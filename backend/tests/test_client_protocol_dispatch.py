@@ -1,8 +1,10 @@
 import asyncio
+import httpx
 import pytest
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from openai import AsyncOpenAI
 import backend.utils.llm_client as llm_mod
 from backend.utils.llm_client import OpenAICompatibleClient, LLMResponse, LLMToolResponse, NotFoundError, BadRequestError, InternalServerError, RateLimitError
 from backend.utils.llm_client_parts.media import normalize_image_input
@@ -1224,6 +1226,91 @@ async def test_vision_shape_400_reroutes_only_vision():
     c.client.chat.completions.create.assert_awaited_once()
     assert llm_mod._PROBE_CACHE[("https://x/v1", "vision-model", "vision")] == "chat"
     assert llm_mod._PROBE_CACHE.get(("https://x/v1", "vision-model")) is None
+
+
+def _sdk_flat_vision_bad_request():
+    detail = {
+        "message": " Invalid   input ",
+        "type": "invalid_request_error",
+        "param": "messages.1.content",
+        "code": None,
+    }
+    request = httpx.Request("POST", "https://x/v1/responses")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={"error": detail},
+    )
+    sdk = AsyncOpenAI(api_key="k", base_url="https://x/v1")
+    return sdk, sdk._make_status_error(
+        response.text,
+        body=response.json(),
+        response=response,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sdk_flat_bad_request_body_is_vision_context_only():
+    sdk, error = _sdk_flat_vision_bad_request()
+    try:
+        assert isinstance(error, BadRequestError)
+        assert error.body == {
+            "message": " Invalid   input ",
+            "type": "invalid_request_error",
+            "param": "messages.1.content",
+            "code": None,
+        }
+        assert llm_mod.is_vision_request_shape_error(error) is False
+        assert llm_mod.is_vision_request_shape_error(
+            error, vision_request=True
+        ) is True
+        assert llm_mod.is_transient_probe_error(error) is True
+        assert llm_mod.is_transient_probe_error(
+            error, vision_request=True
+        ) is False
+    finally:
+        await sdk.close()
+
+
+@pytest.mark.asyncio
+async def test_flat_generic_vision_400_redirects_once_without_transient_retry():
+    base_url = "https://x/v1"
+    model = "vision-model"
+    c = _client(base_url)
+    sdk, shape_error = _sdk_flat_vision_bad_request()
+    try:
+        responses = MagicMock()
+        responses.complete_vision = AsyncMock(side_effect=shape_error)
+        c._responses_adapter = responses
+
+        inline = MagicMock()
+        inline.choices = [
+            MagicMock(message=MagicMock(content="CHAT_VISION", tool_calls=None))
+        ]
+        inline.model = model
+        inline.usage = MagicMock(
+            prompt_tokens=1,
+            completion_tokens=1,
+            total_tokens=2,
+            prompt_tokens_details=None,
+        )
+        c.client.chat.completions.create = AsyncMock(return_value=inline)
+
+        result = await c.chat_with_vision(
+            model=model,
+            text_prompt="describe",
+            images=["aW1hZ2U="],
+            max_tokens=10,
+        )
+
+        assert result.content == "CHAT_VISION"
+        responses.complete_vision.assert_awaited_once()
+        c.client.chat.completions.create.assert_awaited_once()
+        llm_mod.asyncio.sleep.assert_not_awaited()
+        assert llm_mod._PROBE_CACHE[(base_url, model, "vision")] == "chat"
+        assert llm_mod._PROBE_CACHE.get((base_url, model)) is None
+    finally:
+        await sdk.close()
 
 
 def test_vision_data_uri_is_normalized_without_double_prefix():

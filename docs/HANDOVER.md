@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.53.4 · **Last updated**: 2026-09-07
+**Version**: 0.53.5 · **Last updated**: 2026-09-07
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,19 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.53.x — (2026-09-07 onward)**
+
+- `0.53.5` — Keeps a technical Bioinformatics interruption in the same
+  Round/Stage and preserves the approved plan for an explicit Retry after the
+  bounded unattended retry budget is exhausted. A failed Exploration result
+  now proceeds to the existing partial-summary/report path instead of silently
+  starting another Exploration round, while Innovation and optional-agent
+  routing retain their existing behavior. Vision requests now recognize the
+  gateway's flat SDK-shaped `Invalid input` 400 for the image-bearing message,
+  redirect once to the alternate protocol, and retain the existing figure
+  revision text fallback without disabling vision capability. Focused evidence
+  passed `170/170` tests and version consistency passed `8/8`; no client,
+  kernel, backend-full, frontend, image build, deployment, or historical-session
+  repair was performed.
 
 - `0.53.4` — Keeps graphic-abstract review state honest when vision review or
   candidate selection is unavailable, preserving usable artifacts without

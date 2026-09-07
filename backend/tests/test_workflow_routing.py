@@ -1,4 +1,5 @@
 """Unit tests for RoutingMixin pure routing functions."""
+from backend.models.schemas import AnalysisPhase
 from backend.workflow.routing import RoutingMixin
 
 
@@ -146,6 +147,81 @@ def test_should_continue_normal():
     s = _Stub()
     state = {"human_stop_requested": False, "should_continue": True,
              "analysis_state": type("AS", (), {"max_rounds": 0, "current_round": 2, "status": "running"})()}
+    assert s._should_continue(state) == "continue"
+
+
+def test_should_continue_stops_failed_exploration_bioinformatics_without_mutating_context():
+    s = _Stub()
+    plan = object()
+    analysis_state = type(
+        "AS",
+        (),
+        {
+            "analysis_phase": AnalysisPhase.EXPLORATION,
+            "max_rounds": 5,
+            "current_round": 1,
+            "status": "running",
+            "current_plan": plan,
+        },
+    )()
+    state = {
+        "human_stop_requested": False,
+        "should_continue": True,
+        "analysis_state": analysis_state,
+        "bioinformatics_result": {"status": "failed"},
+    }
+
+    assert s._should_continue(state) == "stop"
+    assert analysis_state.current_round == 1
+    assert analysis_state.current_plan is plan
+
+
+def test_should_continue_keeps_failed_innovation_direction_routing():
+    s = _Stub()
+    analysis_state = type(
+        "AS",
+        (),
+        {
+            "analysis_phase": AnalysisPhase.INNOVATION,
+            "max_rounds": 5,
+            "current_round": 1,
+            "status": "running",
+            "active_direction_batch": [{"direction": "target"}],
+            "user_chosen_directions": [{"direction": "target"}],
+            "round_results": [],
+            "restore_branch_id": "",
+            "last_integrated_round": 0,
+        },
+    )()
+    state = {
+        "human_stop_requested": False,
+        "should_continue": True,
+        "analysis_state": analysis_state,
+        "bioinformatics_result": {"status": "failed"},
+    }
+
+    assert s._should_continue(state) == "continue"
+
+
+def test_should_continue_keeps_completed_bioinformatics_normal_routing():
+    s = _Stub()
+    analysis_state = type(
+        "AS",
+        (),
+        {
+            "analysis_phase": AnalysisPhase.EXPLORATION,
+            "max_rounds": 5,
+            "current_round": 1,
+            "status": "running",
+        },
+    )()
+    state = {
+        "human_stop_requested": False,
+        "should_continue": True,
+        "analysis_state": analysis_state,
+        "bioinformatics_result": {"status": "completed"},
+    }
+
     assert s._should_continue(state) == "continue"
 
 

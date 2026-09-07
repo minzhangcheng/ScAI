@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from backend.utils.llm_client import UpstreamExhaustedError
 from backend.constants import LlmFailureAction, StateSyncChangeType
-from backend.models.schemas import AnalysisState
+from backend.models.schemas import AnalysisPlan, AnalysisState, TaskStatus
 
 
 async def _signal_action_once(mock_self, node_name, action, timeout=5.0):
@@ -256,6 +256,91 @@ async def test_node_entry_resets_the_unattended_retry_budget(monkeypatch):
 
     assert result["ok"] is True
     assert "data_profiling" not in wf._unattended_gate_retries
+
+
+@pytest.mark.asyncio
+async def test_bioinformatics_unattended_exhaustion_retains_gate_and_retry_context(
+    monkeypatch,
+):
+    """Core Bioinformatics failures remain actionable after auto-retries."""
+    from backend.services.snapshot_v2.continuation import ContinuationRegistry
+    from backend.workflow import with_retry
+
+    _no_backoff(monkeypatch)
+    wf = _gate_self()
+    wf._pause_event = None
+    wf._set_status = lambda state, status: setattr(state, "status", status)
+    wf.await_restore_safe_point = AsyncMock()
+
+    plan = AnalysisPlan(
+        id="approved-stage2-plan",
+        phase="exploration",
+        stage="stage2",
+        status="approved",
+    )
+    analysis_state = AnalysisState(
+        user_id="u",
+        current_round=1,
+        round_wait_seconds=0,
+        current_plan=plan,
+    )
+    workflow_state = {
+        "analysis_state": analysis_state,
+        "current_round": 1,
+        "planning_stage": "stage2",
+        "plan_approved": True,
+        "skip_nodes": [],
+    }
+    calls = 0
+
+    @with_retry("bioinformatics_analysis")
+    async def node(self, state):
+        nonlocal calls
+        calls += 1
+        if calls <= 4:
+            raise _exhausted()
+        return {**state, "bioinformatics_result": {"status": "completed"}}
+
+    task = asyncio.create_task(node(wf, workflow_state))
+    while wf._generation_for("bioinformatics_analysis") < 4:
+        await asyncio.sleep(0)
+
+    assert not task.done()
+    assert analysis_state.status == TaskStatus.WAITING_INPUT
+    assert analysis_state.wait_input_reason == "llm_failure"
+    assert analysis_state.llm_failure_info["node_name"] == "bioinformatics_analysis"
+    assert analysis_state.llm_failure_info["generation"] == 4
+    assert analysis_state.current_round == 1
+    assert analysis_state.current_plan is plan
+    assert wf._llm_failure_events["bioinformatics_analysis"]
+
+    # The terminal branch uses the existing safe-point-aware indefinite wait.
+    await asyncio.wait_for(
+        _wait_for_hook(wf.await_restore_safe_point), timeout=2.5
+    )
+    capsule = ContinuationRegistry(MagicMock()).freeze_dynamic(
+        {"kernel_present": True, "current_round": 1},
+        analysis_state=analysis_state,
+        workflow_state=workflow_state,
+    )
+    assert capsule.kind == "idle"
+
+    assert wf.signal_llm_failure_action(
+        "bioinformatics_analysis", LlmFailureAction.RETRY.value, 4
+    ) is True
+    result = await asyncio.wait_for(task, timeout=2.0)
+
+    assert calls == 5
+    assert result["bioinformatics_result"]["status"] == "completed"
+    assert analysis_state.current_round == 1
+    assert analysis_state.current_plan is plan
+    assert analysis_state.current_plan.stage == "stage2"
+    assert analysis_state.current_plan.status == "approved"
+
+
+async def _wait_for_hook(hook):
+    while hook.await_count == 0:
+        await asyncio.sleep(0.01)
 
 
 # ── Test 1: @with_retry decorator LLM failure handling ────────────────

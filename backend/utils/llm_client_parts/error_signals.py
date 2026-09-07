@@ -244,7 +244,9 @@ _VISION_SHAPE_MARKERS = (
 )
 
 
-def is_responses_vision_shape_error(error: Exception) -> bool:
+def is_responses_vision_shape_error(
+    error: Exception, *, vision_request: bool = False
+) -> bool:
     """Recognize the one deterministic Responses image-shape incompatibility.
 
     A provider may expose a Responses endpoint while rejecting the image item
@@ -253,10 +255,12 @@ def is_responses_vision_shape_error(error: Exception) -> bool:
     400 errors whose structured message names ``image_url``/``image url`` and
     one of the known schema markers; unrelated 400s must not be rerouted.
     """
-    return is_vision_request_shape_error(error)
+    return is_vision_request_shape_error(error, vision_request=vision_request)
 
 
-def is_vision_request_shape_error(error: Exception) -> bool:
+def is_vision_request_shape_error(
+    error: Exception, *, vision_request: bool = False
+) -> bool:
     """Recognize a local payload failure or structured image-shape rejection.
 
     Cause chains are inspected because protocol probing may wrap the provider's
@@ -270,7 +274,9 @@ def is_vision_request_shape_error(error: Exception) -> bool:
         seen.add(id(current))
         if isinstance(current, VisionPayloadError):
             return True
-        if _one_vision_request_shape_error(current):
+        if _one_vision_request_shape_error(
+            current, vision_request=vision_request
+        ):
             return True
         current = getattr(current, "__cause__", None) or getattr(
             current, "__context__", None
@@ -278,7 +284,9 @@ def is_vision_request_shape_error(error: Exception) -> bool:
     return False
 
 
-def _one_vision_request_shape_error(error: BaseException) -> bool:
+def _one_vision_request_shape_error(
+    error: BaseException, *, vision_request: bool = False
+) -> bool:
     response = getattr(error, "response", None)
     status_code = getattr(response, "status_code", None)
     # This is deliberately a protocol signal, not a prose heuristic.  A
@@ -290,7 +298,12 @@ def _one_vision_request_shape_error(error: BaseException) -> bool:
     body = getattr(error, "body", None)
     if not isinstance(body, dict):
         return False
-    err = body.get("error") or {}
+    # OpenAI's status-error factory unwraps a top-level ``error`` member before
+    # storing it on ``BadRequestError.body``.  Keep accepting the wrapped form
+    # used by older test doubles and compatible SDKs as well.
+    err = body.get("error")
+    if not isinstance(err, dict):
+        err = body
     if not isinstance(err, dict):
         return False
     # Read only structured fields from the provider response.  The SDK's
@@ -300,10 +313,31 @@ def _one_vision_request_shape_error(error: BaseException) -> bool:
         str(err.get(key, "")).lower()
         for key in ("message", "param", "code", "type")
     )
-    if "image_url" not in message and "image url" not in message:
+    has_image_shape_marker = (
+        "image_url" in message or "image url" in message
+    ) and (
+        str(err.get("code") or "").strip() == "1214"
+        or any(marker in message for marker in _VISION_SHAPE_MARKERS)
+    )
+    if has_image_shape_marker:
+        return True
+
+    if not vision_request:
         return False
-    return str(err.get("code") or "").strip() == "1214" or any(
-        marker in message for marker in _VISION_SHAPE_MARKERS
+
+    # The gateway's generic 400 identifies the image-bearing user message
+    # rather than mentioning an image field.  It is meaningful only when the
+    # caller has already established that this is a visual request; the same
+    # response on a text request must remain an ordinary upstream failure.
+    normalized_message = re.sub(
+        r"\s+", " ", str(err.get("message") or "").strip()
+    ).casefold()
+    return (
+        normalized_message == "invalid input"
+        and str(err.get("type") or "").strip() == "invalid_request_error"
+        and str(err.get("param") or "").strip()
+        in {"messages.1.content", "messages[1].content"}
+        and not str(err.get("code") or "").strip()
     )
 
 
@@ -418,7 +452,9 @@ def is_responses_input_shape_error(error: Exception) -> bool:
         "extra inputs are not permitted",
     ))
 
-def is_transient_probe_error(error: Exception) -> bool:
+def is_transient_probe_error(
+    error: Exception, *, vision_request: bool = False
+) -> bool:
     """True when an error is a transient upstream blip (retry the SAME protocol),
     as opposed to a deterministic protocol/parameter adaptation signal (switch
     protocol immediately or fall back to a different parameter set).
@@ -432,6 +468,8 @@ def is_transient_probe_error(error: Exception) -> bool:
     a user-facing HITL gate (retry/skip/stop).
     """
     if isinstance(error, UpstreamExhaustedError):
+        return False
+    if is_vision_request_shape_error(error, vision_request=vision_request):
         return False
     if _is_protocol_adaptation_signal(error):
         return False

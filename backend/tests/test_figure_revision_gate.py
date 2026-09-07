@@ -11,11 +11,13 @@ import asyncio
 import json
 import base64
 import ast
+import httpx
 import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from openai import AsyncOpenAI
 import pytest
 
 from backend.agents.bioinformatics.figures import FiguresMixin
@@ -1076,6 +1078,40 @@ class _PayloadRejectLLM(_PromptLLM):
         )
 
 
+class _FlatPayloadRejectLLM(_PromptLLM):
+    async def chat_with_vision(self, **kwargs):
+        self.calls.append(("vision", kwargs))
+        detail = {
+            "message": "Invalid input",
+            "type": "invalid_request_error",
+            "param": "messages[1].content",
+            "code": None,
+        }
+        request = httpx.Request("POST", "https://x/v1/responses")
+        response = httpx.Response(
+            400,
+            request=request,
+            json={"error": detail},
+        )
+        sdk = AsyncOpenAI(api_key="k", base_url="https://x/v1")
+        try:
+            sdk_error = sdk._make_status_error(
+                response.text,
+                body=response.json(),
+                response=response,
+            )
+        finally:
+            await sdk.close()
+        exhausted = UpstreamExhaustedError(
+            "vision protocol rejected the request",
+            agent_name="bioinformatics",
+            model=kwargs["model"],
+            llm_server="https://x/v1",
+        )
+        exhausted.__cause__ = sdk_error
+        raise exhausted
+
+
 class _IncompleteVisionLLM(_PromptLLM):
     def __init__(self, failures):
         super().__init__()
@@ -1170,6 +1206,30 @@ async def test_figure_revision_payload_rejection_falls_back_without_disabling_vi
     assert "Image not available for this request" in (
         agent.llm_client.calls[-1][1]["messages"][0]["content"]
     )
+
+
+@pytest.mark.asyncio
+async def test_figure_revision_flat_sdk_payload_rejection_falls_back_without_disabling_vision():
+    agent = _PromptAgent()
+    agent.llm_client = _FlatPayloadRejectLLM()
+
+    revised = await agent._revise_figure_code(
+        "ORIGINAL_PLOT_CODE",
+        "PI_FEEDBACK",
+        ["SUGGESTION"],
+        ["MUST_FIX"],
+        "heatmap",
+        state=SimpleNamespace(treatment_groups=[]),
+        image_base64="aW1hZ2U=",
+    )
+
+    assert revised == "revised plain code"
+    assert agent.has_vision is True
+    assert [kind for kind, _kwargs in agent.llm_client.calls] == ["vision", "chat"]
+    text_prompt = agent.llm_client.calls[-1][1]["messages"][0]["content"]
+    assert "ORIGINAL_PLOT_CODE" in text_prompt
+    assert "PI_FEEDBACK" in text_prompt
+    assert "Image not available for this request" in text_prompt
 
 
 @pytest.mark.asyncio

@@ -64,7 +64,7 @@ async def _consume_unattended_gate_retry(self, node_name: str, event):
     if used >= UNATTENDED_GATE_MAX_AUTO_RETRIES:
         logger.warning(
             f"[{self.session_id}] {node_name}: unattended gate exhausted its "
-            f"{UNATTENDED_GATE_MAX_AUTO_RETRIES} auto-retries; skipping"
+            f"{UNATTENDED_GATE_MAX_AUTO_RETRIES} auto-retries"
         )
         return None
     self._unattended_gate_retries[node_name] = used + 1
@@ -98,6 +98,7 @@ async def _drive_hitl_gate(
     clear_cache_on_retry: bool,
     wait_seconds: int | None = None,
     auto_retry: bool = True,
+    require_explicit_resolution: bool = False,
 ) -> LlmFailureAction:
     """Shared HITL intervention scaffold (lock/event/generation/state_sync).
 
@@ -157,6 +158,23 @@ async def _drive_hitl_gate(
                 # An answer landed during the backoff and the caller was told it
                 # was accepted, so it outranks the retry chosen on a timeout.
                 action = late
+        if action is None and require_explicit_resolution:
+            logger.warning(
+                f"[{self.session_id}] {node_name}: unattended gate requires "
+                "explicit resolution after automatic retries"
+            )
+            # Keep this generation, event, and visible failure state alive
+            # until a valid Retry/Skip/Terminate action is delivered.  The
+            # safe-point-aware indefinite wait lets restore coordination make
+            # progress while this in-flight graph node remains parked.
+            while action is None:
+                if event.is_set():
+                    event.clear()
+                await wait_with_skip_time(
+                    event, -1, self.session_id, node_name,
+                    safe_point_hook=getattr(self, "await_restore_safe_point", None),
+                )
+                action = self._llm_failure_actions.pop(node_name, None)
         if action != LlmFailureAction.RETRY.value:
             self._unattended_gate_retries.pop(node_name, None)
         analysis_state.wait_input_reason = None
@@ -190,6 +208,7 @@ async def _wait_for_llm_intervention(
     *,
     wait_seconds: int | None = None,
     auto_retry: bool = True,
+    require_explicit_resolution: bool = False,
 ) -> LlmFailureAction:
     """Block workflow, show LlmTimeoutDialog, wait for user action.
 
@@ -222,6 +241,7 @@ async def _wait_for_llm_intervention(
         clear_cache_on_retry=True,
         wait_seconds=wait_seconds,
         auto_retry=auto_retry and not _is_non_recoverable_llm_failure(error),
+        require_explicit_resolution=require_explicit_resolution,
     )
 
 async def _publish_runtime_persistence_transition(

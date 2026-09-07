@@ -702,7 +702,9 @@ Return only the Python code:{note}"""
                 )
             except Exception as vision_err:
                 _is_vision_unsupported = is_vision_capability_mismatch(vision_err)
-                _is_payload_error = is_vision_request_shape_error(vision_err)
+                _is_payload_error = is_vision_request_shape_error(
+                    vision_err, vision_request=True
+                )
                 if _is_vision_unsupported or _is_payload_error:
                     fallback_reason = (
                         "model vision capability mismatch"
