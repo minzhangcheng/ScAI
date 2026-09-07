@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.53.5 · **Last updated**: 2026-09-07
+**Version**: 0.54.1 · **Last updated**: 2026-09-07
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,29 @@ six minutes per occurrence rather than blocking.
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.54.x — (2026-09-07 onward)**
+
+- `0.54.1` — Merges `method_optimize` while retaining the Python-only analysis
+  stack and PI-owned, non-blocking scientific judgment. Corrects resampling
+  resolution, small-panel and effect-size wording, dependence-aware multiple
+  testing, sample-level composition analysis, and design-aware filtering.
+  Runtime resolution observations distinguish nominal from adjusted values and
+  preserve multilevel score identity even alongside ordinary permutation scores.
+  Harmonizes PI, executor, Stage 1/2, and default prompt guidance for input scale,
+  library-aware doublet assessment, Harmony output orientation, pseudobulk DE,
+  the separate LIANA comparison routes, and supported Python method alternatives.
+  CellTypist gains an optional host-fetched data-volume cache linked into each
+  kernel; partial fetches report missing models, and annotation guidance exposes
+  the per-cell label distribution behind each cluster vote. Reports and CSV use
+  small-matched-panel wording, baseline volcano plots avoid host-chosen discovery
+  thresholds, and method decision cards remain disabled by default.
+  Focused regressions including all eight version-consistency checks passed
+  `313` tests, with `5` live-kernel tests skipped. The immutable runner accepted
+  evidence from an identical temporary checkout because the primary checkout
+  directory is not readable by the runner UID; its permissions were preserved.
+  No client, kernel, backend-full, frontend, image build, push, deployment, or
+  historical-session repair was performed.
 
 **0.53.x — (2026-09-07 onward)**
 

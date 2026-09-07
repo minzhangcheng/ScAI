@@ -106,5 +106,7 @@ def attribution() -> str:
         f"Methodological rules distilled from {meta.get('source', 'bioSkills')} "
         f"({meta.get('source_url', '')}) at commit "
         f"{str(meta.get('source_commit', ''))[:12]}, {meta.get('source_license', '')} licence, "
-        f"{meta.get('source_copyright', '')}; translated for this stack."
+        f"{meta.get('source_copyright', '')}; translated for this stack. Rules whose "
+        "source_skill begins with scai-native/ are this project's own and carry no "
+        "upstream copyright."
     )

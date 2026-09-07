@@ -204,7 +204,9 @@ Reply in JSON format as follows:
         merge_field_hint = '"Which subtypes to merge for condition comparison (brief)"'
         baseline_pipeline_block = """## Baseline Pipeline (MUST be included in bioinformatics_tasks)
 1. Quality Control (QC) and filtering
-2. Doublet removal assessment (if data quality suggests it is needed)
+2. Doublet assessment: decide from the design whether and how to run it (per library by
+   default for per-library captures; pooled donors, hashed libraries, or data already
+   doublet-filtered need their own justification)
 3. Batch effect assessment on the uncorrected representation; decide whether a
    correction/integration step is scientifically appropriate for the measured design
 4. Normalization, HVG selection, PCA, UMAP
@@ -213,7 +215,8 @@ Reply in JSON format as follows:
 7. Assess condition-associated signals using methods and inferential strength that
    you judge appropriate for the measured design; state material limitations
    (merge closely related states into a shared parent population only when the observed markers support it)
-8. Cell-cell communication analysis (liana)"""
+8. Cell-cell communication analysis (liana) only when the data have single-cell resolution
+   and the design supports comparing interactions; otherwise state why it is omitted"""
         sample_design_facts = sequencing_design_instruction(state)
         prompt = f"""
 ## Project Information
@@ -341,12 +344,12 @@ PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]
         correlation_unit = "computed within a cell population"
         marker_viz = "dot plots, violin plots, feature plots for key genes across conditions"
         task_target = "the target cell types"
-        modality_toolkit = """- **Trajectory & RNA Velocity**: Diffusion pseudotime (DPT), PAGA for lineage inference; scvelo or cellrank for directed cell fate mapping (only where spliced/unspliced layers exist; these answer different questions and are not interchangeable)
-- **Cell-cell communication**: liana / cellphonedb for ligand-receptor interactions; ligand-target analysis (via decoupler) to predict downstream target activation in receiver cells
-- **Cellular Stemness & Plasticity**: cytotrace2-py for CytoTRACE-like scoring to infer differentiation potential
+        modality_toolkit = """- **Trajectory & RNA Velocity**: Diffusion pseudotime (DPT), PAGA for lineage inference; scvelo for splicing-based velocity (requires spliced/unspliced layers); cellrank 2 for fate mapping through whichever kernel its inputs support (VelocityKernel needs spliced/unspliced layers; PseudotimeKernel a justified root and pseudotime; CytoTRACEKernel no splicing information but a neighbour-smoothed expression layer (scvelo's moments; per the CellRank docs copy X into the spliced and unspliced layers first when they are absent) and it rests on the transcriptional-diversity assumption of the original CytoTRACE; RealTimeKernel experimental time points plus transport couplings). These answer different questions and are not interchangeable, and a modelled direction is not a measured fate
+- **Cell-cell communication**: liana (its rank_aggregate consensus includes the CellPhoneDB method); across conditions run per sample (rank_aggregate.by_sample) and compare at the sample level, or map sample-level pseudobulk DE statistics onto ligand-receptor pairs with liana's df_to_lr, whose averaged statistics rank and describe but are not a calibrated test; ligand-target analysis (via decoupler) to predict downstream target activation in receiver cells
+- **Cellular Stemness & Plasticity**: cellrank's CytoTRACEKernel adapts the original CytoTRACE-style differentiation-potential score (CytoTRACE 2 is not installed); it needs the neighbour-smoothed expression layer described under trajectory, and the assumption that transcriptional diversity tracks potency must be stated before using it
 - **Tumor/Malignancy estimation**: infercnvpy to detect large-scale copy number variation (use only when oncology data is present)
 - **Subpopulation re-clustering**: re-cluster specific cell types at higher resolution to discover subtypes or functional states
-- **Compositional analysis**: compare cell type proportions between conditions with statistical testing (pertpy or sccoda)
+- **Compositional analysis**: compare cell type proportions between conditions with sample as the unit and at least two independent samples per group: per-type tests on variance-stabilised sample proportions (arcsin-square-root or logit, statsmodels) or a CLR transform with a sample-level linear model, adjusted across populations, stating the zero-handling rule and the relative-abundance caveat; a joint compositional model (scCODA, sccomp, Milo) is a candidate only if such a package is installed, which it currently is not; with one sample per group report proportions descriptively
 """
 
         # Conditionally add bulk-scRNA integration as the FIRST and recommended item
@@ -369,9 +372,11 @@ PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]
             toolkit_intro = ""
 
         # Append additional targeted-analysis methods (Round 2+ enrichments)
-        toolkit_intro += """- **Gene Expression Programs**: For continuous cell states, matrix factorization (NMF, cNMF) or
-  another program-discovery method — choose it, its rank, and its input feature set from the data
-  and justify them; a rank picked without inspecting the reconstruction or stability is a guess.
+        toolkit_intro += """- **Gene Expression Programs**: For continuous cell states, matrix factorization (sklearn NMF with
+  repeated restarts and a stability check; the consensus cNMF procedure is not installed, so do
+  not label a plain NMF result as cNMF) or another program-discovery method — choose it, its
+  rank, and its input feature set from the data and justify them; a rank picked without
+  inspecting the reconstruction or stability is a guess.
   Subsampling to keep runtime tractable is fine, but state the number used and check the programs
   are recovered on a second subsample before interpreting them.
 - **Biomarker Discovery (Conditional)**: A supervised classifier can nominate candidate features,
@@ -414,11 +419,10 @@ Available analysis toolkit (use as many as relevant):
 {toolkit_intro}{modality_toolkit}- **Targeted differential expression**: specify which populations or sample groups to
   compare, which contrasts, and the threshold strategy — fixed in advance, not after seeing
   the result
-- **Pathway enrichment**: GO/KEGG for broad screening; GSEA/ssGSEA for quantitative pathway scoring; MSigDB hallmark gene sets
+- **Pathway enrichment**: three families that answer different questions and are not interchangeable: over-representation tests on a selected list against a measured background; ranked enrichment (GSEA) on a signed statistic; per-cell or per-sample module scores (sc.tl.score_genes, decoupler AUCell) for descriptive state scoring; versioned MSigDB collections via fetch_gene_set. Per-cell ssGSEA is slow on large objects and is not a substitute for the other two
 - **Gene signature & Metabolic scoring**: {scoring_entry}; choose gene sets based on data-driven findings, not prior assumptions
-- **Transcription factor & Gene Regulatory Networks (GRN)**: decoupler / pyscenic to infer TF activity; PyWGCNA or gene co-expression analysis to identify co-expressed gene modules and hub genes
+- **Transcription factor & pathway activity (footprints)**: decoupler with CollecTRI (TF regulons) or PROGENy (pathway responses) via ULM/MLM; these cover only the networks they contain and are distinct from process-member module scores. Full SCENIC needs cisTarget ranking databases that are not provided; AUCell scoring of existing regulons does not. Co-expression modules: correlation-based module detection in this environment (PyWGCNA is not installed; no equivalent implementation is available here)
 - **Correlation analysis**: gene-gene correlation, module scoring, or regression, {correlation_unit}
-- **Immune repertoire analysis**: scirpy for TCR/BCR clonotype expansion, diversity, and sharing analysis (use only when paired VDJ data is available)
 - **Key-gene visualization**: {marker_viz}
 
 IMPORTANT:

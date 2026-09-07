@@ -76,7 +76,9 @@ def test_project_licence_is_still_apache():
     assert "Apache License" in licence
 
 
-@pytest.mark.parametrize("resource", ["MSigDB", "Ensembl", "PanglaoDB", "CellMarker"])
+@pytest.mark.parametrize(
+    "resource", ["MSigDB", "Ensembl", "PanglaoDB", "CellMarker", "CellTypist"]
+)
 def test_runtime_data_resources_are_disclosed(resource):
     """These are fetched, not redistributed, but users need to know they are used."""
     assert resource in _NOTICES.read_text(encoding="utf-8")

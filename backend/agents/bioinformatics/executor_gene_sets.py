@@ -205,7 +205,11 @@ async def handle_fetch_gene_set(context, tool_call) -> ToolAction:
         lines = [
             f"Split {set_id} into {len(parts)} direction-coherent "
             f"panels. Score them SEPARATELY -- that is the point of "
-            f"the split. Register each as its own plan and score."
+            f"the split: it keeps activators and repressors from "
+            f"cancelling in one score. A higher score on the positive "
+            f"panel is not by itself evidence that the process is more "
+            f"active; for an activity question consider a footprint "
+            f"method. Register each as its own plan and score."
         ]
         for part in parts:
             name = part.set_id.split("#")[-1]
