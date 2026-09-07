@@ -127,15 +127,29 @@ _ALT_INFERENCE = re.compile(
     r'|\bt\s*=\s*[-+]?[\d.]{2,})', re.I)
 
 
-#: Same grammar as _P_NUMERIC, but capturing the comparator and the number so a
-#: quoted value can be checked against the resolution the method could attain.
+#: Same grammar as _P_NUMERIC, but capturing the label, the comparator and the
+#: number so a quoted value can be checked against the resolution the method
+#: could attain -- and so the check can tell a nominal p-value from an adjusted
+#: one, which need not share its floor.
 _P_NUMERIC_VALUE = re.compile(
-    r'\b(?:p|p[-_ ]?val(?:ue)?s?|p[-_ ]?adj|padj|adj[-_. ]?p(?:[-_ ]?val(?:ue)?)?|'
+    r'\b(p|p[-_ ]?val(?:ue)?s?|p[-_ ]?adj|padj|adj[-_. ]?p(?:[-_ ]?val(?:ue)?)?|'
     r'adjusted\s+p(?:[-_ ]?val(?:ue)?)?|q|q[-_ ]?val(?:ue)?|fdr|bh)\b'
     r'\s*(?:[-_ ]?adjusted)?\s*'
     r'(?:([<>=~≤≥≈]{1,2})|\b(below|under|less\s+than|at\s+most|above|'
     r'greater\s+than|at\s+least|of|was|were|is|are)\b'
     r'|(?<=\s))\s*~?\s*(\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)', re.I)
+
+#: Labels whose value is an adjusted quantity. A Benjamini-Hochberg q inherits
+#: the nominal floor, but GSEA's FDR is computed from the pooled null of every
+#: set in the call and can legitimately sit below 1/(B+1); prose does not say
+#: which one it quotes, so the floor check is confined to nominal p-values.
+_ADJUSTED_P_LABEL = re.compile(r'adj|^q\b|^q[-_ ]|fdr|bh', re.I)
+
+#: An estimator built for the tail: its precision is not set by a resample
+#: count, so 1/(B+1) does not describe it. Named in the score parameters
+#: (gseapy.prerank(method="multilevel")) or in the sentence itself.
+_ADAPTIVE_ESTIMATOR = re.compile(r'\bmultilevel\b', re.I)
+_ESTIMATOR_PARAM_KEYS = ("method", "estimator")
 
 #: Comparators that already state the value as a bound. A floor reported as an
 #: inequality is the correct reporting, and must not be refused.

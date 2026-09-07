@@ -10,7 +10,10 @@ into every kernel's session folder; the cache is never inside the code tree.
 By default every model in the CellTypist index is fetched (each is a few MB);
 ``--models`` restricts the download to named files. Files already present are
 skipped unless ``--force`` is given, so the startup hook can call this
-unconditionally. Failures are logged and reported through the exit status; a
+unconditionally. celltypist logs a failed model and carries on, so success is
+judged afterwards: every requested model (or, without ``--models``, every model
+in the index) must be on disk, and any that is not is named in the log and
+turns the exit status non-zero. The models that did arrive stay usable; a
 missing cache only means kernels fall back to on-demand downloads.
 
 CLI: python scripts/fetch_celltypist_models.py [--dest DIR] [--models A.pkl B.pkl] [--force]
@@ -95,11 +98,26 @@ def fetch(dest_dir: Optional[Path] = None,
         model_list = list(models) if models else None
         ct_models.download_models(force_update=force, model=model_list)
         models_dir = Path(ct_models.models_path)
-        present = sorted(p.name for p in models_dir.glob("*.pkl"))
+        present = {p.name for p in models_dir.glob("*.pkl")}
+        if model_list:
+            expected = set(model_list)
+        else:
+            index = ct_models.get_models_index()
+            expected = {m["filename"] for m in index.get("models", [])}
+        missing = sorted(expected - present)
+        if present:
+            (dest / "NOTICE").write_text(NOTICE_TEXT)
+        if missing:
+            # download_models catches each model's download error itself, so
+            # this is the only place a partial fetch becomes visible.
+            logger.warning(
+                f"celltypist fetch incomplete under {models_dir}: "
+                f"{len(missing)} of {len(expected)} requested model(s) missing: "
+                f"{', '.join(missing[:8])}{' ...' if len(missing) > 8 else ''}")
+            return False
         if not present:
             logger.warning(f"celltypist fetch left no model under {models_dir}")
             return False
-        (dest / "NOTICE").write_text(NOTICE_TEXT)
         logger.info(f"celltypist cache at {models_dir}: {len(present)} model(s)")
         return True
     except Exception as e:

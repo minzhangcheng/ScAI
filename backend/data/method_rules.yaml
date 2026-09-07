@@ -911,9 +911,13 @@ rules:
     celltypist.models.models_description() for coverage. Every CellTypist model expects
     normalize_total(target_sum=1e4) followed by log1p; run celltypist.annotate(adata,
     model=<file>, majority_voting=True, over_clustering=<cluster key>) on such a copy so
-    the vote runs over the analysis clusters, take .to_adata() on the returned
-    AnnotationResult to obtain predicted_labels, majority_voting and conf_score in obs,
-    and crosstab majority_voting against the cluster key. Reference mapping with
+    the vote runs over the analysis clusters, and take .to_adata() on the returned
+    AnnotationResult to obtain predicted_labels, majority_voting and conf_score in obs.
+    Report the distribution behind the vote: majority_voting is one label per cluster by
+    construction, so crosstab predicted_labels against the cluster key (normalize by row)
+    and quote each cluster''s top labels with their fractions; a cluster whose top fraction
+    is low is mixed or unrepresented in the model, whatever the majority label says.
+    Reference mapping with
     scvi.model.SCANVI needs a compatible annotated reference and training, and is the
     route when no cached model matches.'
   citations:

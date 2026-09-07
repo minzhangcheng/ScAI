@@ -180,7 +180,7 @@ def write_score_definitions_csv(
             "Score Name", "Method", "Computation", "Description",
             "Parameters", "Gene List", "Gene List Source", "Provenance Kind",
             "Provenance Resource", "Provenance Version", "Provenance Set ID",
-            "Panel Genes", "Panel Genes Matched", "Underpowered", "Round Number",
+            "Panel Genes", "Panel Genes Matched", "Small Matched Panel", "Round Number",
         ])
         for sd in defs:
             params = sd["parameters"]

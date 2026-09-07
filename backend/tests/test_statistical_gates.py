@@ -620,9 +620,12 @@ def test_a_conventional_cutoff_is_not_a_resolution_floor_violation():
                  "Preranked GSEA showed the module significant at padj = 0.001."):
         assert _floor_gates([text], scores) == []
 
-    # A value that is not a conventional cutoff and is under the floor still goes.
-    assert _floor_gates(["Preranked GSEA: NES = 2.4, q = 0.0004."],
+    # A nominal value that is not a conventional cutoff and is under the floor
+    # still goes. Nominal on purpose: an adjusted value (q, FDR) may be GSEA's
+    # pooled-null FDR, which resolves below the per-set floor, so it is exempt.
+    assert _floor_gates(["Preranked GSEA: NES = 2.4, p = 0.0004."],
                         scores) == ["p-below-resampling-resolution"]
+    assert _floor_gates(["Preranked GSEA: NES = 2.4, q = 0.0004."], scores) == []
 
 
 def test_a_detected_singleton_reaches_the_analysis_unit_check():

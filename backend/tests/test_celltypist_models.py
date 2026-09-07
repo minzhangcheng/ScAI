@@ -158,10 +158,11 @@ class _FakeCelltypist(importlib.abc.MetaPathFinder, importlib.abc.Loader):
     a body and would let the export move after the import unnoticed.
     """
 
-    def __init__(self, dest: Path, download=None):
+    def __init__(self, dest: Path, download=None, index=()):
         self.dest = dest
         self.seen = {}
         self.download = download
+        self.index = {"models": [{"filename": name} for name in index]}
 
     def find_spec(self, name, path=None, target=None):
         if name in ("celltypist", "celltypist.models"):
@@ -180,6 +181,7 @@ class _FakeCelltypist(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             module.download_models = self.download or (
                 lambda force_update=False, model=None: None
             )
+            module.get_models_index = lambda force_update=False: self.index
 
     def install(self, monkeypatch):
         monkeypatch.delitem(sys.modules, "celltypist", raising=False)
@@ -220,12 +222,57 @@ def test_fetch_script_exports_the_folder_before_importing_celltypist(monkeypatch
 
 def test_fetch_script_reports_an_empty_download_as_failure(monkeypatch, tmp_path):
     dest = tmp_path / "celltypist"
-    _FakeCelltypist(dest).install(monkeypatch)
+    _FakeCelltypist(dest, index=["Only.pkl"]).install(monkeypatch)
     monkeypatch.delenv("CELLTYPIST_FOLDER", raising=False)
 
     script = _load_fetch_script()
     assert script.fetch(dest) is False
     assert not (dest / ".fetch.lock").exists()
+
+
+def test_fetch_script_reports_a_partial_download_as_failure(monkeypatch, tmp_path, caplog):
+    """celltypist logs a failed model and continues; the script must not call that success.
+
+    A cache that already holds A, asked for A and B, ends the pass with A on
+    disk and B absent. The models that arrived stay usable, but the run is
+    reported as incomplete and says which file is missing.
+    """
+    dest = tmp_path / "celltypist"
+
+    def download_models(force_update=False, model=None):
+        models_dir = dest / "data" / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        (models_dir / "A.pkl").write_bytes(b"x")  # B "fails" upstream, silently
+
+    _FakeCelltypist(dest, download_models).install(monkeypatch)
+    monkeypatch.delenv("CELLTYPIST_FOLDER", raising=False)
+
+    script = _load_fetch_script()
+    with caplog.at_level("WARNING"):
+        ok = script.fetch(dest, models=["A.pkl", "B.pkl"])
+
+    assert ok is False
+    assert (dest / "data" / "models" / "A.pkl").exists()
+    assert "B.pkl" in caplog.text
+    assert not (dest / ".fetch.lock").exists()
+
+
+def test_fetch_script_checks_the_whole_index_when_no_models_are_named(monkeypatch, tmp_path):
+    dest = tmp_path / "celltypist"
+
+    def download_models(force_update=False, model=None):
+        models_dir = dest / "data" / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        (models_dir / "A.pkl").write_bytes(b"x")
+
+    _FakeCelltypist(dest, download_models, index=["A.pkl", "B.pkl"]).install(monkeypatch)
+    monkeypatch.delenv("CELLTYPIST_FOLDER", raising=False)
+
+    script = _load_fetch_script()
+    assert script.fetch(dest) is False
+
+    _FakeCelltypist(dest, download_models, index=["A.pkl"]).install(monkeypatch)
+    assert _load_fetch_script().fetch(dest) is True
 
 
 def test_fetch_script_yields_to_a_running_fetch(monkeypatch, tmp_path):

@@ -335,10 +335,15 @@ CELL TYPE ANNOTATION WORKFLOW:
    trained on): res = celltypist.annotate(adata_ct, model='<file>.pkl',
    majority_voting=True, over_clustering='leiden') so the vote runs over YOUR clusters;
    celltypist.annotate returns an AnnotationResult, so take adata_ct = res.to_adata()
-   to get predicted_labels, majority_voting and conf_score into obs, copy them onto
-   adata.obs, and print a crosstab of majority_voting against the cluster key next to
-   the annotate_clusters labels. It is one evidence stream, not an override: where the
-   two disagree, keep both in the findings and name the model file and version. No
+   to get predicted_labels, majority_voting and conf_score into obs, and copy them onto
+   adata.obs. Show the per-cell distribution, not only the vote: majority_voting is one
+   label per cluster by construction, so a crosstab of it against the cluster key is a
+   diagonal that hides a 60/40 mixed cluster. Print
+   pd.crosstab(adata.obs['leiden'], adata.obs['predicted_labels'], normalize='index')
+   reduced to each cluster's top labels with their fractions, next to the majority label
+   and the annotate_clusters label. It is one evidence stream, not an override: where
+   the two disagree, or the top fraction is low, keep that in the findings and name the
+   model file and version. No
    cached model, or none that matches, means skip this step and say so;
    celltypist.models.download_models(model=...) can add a model that is NOT cached
    (it needs network access), but never pass force_update=True: the cached files are

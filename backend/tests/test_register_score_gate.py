@@ -139,4 +139,8 @@ def test_csv_export_includes_provenance_columns(tmp_path):
     text = path.read_text()
     assert "Provenance Kind" in text
     assert "Panel Genes Matched" in text
+    # The HTML says "small matched panel"; the CSV a user downloads must say
+    # the same thing, not the power-calculation word the report dropped.
+    assert "Small Matched Panel" in text
+    assert "Underpowered" not in text
     assert "database" in text

@@ -103,7 +103,7 @@ def test_a_p_value_at_the_floor_is_recorded_for_pi_review():
     """
     score = _score("ranked_panel", n_resamples=500)
     out = check_resampling_resolution(
-        ["The GSEA result for ranked_panel was strongly enriched, FDR = 0.002."],
+        ["The GSEA result for ranked_panel was strongly enriched, nominal p = 0.002."],
         [score],
     )
     assert len(out) == 1
@@ -116,7 +116,7 @@ def test_the_next_attainable_value_up_has_no_resolution_observation():
     """The rounding tolerance must not reach a genuinely larger p-value."""
     score = _score("ranked_panel", n_resamples=500)
     out = check_resampling_resolution(
-        ["The GSEA result for ranked_panel gave FDR = 0.004."], [score])
+        ["The GSEA result for ranked_panel gave p = 0.004."], [score])
     assert out == []
 
 
@@ -128,7 +128,7 @@ def test_the_floor_quoted_as_a_strict_inequality_is_also_observed():
     """
     score = _score("ranked_panel", n_resamples=500)
     out = check_resampling_resolution(
-        ["The GSEA result for ranked_panel reached FDR < 0.002."], [score])
+        ["The GSEA result for ranked_panel reached p < 0.002."], [score])
     assert len(out) == 1
     assert out[0].gate == "p-below-resampling-resolution"
     assert "p = 0.002" in out[0].detail
@@ -178,15 +178,61 @@ def test_the_floor_quoted_as_at_most_is_correct_reporting():
     """p <= 1/(B+1) is true of the estimate; only the strict form overclaims."""
     score = _score("ranked_panel", n_resamples=500)
     out = check_resampling_resolution(
-        ["The GSEA result for ranked_panel reached FDR <= 0.002."], [score])
+        ["The GSEA result for ranked_panel reached p <= 0.002."], [score])
     assert out == []
 
 
 def test_a_strict_inequality_well_below_the_floor_is_left_alone():
-    """"FDR < 1e-4" in a GSEA sentence is a selection threshold, not a floor value."""
+    """"p < 1e-4" in a GSEA sentence is a selection threshold, not a floor value."""
     score = _score("ranked_panel", n_resamples=500)
     out = check_resampling_resolution(
-        ["GSEA sets for ranked_panel were retained at FDR < 1e-4."], [score])
+        ["GSEA sets for ranked_panel were retained at p < 1e-4."], [score])
+    assert out == []
+
+
+def test_an_fdr_at_the_per_set_floor_is_not_observed():
+    """GSEA's FDR comes from the pooled null of every set in the call.
+
+    Its resolution is finer than 1/(B+1), and a sentence does not say whether
+    "FDR" is that or a Benjamini-Hochberg q that would inherit the floor, so
+    the check stays silent on adjusted values rather than misreport a pooled
+    FDR as a per-set resolution limit.
+    """
+    score = _score("ranked_panel", n_resamples=500)
+    out = check_resampling_resolution(
+        ["The GSEA result for ranked_panel reached FDR = 0.002.",
+         "The same set had q < 0.002 and padj = 0.002."],
+        [score],
+    )
+    assert out == []
+
+
+def test_a_score_using_the_multilevel_estimator_has_no_resample_floor():
+    """gseapy.prerank(method="multilevel") resolves below 1/(B+1) by design.
+
+    The declared permutation count still exists in the parameters, but it no
+    longer sets the smallest attainable value, so neither observation applies.
+    """
+    # The estimator is a score PARAMETER (gseapy's keyword), not the score's
+    # method; _score's own ``method`` argument is the tool name.
+    score = _score("ranked_panel", permutation_num=1000)
+    score.parameters["method"] = "multilevel"
+    out = check_resampling_resolution(
+        ["The GSEA result for ranked_panel reached nominal p = 1e-6."], [score])
+    assert out == []
+    undeclared = _score("ranked_panel")
+    undeclared.parameters["method"] = "multilevel"
+    out = check_resampling_resolution(["ranked_panel was enriched."], [undeclared])
+    assert out == []
+
+
+def test_a_sentence_naming_the_multilevel_estimator_is_left_alone():
+    score = _score("ranked_panel", n_resamples=1000)
+    out = check_resampling_resolution(
+        ["With the multilevel estimator, the GSEA result for ranked_panel "
+         "reached p = 2e-7."],
+        [score],
+    )
     assert out == []
 
 

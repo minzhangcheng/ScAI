@@ -16,12 +16,15 @@ from .method_rules import rule_text
 from .statistical_gate_vocabulary import (  # noqa: F401
     FAMILY_REQUIRED_KINDS,
     _ACTIVITY,
+    _ADAPTIVE_ESTIMATOR,
+    _ADJUSTED_P_LABEL,
     _ALT_INFERENCE,
     _BOUNDED_COMPARATORS,
     _CONVENTIONAL_CUTOFFS,
     _COUNT_TEST,
     _DA,
     _DE,
+    _ESTIMATOR_PARAM_KEYS,
     _FLOOR_ROUNDING_TOLERANCE,
     _MODULE,
     _NAMED_TEST,
@@ -656,16 +659,32 @@ def _declared_resamples(score) -> Optional[int]:
 
 
 def _quoted_p_values(text):
-    """(comparator, value) for every p/q-like number stated in a text."""
+    """(label, comparator, value) for every p/q-like number stated in a text."""
     out = []
     for match in _P_NUMERIC_VALUE.finditer(str(text)):
-        symbol, word, number = match.group(1), match.group(2), match.group(3)
+        label, symbol, word, number = match.groups()
         comparator = (symbol or word or "").strip().lower()
         try:
-            out.append((comparator, float(number)))
+            out.append((label.strip().lower(), comparator, float(number)))
         except (TypeError, ValueError):
             continue
     return out
+
+
+def _is_nominal_p(label) -> bool:
+    """Whether a quoted label names a nominal p-value rather than an adjusted one."""
+    return not _ADJUSTED_P_LABEL.search(str(label))
+
+
+def _uses_adaptive_estimator(score) -> bool:
+    """Whether a score declared a tail estimator (multilevel) instead of plain counting."""
+    params = getattr(score, "parameters", None) or {}
+    if not isinstance(params, dict):
+        return False
+    return any(
+        _ADAPTIVE_ESTIMATOR.search(str(params.get(key, "")))
+        for key in _ESTIMATOR_PARAM_KEYS
+    )
 
 
 def _names_score(text, score_name):
@@ -707,17 +726,26 @@ def check_resampling_resolution(findings, score_definitions):
     inequality below it, and results tied there are not ranked on it. Both are
     observations; the PI decides whether rewording or more resamples follow.
 
-    Deliberately absent: an inference that one value shared by several results
-    is a resolution floor. Benjamini-Hochberg's step-up monotonisation ties
-    adjusted values by construction, so a shared q-value is routine and proves
-    nothing about resampling resolution.
+    Deliberately absent, because the floor arithmetic does not describe them:
+    adjusted values (a GSEA FDR comes from the pooled null of every set in the
+    call and can sit below the per-set floor, and prose does not say whether a
+    quoted FDR is that or a Benjamini-Hochberg q); scores that declared a tail
+    estimator (gseapy's method="multilevel"), whose precision is not set by a
+    resample count -- such scores are excluded from both observations; and
+    sentences that name the multilevel estimator themselves. Also absent: an
+    inference that one value shared by several results is a resolution floor.
+    Benjamini-Hochberg's step-up monotonisation ties adjusted values by
+    construction, so a shared q-value is routine and proves nothing.
     """
     texts = _texts(findings)
     if not texts:
         return []
 
     out = []
-    ranked = [s for s in (score_definitions or ()) if score_kind(s) == "ranked_enrichment"]
+    ranked = [
+        s for s in (score_definitions or ())
+        if score_kind(s) == "ranked_enrichment" and not _uses_adaptive_estimator(s)
+    ]
     declared = {
         getattr(s, "score_name", ""): _declared_resamples(s) for s in ranked
     }
@@ -758,11 +786,15 @@ def check_resampling_resolution(findings, score_definitions):
             for sent in _sentences(text):
                 if not _RESAMPLED_RESULT.search(sent):
                     continue
+                if _ADAPTIVE_ESTIMATOR.search(sent):
+                    continue
                 resamples = _resamples_for(sent, declared)
                 if not resamples:
                     continue
                 floor = 1.0 / (resamples + 1)
-                for comparator, value in _quoted_p_values(sent):
+                for label, comparator, value in _quoted_p_values(sent):
+                    if not _is_nominal_p(label):
+                        continue
                     if value <= 0 or value > floor * _FLOOR_ROUNDING_TOLERANCE:
                         continue
                     if comparator in _NON_STRICT_OR_LOWER_COMPARATORS:
@@ -804,7 +836,8 @@ def check_resampling_resolution(findings, score_definitions):
                     f"resamples cannot establish. Confirm which estimator the tool "
                     f"used, do not rank results tied at the limit against each other, "
                     f"and re-run with more resamples or a multilevel estimator if a "
-                    f"smaller value matters."),
+                    f"smaller value matters (a score registered with "
+                    f"method=\"multilevel\" is not held to this limit)."),
             ))
     return out
 
