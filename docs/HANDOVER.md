@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.53.2 · **Last updated**: 2026-09-07
+**Version**: 0.53.3 · **Last updated**: 2026-09-07
 
 ## 1. Runtime Architecture
 
@@ -352,6 +352,16 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.53.x — (2026-09-07 onward)**
+
+- `0.53.3` — Keeps Bioinformatics executor checkpoints aligned with the live
+  loop context: resumed runs now persist the current step number and the
+  post-compaction transcript instead of initialization-time values, so an
+  interrupted analysis can continue from its saved work. The revised-plan
+  checkpoint remains durable before the next LLM turn, and a focused regression
+  covers list replacement, save/restore, and plan-revision persistence. Focused
+  backend evidence passed `10/10` tests; no client, kernel, backend-full,
+  frontend, image-build, deployment, or historical-session repair was
+  performed.
 
 - `0.53.2` — Preserves current-round identity when workspace figures are
   adopted: typed analysis-log entries now join to current successful schema-v2
