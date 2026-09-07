@@ -184,6 +184,7 @@ class LocalJupyterSandbox(
         if self._kernel_staging_root.is_symlink():
             raise RuntimeError("kernel staging root must not be a symlink")
         self._initialized = False
+        self._starting = False
         persistence = self.notebook_state.runtime_persistence
         self.runtime_revision: int = int(persistence.get("current_revision") or 0)
         self.saved_runtime_revision: int = int(persistence.get("saved_revision") or 0)
@@ -226,6 +227,12 @@ class LocalJupyterSandbox(
             self, bindings=sys.modules[__name__]
         )
     
+    async def _save_session_locked(self):
+        """Already-locked save for export and kernel shutdown."""
+        return await _runtime_save_owner.save_session_locked(
+            self, bindings=sys.modules[__name__],
+        )
+
     async def save_session(self):
         """Save the current session state by streaming dill per-variable.
 

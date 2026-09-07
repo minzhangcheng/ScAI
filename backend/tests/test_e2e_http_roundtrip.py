@@ -54,7 +54,6 @@ def _token(client, username="boss", password="adminpass123"):
 def _populate(session_id, *, live_pkl: bool):
     """Give the session the artefacts a real mid-analysis run would have."""
     from backend.config import get_session_states, get_session_workspace, get_session_uploads
-    from backend.utils.runtime_apply import _live_pkl
 
     states = get_session_states(session_id)
     states.mkdir(parents=True, exist_ok=True)
@@ -67,7 +66,7 @@ def _populate(session_id, *, live_pkl: bool):
     )
     asyncio.run(_create_checkpoint_fixture(states / "checkpoints.sqlite"))
     if live_pkl:
-        _live_pkl(session_id).write_bytes(b"DILL-KERNEL-DUMP")
+        _write_committed_generation(session_id)
 
     ws = get_session_workspace(session_id)
     ws.mkdir(parents=True, exist_ok=True)
@@ -77,6 +76,79 @@ def _populate(session_id, *, live_pkl: bool):
     up.mkdir(parents=True, exist_ok=True)
     (up / "matrix.h5ad").write_bytes(b"H5AD-DATA")
 
+
+
+def _write_committed_generation(session_id):
+    """The pkl and its HMAC, as a real generation carries them.
+
+    Writing bare bytes made the session look resumable to an exporter that only
+    read the pairing and unresumable to one that verifies the generation --
+    which is the difference the resumable-export contract turns on.
+
+    The manifest is written separately by `_pair_committed_generation`, because
+    it has to record the state/checkpoint pairing as of the moment the save
+    commits, and the fixture advances the session after populating it.
+    """
+    from backend.utils.runtime_apply import _live_pkl
+    from backend.utils.sandbox_parts.regular_save import _write_pkl_signature
+    from backend.utils.sandbox_parts.shared import _integrity_dir
+
+    pkl = _live_pkl(session_id)
+    pkl.parent.mkdir(parents=True, exist_ok=True)
+    pkl.write_bytes(b"DILL-KERNEL-DUMP")
+    _write_pkl_signature(pkl, _integrity_dir(session_id))
+
+
+def _pair_committed_generation(session_id, *, revision: int = 1):
+    """Sign a manifest that pairs the dump to the session as it stands now.
+
+    A real save captures `state_version` and the checkpoint identity at commit
+    time, and resumable export refuses an archive whose manifest pairs to
+    anything else -- that refusal is the point of the contract, so the fixture
+    has to pair honestly rather than be exempted from the check.
+    """
+    from backend.state import sessions
+    from backend.utils.runtime_apply import _live_pkl
+    from backend.utils.runtime_manifest import (
+        build_runtime_manifest,
+        runtime_manifest_path,
+        write_runtime_manifest,
+    )
+    from backend.utils.runtime_pairing import capture_pairing
+    from backend.utils.sandbox_parts.regular_save import _sha256_file
+
+    pkl = _live_pkl(session_id)
+    digest = _sha256_file(pkl)
+    state = sessions[session_id]
+    write_runtime_manifest(
+        runtime_manifest_path(session_id),
+        build_runtime_manifest(
+            revision=revision,
+            state_revision=revision,
+            pkl_digest=digest,
+            saved_names=["adata"],
+            skipped_names=[],
+            serializer_version="dill-zstd-1",
+            pairing=capture_pairing(session_id, state),
+        ),
+    )
+
+    # A generation on disk is only half of it: `state_runtime_coherence` reads
+    # the session's own record, and with no `committed_source`/`committed_digest`
+    # it answers "unavailable" -- a session that never saved. A real save writes
+    # these through `sync_runtime_persistence_state`, so the fixture writes them
+    # too rather than the export being exempted from the coherence check.
+    persistence = dict(getattr(state, "runtime_persistence", None) or {})
+    persistence.update({
+        "committed_source": "regular_save",
+        "committed_digest": digest,
+        "committed_revision": revision,
+        "current_revision": revision,
+        "saved_revision": revision,
+        "last_attempt_revision": revision,
+        "last_attempt_status": "committed",
+    })
+    state.runtime_persistence = persistence
 
 async def _create_checkpoint_fixture(path):
     """Create the smallest saver-owned checkpoint database for E2E export."""
@@ -173,6 +245,8 @@ def test_export_import_continue(
     _populate(src_id, live_pkl=True)
     _advance(src_id)
     client.post(f"/api/session/{src_id}/save", headers=_auth(token))
+    if include_runtime:
+        _pair_committed_generation(src_id)
 
     blob = _export_download(client, token, src_id, include_runtime=include_runtime)
     assert blob[:2] == b"\x1f\x8b", "export is not gzip"
@@ -309,6 +383,7 @@ def test_a_resumable_archive_is_refused_onto_a_live_session_id(client):
     _populate(src_id, live_pkl=True)
     _advance(src_id)
     client.post(f"/api/session/{src_id}/save", headers=_auth(token))
+    _pair_committed_generation(src_id)
 
     blob = _export_download(client, token, src_id, include_runtime=True)
     job = _import_job(client, token, blob, trust=True)
@@ -357,6 +432,7 @@ def test_the_resume_button_is_not_a_silent_no_op(client):
     _populate(src_id, live_pkl=True)
     _advance(src_id)
     client.post(f"/api/session/{src_id}/save", headers=_auth(token))
+    _pair_committed_generation(src_id)
 
     blob = _export_download(client, token, src_id, include_runtime=True)
 

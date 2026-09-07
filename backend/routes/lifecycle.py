@@ -35,6 +35,7 @@ from backend.services.session_store import (
 from backend.utils.auth import require_session_ownership
 
 from backend.utils.runtime_apply import is_forward_resume_blocked, state_runtime_coherence
+from backend.utils.runtime_pairing import is_live_runtime_continuation_safe
 
 from backend.utils.checkpoint_paths import checkpoint_sqlite_path
 

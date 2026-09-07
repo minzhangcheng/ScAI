@@ -59,6 +59,70 @@ def capture_pairing(session_id: str, state, states_dir=None) -> dict | None:
     }
 
 
+def is_live_runtime_continuation_safe(session_id: str, state, workflow=None) -> bool:
+    """Use a parked graph's intact namespace instead of its older disk dump.
+
+    The epoch is latched on the owner's first kernel start. A restart cannot
+    inherit this proof, even if it retains the graph pointers and gate events.
+    Cold owners are checked before they have a live graph state.
+    """
+    from backend.state import workflows
+
+    owner = workflows.get(session_id)
+    if owner is None or (workflow is not None and owner is not workflow):
+        return False
+    if getattr(owner, "session_id", None) != session_id or getattr(state, "id", None) != session_id:
+        return False
+    graph = getattr(owner, "_current_graph_state", None)
+    if not isinstance(graph, dict) or getattr(graph.get("analysis_state"), "id", None) != session_id:
+        return False
+    if getattr(getattr(owner, "_current_analysis_state", None), "id", None) != session_id:
+        return False
+    sandbox = getattr(owner, "sandbox", None)
+    if sandbox is None or not getattr(sandbox, "_initialized", False):
+        return False
+    if any(getattr(sandbox, flag, False) for flag in (
+        "_kernel_dead", "_session_restore_failed", "_restarting", "_starting",
+    )):
+        return False
+    epoch = getattr(owner, "_continuation_kernel_epoch", None)
+    if epoch is None or epoch != getattr(sandbox, "kernel_epoch", None):
+        return False
+    if getattr(sandbox, "kc", None) is None or getattr(sandbox, "km", None) is None:
+        return False
+    try:
+        if not sandbox.km.is_alive():
+            return False
+    except Exception:
+        return False
+    if any(getattr(owner, flag, False) for flag in (
+        "_close_complete", "_discard_runtime_on_close", "_restore_superseded",
+    )):
+        return False
+    closing = getattr(owner, "_close_task", None)
+    if closing is not None and not closing.done():
+        return False
+    generation = int(getattr(state, "lifecycle_generation", 0) or 0)
+    if generation != getattr(sandbox, "_expected_lifecycle_generation", None):
+        return False
+    if generation != getattr(sandbox.notebook_state, "lifecycle_generation", None):
+        return False
+    status = getattr(getattr(state, "status", None), "value", getattr(state, "status", None))
+    pause = getattr(owner, "_pause_event", None)
+    if pause is None:
+        return False
+    if status == "paused":
+        return not pause.is_set()
+    gates = {
+        "waiting_input": "_continue_event",
+        "waiting_annotation": "_annotation_event",
+        "waiting_plan_review": "_plan_review_event",
+        "waiting_species_input": "_species_event",
+    }
+    gate = getattr(owner, gates.get(status, ""), None)
+    return pause.is_set() and gate is not None and not gate.is_set()
+
+
 def refresh_runtime_availability(state) -> None:
     """Check cold-resume file availability before the graph can advance.
 

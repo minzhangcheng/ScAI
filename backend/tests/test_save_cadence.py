@@ -300,7 +300,7 @@ def test_the_closing_save_is_one_attempt_and_does_not_hold_the_shutdown():
     start = source.index("    async def stop(self, *, save: bool = True):")
     body = source[start:start + 4000]
 
-    assert body.count("await self.save_session()") == 1, body[:2000]
+    assert body.count("await self._save_session_locked()") == 1, body[:2000]
     assert "One attempt (spec 5.1)" in body
     # The notebook save is outside the dump's try, so a failed dump cannot take
     # the notebook with it.

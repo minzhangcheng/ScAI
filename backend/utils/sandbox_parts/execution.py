@@ -294,15 +294,15 @@ class ExecutionMixin:
                         f"{result.error}\n{contract_error}"
                         if result.error else contract_error
                     )
-        self._note_execution_effect(
-            mutates_namespace=mutates_namespace, reached_kernel=reached_kernel
-        )
-        if result.success and records_history:
-            self.notebook_state.update_runtime_persistence(
-                "live_dirty",
-                current_revision=self.runtime_revision,
-                saved_revision=self.saved_runtime_revision,
+            self._note_execution_effect(
+                mutates_namespace=mutates_namespace, reached_kernel=reached_kernel
             )
+            if result.success and records_history:
+                self.notebook_state.update_runtime_persistence(
+                    "live_dirty",
+                    current_revision=self.runtime_revision,
+                    saved_revision=self.saved_runtime_revision,
+                )
         return result
 
     async def _execute_unlocked(

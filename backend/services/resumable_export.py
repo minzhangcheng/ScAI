@@ -1,34 +1,20 @@
-"""Freeze, flush, verify — what ``include_runtime=true`` has to mean. Spec 5.4.
-
-An export that packs whatever pkl happens to be on disk ships a runtime that
-can be many cells old, beside a state file and a checkpoint captured later. The
-archive then imports cleanly and cannot continue: ``import_state`` compares the
-archived pairing against what the archive actually carries and retires both the
-runtime and the checkpoint when they disagree, so "the import succeeded" is not
-evidence of anything.
-
-Three files have to describe one moment: the state, the runtime dump and the
-checkpoint copy. This module produces that moment, or refuses.
-
-**Refusing is the design.** Falling back to the previous committed generation
-would ship a *new* state beside an *old* runtime, which is exactly the
-incoherence spec 5.1 names — and this design does not retain the matching older
-state and checkpoint to pair the old runtime with.
-"""
+"""Capture one verified runtime/state/checkpoint generation for portable export."""
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import tarfile
+import tempfile
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class ResumableExportUnavailable(RuntimeError):
-    """The export cannot produce a resumable archive right now.
-
-    Carries a reason the caller can render. Never a 500: the session is intact,
-    the previous generation is intact, and a results-only export still works.
-    """
+    """A results-only export remains available when this capture cannot resume."""
 
     def __init__(self, reason: str, detail: str):
         self.reason = reason
@@ -37,16 +23,10 @@ class ResumableExportUnavailable(RuntimeError):
 
 
 def live_sandbox(session_id: str) -> Optional[Any]:
-    """The sandbox currently owning *session_id*'s kernel, if any.
-
-    A workflow's own sandbox first: it is the one executing cells. The chat
-    sandbox is the fallback for a session whose analysis has finished but whose
-    kernel is still up for chat-driven figures.
-    """
     from backend.state import chat_sandboxes, workflows
 
-    workflow = workflows.get(session_id)
-    sandbox = getattr(workflow, "sandbox", None)
+    owner = workflows.get(session_id)
+    sandbox = getattr(owner, "sandbox", None)
     if sandbox is not None and getattr(sandbox, "km", None) is not None:
         return sandbox
     sandbox = chat_sandboxes.get(session_id)
@@ -55,91 +35,174 @@ def live_sandbox(session_id: str) -> Optional[Any]:
     return None
 
 
-def _pairing(session_id: str, state) -> Optional[dict]:
+def _refuse(reason: str, detail: str):
+    return ResumableExportUnavailable(
+        reason, detail + " Export without runtime to keep the results, or retry when the session is idle.",
+    )
+
+
+def _pairing(session_id: str, state) -> dict:
     from backend.utils.runtime_pairing import capture_pairing
 
     try:
-        return capture_pairing(session_id, state)
-    except Exception:
-        logger.warning(
-            "[%s] Could not capture the export pairing", session_id, exc_info=True,
-        )
-        return None
-
-
-async def flush_for_resumable_export(session_id: str, state) -> Optional[dict]:
-    """Flush the live kernel and return the pairing the archive must record.
-
-    Returns ``None`` when there is no live kernel: an archive built from a
-    session whose kernel is already down carries the last committed generation,
-    which is coherent with the state on disk beside it. There is nothing to
-    flush and nothing to refuse.
-
-    Raises :class:`ResumableExportUnavailable` when a kernel is live and its
-    generation could not be committed.
-    """
-    sandbox = live_sandbox(session_id)
-    if sandbox is None:
-        return _pairing(session_id, state)
-
-    try:
-        committed = await sandbox.save_session()
+        pairing = capture_pairing(session_id, state)
+        if pairing is None:
+            raise ValueError("state pairing is absent")
+        return pairing
     except Exception as exc:
-        raise ResumableExportUnavailable(
-            "flush_failed",
-            "The runtime could not be saved, so a resumable archive would "
-            "contain a kernel older than the session state beside it. Export "
-            "without runtime to keep the results, or retry once the session "
-            "is idle.",
-        ) from exc
-    if committed is not True:
-        raise ResumableExportUnavailable(
-            "flush_failed",
-            "The runtime could not be saved, so a resumable archive would "
-            "contain a kernel older than the session state beside it. Export "
-            "without runtime to keep the results, or retry once the session "
-            "is idle.",
-        )
-
-    verify_committed_generation(session_id)
-    return _pairing(session_id, state)
+        raise _refuse("boundary_unavailable", "The state/checkpoint identity could not be read.") from exc
 
 
-def verify_committed_generation(session_id: str) -> None:
-    """Refuse an archive whose committed generation does not verify. Spec 4.4.
+def _digest(stream) -> str:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
 
-    A dump that fails its own HMAC is not a generation; shipping it produces an
-    archive that imports and then fails to rehydrate on the destination, where
-    there is nothing left to fall back to.
-    """
-    from backend.utils.runtime_apply import RuntimeApplyError, verify_live_pkl_or_raise
+
+def verify_committed_generation(session_id: str) -> dict:
+    """Require an existing signed dump and its matching signed manifest."""
+    from backend.utils.runtime_apply import _live_pkl, verify_live_pkl_or_raise
+    from backend.utils.runtime_manifest import read_runtime_manifest, runtime_manifest_path
 
     try:
+        pkl = _live_pkl(session_id)
+        if not pkl.is_file():
+            raise ValueError("committed runtime is absent")
         verify_live_pkl_or_raise(session_id)
-    except RuntimeApplyError as exc:
-        raise ResumableExportUnavailable(
-            "generation_unverified",
-            "The saved runtime failed its integrity check, so it cannot be "
-            "packed into a portable archive. Export without runtime to keep "
-            "the results.",
-        ) from exc
+        manifest = read_runtime_manifest(runtime_manifest_path(session_id))
+        with pkl.open("rb") as stream:
+            if _digest(stream) != manifest["pkl_sha256"]:
+                raise ValueError("runtime digest does not match its manifest")
+        return manifest
+    except Exception as exc:
+        raise _refuse("generation_unverified", "The saved runtime is absent or failed its integrity check.") from exc
 
 
-def assert_boundary_held(session_id: str, state, before: Optional[dict]) -> None:
-    """Refuse an archive assembled across a moving execution boundary.
+def assert_boundary_held(session_id: str, state, before: dict) -> None:
+    if before != _pairing(session_id, state):
+        raise _refuse("boundary_moved", "The analysis advanced while its archive was being built.")
 
-    The pairing is ``(state_version, checkpoint_identity)``. If either moved
-    between the flush and the end of the capture, the three files no longer
-    describe one moment and the destination's own check would retire the
-    runtime -- silently, after reporting a successful import. Refusing here is
-    the same verdict, delivered where the user can act on it.
+
+async def _flush_locked(sandbox, state) -> None:
+    try:
+        if await sandbox._save_session_locked() is not True:
+            raise ValueError("runtime save did not commit")
+        sandbox.sync_runtime_persistence_state(state)
+        # The notebook is part of the same frozen execution boundary.
+        sandbox.notebook_state.save()
+    except Exception as exc:
+        raise _refuse("flush_failed", "The current runtime and notebook could not be saved.") from exc
+
+
+@asynccontextmanager
+async def frozen_resumable_export(session_id: str, state):
+    """Hold execution/save/shutdown exclusion until archive capture has drained.
+
+    Cold exports reserve the existing runtime-start barrier, without starting a
+    kernel. Lifecycle locks are held only for reservation/release; state saves
+    and export cancellation need to acquire those locks independently.
     """
-    after = _pairing(session_id, state)
-    if before == after:
-        return
-    raise ResumableExportUnavailable(
-        "boundary_moved",
-        "The analysis advanced while the archive was being built, so its "
-        "runtime, state and checkpoint would not describe the same moment. "
-        "Retry the export once the session is idle.",
+    from backend.services.session_lifecycle import get_lifecycle_lock
+    from backend.state import (
+        chat_sandboxes, workflows, report_workflows, initializing_sessions,
+        claim_initializing_session, release_initializing_session,
     )
+    from backend.utils.asyncio_tasks import await_with_deferred_cancellation
+    import asyncio
+
+    token = None
+    async with get_lifecycle_lock(session_id):
+        sandbox = live_sandbox(session_id)
+        if sandbox is None:
+            if (session_id in initializing_sessions or session_id in workflows
+                    or session_id in report_workflows or session_id in chat_sandboxes):
+                raise _refuse("runtime_busy", "The runtime is starting or closing.")
+            token = claim_initializing_session(session_id)
+    try:
+        if sandbox is None:
+            yield _capture_descriptor(session_id, state)
+        else:
+            async with sandbox._exec_lock:
+                if (live_sandbox(session_id) is not sandbox
+                        or not getattr(sandbox, "_initialized", False)
+                        or getattr(sandbox, "_starting", False)
+                        or getattr(sandbox, "_restarting", False)
+                        or getattr(sandbox, "_kernel_dead", False)
+                        or getattr(sandbox, "_session_restore_failed", False)):
+                    raise _refuse("runtime_busy", "The live runtime changed before capture.")
+                await _flush_locked(sandbox, state)
+                yield _capture_descriptor(session_id, state)
+    finally:
+        if token is not None:
+            async def release():
+                async with get_lifecycle_lock(session_id):
+                    release_initializing_session(session_id, token)
+            await await_with_deferred_cancellation(asyncio.create_task(release()))
+
+
+def _capture_descriptor(session_id: str, state) -> dict:
+    from backend.config import get_session_states
+    from backend.utils.runtime_apply import state_runtime_coherence
+
+    manifest = verify_committed_generation(session_id)
+    pairing = _pairing(session_id, state)
+    if manifest.get("pairing") != pairing or state_runtime_coherence(state) != "current":
+        raise _refuse("generation_mismatch", "The committed runtime does not match the current state and checkpoint.")
+    notebooks = {}
+    for path in get_session_states(session_id).glob("*.ipynb"):
+        with path.open("rb") as stream:
+            notebooks[path.name] = _digest(stream)
+    return {"pairing": pairing, "manifest": manifest, "notebooks": notebooks}
+
+
+async def flush_for_resumable_export(session_id: str, state) -> dict:
+    """Compatibility flush; archive callers must retain frozen_resumable_export."""
+    async with frozen_resumable_export(session_id, state) as descriptor:
+        return descriptor["pairing"]
+
+
+def verify_captured_archive(tar_path: str, session_id: str, descriptor: dict) -> None:
+    """Check required captured members, including the actual SQLite backup.
+
+    Generic archive helpers tolerate disappearing files for results-only export.
+    A resumable archive cannot silently inherit that tolerance.
+    """
+    from backend.utils.runtime_manifest import runtime_manifest_path
+    from backend.utils.runtime_pairing import checkpoint_identity
+
+    prefix = f"{session_id}/states/"
+    try:
+        with tarfile.open(tar_path, "r:gz") as archive:
+            def member(name):
+                stream = archive.extractfile(name)
+                if stream is None:
+                    raise ValueError(f"missing archive member: {name}")
+                return stream
+
+            manifest = json.load(member(prefix + runtime_manifest_path(session_id).name))
+            if manifest != descriptor["manifest"]:
+                raise ValueError("captured runtime manifest changed")
+            with member(prefix + f"{session_id}_session.pkl") as stream:
+                if _digest(stream) != manifest["pkl_sha256"]:
+                    raise ValueError("captured runtime digest changed")
+            state = json.load(member(f"{session_id}/sessions/{session_id}.json"))
+            if state.get("state_version") != descriptor["pairing"]["state_version"]:
+                raise ValueError("captured state version changed")
+            for name, digest in descriptor["notebooks"].items():
+                with member(prefix + name) as stream:
+                    if _digest(stream) != digest:
+                        raise ValueError("captured notebook changed")
+            checkpoint_name = prefix + "checkpoints.sqlite"
+            checkpoint = None
+            if checkpoint_name in archive.getnames():
+                with tempfile.TemporaryDirectory(prefix="scai-export-check-") as directory:
+                    target = Path(directory) / "checkpoints.sqlite"
+                    with member(checkpoint_name) as source, target.open("wb") as dest:
+                        import shutil
+                        shutil.copyfileobj(source, dest, 1024 * 1024)
+                    checkpoint = checkpoint_identity(session_id, directory)
+            if checkpoint != descriptor["pairing"]["checkpoint"]:
+                raise ValueError("captured checkpoint changed")
+    except Exception as exc:
+        raise _refuse("capture_unverified", "The archive did not capture one complete runtime generation.") from exc

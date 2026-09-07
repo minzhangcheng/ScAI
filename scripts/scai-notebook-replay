@@ -52,7 +52,7 @@ TOLERANCES = {
 # because the kernel is a separate process with its own namespace, and the
 # fingerprint has to be taken from *that* namespace.
 EXTRACT_FUNCTION = r'''
-def _scai_replay_fingerprint():
+def _scai_replay_fingerprint(declared_outputs=None, namespace_names=None):
     import hashlib
     import json
 
@@ -60,7 +60,16 @@ def _scai_replay_fingerprint():
         joined = "\n".join(sorted(str(n) for n in names))
         return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
-    out = {"present": False}
+    out = {"schema_version": 2, "extraction_status": "measured", "present": False}
+    if declared_outputs is None:
+        out["persistent_outputs_status"] = "unmeasured"
+    else:
+        out["persistent_outputs_status"] = "measured"
+        out["declared_persistent_outputs"] = sorted(set(declared_outputs))
+        out["persistent_outputs"] = sorted(
+            name for name in set(declared_outputs)
+            if name in (globals() if namespace_names is None else namespace_names)
+        )
     adata = globals().get("adata")
     if adata is None:
         return out
@@ -79,6 +88,7 @@ def _scai_replay_fingerprint():
         out["x_nonzero"] = int(X.nnz) if hasattr(X, "nnz") else int((X != 0).sum())
     except Exception as exc:
         out["x_error"] = repr(exc)
+        out["extraction_status"] = "unmeasured"
 
     cats = {}
     for column in adata.obs.columns:
@@ -97,20 +107,19 @@ def _scai_replay_fingerprint():
         try:
             arr = adata.obsm[key]
             shapes[str(key)] = list(arr.shape)
-            # A digest is useless under a tolerance, so the comparison needs the
-            # values. Storing the full array would make the fingerprint the size
-            # of the embedding, so it carries per-column sums and the count of
-            # finite entries -- enough to catch a seed that did not take, which
-            # is what the 1e-4 bound is for.
             import numpy as np
-            finite = np.isfinite(arr)
+            arr = np.asarray(arr, dtype=float)
             values[str(key)] = {
-                "column_sums": [float(v) for v in np.nansum(arr, axis=0)],
-                "n_finite": int(finite.sum()),
-                "abs_mean": float(np.nanmean(np.abs(arr))) if arr.size else 0.0,
+                "encoding": "flat-float-v1", "shape": list(arr.shape),
+                "values": [
+                    float(value) if np.isfinite(value) else
+                    ("nan" if np.isnan(value) else ("+inf" if value > 0 else "-inf"))
+                    for value in arr.ravel()
+                ],
             }
         except Exception as exc:
             shapes[str(key)] = ["error", repr(exc)]
+            out["extraction_status"] = "unmeasured"
     out["obsm_shapes"] = shapes
     out["obsm_values"] = values
 
@@ -121,6 +130,7 @@ def _scai_replay_fingerprint():
             out["n_highly_variable"] = int(len(selected))
     except Exception as exc:
         out["highly_variable"] = "error: %r" % (exc,)
+        out["extraction_status"] = "unmeasured"
 
     return out
 '''
@@ -130,7 +140,7 @@ def _scai_replay_fingerprint():
 # own rather than relying on the function's locals leaking out.
 EXTRACT_SOURCE = EXTRACT_FUNCTION + (
     "\nimport json as _scai_json\n"
-    "print('__SCAI_FINGERPRINT__' + _scai_json.dumps(_scai_replay_fingerprint()))\n"
+    "print('__SCAI_FINGERPRINT__' + _scai_json.dumps(_scai_replay_fingerprint(globals().get('_scai_declared_outputs'), globals().get('_scai_namespace_names'))))\n"
 )
 FINGERPRINT_PREFIX = "__SCAI_FINGERPRINT__"
 
@@ -147,11 +157,78 @@ def _close(new, old, rtol: float) -> bool:
     return abs(float(new) - float(old)) <= rtol * max(1.0, abs(float(old)))
 
 
+def _embedding_comparison(original, replayed, rtol):
+    """Pointwise MAD; non-finite kinds and positions must agree exactly."""
+    import math
+
+    if not isinstance(original, dict) or not isinstance(replayed, dict):
+        return {"variable": "obsm_values", "verdict": "unmeasured", "detail": "invalid embedding record"}
+    details = {}
+    unmeasured = False
+    for key in sorted(set(original) | set(replayed)):
+        if key not in original or key not in replayed:
+            details[key] = "present in one run only"
+            continue
+        a, b = original[key], replayed[key]
+        try:
+            for record in (a, b):
+                if record.get("encoding") != "flat-float-v1":
+                    raise ValueError("legacy aggregate fingerprint lacks embedding values")
+                shape, values = record["shape"], record["values"]
+                if not isinstance(shape, list) or any(type(n) is not int or n < 0 for n in shape):
+                    raise ValueError("invalid embedding shape")
+                if not isinstance(values, list) or len(values) != math.prod(shape):
+                    raise ValueError("incomplete embedding values")
+                for value in values:
+                    if isinstance(value, str) and value in {"nan", "+inf", "-inf"}:
+                        continue
+                    if type(value) not in (float, int) or not math.isfinite(value):
+                        raise ValueError("invalid embedding value encoding")
+            if a["shape"] != b["shape"]:
+                details[key] = "embedding shape differs"
+                continue
+            differences, original_abs = [], []
+            for old, new in zip(a["values"], b["values"]):
+                if isinstance(old, str) or isinstance(new, str):
+                    if old != new:
+                        details[key] = "finite/non-finite identity differs"
+                        break
+                else:
+                    differences.append(abs(new - old))
+                    original_abs.append(abs(old))
+            else:
+                mad = math.fsum(differences) / len(differences) if differences else 0.0
+                scale = max(1.0, math.fsum(original_abs) / len(original_abs)) if original_abs else 1.0
+                if mad > rtol * scale:
+                    details[key] = {"mean_absolute_difference": mad, "bound": rtol * scale}
+        except (KeyError, TypeError, ValueError, OverflowError, AttributeError) as exc:
+            unmeasured = True
+            details[key] = str(exc)
+    return {
+        "variable": "obsm_values",
+        "verdict": "unmeasured" if unmeasured else ("diverged" if details else "match"),
+        **({"detail": details} if details else {}),
+    }
+
+
 def compare(original: dict, replayed: dict) -> list[dict]:
     """One entry per declared variable. Absent from both is skipped, not passed."""
     results = []
+    if any(not isinstance(fp, dict) or fp.get("schema_version") != 2
+           or fp.get("extraction_status") != "measured" for fp in (original, replayed)):
+        results.append({"variable": "fingerprint", "verdict": "unmeasured",
+                        "detail": "missing, failed, or legacy extraction evidence"})
+    original = original if isinstance(original, dict) else {}
+    replayed = replayed if isinstance(replayed, dict) else {}
     for name, rtol in TOLERANCES.items():
-        if name == "persistent_outputs":
+        if name == "persistent_outputs" and any(
+            fp.get("persistent_outputs_status") != "measured"
+            or not isinstance(fp.get(name), list)
+            or not isinstance(fp.get("declared_persistent_outputs"), list)
+            for fp in (original, replayed)
+        ):
+            results.append({"variable": name, "verdict": "unmeasured",
+                            "detail": "declared output namespace presence was not measured"})
             continue
         a, b = original.get(name), replayed.get(name)
         if a is None and b is None:
@@ -165,7 +242,12 @@ def compare(original: dict, replayed: dict) -> list[dict]:
             continue
 
         if rtol is None:
-            verdict = "match" if a == b else "diverged"
+            if name == "persistent_outputs":
+                same = (set(a) == set(b) and set(original["declared_persistent_outputs"])
+                        == set(replayed["declared_persistent_outputs"]))
+            else:
+                same = a == b
+            verdict = "match" if same else "diverged"
             entry = {"variable": name, "verdict": verdict}
             if verdict == "diverged":
                 entry["original"], entry["replayed"] = a, b
@@ -173,28 +255,7 @@ def compare(original: dict, replayed: dict) -> list[dict]:
             continue
 
         if name == "obsm_values":
-            diverged = {}
-            for key in sorted(set(a) | set(b)):
-                if key not in a or key not in b:
-                    diverged[key] = "present in one run only"
-                    continue
-                for field in ("abs_mean",):
-                    if not _close(b[key][field], a[key][field], rtol):
-                        diverged[key] = {
-                            "field": field,
-                            "original": a[key][field],
-                            "replayed": b[key][field],
-                        }
-                sums_a, sums_b = a[key]["column_sums"], b[key]["column_sums"]
-                if len(sums_a) != len(sums_b):
-                    diverged[key] = "column count differs"
-                elif any(not _close(y, x, rtol) for x, y in zip(sums_a, sums_b)):
-                    diverged.setdefault(key, "column sums outside tolerance")
-            results.append({
-                "variable": name,
-                "verdict": "diverged" if diverged else "match",
-                **({"detail": diverged} if diverged else {}),
-            })
+            results.append(_embedding_comparison(a, b, rtol))
             continue
 
         ok = _close(b, a, rtol)
@@ -242,7 +303,7 @@ def read_cells(session_dir: pathlib.Path) -> list[dict]:
 # --- kernel ------------------------------------------------------------------
 
 
-def run_in_kernel(cells: list[dict], workspace: pathlib.Path) -> tuple[list[dict], dict]:
+def run_in_kernel(cells: list[dict], workspace: pathlib.Path, declared_outputs=None) -> tuple[list[dict], dict]:
     """Execute every cell in order. Does not stop at a failure: the original run
     did not, and a harness that stopped could not report the second divergence."""
     from jupyter_client.manager import start_new_kernel
@@ -306,19 +367,36 @@ def run_in_kernel(cells: list[dict], workspace: pathlib.Path) -> tuple[list[dict
             })
 
         captured = []
-        client.execute_interactive(
-            EXTRACT_SOURCE, timeout=None, store_history=False,
+        reply = client.execute_interactive(
+            "_scai_namespace_names = set(globals())\n_scai_declared_outputs = "
+            + repr(declared_outputs) + "\n" + EXTRACT_SOURCE,
+            timeout=None, store_history=False,
             output_hook=lambda msg: captured.append(msg),
         )
-        for msg in captured:
-            text = msg.get("content", {}).get("text", "")
-            for line in text.splitlines():
-                if line.startswith(FINGERPRINT_PREFIX):
-                    fingerprint = json.loads(line[len(FINGERPRINT_PREFIX):])
+        fingerprint = parse_extraction(reply, captured)
     finally:
         client.stop_channels()
         manager.shutdown_kernel(now=True)
     return outcomes, fingerprint
+
+
+def parse_extraction(reply, messages):
+    """A missing or malformed stdout marker is unmeasured, never an empty pass."""
+    failure = {"schema_version": 2, "extraction_status": "unmeasured"}
+    if reply.get("content", {}).get("status") != "ok":
+        return {**failure, "extraction_error": "fingerprint execution failed"}
+    candidates = []
+    text = "".join(msg.get("content", {}).get("text", "") for msg in messages)
+    for line in text.splitlines():
+        if line.startswith(FINGERPRINT_PREFIX):
+            try:
+                value = json.loads(line[len(FINGERPRINT_PREFIX):])
+            except (ValueError, TypeError):
+                return {**failure, "extraction_error": "malformed fingerprint marker"}
+            candidates.append(value)
+    if len(candidates) != 1 or not isinstance(candidates[0], dict):
+        return {**failure, "extraction_error": "missing or ambiguous fingerprint marker"}
+    return candidates[0]
 
 
 def outcome_divergences(outcomes: list[dict]) -> list[dict]:
@@ -378,6 +456,33 @@ def load_committed_namespace(path: pathlib.Path) -> dict:
     return namespace
 
 
+def read_declared_outputs(session):
+    """Read declaration receipts from the one persisted AnalysisState."""
+    candidates = [session / "session.json"]
+    if session.name == "states":
+        candidates.append(session.parent / "session.json")
+    candidates.append(session / "sessions" / (session.name + ".json"))
+    present = [path for path in candidates if path.is_file()]
+    if len(present) != 1:
+        return None, "one session state JSON is required for output declarations"
+    try:
+        state = json.loads(present[0].read_text())
+        history = state["code_history"]
+        if not isinstance(history, list):
+            raise ValueError("code_history is not a list")
+        declared = set()
+        for receipt in history:
+            names = receipt["declared_persistent_outputs"]
+            if not isinstance(names, list) or any(
+                not isinstance(name, str) or not name.isidentifier() for name in names
+            ):
+                raise ValueError("invalid output declarations")
+            declared.update(names)
+        return sorted(declared), None
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return None, "output declarations could not be measured: " + str(exc)
+
+
 def cmd_fingerprint(args) -> int:
     """Extract the declared variables from the original run's committed runtime.
 
@@ -396,8 +501,15 @@ def cmd_fingerprint(args) -> int:
         )
 
     scope = load_committed_namespace(dumps[0])
+    namespace_names = set(scope)
     exec(compile(EXTRACT_FUNCTION, "<extract>", "exec"), scope)
-    payload = scope["_scai_replay_fingerprint"]()
+    declared, declaration_error = read_declared_outputs(session)
+    try:
+        payload = scope["_scai_replay_fingerprint"](declared, namespace_names)
+    except Exception as exc:
+        payload = {"schema_version": 2, "extraction_status": "unmeasured", "extraction_error": str(exc)}
+    if declaration_error:
+        payload["persistent_outputs_error"] = declaration_error
     payload["source"] = str(dumps[0])
     pathlib.Path(args.out).write_text(json.dumps(payload, indent=2))
     print("fingerprint: %s (adata present: %s)" % (args.out, payload.get("present")))
@@ -418,7 +530,9 @@ def cmd_replay(args) -> int:
         )
 
     workspace = pathlib.Path(args.workspace or (session / "_replay_workspace"))
-    outcomes, replayed = run_in_kernel(cells, workspace)
+    declarations = (original.get("declared_persistent_outputs")
+                    if original.get("persistent_outputs_status") == "measured" else None)
+    outcomes, replayed = run_in_kernel(cells, workspace, declarations)
     divergences = outcome_divergences(outcomes)
     variables = compare(original, replayed)
 
@@ -428,7 +542,7 @@ def cmd_replay(args) -> int:
         "outcome_divergences": divergences,
         "variables": variables,
         "passed": not divergences and not any(
-            v["verdict"] == "diverged" for v in variables
+            v["verdict"] in {"diverged", "unmeasured"} for v in variables
         ),
         "original_fingerprint": original,
         "replayed_fingerprint": replayed,

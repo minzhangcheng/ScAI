@@ -209,11 +209,39 @@ def test_start_tears_down_a_kernel_whose_restore_failed():
     from backend.tests.split_facade import source_for_path
 
     source = source_for_path("backend/utils/sandbox_parts/kernel.py")
-    start = source.split("async def start(", 1)[1]
+    # Bounded at the next method: the unbounded slice ran on into `restart()`,
+    # whose `await self.stop()` is correct there and would fail the rule below.
+    start = source.split("async def start(", 1)[1].split("\n    async def ", 1)[0]
     assert "await self._restore_session()" in start
-    assert "await self.stop(save=False)" in start, (
-        "a failed restore must tear the kernel down, without saving"
+
+    # The teardown call, whichever of the two it is. `start` used to call
+    # `stop(save=False)`; it now calls `_shutdown_kernel_unlocked()`, because
+    # the export freeze holds the execution lock and the old path tried to
+    # re-acquire it. Both satisfy this guard's actual rule.
+    teardown = [
+        call for call in ("await self._shutdown_kernel_unlocked()",
+                          "await self.stop(save=False)")
+        if call in start
+    ]
+    assert teardown, (
+        "a failed restore must tear the kernel down; start() calls neither "
+        "_shutdown_kernel_unlocked() nor stop(save=False)"
     )
+    assert "await self.stop()" not in start, (
+        "a failed restore must not take the saving stop() path"
+    )
+
+    # And the helper it uses must be incapable of saving, rather than merely
+    # called with save=False -- which is what the previous spelling-match
+    # assumed without checking.
+    if "await self._shutdown_kernel_unlocked()" in start:
+        helper = source.split("async def _shutdown_kernel_unlocked(", 1)[1]
+        helper = helper.split("\n    async def ", 1)[0]
+        for forbidden in ("save_session", "notebook_state.save", "save=True"):
+            assert forbidden not in helper, (
+                f"the teardown helper reaches {forbidden}; a half-restored "
+                "namespace must never be persisted"
+            )
 
 
 def test_save_session_collects_and_reports_skipped_vars():

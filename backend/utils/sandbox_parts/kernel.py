@@ -210,6 +210,7 @@ class KernelMixin:
         # Manager, process, channels, bootstrap, and restore are one resource-
         # acquisition unit. Any failure must tear down whatever this call has
         # acquired, including a process whose client/channel setup failed.
+        self._starting = True
         try:
             self.km = KernelManager(kernel_name='python3')
             self._install_isolated_kernel_launcher(self.km)
@@ -253,6 +254,9 @@ class KernelMixin:
             # a failed restore discards this generation below.
             self._kernel_dead = False
             self.kernel_epoch = getattr(self, "kernel_epoch", 0) + 1
+            epoch_callback = getattr(self, "runtime_epoch_callback", None)
+            if callable(epoch_callback):
+                epoch_callback(self.kernel_epoch)
 
             # `_restore_session` assigns into globals() frame by frame, so any
             # error or cancellation leaves a partial namespace. save=False is
@@ -261,13 +265,15 @@ class KernelMixin:
         except BaseException:
             self._kernel_dead = True
             try:
-                await self.stop(save=False)
+                await self._shutdown_kernel_unlocked()
             except Exception:
                 logger.exception(
                     "Failed to stop partially started kernel for %s",
                     self.session_id,
                 )
             raise
+        finally:
+            self._starting = False
 
         return {
             "started": True,
@@ -389,7 +395,7 @@ class KernelMixin:
                 logger.error(f"Failed to restart kernel: {restart_error}")
                 self._kernel_dead = True
                 try:
-                    await self.stop(save=False)
+                    await self._shutdown_kernel_unlocked()
                 except Exception:
                     logger.exception(
                         "Failed to stop partially restarted kernel for %s",
@@ -406,6 +412,9 @@ class KernelMixin:
             # than the one it already partially serialized.
             self._kernel_dead = False
             self.kernel_epoch = getattr(self, "kernel_epoch", 0) + 1
+            epoch_callback = getattr(self, "runtime_epoch_callback", None)
+            if callable(epoch_callback):
+                epoch_callback(self.kernel_epoch)
 
             # Restore mutates globals frame by frame.  A failed restore leaves a
             # partial namespace, so it must never be handed back as usable.
@@ -418,7 +427,7 @@ class KernelMixin:
                 )
                 self._kernel_dead = True
                 try:
-                    await self.stop(save=False)
+                    await self._shutdown_kernel_unlocked()
                 except Exception:
                     logger.exception(
                         "Failed to stop kernel after restore failure for %s",
@@ -445,37 +454,44 @@ class KernelMixin:
         alive for a person to answer is the gate this replaced. The state is
         then stale rather than current, and the UI says so.
         """
+        # Pending saves themselves need this lock. Drain before acquiring it.
         if save:
-            try:
-                await self.await_pending_saves()
-                saved = await self.save_session()
-                if saved is not True:
-                    raise RuntimeError(
-                        "runtime persistence did not commit a current generation"
+            await self.await_pending_saves()
+        async with self._exec_lock:
+            if save:
+                try:
+                    saved = await self._save_session_locked()
+                    if saved is not True:
+                        raise RuntimeError(
+                            "runtime persistence did not commit a current generation"
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # One attempt (spec 5.1). The previous committed generation is
+                    # intact and the failure is already recorded; shutting down
+                    # anyway is the point of removing the gate.
+                    logger.exception(
+                        "Final runtime persistence failed for %s; the previous "
+                        "committed generation is kept and the kernel is closed",
+                        self.session_id,
                     )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # One attempt (spec 5.1). The previous committed generation is
-                # intact and the failure is already recorded; shutting down
-                # anyway is the point of removing the gate.
-                logger.exception(
-                    "Final runtime persistence failed for %s; the previous "
-                    "committed generation is kept and the kernel is closed",
-                    self.session_id,
-                )
-            # Independent of the dump, per spec 5.1: when the runtime could not
-            # be persisted the notebook is the only remaining record of what
-            # ran, which is exactly when losing it costs most.
-            try:
-                self.notebook_state.save()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception(
-                    "Notebook save failed during stop for %s", self.session_id,
-                )
+                # Independent of the dump, per spec 5.1: when the runtime could not
+                # be persisted the notebook is the only remaining record of what
+                # ran, which is exactly when losing it costs most.
+                try:
+                    self.notebook_state.save()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Notebook save failed during stop for %s", self.session_id,
+                    )
 
+            await self._shutdown_kernel_unlocked()
+
+    async def _shutdown_kernel_unlocked(self):
+        """Release resources; also used by failed startup inside execute's lock."""
         manager = self.km
 
         if self.kc is not None:

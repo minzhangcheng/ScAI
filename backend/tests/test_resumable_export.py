@@ -8,7 +8,9 @@ successful import either way.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+from types import SimpleNamespace
 import pathlib
 import tarfile
 
@@ -23,11 +25,15 @@ class _Sandbox:
 
     def __init__(self, *, committed=True, raises=None):
         self.km = object()
+        self._exec_lock = asyncio.Lock()
+        self._initialized = True
+        self.notebook_state = SimpleNamespace(save=lambda: None)
+        self.sync_runtime_persistence_state = lambda _state: None
         self.committed = committed
         self.raises = raises
         self.saves = 0
 
-    async def save_session(self):
+    async def _save_session_locked(self):
         self.saves += 1
         if self.raises is not None:
             raise self.raises
@@ -55,7 +61,7 @@ async def test_a_resumable_export_flushes_the_kernel_before_archiving(monkeypatc
     sandbox = _Sandbox()
     monkeypatch.setattr(resumable_export, "live_sandbox", lambda _sid: sandbox)
     monkeypatch.setattr(
-        resumable_export, "verify_committed_generation", lambda _sid: None,
+        resumable_export, "_capture_descriptor", lambda _sid, _state: {"pairing": {"state_version": 1, "checkpoint": None}},
     )
 
     await resumable_export.flush_for_resumable_export("resumable", _state())
@@ -83,14 +89,13 @@ async def test_a_resumable_export_refuses_when_the_flush_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_session_with_no_live_kernel_has_nothing_to_flush(monkeypatch):
-    """Its last committed generation is already coherent with the state beside it."""
+async def test_a_cold_session_without_committed_runtime_is_refused(monkeypatch):
     from backend.services import resumable_export
 
     monkeypatch.setattr(resumable_export, "live_sandbox", lambda _sid: None)
-    # Does not raise, and does not need a verification pass over a dump that
-    # this export did not produce.
-    await resumable_export.flush_for_resumable_export("resumable", _state())
+    with pytest.raises(resumable_export.ResumableExportUnavailable) as refusal:
+        await resumable_export.flush_for_resumable_export("resumable", _state())
+    assert refusal.value.reason == "generation_unverified"
 
 
 @pytest.mark.asyncio
@@ -102,11 +107,10 @@ async def test_a_results_only_export_does_not_flush():
     packer = source[source.index("async def _pack_session_archive("):]
     packer = packer[:packer.index("async def _retire_failed_export")]
 
-    assert "if include_runtime:\n        pairing_before = await flush_for_resumable_export(" in packer
-    # The flush is inside the branch, not before it.
-    flush_at = packer.index("flush_for_resumable_export(")
+    assert "if include_runtime:\n        async with frozen_resumable_export(" in packer
+    freeze_at = packer.index("frozen_resumable_export(")
     guard_at = packer.index("if include_runtime:")
-    assert guard_at < flush_at
+    assert guard_at < freeze_at
 
 
 def test_an_unverifiable_generation_is_refused(tmp_path, monkeypatch):
@@ -175,9 +179,10 @@ def test_the_boundary_check_runs_after_the_tar_is_built():
     packer = source[source.index("async def _pack_session_archive("):]
     packer = packer[:packer.index("async def _retire_failed_export")]
 
-    build_at = packer.index("_build_session_tar,")
+    capture_at = packer.index("result = await _pack_frozen_session_archive(")
     check_at = packer.index("assert_boundary_held(")
-    assert build_at < check_at
+    assert capture_at < check_at
+    assert packer.index("_build_session_tar,") < packer.index("verify_captured_archive,")
 
 
 def test_the_refusal_is_a_409_the_caller_can_act_on():

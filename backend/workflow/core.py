@@ -75,6 +75,7 @@ from ..constants import (
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.sandbox import LocalJupyterSandbox
 from ..utils.runtime_apply import is_forward_resume_blocked, state_runtime_coherence
+from ..utils.runtime_pairing import is_live_runtime_continuation_safe
 from ..utils.asyncio_tasks import consume_current_cancellation_request
 from ..utils.checkpoint import (
     DurableJsonPlusSerializer,

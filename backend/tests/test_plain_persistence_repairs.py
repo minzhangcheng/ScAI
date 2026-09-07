@@ -281,3 +281,87 @@ def test_red_tree_validates_nodes_before_creating_worktree():
     from pathlib import Path
     script = (Path(__file__).resolve().parents[2] / "scripts/scai-red-tree").read_text()
     assert script.index('die "name each node') < script.index("git worktree add")
+
+
+def _live_paused_owner(monkeypatch, status="paused"):
+    from backend.models.schemas import AnalysisState
+    from backend.state import sessions, workflows
+    sid = str(uuid.uuid4())
+    state = AnalysisState(id=sid, user_id="u1", current_round=2, status=status,
+                          runtime_persistence={"current_revision": 2, "saved_revision": 1,
+                                               "last_attempt_status": "failed",
+                                               "committed_revision": 1,
+                                               "committed_source": "regular_save",
+                                               "committed_digest": "d" * 64})
+    sandbox = SimpleNamespace(
+        _initialized=True, _kernel_dead=False, _session_restore_failed=False,
+        _restarting=False, km=SimpleNamespace(is_alive=lambda: True), kc=object(),
+        kernel_epoch=1, _expected_lifecycle_generation=state.lifecycle_generation,
+        notebook_state=SimpleNamespace(lifecycle_generation=state.lifecycle_generation),
+    )
+    owner = SimpleNamespace(
+        session_id=sid, sandbox=sandbox, _continuation_kernel_epoch=1,
+        _current_analysis_state=state, _current_graph_state={"analysis_state": state},
+        _pause_event=asyncio.Event(), _continue_event=asyncio.Event(),
+        signal_resume=MagicMock(), signal_continue=MagicMock(),
+    )
+    if status != "paused":
+        owner._pause_event.set()
+    monkeypatch.setitem(sessions, sid, state)
+    monkeypatch.setitem(workflows, sid, owner)
+    return state, owner
+
+
+@pytest.mark.parametrize("status", ["paused", "waiting_input"])
+def test_live_continuation_requires_the_original_reachable_kernel(monkeypatch, status):
+    from backend.utils.runtime_pairing import is_live_runtime_continuation_safe
+    state, owner = _live_paused_owner(monkeypatch, status)
+    assert is_live_runtime_continuation_safe(state.id, state)
+    owner.sandbox.kernel_epoch = 2
+    assert not is_live_runtime_continuation_safe(state.id, state)
+    owner.sandbox.kernel_epoch = 1
+    owner.sandbox._session_restore_failed = True
+    assert not is_live_runtime_continuation_safe(state.id, state)
+    owner.sandbox._session_restore_failed = False
+    owner.sandbox.km.is_alive = lambda: False
+    assert not is_live_runtime_continuation_safe(state.id, state)
+    owner.sandbox.km.is_alive = lambda: True
+    owner._current_graph_state = None
+    assert not is_live_runtime_continuation_safe(state.id, state)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["paused", "waiting_input"])
+async def test_http_resume_uses_intact_live_kernel_after_failed_save(monkeypatch, status):
+    from backend.routes import lifecycle
+    state, owner = _live_paused_owner(monkeypatch, status)
+    monkeypatch.setattr(lifecycle, "require_session_ownership", AsyncMock(return_value=state))
+    monkeypatch.setattr(lifecycle, "_update_session_cache", AsyncMock())
+    monkeypatch.setattr(lifecycle, "async_save_session", AsyncMock())
+    response = await lifecycle.resume_analysis(
+        state.id, SimpleNamespace(state=SimpleNamespace(user_id="u1")),
+    )
+    assert response.success
+    assert not (response.data or {}).get("runtime_unavailable")
+    assert state.runtime_restore_status == "complete"
+    (owner.signal_resume if status == "paused" else owner.signal_continue).assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cold_resume_refusal_persists_rerun_projection(monkeypatch):
+    from backend.routes import lifecycle
+    state, owner = _live_paused_owner(monkeypatch)
+    owner.sandbox.kernel_epoch += 1
+    monkeypatch.setattr(lifecycle, "require_session_ownership", AsyncMock(return_value=state))
+    monkeypatch.setattr(lifecycle, "_update_session_cache", AsyncMock())
+    save = AsyncMock()
+    monkeypatch.setattr(lifecycle, "async_save_session", save)
+    response = await lifecycle.resume_analysis(
+        state.id, SimpleNamespace(state=SimpleNamespace(user_id="u1")),
+    )
+    assert response.data["runtime_unavailable"] is True
+    assert response.data["runtime_restore_status"] == "unavailable"
+    assert "Re-run" in response.data["runtime_restore_warning"]
+    assert state.runtime_restore_status == "unavailable"
+    save.assert_awaited_once_with(state.id, state, force=True)
+    owner.signal_resume.assert_not_called()

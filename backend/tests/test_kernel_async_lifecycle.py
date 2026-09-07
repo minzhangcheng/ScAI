@@ -99,10 +99,12 @@ async def test_native_start_keeps_event_loop_responsive(tmp_path, monkeypatch):
     await asyncio.wait_for(manager.start_entered.wait(), timeout=1)
     await asyncio.wait_for(asyncio.sleep(0), timeout=1)
     assert start_task.done() is False
+    assert sandbox._starting is True
 
     manager.start_release.set()
     result = await asyncio.wait_for(start_task, timeout=1)
     assert result["started"] is True
+    assert sandbox._starting is False
     await sandbox.stop(save=False)
     assert manager.shutdown_called is True
 

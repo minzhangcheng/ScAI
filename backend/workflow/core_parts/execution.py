@@ -379,18 +379,29 @@ async def resume(
         sanitize_legacy_state(analysis_state, workflow_active=True)
 
     from ...utils.runtime_pairing import refresh_runtime_availability
-    if analysis_state is not None:
+    live_continuation = (
+        is_live_runtime_continuation_safe(
+            self.session_id, analysis_state, self,
+        )
+        if analysis_state is not None
+        else False
+    )
+    if analysis_state is not None and not live_continuation:
         refresh_runtime_availability(analysis_state)
 
     # §1d: never run the graph forward on a kernel that is inconsistent with
     # the restored state. This is the workflow-level twin of the lifecycle
     # resume block and covers the WebSocket-reconnect resume path.
-    if analysis_state is not None and is_forward_resume_blocked(
-        getattr(analysis_state, "runtime_restore_status", "complete"),
-        coherence=state_runtime_coherence(analysis_state),
-        recompute_pending=bool(
-            getattr(analysis_state, "runtime_recompute_pending", False)
-        ),
+    if (
+        analysis_state is not None
+        and is_forward_resume_blocked(
+            getattr(analysis_state, "runtime_restore_status", "complete"),
+            coherence=state_runtime_coherence(analysis_state),
+            recompute_pending=bool(
+                getattr(analysis_state, "runtime_recompute_pending", False)
+            ),
+        )
+        and not live_continuation
     ):
         logger.warning(
             f"[{self.session_id}] resume blocked: runtime_restore_status="

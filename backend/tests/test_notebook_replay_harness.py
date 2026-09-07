@@ -142,7 +142,8 @@ def test_a_variable_absent_from_both_runs_is_skipped_not_passed(harness):
     """"Nothing to compare" is not "matched". A fingerprint that extracted
     nothing would otherwise report a clean pass."""
     verdicts = {e["variable"]: e["verdict"] for e in harness.compare({}, {})}
-    assert set(verdicts.values()) == {"absent"}
+    assert set(verdicts.values()) == {"absent", "unmeasured"}
+    assert verdicts["fingerprint"] == "unmeasured"
     assert "match" not in verdicts.values()
 
 
@@ -159,16 +160,15 @@ def test_an_embedding_outside_the_loose_bound_still_diverges(harness):
     A divergence larger than it means the seed did not take, which is what
     spec 5.3.5 is about.
     """
-    original = {"obsm_values": {"X_umap": {
-        "column_sums": [10.0, -4.0], "n_finite": 2000, "abs_mean": 3.5}}}
-    drifted = {"obsm_values": {"X_umap": {
-        "column_sums": [10.0, -4.0], "n_finite": 2000, "abs_mean": 3.9}}}
+    def values(data):
+        return {"obsm_values": {"X_umap": {
+            "encoding": "flat-float-v1", "shape": [2, 2], "values": data}}}
+    original = values([1.0, 2.0, 3.0, 4.0])
+    drifted = values([1.5, 2.0, 3.0, 4.0])
     entry = [e for e in harness.compare(original, drifted)
              if e["variable"] == "obsm_values"][0]
     assert entry["verdict"] == "diverged"
-
-    jitter = {"obsm_values": {"X_umap": {
-        "column_sums": [10.0 + 1e-5, -4.0], "n_finite": 2000, "abs_mean": 3.5}}}
+    jitter = values([1.0 + 1e-5, 2.0, 3.0, 4.0])
     entry = [e for e in harness.compare(original, jitter)
              if e["variable"] == "obsm_values"][0]
     assert entry["verdict"] == "match"
@@ -256,3 +256,110 @@ def test_the_harness_refuses_to_guess_which_session_it_was_given(harness):
     another."""
     source = HARNESS.read_text()
     assert source.count("name the session directory precisely") == 2
+
+
+def _extract(harness, array=None, outputs=None, namespace=None):
+    scope = dict(namespace or {})
+    if array is not None:
+        import numpy as np
+        import anndata
+        adata = anndata.AnnData(np.ones((len(array), 1)))
+        adata.obsm["X_test"] = np.asarray(array, dtype=float)
+        scope["adata"] = adata
+    names = set(scope)
+    exec(harness.EXTRACT_FUNCTION, scope)
+    return scope["_scai_replay_fingerprint"](outputs, names)
+
+
+@pytest.mark.parametrize("changed", [
+    [[3, 4], [1, 2]],
+    [[1, 2], [3, float("nan")]],
+])
+def test_embedding_reassignment_and_nonfinite_changes_diverge(harness, changed):
+    original = _extract(harness, [[1, 2], [3, 4]], [])
+    replayed = _extract(harness, changed, [])
+    results = {row["variable"]: row["verdict"] for row in harness.compare(original, replayed)}
+    assert results["obsm_values"] == "diverged"
+
+
+def test_zero_to_nan_cannot_hide_behind_identical_aggregate_sums(harness):
+    original = _extract(harness, [[1, 0], [3, 4]], [])
+    replayed = _extract(harness, [[1, float("nan")], [3, 4]], [])
+    assert next(row for row in harness.compare(original, replayed)
+                if row["variable"] == "obsm_values")["verdict"] == "diverged"
+
+
+def test_declared_outputs_are_measured_in_each_namespace(harness, tmp_path):
+    import json
+    (tmp_path / "session.json").write_text(json.dumps({"code_history": [
+        {"declared_persistent_outputs": ["x", "y"]},
+    ]}))
+    declared, error = harness.read_declared_outputs(tmp_path)
+    assert error is None
+    original = _extract(harness, outputs=declared, namespace={"x": 1, "y": 2})
+    replayed = _extract(harness, outputs=declared, namespace={"x": 1})
+    assert original["persistent_outputs"] == ["x", "y"]
+    assert replayed["persistent_outputs"] == ["x"]
+    results = {row["variable"]: row["verdict"] for row in harness.compare(original, replayed)}
+    assert results["persistent_outputs"] == "diverged"
+
+
+def test_no_declarations_is_distinct_from_missing_receipts(harness, tmp_path):
+    import json
+    assert harness.read_declared_outputs(tmp_path)[0] is None
+    path = tmp_path / "session.json"
+    path.write_text(json.dumps({"code_history": []}))
+    assert harness.read_declared_outputs(tmp_path) == ([], None)
+    measured = _extract(harness, outputs=[])
+    missing = _extract(harness)
+    assert next(row for row in harness.compare(measured, measured)
+                if row["variable"] == "persistent_outputs")["verdict"] == "match"
+    assert next(row for row in harness.compare(measured, missing)
+                if row["variable"] == "persistent_outputs")["verdict"] == "unmeasured"
+    path.write_text(json.dumps({"code_history": [{"code": "old receipt"}]}))
+    assert harness.read_declared_outputs(tmp_path)[0] is None
+
+
+@pytest.mark.parametrize("text,status", [("", "ok"), ("__SCAI_FINGERPRINT__not-json", "ok"),
+                                           ("__SCAI_FINGERPRINT__{}", "error")])
+def test_missing_malformed_or_failed_extraction_is_unmeasured(harness, text, status):
+    result = harness.parse_extraction({"content": {"status": status}}, [{"content": {"text": text}}])
+    assert result["extraction_status"] == "unmeasured"
+    assert any(row["verdict"] == "unmeasured" for row in harness.compare(result, result))
+
+
+def test_chunked_fingerprint_stdout_is_reassembled(harness):
+    import json
+    payload = _extract(harness, outputs=[])
+    text = harness.FINGERPRINT_PREFIX + json.dumps(payload) + "\n"
+    result = harness.parse_extraction({"content": {"status": "ok"}}, [
+        {"content": {"text": text[:24]}}, {"content": {"text": text[24:]}},
+    ])
+    assert result == payload
+
+
+def test_legacy_aggregate_fingerprint_cannot_certify_value_contract(harness):
+    legacy = {"obsm_values": {"X_umap": {"column_sums": [10, 20], "abs_mean": 3.5}}}
+    rows = harness.compare(legacy, legacy)
+    assert next(row for row in rows if row["variable"] == "obsm_values")["verdict"] == "unmeasured"
+
+
+def test_replay_report_does_not_pass_when_extraction_is_missing(harness, tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    path = tmp_path / "fingerprint.json"
+    path.write_text(json.dumps(_extract(harness, outputs=[])))
+    monkeypatch.setattr(harness, "read_cells", lambda _: [])
+    monkeypatch.setattr(harness, "run_in_kernel", lambda *args: ([], {}))
+    report = tmp_path / "report.json"
+    result = harness.cmd_replay(SimpleNamespace(
+        session_dir=str(tmp_path), fingerprint=str(path), workspace=str(tmp_path / "clean"),
+        report=str(report),
+    ))
+    assert result == 1
+    assert json.loads(report.read_text())["passed"] is False
+
+
+def test_extraction_helpers_are_not_counted_as_user_outputs(harness):
+    payload = _extract(harness, outputs=["_scai_replay_fingerprint", "_scai_declared_outputs"])
+    assert payload["persistent_outputs"] == []

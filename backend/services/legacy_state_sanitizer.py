@@ -102,6 +102,8 @@ def _stable_status(value: object, *, workflow_active: bool) -> TaskStatus:
 
 def sanitize_legacy_state(state: Any, *, workflow_active: bool = False) -> bool:
     """Clear retired snapshot blockers. Returns whether anything changed."""
+    session_id = str(getattr(state, "id", "") or "")
+    journal_pending = has_unfinished_restore_journal(session_id)
     failure = getattr(state, "snapshot_failure", None)
     pending = getattr(state, "pending_required_snapshot", None)
     wait_reason = getattr(state, "wait_input_reason", None)
@@ -112,15 +114,26 @@ def sanitize_legacy_state(state: Any, *, workflow_active: bool = False) -> bool:
         or bool(pending)
         or wait_reason in ("snapshot_failure", "runtime_persistence_failure")
     )
-    recovery_gate = bool(getattr(state, "recovery_blocked", False)) or (
-        isinstance(transaction, dict) and "recovery_error" in transaction
+    recovery_gate = (
+        journal_pending
+        or bool(getattr(state, "recovery_blocked", False))
+        or (
+            isinstance(transaction, dict) and "recovery_error" in transaction
+        )
     )
     if not failure_gate and not recovery_gate:
         return False
 
-    session_id = str(getattr(state, "id", "") or "")
+    recovery_marked = False
+    if journal_pending and not getattr(state, "recovery_blocked", False):
+        # The old producer wrote APPLYING before swapping state.json. A crash
+        # in that window leaves no persisted marker for the new process to
+        # discover, so retain the fail-closed block from the journal itself.
+        setattr(state, "recovery_blocked", True)
+        recovery_marked = True
+
     recovery_cleared = False
-    if recovery_gate and not has_unfinished_restore_journal(session_id):
+    if recovery_gate and not journal_pending:
         from backend.services.session_store import clear_recovery_blocked
 
         recovery_cleared = clear_recovery_blocked(session_id, state)
@@ -128,7 +141,7 @@ def sanitize_legacy_state(state: Any, *, workflow_active: bool = False) -> bool:
     if not failure_gate:
         # A recovery block says nothing about where the run was, so the status
         # is left alone.
-        return recovery_cleared
+        return recovery_marked or recovery_cleared
 
     retry_context = failure.get("retry_context", {}) if isinstance(failure, dict) else {}
     if not isinstance(retry_context, dict):
@@ -146,7 +159,7 @@ def sanitize_legacy_state(state: Any, *, workflow_active: bool = False) -> bool:
     else:
         next_status = _stable_status(previous_status, workflow_active=workflow_active)
 
-    changed = recovery_cleared
+    changed = recovery_marked or recovery_cleared
     if failure is not None:
         setattr(state, "snapshot_failure", None)
         changed = True

@@ -112,7 +112,7 @@ async def test_a_failed_final_save_still_closes_the_kernel(tmp_path, monkeypatch
     )
     monkeypatch.setattr(sb, "await_pending_saves", AsyncMock(return_value=None))
     monkeypatch.setattr(
-        sb, "save_session", AsyncMock(side_effect=RuntimeError("dump failed"))
+        sb, "_save_session_locked", AsyncMock(side_effect=RuntimeError("dump failed"))
     )
     sb.kc = None
     sb.km = None
@@ -170,6 +170,55 @@ def test_an_unfinished_restore_journal_still_refuses(tmp_path, monkeypatch):
     assert state.recovery_blocked is True
 
 
+def test_an_unmarked_applying_restore_journal_sets_the_recovery_marker(
+    tmp_path, monkeypatch,
+):
+    """The crash window is detectable before session.json has the marker."""
+    from backend.models.schemas import AnalysisState
+    from backend.services import legacy_state_sanitizer as feature_gate
+    from backend.services import session_store
+
+    session_root = tmp_path / "session"
+    journals = session_root / "journals"
+    journals.mkdir(parents=True)
+    (journals / "restore.json").write_text(
+        '{"kind":"restore","status":"APPLYING"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(feature_gate, "get_session_dir", lambda _sid: session_root)
+
+    state = AnalysisState(id="unmarked-restore", user_id="u1")
+    assert state.recovery_blocked is False
+    assert feature_gate.sanitize_legacy_state(state, workflow_active=False) is True
+    assert state.recovery_blocked is True
+    with pytest.raises(feature_gate.RecoveryBlockedError):
+        session_store.assert_recovery_clear(session_id=state.id)
+
+
+def test_completed_and_non_restore_journals_remain_harmless(tmp_path, monkeypatch):
+    from backend.models.schemas import AnalysisState
+    from backend.services import legacy_state_sanitizer as feature_gate
+
+    session_root = tmp_path / "session"
+    journals = session_root / "journals"
+    journals.mkdir(parents=True)
+    monkeypatch.setattr(feature_gate, "get_session_dir", lambda _sid: session_root)
+    state = AnalysisState(id="harmless-journal", user_id="u1")
+
+    (journals / "completed.json").write_text(
+        '{"kind":"restore","status":"COMPLETED"}', encoding="utf-8",
+    )
+    assert feature_gate.sanitize_legacy_state(state, workflow_active=False) is False
+    assert state.recovery_blocked is False
+
+    (journals / "completed.json").unlink()
+    (journals / "export.json").write_text(
+        '{"kind":"export","status":"APPLYING"}', encoding="utf-8",
+    )
+    assert feature_gate.sanitize_legacy_state(state, workflow_active=False) is False
+    assert state.recovery_blocked is False
+
+
 #: Ways a component can *condition on* the retired gate code. Prose that merely
 #: names it is fine and is how the remaining state-sync branch explains itself;
 #: an earlier version of this guard matched any occurrence and failed on its own
@@ -224,7 +273,7 @@ async def test_a_failed_closing_save_still_writes_the_notebook(tmp_path, monkeyp
     )
     monkeypatch.setattr(sb, "await_pending_saves", AsyncMock(return_value=None))
     monkeypatch.setattr(
-        sb, "save_session", AsyncMock(side_effect=RuntimeError("dump failed"))
+        sb, "_save_session_locked", AsyncMock(side_effect=RuntimeError("dump failed"))
     )
     notebook_save = MagicMock()
     monkeypatch.setattr(sb.notebook_state, "save", notebook_save)
@@ -252,7 +301,7 @@ async def test_a_closing_save_that_reports_no_generation_still_writes_the_notebo
         working_dir=str(tmp_path / "workspace"),
     )
     monkeypatch.setattr(sb, "await_pending_saves", AsyncMock(return_value=None))
-    monkeypatch.setattr(sb, "save_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(sb, "_save_session_locked", AsyncMock(return_value=False))
     notebook_save = MagicMock()
     monkeypatch.setattr(sb.notebook_state, "save", notebook_save)
     sb.kc = None

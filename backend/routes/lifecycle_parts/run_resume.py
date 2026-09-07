@@ -191,7 +191,14 @@ async def resume_analysis(session_id: str, request: Request):
 async def _resume_analysis_locked(session_id: str, user_id: str):
     state = await bindings.require_session_ownership(session_id=session_id, user_id=user_id)
     from backend.utils.runtime_pairing import refresh_runtime_availability
-    refresh_runtime_availability(state)
+
+    # Check the live owner before the cold-file probe. A paused workflow whose
+    # save failed still owns an intact kernel, and a live HITL gate is itself
+    # the continuation boundary; absence of a committed pkl must not turn
+    # either case into a false runtime-unavailable refusal.
+    live_continuation = is_live_runtime_continuation_safe(session_id, state)
+    if not live_continuation:
+        refresh_runtime_availability(state)
 
     from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
@@ -219,10 +226,37 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         state.max_rounds = state.original_max_rounds
         state.original_max_rounds = None
 
-    if is_forward_resume_blocked(
-        state.runtime_restore_status,
-        coherence=state_runtime_coherence(state),
-    ) and state.status != TaskStatus.COMPLETED:
+    coherence = state_runtime_coherence(state)
+    if (
+        is_forward_resume_blocked(
+            state.runtime_restore_status,
+            coherence=coherence,
+        )
+        and not live_continuation
+        and state.status != TaskStatus.COMPLETED
+    ):
+        warning = getattr(state, "runtime_restore_warning", None)
+        if not warning:
+            if coherence == "stale":
+                warning = (
+                    "The committed runtime is stale after a failed save. "
+                    "Re-run the analysis from the input data to recompute it."
+                )
+            elif coherence == "inconsistent":
+                warning = (
+                    "The committed runtime is inconsistent with the saved "
+                    "analysis state. Re-run the analysis from the input data "
+                    "to recompute it."
+                )
+            else:
+                warning = (
+                    "No usable runtime is available. Re-run the analysis from "
+                    "the input data to recompute it."
+                )
+        state.runtime_restore_status = "unavailable"
+        state.runtime_restore_warning = warning
+        await bindings._update_session_cache(session_id, state)
+        await bindings.async_save_session(session_id, state, force=True)
         return APIResponse(
             success=True,
             message=(
@@ -230,7 +264,13 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
                 "Forward analysis is blocked. Re-run the analysis from your data to "
                 "recompute kernel state, or view the session read-only."
             ),
-            data={"needs_reconnect": False, "runtime_unavailable": True},
+            data={
+                "needs_reconnect": False,
+                "runtime_unavailable": True,
+                "runtime_restore_status": state.runtime_restore_status,
+                "runtime_restore_warning": state.runtime_restore_warning,
+                "status": state.status.value,
+            },
         )
 
     if state.status == TaskStatus.COMPLETED:

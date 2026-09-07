@@ -178,6 +178,20 @@ def assert_recovery_clear(state: AnalysisState | None = None, *, session_id: str
         state = sessions.get(sid)
     if state is not None:
         sid = sid or getattr(state, "id", None) or getattr(state, "session_id", None)
+    if sid:
+        # A crash can occur after the legacy restore journal reaches APPLYING
+        # but before recovery_blocked is projected into session.json. Consult
+        # the journal directly so kernel-only and pre-load entry points cannot
+        # advance through that window.
+        from backend.services.legacy_state_sanitizer import (
+            has_unfinished_restore_journal,
+        )
+
+        if has_unfinished_restore_journal(str(sid)):
+            raise RecoveryBlockedError(
+                "RECOVERY_BLOCKED: Unresolved restore journal blocks forward "
+                "execution; the previous version must finish or roll it back."
+            )
     if sid and sid in _recovery_blocked_sessions:
         raise RecoveryBlockedError(
             "RECOVERY_BLOCKED: Unresolved restore journal blocks forward "

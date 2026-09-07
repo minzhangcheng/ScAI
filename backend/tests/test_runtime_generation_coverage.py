@@ -162,6 +162,74 @@ def test_generated_save_reports_all_three_channels(tmp_path):
     assert all(entry["type"] for entry in parsed["excluded_volatile"])
 
 
+def test_a_skipped_main_closure_is_not_claimed_as_carried(tmp_path):
+    """The carried record describes saved names, not every candidate.
+
+    A closure retaining a generator is discovered as a user definition before
+    dill rejects it.  The ordinary data value must still commit, while the
+    strict manifest receives no claim for the skipped helper.
+    """
+    from backend.utils.sandbox_parts.runtime_save import (
+        _carried_definitions_for_saved_names,
+    )
+    from backend.utils.sandbox_parts.runtime_save import _classify_skipped
+    from backend.utils.runtime_manifest import build_runtime_manifest
+
+    namespace = {"__name__": "__main__"}
+    exec(
+        "def make_helper():\n"
+        "    pending = (item for item in range(3))\n"
+        "    def helper():\n"
+        "        return next(pending)\n"
+        "    return helper\n"
+        "helper = make_helper()\n"
+        "del make_helper\n"
+        "adata = [1, 2, 3]\n",
+        namespace,
+    )
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        exec(
+            compile(_build_save_code(_save_context(tmp_path)), "<save_code>", "exec"),
+            namespace,
+        )
+
+    parsed = _parse_coverage_markers(stream.getvalue())
+    assert "adata" in parsed["saved_names"]
+    assert "helper" not in parsed["saved_names"]
+    assert any(item["name"] == "helper" for item in parsed["carried_definitions"])
+
+    skipped = []
+    for line in stream.getvalue().splitlines():
+        if line.startswith("__SCAI_SAVE_SKIPPED__\t"):
+            parts = line.split("\t")
+            skipped.append({"name": parts[1], "type": parts[2]})
+    skipped_record = _classify_skipped(
+        skipped,
+        excluded_by_kind=parsed["excluded_by_kind"],
+        excluded_volatile=parsed["excluded_volatile"],
+    )
+    assert any(
+        item["name"] == "helper" and item["reason"] == "serialization_failed"
+        for item in skipped_record
+    )
+
+    carried = _carried_definitions_for_saved_names(
+        parsed, {str(name) for name in parsed["saved_names"]}
+    )
+    assert carried is None or all(item["name"] != "helper" for item in carried)
+    manifest = build_runtime_manifest(
+        revision=1,
+        state_revision=1,
+        pkl_digest="a" * 64,
+        saved_names=parsed["saved_names"],
+        skipped_names=skipped_record,
+        serializer_version="dill-zstd-1",
+        carried_definitions=carried,
+    )
+    assert "carried_definitions" not in manifest
+
+
 def test_the_save_script_does_not_clobber_user_variables(tmp_path):
     """Saving must not destroy state merely by needing an import of its own.
 

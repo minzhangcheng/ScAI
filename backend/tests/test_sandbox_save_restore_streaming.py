@@ -400,3 +400,40 @@ async def test_real_kernel_save_restore_keeps_budgets(
         assert "42" in check.output
     finally:
         await restored.stop(save=False)
+
+
+@pytest.mark.asyncio
+async def test_real_kernel_unpicklable_main_closure_commits_other_values(tmp_path):
+    """An actual __main__ closure is skipped without invalidating the generation."""
+    from backend.utils.sandbox import LocalJupyterSandbox
+    from backend.utils.runtime_manifest import read_runtime_manifest, runtime_manifest_path
+
+    sid = "unpicklable-main-closure"
+    states = tmp_path / "states"
+    sb = LocalJupyterSandbox(session_id=sid, state_dir=str(states),
+                              working_dir=str(tmp_path / "workspace"), timeout=60)
+    await sb.start()
+    try:
+        result = await sb.execute("""
+adata = [1, 2, 3]
+def make_helper():
+    captured = (i for i in range(3))
+    def helper():
+        return next(captured)
+    return helper
+helper = make_helper()
+""")
+        assert result.success, result.error
+        assert await sb.save_session() is True
+        manifest = read_runtime_manifest(runtime_manifest_path(sid, states_dir=states))
+        assert "adata" in manifest["saved_names"]
+        assert "helper" not in manifest["saved_names"]
+        assert any(row["name"] == "helper" and row["reason"] == "serialization_failed"
+                   for row in manifest["skipped_names"])
+        assert all(row["name"] != "helper" for row in manifest["carried_definitions"])
+        await sb.stop(save=False)
+        await sb.start()
+        result = await sb.execute("assert adata == [1, 2, 3]; assert 'helper' not in globals()")
+        assert result.success, result.error
+    finally:
+        await sb.stop(save=False)

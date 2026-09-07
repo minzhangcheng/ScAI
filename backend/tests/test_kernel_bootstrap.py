@@ -360,7 +360,7 @@ async def test_start_cleans_kernel_after_bootstrap_failure(
 
     sandbox = _sandbox(tmp_path)
     monkeypatch.setattr(kernel_module, "KernelManager", _FakeKernelManager)
-    sandbox.stop = AsyncMock()
+    sandbox._shutdown_kernel_unlocked = AsyncMock()
     sandbox._initialize_kernel = AsyncMock()
     if failure == "readiness":
         sandbox._wait_for_ready = AsyncMock(side_effect=asyncio.TimeoutError)
@@ -376,7 +376,7 @@ async def test_start_cleans_kernel_after_bootstrap_failure(
     with pytest.raises(RuntimeError, match=expected):
         await sandbox.start()
 
-    sandbox.stop.assert_awaited_once_with(save=False)
+    sandbox._shutdown_kernel_unlocked.assert_awaited_once_with()
     if failure == "readiness":
         sandbox._initialize_kernel.assert_not_awaited()
 

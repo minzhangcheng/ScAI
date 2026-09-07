@@ -117,6 +117,33 @@ def _classify_skipped(skipped, *, excluded_by_kind, excluded_volatile):
     return [entries[name] for name in sorted(entries)]
 
 
+def _carried_definitions_for_saved_names(
+    coverage: dict | None,
+    saved_names: set[str],
+) -> list[dict] | None:
+    """Return only carried definitions present in this dump generation.
+
+    A ``__main__`` definition can be discovered by the kernel before dill
+    rejects it (for example, a closure over a generator).  The definition is
+    therefore present in the optional carried record even though its name is
+    absent from ``saved_names``.  Keep the manifest's strict validation for
+    malformed entries, but do not pass a valid, skipped name to it.
+    """
+    carried = (coverage or {}).get("carried_definitions") or None
+    if carried is None:
+        return None
+    filtered = [
+        entry
+        for entry in carried
+        if not (
+            isinstance(entry, dict)
+            and "name" in entry
+            and str(entry.get("name")) not in saved_names
+        )
+    ]
+    return filtered or None
+
+
 @dataclass
 class SaveContext:
     sandbox: Any
@@ -142,14 +169,19 @@ async def save_session(sandbox, *, bindings):
     # no required set such a value is simply skipped and recorded as coverage,
     # so the second pass would produce the identical dump.
     async with sandbox._exec_lock:
-        context = await _prepare_save(sandbox, bindings=bindings)
-        if isinstance(context, bool):
-            if context:
-                await _publish_committed_projection(sandbox, bindings=bindings)
-            return context
-        return await _execute_save(
-            context, _build_save_code(context), bindings=bindings,
-        )
+        return await save_session_locked(sandbox, bindings=bindings)
+
+
+async def save_session_locked(sandbox, *, bindings):
+    """Commit while the caller holds the execution lock through a larger capture."""
+    context = await _prepare_save(sandbox, bindings=bindings)
+    if isinstance(context, bool):
+        if context:
+            await _publish_committed_projection(sandbox, bindings=bindings)
+        return context
+    return await _execute_save(
+        context, _build_save_code(context), bindings=bindings,
+    )
 
 
 async def _publish_committed_projection(sandbox, *, bindings) -> None:
@@ -775,7 +807,9 @@ async def _execute_save(
     # narrowing reports no carried definitions and is not thereby incomplete.
     # None rather than [] so the manifest omits the key entirely, which keeps a
     # pre-§5.5 generation's record byte-identical to what it is today.
-    carried_record = (coverage or {}).get("carried_definitions") or None
+    carried_record = _carried_definitions_for_saved_names(
+        coverage, saved_names,
+    )
 
     if result.success:
         if skipped:

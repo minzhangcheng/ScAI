@@ -379,6 +379,13 @@ async def initialize(self):
         timeout=self.config.sandbox_timeout,
         runtime_budgets=runtime_budgets,
     )
+    self._continuation_kernel_epoch = None
+
+    def latch_first_kernel_epoch(epoch):
+        if self._continuation_kernel_epoch is None:
+            self._continuation_kernel_epoch = epoch
+
+    self.sandbox.runtime_epoch_callback = latch_first_kernel_epoch
     self.sandbox.runtime_persistence_commit_callback = (
         self._runtime_persistence_commit_callback
     )

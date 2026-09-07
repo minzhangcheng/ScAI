@@ -167,27 +167,160 @@ def test_an_instance_of_a_main_class_is_not_mistaken_for_a_definition():
     assert is_own_definition(live["Marker"])
 
 
+UNPICKLABLE_SOURCE = (
+    "\ndef closes_over_a_generator(_g=(i for i in range(3))):\n"
+    "    return _g\n"
+)
+
+
+def test_the_unpicklable_fixture_is_actually_unpicklable():
+    """Guard the guard.
+
+    The previous version of the test below used `threading.Lock()`, which dill
+    rebuilds happily -- so nothing was ever skipped and its only assertion about
+    skipping sat inside `if skipped:`. A fixture that quietly starts pickling
+    makes every test under it vacuous, so the fixture's own premise is asserted
+    first.
+    """
+    live = build_namespace(UNPICKLABLE_SOURCE)
+    assert is_own_definition(live["closes_over_a_generator"])
+
+    with pytest.raises(Exception):
+        dill.dumps(("closes_over_a_generator", live["closes_over_a_generator"]))
+
+
 def test_an_unserialisable_main_function_is_skipped_and_recorded():
     """Coverage, not an abort. Spec 4.4.
 
     This is what makes the narrowing bounded: widening what is offered to dill
     cannot turn a save that used to succeed into one that fails.
     """
-    live = build_namespace(
-        "\nimport threading\n"
-        "def closes_over_a_lock(_l=threading.Lock()):\n"
-        "    return _l\n"
-    )
-    assert is_own_definition(live["closes_over_a_lock"])
+    live = build_namespace(UNPICKLABLE_SOURCE)
 
     restored, skipped = round_trip(live, excluded_by_kind_narrowed)
 
-    # Whether dill refuses this particular closure is a dill detail; what must
-    # hold either way is that the other values still arrived.
+    assert "closes_over_a_generator" in skipped, skipped
+    # Unconditional, unlike the version this replaced: ordinary values still
+    # arrive. `a` is deliberately not asserted here -- see the test below.
     assert "plain" in restored and restored["plain"] == [1, 2, 3]
-    assert "a" in restored
-    if skipped:
-        assert "closes_over_a_lock" in skipped
+
+
+def test_one_unpicklable_definition_also_costs_every_main_class(tmp_path):
+    """A pre-existing limit, pinned because §5.5 overstates the opposite.
+
+    §5.5 says a `__main__` value dill refuses is "skipped and recorded as
+    coverage ... aborting nothing". The abort part is true. The *containment*
+    is not: dill serialises a `__main__` class by value and drags the module
+    globals with it, so one unpicklable definition anywhere in the namespace
+    makes every `__main__`-defined class -- and every instance of one --
+    unpicklable too.
+
+    **Not caused by §5.5's narrowing.** Measured both ways in the app image:
+    with functions and classes excluded by kind, exactly as before A2-10,
+    `Marker` is never offered to dill and the instance `a` still fails. The
+    narrowing changed which names are *offered*; it did not change this.
+
+    Recorded rather than fixed. Containing it means not pickling `__main__`
+    objects by value, which is the capability §5.5 exists to use.
+    """
+    clean = build_namespace()
+    poisoned = build_namespace(UNPICKLABLE_SOURCE)
+
+    clean_restored, _ = round_trip(clean, excluded_by_kind_narrowed)
+    assert "a" in clean_restored, "the instance survives without the poison"
+    assert "Marker" in clean_restored
+
+    poisoned_restored, poisoned_skipped = round_trip(
+        poisoned, excluded_by_kind_narrowed
+    )
+
+    assert "a" not in poisoned_restored
+    assert "Marker" not in poisoned_restored
+    assert {"a", "Marker"} <= set(poisoned_skipped), poisoned_skipped
+    # And a value that owns no `__main__` type is untouched.
+    assert poisoned_restored["plain"] == [1, 2, 3]
+
+
+def test_a_definition_dill_refused_is_dropped_from_the_carried_record():
+    """The save-breaking bug, at the unit that fixes it.
+
+    The kernel registers a `__main__` definition in `carried_definitions` when
+    it classifies the namespace, which happens *before* dill is asked to
+    serialise it. A refusal drops the frame and continues, so the name is absent
+    from `saved_names` while still present in the carried record -- and
+    `build_runtime_manifest` refuses a carried name the dump does not hold.
+
+    The result was that every save failed, for as long as that definition
+    existed in the namespace, with an error naming no variable. Spec §5.5 says
+    such a value is "skipped and recorded as coverage ... aborting nothing".
+    """
+    from backend.utils.sandbox_parts.runtime_save import (
+        _carried_definitions_for_saved_names,
+    )
+
+    coverage = {
+        "carried_definitions": [
+            {"name": "helper_ok", "kind": "function"},
+            {"name": "closes_over_a_generator", "kind": "function"},
+        ]
+    }
+
+    filtered = _carried_definitions_for_saved_names(
+        coverage, {"adata", "helper_ok"}
+    )
+
+    assert filtered == [{"name": "helper_ok", "kind": "function"}]
+
+
+def test_the_manifest_builds_when_a_carried_definition_was_refused():
+    """End of the same path: the manifest must build, not raise.
+
+    Asserted here rather than only on the filter, because the filter is only
+    correct if the manifest still accepts what it produces.
+    """
+    from backend.utils.sandbox_parts.runtime_save import (
+        _carried_definitions_for_saved_names,
+    )
+
+    saved = {"adata", "helper_ok"}
+    coverage = {
+        "carried_definitions": [
+            {"name": "helper_ok", "kind": "function"},
+            {"name": "closes_over_a_generator", "kind": "function"},
+        ]
+    }
+
+    record = _manifest(
+        saved_names=sorted(saved),
+        skipped_names=[{
+            "name": "closes_over_a_generator",
+            "type": "function",
+            "reason": "serialization_failed",
+        }],
+        carried_definitions=_carried_definitions_for_saved_names(coverage, saved),
+    )
+
+    assert [c["name"] for c in record["carried_definitions"]] == ["helper_ok"]
+    assert "closes_over_a_generator" in {
+        s["name"] for s in record["skipped_names"]
+    }
+
+
+def test_an_unfiltered_carried_record_still_fails_the_manifest():
+    """The filter is load-bearing, not belt-and-braces.
+
+    If this ever stops raising, `build_runtime_manifest` has quietly stopped
+    checking that a carried name is in the dump -- and the filter above would
+    become untested rather than unnecessary.
+    """
+    with pytest.raises(ValueError, match="does not hold"):
+        _manifest(
+            saved_names=["adata", "helper_ok"],
+            carried_definitions=[
+                {"name": "helper_ok", "kind": "function"},
+                {"name": "closes_over_a_generator", "kind": "function"},
+            ],
+        )
 
 
 # --- the divergence, pinned rather than deleted ------------------------------
@@ -472,7 +605,15 @@ def test_the_save_passes_the_record_through_to_the_manifest():
     from backend.tests.split_facade import source_for_path
 
     save_source = source_for_path("backend/utils/sandbox_parts/runtime_save.py")
-    assert "carried_record = (coverage or {}).get(\"carried_definitions\")" in save_source
+
+    # The *call site*, not the name. Asserting the name merely proves the
+    # helper is defined, and a defined-but-uncalled filter is precisely how
+    # this bug came back green: removing the call from `_execute_save` left
+    # every direct-unit test passing.
+    assert "carried_record = _carried_definitions_for_saved_names(" in save_source
+    assert "(coverage or {}).get(\"carried_definitions\")" not in save_source.replace(
+        "carried = (coverage or {}).get(\"carried_definitions\") or None", ""
+    ), "the unfiltered expression is back at a call site"
     assert '"carried_definitions": carried_record,' in save_source
 
     commit_source = source_for_path("backend/utils/sandbox_parts/regular_save.py")

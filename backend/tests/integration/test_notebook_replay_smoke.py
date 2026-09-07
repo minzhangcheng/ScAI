@@ -78,7 +78,7 @@ async def replayable_session(session_id, tmp_path):
     )
     await sb.start()
     try:
-        result = await sb.execute(SESSION_CODE, skip_safety_check=True)
+        result = await sb.execute(SESSION_CODE, skip_safety_check=True, declared_outputs=["adata"])
         assert result.success, result.error
         # One recorded failure, so the replay has an expected-to-fail cell --
         # and a cell after it, or "the replay did not stop at the first failure"
@@ -91,6 +91,12 @@ async def replayable_session(session_id, tmp_path):
         assert after.success, after.error
         assert await sb.save_session() is True
         sb.notebook_state.save()
+        from backend.models.schemas import AnalysisState, CodeExecution
+        state = AnalysisState(id=session_id, user_id="owner", code_history=[CodeExecution(
+            code=SESSION_CODE, declared_persistent_outputs=["adata"],
+            realized_persistent_outputs=["adata"],
+        )])
+        (session_dir / "session.json").write_text(state.model_dump_json())
         yield sb, states
     finally:
         await sb.stop(save=False)

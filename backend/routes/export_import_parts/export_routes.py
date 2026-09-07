@@ -29,7 +29,8 @@ from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
 from backend.services.resumable_export import (
     ResumableExportUnavailable,
     assert_boundary_held,
-    flush_for_resumable_export,
+    frozen_resumable_export,
+    verify_captured_archive,
 )
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
@@ -120,7 +121,8 @@ def _generation_facts(
     return facts
 
 
-def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = False) -> None:
+def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = False,
+                       state_payload=None) -> None:
     """Write the portable session archive for *session_id* to *tar_path*.
 
     Both export endpoints share this so their archives cannot drift apart; they
@@ -142,8 +144,7 @@ def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = F
         # manifest -- because the manifest states how many Snapshot V2 records
         # travel without their object storage, which only this payload knows.
         session_file = resolve_session_metadata_path(session_id)
-        state_payload = None
-        if session_file and session_file.exists():
+        if state_payload is None and session_file and session_file.exists():
             state_payload = json.loads(session_file.read_text(encoding="utf-8"))
 
         # Manifest first: the importer latches the session id from the first
@@ -227,15 +228,25 @@ async def _pack_session_archive(
     """
     check_export_disk_space()
 
-    # Spec 5.4. A resumable archive has to carry a runtime generation that
-    # matches the state and the checkpoint beside it, so the kernel is flushed
-    # *before* the state file is written and the pairing that flush produced is
-    # what the capture is checked against afterwards. A results-only export
-    # skips all of it: `include_runtime=false` must not pause an analysis.
-    pairing_before = None
     if include_runtime:
-        pairing_before = await flush_for_resumable_export(session_id, state)
+        async with frozen_resumable_export(session_id, state) as descriptor:
+            result = await _pack_frozen_session_archive(
+                session_id, state, include_runtime, prefix=prefix,
+                export_info=export_info, descriptor=descriptor,
+            )
+            assert_boundary_held(session_id, state, descriptor["pairing"])
+            return result
+    return await _pack_frozen_session_archive(
+        session_id, state, include_runtime, prefix=prefix, export_info=export_info,
+    )
 
+
+async def _pack_frozen_session_archive(
+    session_id, state, include_runtime, *, prefix, export_info, descriptor=None,
+):
+    # A workflow may project state during the archive worker. Pack this frozen
+    # value, then verify the live pairing, instead of re-reading mutable JSON.
+    state_payload = state.model_dump(mode="json") if include_runtime else None
     save_task = asyncio.create_task(
         async_save_session(session_id, state, force=True),
         name=f"export-state-save:{session_id}:{export_info['token']}",
@@ -264,20 +275,12 @@ async def _pack_session_archive(
     export_info["ownership_marker_owned"] = True
     await bind_export_path(export_info, tar_path)
 
-    await run_in_owned_thread(
-        _build_session_tar,
-        tar_path,
-        session_id,
-        include_runtime,
-    )
-
+    args = (tar_path, session_id, include_runtime)
     if include_runtime:
-        # The checkpoint copy is taken inside `_build_session_tar`. If the graph
-        # advanced between the flush and that copy, the archive's three files no
-        # longer describe one moment -- and the destination would notice, retire
-        # the runtime and the checkpoint, and still report a successful import.
-        # Refuse here instead, where the user can retry.
-        assert_boundary_held(session_id, state, pairing_before)
+        args += (state_payload,)
+    await run_in_owned_thread(_build_session_tar, *args)
+    if include_runtime:
+        await run_in_owned_thread(verify_captured_archive, tar_path, session_id, descriptor)
 
     return tar_path, _build_export_filename(session_id, state.name)
 

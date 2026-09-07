@@ -47,6 +47,8 @@ describe('resume refused by the backend', () => {
         biochemistryIndicators: [],
         roundResults: [],
       },
+      runtimeRestoreStatus: 'complete',
+      runtimeRestoreWarning: null,
     })
   })
 
@@ -66,6 +68,87 @@ describe('resume refused by the backend', () => {
     })
 
     expect(useAppStore.getState().currentSession?.status).toBe('paused')
+  })
+
+  it('hydrates the runtime warning and leaves rerun enabled on refusal', async () => {
+    mockFetch.mockResolvedValueOnce(
+      resumeResponse({
+        needs_reconnect: false,
+        runtime_unavailable: true,
+        runtime_restore_status: 'unavailable',
+        runtime_restore_warning: 'The committed runtime is stale; re-run to recompute it.',
+      }),
+    )
+
+    const { result } = renderHook(() => useSession())
+    await act(async () => {
+      await result.current.continueRound()
+    })
+
+    const state = useAppStore.getState()
+    expect(state.currentSession?.status).toBe('paused')
+    expect(state.runtimeRestoreStatus).toBe('unavailable')
+    expect(state.runtimeRestoreWarning).toBe(
+      'The committed runtime is stale; re-run to recompute it.',
+    )
+    expect(state.isRerunEnabled()).toBe(true)
+  })
+
+  it('uses the refusal message when the backend omits a warning', async () => {
+    mockFetch.mockResolvedValueOnce(
+      resumeResponse({ needs_reconnect: false, runtime_unavailable: true }),
+    )
+
+    const { result } = renderHook(() => useSession())
+    await act(async () => {
+      await result.current.continueRound()
+    })
+
+    const state = useAppStore.getState()
+    expect(state.runtimeRestoreStatus).toBe('unavailable')
+    expect(state.runtimeRestoreWarning).toBe(
+      'The saved runtime is unavailable. Re-run the analysis from the input data.',
+    )
+    expect(state.isRerunEnabled()).toBe(true)
+  })
+
+  it('does not apply a late refusal to a newly selected session', async () => {
+    let resolveFetch: (value: any) => void = () => undefined
+    mockFetch.mockImplementationOnce(
+      () => new Promise(resolve => { resolveFetch = resolve }),
+    )
+
+    const { result } = renderHook(() => useSession())
+    let pending!: Promise<void>
+    await act(async () => {
+      pending = result.current.continueRound()
+      useAppStore.setState({
+        currentSession: {
+          id: 'new-session',
+          name: 'New Session',
+          status: 'paused',
+          currentRound: 1,
+          createdAt: new Date().toISOString(),
+          instruction: '',
+          treatmentGroups: [],
+          dataFiles: [],
+          biochemistryIndicators: [],
+          roundResults: [],
+        },
+      })
+      resolveFetch(resumeResponse({
+        needs_reconnect: false,
+        runtime_unavailable: true,
+        runtime_restore_warning: 'Old session warning',
+      }))
+      await pending
+    })
+
+    const state = useAppStore.getState()
+    expect(state.currentSession?.id).toBe('new-session')
+    expect(state.currentSession?.status).toBe('paused')
+    expect(state.runtimeRestoreStatus).toBe('complete')
+    expect(state.runtimeRestoreWarning).toBeNull()
   })
 
   it('does not mark the session running when continuing a round is refused', async () => {
