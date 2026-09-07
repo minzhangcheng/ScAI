@@ -120,12 +120,19 @@ def test_the_next_attainable_value_up_has_no_resolution_observation():
     assert out == []
 
 
-def test_the_same_value_reported_as_a_bound_is_accepted():
-    """Reporting the floor as an inequality is the correct reporting."""
+def test_the_floor_quoted_as_a_strict_inequality_is_also_observed():
+    """p < 1/(B+1) claims more than B resamples can establish.
+
+    With the +1 estimator a result no resample reached is p = 1/(B+1); the
+    strict inequality below it is the overstatement, not the correct form.
+    """
     score = _score("ranked_panel", n_resamples=500)
     out = check_resampling_resolution(
         ["The GSEA result for ranked_panel reached FDR < 0.002."], [score])
-    assert out == []
+    assert len(out) == 1
+    assert out[0].gate == "p-below-resampling-resolution"
+    assert "p = 0.002" in out[0].detail
+    assert "not as p < 0.002" in out[0].detail
 
 
 def test_an_analytic_p_value_is_not_subject_to_a_resampling_floor():
@@ -146,18 +153,41 @@ def test_an_undeclared_resample_count_advises_but_does_not_block():
     assert "resample count" in out[0].detail
 
 
-def test_one_value_shared_across_several_results_is_flagged():
+def test_one_value_shared_across_several_results_is_not_read_as_a_floor():
+    """Benjamini-Hochberg ties adjusted values by construction.
+
+    Its step-up monotonisation gives neighbouring features the same q-value
+    routinely, so a shared value says nothing about resampling resolution and
+    must not be surfaced as if it did. A declared resampling score is present
+    so the check has something to reason about; the shared value sits well
+    above its floor.
+    """
+    score = _score("gsea_panel", n_resamples=1000)
     out = check_resampling_resolution(
         [
-            "panel one reached FDR = 0.00617.",
-            "panel two reached FDR = 0.00617.",
-            "panel three reached FDR = 0.00617.",
+            "GSEA panel one reached FDR = 0.00617.",
+            "GSEA panel two reached FDR = 0.00617.",
+            "GSEA panel three reached FDR = 0.00617.",
         ],
-        [],
+        [score],
     )
-    assert len(out) == 1
-    assert out[0].gate == "adjusted-p-tied-across-results"
-    assert out[0].severity == "advise"
+    assert out == []
+
+
+def test_the_floor_quoted_as_at_most_is_correct_reporting():
+    """p <= 1/(B+1) is true of the estimate; only the strict form overclaims."""
+    score = _score("ranked_panel", n_resamples=500)
+    out = check_resampling_resolution(
+        ["The GSEA result for ranked_panel reached FDR <= 0.002."], [score])
+    assert out == []
+
+
+def test_a_strict_inequality_well_below_the_floor_is_left_alone():
+    """"FDR < 1e-4" in a GSEA sentence is a selection threshold, not a floor value."""
+    score = _score("ranked_panel", n_resamples=500)
+    out = check_resampling_resolution(
+        ["GSEA sets for ranked_panel were retained at FDR < 1e-4."], [score])
+    assert out == []
 
 
 def test_a_repeated_conventional_cutoff_is_not_a_resolution_floor():

@@ -166,6 +166,52 @@ def test_partially_unknown_sample_counts_do_not_raise():
     assert len(out) == 1
 
 
+def test_gene_permutation_at_small_n_is_not_called_invalid():
+    """prerank permutes genes; the sample count never enters its null."""
+    scores = [_score("enrich_a", method="gseapy.prerank")]
+    findings = ["enrich_a reached FDR 0.045"]
+    out = check_permutation_at_small_n(findings, scores, {"A": 3, "B": 3})
+    assert len(out) == 1
+    assert out[0].rule_id == "gene-permutation-is-anticonservative"
+    assert "invalid" not in out[0].detail
+    assert "needed for the null" not in out[0].detail
+    assert "ranking statistic" in out[0].detail
+
+
+def test_phenotype_permutation_at_small_n_is_described_as_coarse_not_invalid():
+    """Few samples mean few distinct label assignments, not an invalid test."""
+    score = _score("gsea_pheno", method="gseapy.gsea")
+    score.parameters = {"permutation_type": "phenotype", "permutation_num": 1000}
+    findings = ["gsea_pheno reached FDR 0.03 for the contrast"]
+    out = check_permutation_at_small_n(findings, [score], {"A": 3, "B": 3})
+    assert len(out) == 1
+    assert out[0].rule_id == "resampling-p-has-a-resolution-floor"
+    assert "label assignments" in out[0].detail
+    assert "invalid" not in out[0].detail
+    assert out[0].also_see == ()
+
+
+def test_gseapy_gsea_without_parameters_counts_as_phenotype_permutation():
+    """gseapy.gsea permutes phenotypes by default; the method name decides."""
+    score = _score("gsea_pheno", method="gseapy.gsea")
+    findings = ["gsea_pheno reached FDR 0.03 for the contrast"]
+    out = check_permutation_at_small_n(findings, [score], {"A": 3, "B": 3})
+    assert len(out) == 1
+    assert out[0].rule_id == "resampling-p-has-a-resolution-floor"
+
+
+def test_a_finding_naming_both_permutation_kinds_gets_both_observations():
+    pheno = _score("gsea_pheno", method="gseapy.gsea")
+    pheno.parameters = {"permutation_type": "phenotype"}
+    ranked = _score("enrich_a", method="gseapy.prerank")
+    findings = ["gsea_pheno and enrich_a both reached FDR < 0.05"]
+    out = check_permutation_at_small_n(findings, [pheno, ranked], {"A": 3, "B": 3})
+    assert {f.rule_id for f in out} == {
+        "resampling-p-has-a-resolution-floor",
+        "gene-permutation-is-anticonservative",
+    }
+
+
 # --------------------------------------------------------------- design
 
 def test_single_sample_per_condition_advises_on_an_inferential_claim():

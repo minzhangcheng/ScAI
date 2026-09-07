@@ -204,7 +204,9 @@ Reply in JSON format as follows:
         merge_field_hint = '"Which subtypes to merge for condition comparison (brief)"'
         baseline_pipeline_block = """## Baseline Pipeline (MUST be included in bioinformatics_tasks)
 1. Quality Control (QC) and filtering
-2. Doublet removal assessment (if data quality suggests it is needed)
+2. Doublet assessment: decide from the design whether and how to run it (per library by
+   default for per-library captures; pooled donors, hashed libraries, or data already
+   doublet-filtered need their own justification)
 3. Batch effect assessment on the uncorrected representation; decide whether a
    correction/integration step is scientifically appropriate for the measured design
 4. Normalization, HVG selection, PCA, UMAP
@@ -213,7 +215,8 @@ Reply in JSON format as follows:
 7. Assess condition-associated signals using methods and inferential strength that
    you judge appropriate for the measured design; state material limitations
    (merge closely related states into a shared parent population only when the observed markers support it)
-8. Cell-cell communication analysis (liana)"""
+8. Cell-cell communication analysis (liana) only when the data have single-cell resolution
+   and the design supports comparing interactions; otherwise state why it is omitted"""
         sample_design_facts = sequencing_design_instruction(state)
         prompt = f"""
 ## Project Information
@@ -341,7 +344,7 @@ PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]
         correlation_unit = "computed within a cell population"
         marker_viz = "dot plots, violin plots, feature plots for key genes across conditions"
         task_target = "the target cell types"
-        modality_toolkit = """- **Trajectory & RNA Velocity**: Diffusion pseudotime (DPT), PAGA for lineage inference; scvelo or cellrank for directed cell fate mapping (only where spliced/unspliced layers exist; these answer different questions and are not interchangeable)
+        modality_toolkit = """- **Trajectory & RNA Velocity**: Diffusion pseudotime (DPT), PAGA for lineage inference; scvelo for splicing-based velocity (requires spliced/unspliced layers); cellrank 2 for fate mapping through whichever kernel its inputs support (VelocityKernel needs spliced/unspliced layers; PseudotimeKernel a justified root and pseudotime; CytoTRACEKernel no splicing information but a neighbour-smoothed expression layer (scvelo's moments; per the CellRank docs copy X into the spliced and unspliced layers first when they are absent) and it rests on the transcriptional-diversity assumption of the original CytoTRACE; RealTimeKernel experimental time points plus transport couplings). These answer different questions and are not interchangeable, and a modelled direction is not a measured fate
 - **Cell-cell communication**: liana / cellphonedb for ligand-receptor interactions; ligand-target analysis (via decoupler) to predict downstream target activation in receiver cells
 - **Cellular Stemness & Plasticity**: cytotrace2-py for CytoTRACE-like scoring to infer differentiation potential
 - **Tumor/Malignancy estimation**: infercnvpy to detect large-scale copy number variation (use only when oncology data is present)

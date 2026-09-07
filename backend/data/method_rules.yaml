@@ -93,12 +93,16 @@ rules:
   title: BH assumes independence or positive dependence
   enforcement: guidance
   applies_when: Correcting p-values across correlated features or gene sets.
-  rule: Use Benjamini-Hochberg for discovery under independence or positive regression dependence;
-    use Benjamini-Yekutieli under arbitrary or negative dependence; use FWER control for a
-    small confirmatory panel.
-  why: The BH guarantee is conditional on a dependence structure. Overlapping gene sets and
-    co-expressed genes are strongly dependent, and applying BH as though tests were independent
-    understates the true error rate.
+  rule: 'Benjamini-Hochberg is the default for discovery: it is valid under independence and
+    under positive regression dependence. Use Benjamini-Yekutieli only when negative or
+    arbitrary dependence is plausible and a guarantee is required, and say what it costs in
+    power; use FWER control for a small confirmatory panel.'
+  why: 'The BH guarantee is conditional on the dependence structure. Positively correlated
+    tests, the usual case for co-expressed genes and overlapping gene sets, generally satisfy
+    that condition, although correlation alone is not a proof of it. Overlap among sets is a
+    problem of double-counted evidence rather than of BH validity (see
+    overlapping-sets-are-not-independent-evidence). BY is markedly conservative and should
+    not be adopted merely because sets overlap.'
   python: statsmodels.stats.multitest.multipletests defaults to method='hs' (Holm-Sidak, an
     FWER method), NOT Benjamini-Hochberg. Always pass method='fdr_bh' or 'fdr_by' explicitly.
   citations:
@@ -136,10 +140,11 @@ rules:
   applies_when: A non-significant result is used to argue against a mechanism.
   rule: A non-significant result from a panel below the minimum size does not support a negative
     conclusion. Report it as underpowered, or widen the panel and re-test.
-  why: 'Failing to reject with almost no power says nothing about the null. The asymmetry
-    is real: such a panel may still be reported as a positive observation when it does reach
-    significance, because significance despite low power is a stronger signal, not a weaker
-    one.'
+  why: 'Failing to reject with almost no power says nothing about the null. A positive result
+    from such a panel may still be reported, as an observation that names the matched count,
+    but it is not stronger evidence: under low power only a large observed effect reaches
+    significance, which is exactly the condition under which the estimate is inflated, and
+    a smaller share of the results that do reach significance reflect a real effect.'
   python: services.gene_set_provenance.assess_panel_power marks this; the report observation
     identifies a negative claim resting on an underpowered panel for PI review.
   citations:
@@ -262,23 +267,35 @@ rules:
 - id: resampling-p-has-a-resolution-floor
   title: A resampling p-value cannot be smaller than one over the number of resamples
   enforcement: advisory
-  applies_when: Any p-value or q-value estimated by permutation, bootstrap or other resampling.
-  rule: A p-value estimated from B resamples cannot fall below 1/(B+1). Declare B alongside
-    the result. A value at that floor is a bound, not an estimate, so report it as an inequality
-    and rank competing results on the effect statistic rather than on the adjusted p-value.
-    To report a smaller value, increase B.
-  why: 'The estimator counts how many resamples reached the observed statistic, so its
-    resolution is fixed by how many were drawn: with B resamples there are only B+1 attainable
-    values, and everything more extreme than every resample collapses onto the smallest of
-    them. Two consequences are routinely missed. Results tied at the floor are indistinguishable
-    from each other, so ordering them is ordering noise -- and multiplicity adjustment
-    preserves ties, so an identical adjusted value shared across many results is the floor
-    showing through rather than a coincidence. And a floor value quoted as though it were
-    an estimate overstates the evidence by however much smaller the true value might have
-    been, which is unbounded.'
-  python: gseapy.prerank takes permutation_num (1000 by default, so a floor near 1e-3); scipy.stats.permutation_test
-    takes n_resamples. Record the count in the score's parameters as n_resamples so the floor
-    is checkable after the fact, and quote floor values as "p < 1/(B+1)".
+  applies_when: Any p-value, or q-value adjusted from it, estimated by permutation, bootstrap
+    or other resampling.
+  rule: 'A p-value estimated from B resamples cannot fall below 1/(B+1), and with the +1
+    estimator a result that no resample reached IS that value. Report it as p = 1/(B+1), the
+    smallest value B resamples can attain, and declare B. Do not write it as p < 1/(B+1);
+    the resamples do not establish that. Results sitting at the floor are tied, so rank them
+    on the effect statistic. To resolve a smaller value, increase B or use an estimator built
+    for the tail (multilevel splitting). Check which estimator the tool used before
+    interpreting any very small value.'
+  why: 'The Monte Carlo estimator counts how many resamples reached the observed statistic,
+    so it has only B+1 attainable values, and (b+1)/(B+1) is itself a valid p-value for the
+    test. When b is zero the estimate is exactly 1/(B+1); quoting a strict inequality below
+    it overstates the evidence, because the true tail probability could be larger and the
+    resamples cannot tell. Three quantities are easily confused here. A Monte Carlo nominal
+    p-value has this floor, and a q-value adjusted from it by Benjamini-Hochberg inherits it
+    (an adjusted value is never smaller than the p-value it adjusts). An analytic p-value has
+    none. GSEA''s FDR is computed from the pooled null of every set in the call rather than
+    from one per-set count, so the per-set 1/(B+1) arithmetic does not describe it. Identical
+    adjusted values across results are routine under Benjamini-Hochberg, whose step-up
+    monotonisation ties neighbouring features by construction, and prove nothing about
+    resolution.'
+  python: 'gseapy.prerank takes permutation_num (1000 by default, so a floor near 1e-3) and
+    computes its FDR from the pooled NES null, not per set. In the installed gseapy 1.3.1,
+    prerank(method="multilevel") selects the fgsea multilevel estimator for very small
+    p-values: it accepts one ranking and returns log2err instead of an FWER column. Note the
+    name collision: in gseapy.gsea the method argument is the ranking metric, not the
+    estimator. scipy.stats.permutation_test uses (b+1)/(B+1) and takes n_resamples. Record the
+    count in the score parameters as n_resamples so the floor is checkable after the fact,
+    and quote a floor value as p = 1/(B+1), never as p < 1/(B+1).'
   citations:
   - 'Phipson & Smyth 2010 Stat Appl Genet Mol Biol 9: Article 39 -- permutation p-values should
     never be zero'
@@ -579,19 +596,22 @@ rules:
   - Luecken et al. 2022 Nat Methods 19:41-50 -- benchmarking atlas-level integration
   source_skill: single-cell/batch-integration
 - id: small-n-exaggerates-significant-effects
-  title: Underpowered studies overstate the effects that reach significance
+  title: Effects that reach significance in a small design tend to be overestimated
   enforcement: guidance
   applies_when: Reporting effect sizes from a design with few replicates per group.
-  rule: In a small design, report significant effect sizes as upper bounds and say they are
-    likely exaggerated. Do not quote them as point estimates.
-  why: Low power does not only miss true effects. Conditional on passing a significance threshold,
-    an estimate from a noisy design must be large -- so the surviving effects systematically
-    overstate magnitude, and in the worst case have the wrong sign. The published effect is
-    then bigger than the real one by a factor that grows as power falls, which is why small-study
-    effects so often fail to replicate at their reported size.
-  python: Report the confidence interval alongside every effect and let its width carry the
-    uncertainty. Shrunken estimates (DeseqStats.lfc_shrink(coeff=...)) are less exaggerated
-    than raw ones for exactly this reason.
+  rule: 'In a small design, report the effect point estimate together with its uncertainty
+    and say that selection on significance is expected to have inflated it. Provide a shrunken
+    estimate where the model supports one. Do not present the estimate as an upper bound on
+    the true effect, and do not quote it bare.'
+  why: 'Low power does not only miss true effects. Conditional on passing a significance
+    threshold, an estimate from a noisy design must be large, so the surviving estimates
+    overstate magnitude on average and can carry the wrong sign. That is a statement about
+    the average over such results: any one estimate may sit above or below the truth, which
+    is why it is not a bound.'
+  python: 'Report the confidence interval alongside every effect. pydeseq2''s
+    DeseqStats.lfc_shrink(coeff=...) shrinks one named coefficient; use it when that
+    coefficient is the contrast being reported and say so, and note that a shrunken value
+    is still a point estimate.'
   citations:
   - Gelman & Carlin 2014 Perspect Psychol Sci 9:641 (Type-S and Type-M)
   - Button et al. 2013 Nat Rev Neurosci 14:365
@@ -644,9 +664,9 @@ rules:
     result.'
   why: 'Curated collections are assembled by different groups against overlapping concepts,
     so near-duplicate sets are the norm rather than the exception, and the duplication is
-    invisible from the identifiers alone. Two harms follow. Statistically, adjusting across
-    them as if they were separate tests understates the error rate, because the shared members
-    make the statistics move together. Rhetorically -- and this is the larger one -- placing
+    invisible from the identifiers alone. Two harms follow. Statistically, the two results
+    are not independent pieces of evidence: the shared members make the statistics move
+    together, so counting both is counting one observation twice. Rhetorically -- and this is the larger one -- placing
     two nearly identical results side by side manufactures an appearance of convergence from
     a single observation, which reads as corroboration to every later consumer of the report.
     Overlap is not itself an error: testing a broad process and a focused component of it is

@@ -186,7 +186,7 @@ This applies to: sc.tl.score_genes, gseapy.ssgsea, gseapy.prerank, gseapy.enrich
 WHY THE PLAN COMES FIRST:
   Curating a panel is a real judgement -- an ontology term routinely mixes genes that
   drive a process with genes that suppress it, and scoring them as one module answers
-  nothing. Splitting such a set is exactly what you should do, and the partition edit
+  nothing. Splitting such a set is one legitimate way to handle it, and the partition edit
   operation exists for it. But the panel has to be fixed BEFORE the result is visible.
   Revising a panel after seeing which genes carry the signal is selection on the
   outcome, and it is indistinguishable in the final report from having got it right
@@ -209,13 +209,19 @@ PREFER A VERSIONED SET OVER A REMEMBERED ONE:
   that drive a process and genes that suppress it, so a high module score is
   equally consistent with the process running and with it being held in check.
 
-  You do not have to fix that by hand. Call fetch_gene_set with
-  partition_by_direction=true and the ontology's own regulation terms are used to
-  split the set into direction-coherent panels -- positive, negative, ambiguous
+  One option: call fetch_gene_set with partition_by_direction=true and the
+  ontology's own regulation terms split the set into positive, negative, ambiguous
   (annotated to both, so unable to support a directional claim) and core (the
-  genes that carry out the process rather than tuning it). Each part comes back
-  as a panel with its own provenance. Score them SEPARATELY; scoring them
-  together is the failure the split exists to prevent.
+  genes that carry out the process rather than tuning it) panels, each with its
+  own provenance. Scoring the parts separately stops activators and repressors
+  from cancelling inside one module score. It does not by itself establish that
+  the process is more active: GO's regulation terms describe what a gene product
+  does to the process, not what its transcript level says about the process in
+  these cells, and feedback, protein-level control and context all intervene.
+  When the question is whether a pathway or regulator is more active, consider a
+  footprint method (PROGENy or CollecTRI with decoupler's ULM/MLM) over the
+  networks they cover, or a score over the core executor genes, and say which
+  reading each result supports.
 
   Only the biological-process branch of the ontology publishes the regulation
   terms this needs, so other collections refuse the split and say so. When the
