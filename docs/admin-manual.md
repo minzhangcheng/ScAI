@@ -230,7 +230,7 @@ Example for network access and non-default ports:
 
 Relative to the repository directory `<REPO>`, startup stores dependencies in `<REPO>/../dep`, data in `<REPO>/../data`, and process metadata in `<REPO>/.scai.pid`. It creates the environment with `python3.12 -m venv`, updates pip, installs backend requirements, and starts Uvicorn on the application port. If any frontend build input is newer than `dist/index.html`, it installs the exact `package-lock.json` graph with `npm ci` outside the checkout and rebuilds first. Development instead records both Uvicorn and Vite PIDs.
 
-Direct-run environment controls include `SCAI_DATA_DIR` (backend data-root override), `SCAI_JWT_SECRET`, `SCAI_CONFIG_SECRET`, `SCAI_ENABLE_REPRODUCIBILITY`, and `SCAI_AUTO_FETCH_MARKERS=1`. The last option fetches optional marker databases if missing and does not block startup on failure. When `SCAI_DATA_DIR` is set, `start.sh` still creates and prints `<REPO>/../data`, but the backend actually reads and writes the override path; monitor and back up the override, not the printed sibling directory.
+Direct-run environment controls include `SCAI_DATA_DIR` (backend data-root override), `SCAI_JWT_SECRET`, `SCAI_CONFIG_SECRET`, `SCAI_ENABLE_REPRODUCIBILITY`, `SCAI_AUTO_FETCH_MARKERS=1`, and `SCAI_AUTO_FETCH_CELLTYPIST=1`. The two fetch options download optional resources if missing and do not block startup on failure: the marker databases for annotation priors, and the CellTypist model repertoire (each model is a few MB) into `$SCAI_DATA_DIR/celltypist`, which every analysis kernel sees through its `CELLTYPIST_FOLDER`. Without the cache a kernel downloads a model on demand and needs network access to do so. For the container, run `docker exec <container> /dep/venv/bin/python /app/scripts/fetch_celltypist_models.py` once; the cache persists on the data volume. When `SCAI_DATA_DIR` is set, `start.sh` still creates and prints `<REPO>/../data`, but the backend actually reads and writes the override path; monitor and back up the override, not the printed sibling directory.
 
 Stop the instance with:
 
@@ -741,6 +741,7 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_MODE` | `prod` | Docker entrypoint mode; the production image rejects `dev` |
 | `PIP_INDEX_URL` | pip environment/default | Docker Python package index |
 | `SCAI_AUTO_FETCH_MARKERS` | `0` | Direct startup; `1` attempts marker-database download |
+| `SCAI_AUTO_FETCH_CELLTYPIST` | `0` | Direct startup; `1` caches CellTypist models under `$SCAI_DATA_DIR/celltypist` |
 | `SCAI_HOST` | Set internally | Vite proxy host; scripts set it from startup context |
 | `SCAI_BACKPORT` | Set internally | Vite proxy backend port; scripts set it from startup context |
 

@@ -316,6 +316,13 @@ if [ "${SCAI_AUTO_FETCH_MARKERS:-0}" = "1" ]; then
     "$VENV_DIR/bin/python" scripts/fetch_markers.py || echo "WARNING: marker DB fetch failed; DB priors will be skipped"
 fi
 
+# Optional: cache CellTypist models for the analysis kernels (off by default; never
+# blocks startup). Files already present are skipped, so this is safe to repeat.
+if [ "${SCAI_AUTO_FETCH_CELLTYPIST:-0}" = "1" ]; then
+    echo "Fetching CellTypist models (SCAI_AUTO_FETCH_CELLTYPIST=1)..."
+    "$VENV_DIR/bin/python" scripts/fetch_celltypist_models.py || echo "WARNING: CellTypist model fetch failed; kernels will download models on demand"
+fi
+
 echo ""
 echo "Starting services..."
 echo ""

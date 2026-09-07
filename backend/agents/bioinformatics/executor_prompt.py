@@ -327,6 +327,22 @@ CELL TYPE ANNOTATION WORKFLOW:
    where markers is the LITERAL dict content you saw in the print output.
 6. Apply the returned mapping: adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(cluster_to_celltype).fillna('Unknown')
 7. Generate UMAP colored by cell_type
+8. OPTIONAL second label set, only when a cached CellTypist model covers this organism and
+   the populations expected here: the models the host has cached are listed by
+   sorted(os.listdir(os.path.join(os.environ['CELLTYPIST_FOLDER'], 'data', 'models')))
+   and described by celltypist.models.models_description(). Run it on a copy carrying
+   normalize_total(target_sum=1e4) + log1p (the representation every CellTypist model was
+   trained on): res = celltypist.annotate(adata_ct, model='<file>.pkl',
+   majority_voting=True, over_clustering='leiden') so the vote runs over YOUR clusters;
+   celltypist.annotate returns an AnnotationResult, so take adata_ct = res.to_adata()
+   to get predicted_labels, majority_voting and conf_score into obs, copy them onto
+   adata.obs, and print a crosstab of majority_voting against the cluster key next to
+   the annotate_clusters labels. It is one evidence stream, not an override: where the
+   two disagree, keep both in the findings and name the model file and version. No
+   cached model, or none that matches, means skip this step and say so;
+   celltypist.models.download_models(model=...) can add a model that is NOT cached
+   (it needs network access), but never pass force_update=True: the cached files are
+   read-only links and rewriting them fails.
 """
 
 

@@ -889,3 +889,35 @@ rules:
   - 'No upstream citation: ScAI''s own guidance on what to report instead of a p-value once
     one-sample-per-condition-is-unidentifiable applies. Not claimed as a bioSkills rule.'
   source_skill: scai-native/statistical-gates
+- id: classifier-labels-are-one-evidence-stream
+  title: 'A pretrained cell-type classifier adds a label set; it does not settle the annotation'
+  enforcement: guidance
+  applies_when: 'Labelling clusters or cells with a pretrained reference classifier, such as
+    a CellTypist model or an scANVI reference.'
+  rule: 'Use a model only when its species and the populations it was trained on cover the
+    query, give it the input representation it was trained on, summarise cell-level
+    predictions per cluster together with the fraction of cells behind the majority label,
+    and report where the classifier and the marker-based annotation disagree instead of
+    averaging them. Name the model and its version.'
+  why: 'A classifier can only return labels it was trained on: a population absent from the
+    reference is assigned to its nearest trained neighbour with no signal that it is novel,
+    and a state the reference did not contain is invisible. The marker-based annotation and
+    the classifier fail in different ways, so their agreement is informative and their
+    disagreement is where a reviewer should look; both are lost when one label set silently
+    overrides the other.'
+  python: 'CellTypist reads its models from CELLTYPIST_FOLDER, which the kernel launcher points
+    at a per-session view of the host cache ($SCAI_DATA_DIR/celltypist, filled by
+    scripts/fetch_celltypist_models.py); list the files under data/models there and read
+    celltypist.models.models_description() for coverage. Every CellTypist model expects
+    normalize_total(target_sum=1e4) followed by log1p; run celltypist.annotate(adata,
+    model=<file>, majority_voting=True, over_clustering=<cluster key>) on such a copy so
+    the vote runs over the analysis clusters, take .to_adata() on the returned
+    AnnotationResult to obtain predicted_labels, majority_voting and conf_score in obs,
+    and crosstab majority_voting against the cluster key. Reference mapping with
+    scvi.model.SCANVI needs a compatible annotated reference and training, and is the
+    route when no cached model matches.'
+  citations:
+  - Dominguez Conde et al. 2022 Science 376:eabl5197 -- CellTypist, logistic-regression
+    cell-type models with majority voting over clusters
+  - Xu et al. 2021 Mol Syst Biol 17:e9620 -- scANVI, semi-supervised reference-based annotation
+  source_skill: scai-native/markers-annotation

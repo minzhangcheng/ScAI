@@ -13,6 +13,21 @@ from jupyter_client import KernelManager
 
 from .shared import _to_thread_drained, logger
 
+
+def _expose_celltypist_cache(folder: Path) -> None:
+    """Link the host's CellTypist model cache into the session view.
+
+    Read-only for the kernel in effect: the links point at the data volume and
+    a model the kernel downloads itself lands as a real file next to them. An
+    optional resource must never stop a kernel, so every failure is a warning.
+    """
+    try:
+        from backend.services import celltypist_models
+        celltypist_models.link_cache_into(folder)
+    except Exception as e:
+        logger.warning(f"celltypist cache not exposed to the kernel: {e}")
+
+
 def build_kernel_launch_environment(sandbox, *, bindings) -> Dict[str, str]:
     """Build an isolated environment before the kernel process starts.
 
@@ -50,6 +65,9 @@ def build_kernel_launch_environment(sandbox, *, bindings) -> Dict[str, str]:
         "NUMBA_CACHE_DIR": session_tmp / "numba-cache",
         "JOBLIB_TEMP_FOLDER": session_tmp / "joblib",
         "DASK_TEMPORARY_DIRECTORY": session_tmp / "dask",
+        # celltypist creates data/models under this folder when imported, so
+        # it must be a write root; the host's model cache is linked into it.
+        "CELLTYPIST_FOLDER": session_tmp / "celltypist",
         "TMPDIR": session_tmp,
         "TEMP": session_tmp,
         "TMP": session_tmp,
@@ -57,6 +75,7 @@ def build_kernel_launch_environment(sandbox, *, bindings) -> Dict[str, str]:
     for path in set(isolated_dirs.values()):
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.chmod(0o700)
+    _expose_celltypist_cache(isolated_dirs["CELLTYPIST_FOLDER"])
 
     env = os.environ.copy()
     env.update({name: str(path) for name, path in isolated_dirs.items()})

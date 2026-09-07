@@ -210,7 +210,7 @@ docker run -d --name scai \
 
 相对于仓库目录 `<REPO>`，启动过程将依赖项存储在 `<REPO>/../dep`，将数据存储在 `<REPO>/../data`，并将进程元数据存储在 `<REPO>/.scai.pid`。它使用 `python3.12 -m venv` 创建环境、更新 pip、安装后端 requirements，然后在应用端口上启动 Uvicorn。如果任一前端构建输入比 `dist/index.html` 更新，脚本会先在 checkout 之外使用 `npm ci` 安装与 `package-lock.json` 严格一致的依赖图，然后重新构建。开发模式则同时记录 Uvicorn 和 Vite PID。
 
-直接运行的环境控制项包括 `SCAI_DATA_DIR`（覆盖后端数据根目录）、`SCAI_JWT_SECRET`、`SCAI_CONFIG_SECRET`、`SCAI_ENABLE_REPRODUCIBILITY` 和 `SCAI_AUTO_FETCH_MARKERS=1`。最后一个选项会在可选标记数据库缺失时获取它们，失败不会阻止启动。设置 `SCAI_DATA_DIR` 后，`start.sh` 仍会创建并打印 `<REPO>/../data`，但后端实际读写覆盖后的路径；请监控和备份覆盖路径，而不是打印出的同级目录。
+直接运行的环境控制项包括 `SCAI_DATA_DIR`（覆盖后端数据根目录）、`SCAI_JWT_SECRET`、`SCAI_CONFIG_SECRET`、`SCAI_ENABLE_REPRODUCIBILITY`、`SCAI_AUTO_FETCH_MARKERS=1` 和 `SCAI_AUTO_FETCH_CELLTYPIST=1`。两个获取选项会在可选资源缺失时下载它们，失败不会阻止启动：前者是注释先验用的标记数据库，后者是 CellTypist 模型库（每个模型几 MB），缓存到 `$SCAI_DATA_DIR/celltypist`，每个分析内核通过其 `CELLTYPIST_FOLDER` 看到该缓存。没有缓存时内核会按需下载模型，因此需要网络访问。容器部署可运行一次 `docker exec <container> /dep/venv/bin/python /app/scripts/fetch_celltypist_models.py`；缓存保存在数据卷上。设置 `SCAI_DATA_DIR` 后，`start.sh` 仍会创建并打印 `<REPO>/../data`，但后端实际读写覆盖后的路径；请监控和备份覆盖路径，而不是打印出的同级目录。
 
 使用以下命令停止实例：
 
@@ -684,6 +684,7 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_MODE`                           | `prod`                    | Docker 入口程序模式；生产镜像会拒绝 `dev`                                                        |
 | `PIP_INDEX_URL`                       | pip environment/default     | Docker Python 软件包 index                                                                                 |
 | `SCAI_AUTO_FETCH_MARKERS`             | `0`                       | 直接启动；`1` 尝试下载标记数据库                                                                         |
+| `SCAI_AUTO_FETCH_CELLTYPIST`          | `0`                       | 直接启动；`1` 将 CellTypist 模型缓存到 `$SCAI_DATA_DIR/celltypist`                                        |
 | `SCAI_HOST`                           | Set internally              | Vite 代理主机；脚本根据启动上下文设置                                                                      |
 | `SCAI_BACKPORT`                       | Set internally              | Vite 代理后端端口；脚本根据启动上下文设置                                                                  |
 

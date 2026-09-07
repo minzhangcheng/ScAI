@@ -99,7 +99,9 @@ say which one and why rather than silently skipping it):
    scanpy's default backend is still leidenalg; flavor="igraph", n_iterations=2,
    directed=False is the current equivalent where it applies. Report the resolution sweep
    and the value you chose together — the chosen value alone is not auditable
-10. Cell type annotation: find marker genes per cluster (scanpy.tl.rank_genes_groups), then call annotate_clusters tool
+10. Cell type annotation: find marker genes per cluster (scanpy.tl.rank_genes_groups), then call annotate_clusters tool;
+    where a cached CellTypist model covers the organism, run it as an independent second label set and report
+    the per-cluster agreement rather than letting either label set silently override the other
 
 QUALITY-CONTROL FIGURE: the platform renders one for this stage itself, from what the
 kernel holds — the distribution of each per-observation quality metric this run computed,

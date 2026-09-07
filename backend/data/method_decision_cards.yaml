@@ -242,7 +242,7 @@ cards:
           - Accuracy depends on reference complexity, class balance, and label depth.
           - Model files may need to be fetched and cached before use; package presence alone does not guarantee a runnable model.
         python_stack:
-          - celltypist (pretrained cell-type models; requires the model files to be present in a writable cache and the model's species/tissue coverage to match the query)
+          - celltypist (pretrained cell-type models; reads the host cache linked into CELLTYPIST_FOLDER for the session, filled by scripts/fetch_celltypist_models.py; the model's species and population coverage must match the query)
           - sklearn
       - name: marker-based cluster annotation
         answers: Interprets cluster identities from positive, negative, and ambiguous marker evidence.
