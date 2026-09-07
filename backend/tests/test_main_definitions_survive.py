@@ -361,3 +361,119 @@ def test_no_marker_at_all_is_still_not_a_claim_of_completeness():
     """A test double or a pre-transaction kernel. Returning an empty record
     would assert that nothing was excluded, which is the real hazard."""
     assert _parse("Session saved: 1 variables") is None
+
+
+# --- the record has to reach disk, which is where the live run found it did not
+
+
+def _manifest(**over):
+    from backend.utils.runtime_manifest import build_runtime_manifest
+
+    kwargs = dict(
+        revision=3,
+        state_revision=2,
+        pkl_digest="a" * 64,
+        saved_names=["adata", "helper"],
+        skipped_names=[],
+        serializer_version="dill-zstd-1",
+    )
+    kwargs.update(over)
+    return build_runtime_manifest(**kwargs)
+
+
+def test_the_carried_record_is_written_into_the_manifest():
+    """Found by the first live run: the kernel emitted it, the parser read it,
+    and `build_runtime_manifest` took only saved_names and skipped_names -- so
+    nothing reached disk and a restore could not see it."""
+    record = _manifest(carried_definitions=[{"name": "helper", "kind": "function"}])
+
+    assert record["carried_definitions"] == [{"name": "helper", "kind": "function"}]
+
+
+def test_a_carried_class_keeps_its_caveat_on_disk():
+    """A name present under a caveat has to say so.
+
+    The mirror of §4.4's rule that a name absent from the dump is absent from
+    every record of it: a carried class is not `type(instance)` for instances
+    restored from other frames, and that has to travel with it.
+    """
+    note = "restored class is not type(instance) for instances from other frames"
+    record = _manifest(
+        saved_names=["adata", "Marker"],
+        carried_definitions=[{"name": "Marker", "kind": "class", "note": note}],
+    )
+
+    assert record["carried_definitions"][0]["note"] == note
+
+
+def test_a_manifest_without_the_record_is_unchanged():
+    """The compatibility requirement, and the reason the field is optional.
+
+    `read_runtime_manifest` returns the *reconstruction*, so a generation
+    written before §5.5's narrowing must rebuild byte-identically to what it
+    does today -- the key absent, not present and empty.
+    """
+    assert "carried_definitions" not in _manifest()
+    assert "carried_definitions" not in _manifest(carried_definitions=None)
+
+
+def test_the_record_survives_a_write_and_read_round_trip(tmp_path):
+    """The whole point. Writing it is not the same as reading it back: the read
+    path reconstructs through the builder and drops any field it does not
+    thread through, which is the same defect one level up."""
+    from backend.utils.runtime_manifest import (
+        read_runtime_manifest,
+        write_runtime_manifest,
+    )
+
+    path = tmp_path / "session.runtime.json"
+    write_runtime_manifest(
+        path, _manifest(carried_definitions=[{"name": "helper", "kind": "function"}])
+    )
+
+    back = read_runtime_manifest(path)
+    assert back["carried_definitions"] == [{"name": "helper", "kind": "function"}]
+
+
+def test_an_old_manifest_still_reads(tmp_path):
+    """A generation written before the field existed still verifies and loads."""
+    from backend.utils.runtime_manifest import (
+        read_runtime_manifest,
+        write_runtime_manifest,
+    )
+
+    path = tmp_path / "session.runtime.json"
+    write_runtime_manifest(path, _manifest())
+
+    back = read_runtime_manifest(path)
+    assert "carried_definitions" not in back
+    assert back["saved_names"] == ["adata", "helper"]
+
+
+def test_a_carried_name_the_dump_does_not_hold_is_refused():
+    """The record describes this generation, not an aspiration for it.
+
+    A manifest claiming to carry a definition the pkl does not contain would
+    make a restore look for something that was never written -- the same class
+    of lie as a saved_names entry with no frame behind it.
+    """
+    with pytest.raises(ValueError, match="does not hold"):
+        _manifest(carried_definitions=[{"name": "absent", "kind": "function"}])
+
+
+def test_an_unknown_carried_kind_is_refused():
+    with pytest.raises(ValueError, match="unknown carried_definitions kind"):
+        _manifest(carried_definitions=[{"name": "helper", "kind": "module"}])
+
+
+def test_the_save_passes_the_record_through_to_the_manifest():
+    """The three-hop path the live run showed was broken at hop three: the
+    kernel prints it, the parser reads it, the save must hand it on."""
+    from backend.tests.split_facade import source_for_path
+
+    save_source = source_for_path("backend/utils/sandbox_parts/runtime_save.py")
+    assert "carried_record = (coverage or {}).get(\"carried_definitions\")" in save_source
+    assert '"carried_definitions": carried_record,' in save_source
+
+    commit_source = source_for_path("backend/utils/sandbox_parts/regular_save.py")
+    assert 'carried_definitions=runtime_manifest.get("carried_definitions")' in commit_source

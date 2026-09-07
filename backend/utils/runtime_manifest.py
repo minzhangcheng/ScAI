@@ -102,6 +102,9 @@ def canonical_manifest_bytes(manifest: dict[str, Any]) -> bytes:
     return json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+CARRIED_KINDS = frozenset({"function", "class"})
+
+
 def build_runtime_manifest(
     *,
     revision: int,
@@ -111,6 +114,7 @@ def build_runtime_manifest(
     skipped_names: Iterable[dict[str, Any]],
     serializer_version: str,
     pairing: dict | None = None,
+    carried_definitions: Iterable[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Assemble a generation's declaration, rejecting anything unusable.
 
@@ -158,6 +162,41 @@ def build_runtime_manifest(
         "skipped_names": sorted(skipped, key=lambda item: item["name"]),
         "serializer_version": str(serializer_version),
     }
+    # Spec 5.5's carried __main__ definitions. Optional, because a producer
+    # written before the narrowing emits nothing and is not thereby incomplete:
+    # this records what was brought *in*, while saved/skipped record what the
+    # generation holds. A carried class also carries a caveat -- it is not
+    # `type(instance)` for instances restored from other frames -- and a name
+    # present under a caveat has to say so, the mirror of §4.4's rule that a
+    # name absent from the dump is absent from every record of it.
+    if carried_definitions is not None:
+        carried: list[dict[str, str]] = []
+        for entry in carried_definitions:
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"carried_definitions entry is not an object: {entry!r}"
+                )
+            name = str(entry.get("name", ""))
+            kind = str(entry.get("kind", ""))
+            if not name.isidentifier():
+                raise ValueError(
+                    f"carried_definitions entry is not a Python identifier: {name!r}"
+                )
+            if kind not in CARRIED_KINDS:
+                raise ValueError(f"unknown carried_definitions kind: {kind!r}")
+            item = {"name": name, "kind": kind}
+            note = str(entry.get("note", ""))
+            if note:
+                item["note"] = note
+            carried.append(item)
+        missing = sorted({item["name"] for item in carried} - set(saved))
+        if missing:
+            raise ValueError(
+                "carried_definitions names a value the dump does not hold: "
+                + ", ".join(missing)
+            )
+        record["carried_definitions"] = sorted(carried, key=lambda i: i["name"])
+
     if pairing is not None:
         if (
             not isinstance(pairing, dict)
@@ -251,6 +290,7 @@ def read_runtime_manifest(path: str | Path) -> dict[str, Any]:
             skipped_names=manifest["skipped_names"],
             serializer_version=manifest["serializer_version"],
             pairing=manifest.get("pairing"),
+            carried_definitions=manifest.get("carried_definitions"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeManifestError(

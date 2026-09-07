@@ -770,6 +770,12 @@ async def _execute_save(
         if coverage
         else []
     )
+    # `.get`, not a subscript: the three completeness markers are required of
+    # every producer, this one is not. A kernel script from before §5.5's
+    # narrowing reports no carried definitions and is not thereby incomplete.
+    # None rather than [] so the manifest omits the key entirely, which keeps a
+    # pre-§5.5 generation's record byte-identical to what it is today.
+    carried_record = (coverage or {}).get("carried_definitions") or None
 
     if result.success:
         if skipped:
@@ -866,6 +872,7 @@ async def _execute_save(
                                     "pairing": context.pairing,
                                     "saved_names": sorted(saved_names),
                                     "skipped_names": skipped_record,
+                                    "carried_definitions": carried_record,
                                     "serializer_version": "dill-zstd-1",
                                 },
                                 target_revision=context.revision,

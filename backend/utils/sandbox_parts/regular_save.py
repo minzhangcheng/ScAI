@@ -563,6 +563,9 @@ def _commit_pkl_transaction(
                     skipped_names=runtime_manifest["skipped_names"],
                     serializer_version=str(runtime_manifest["serializer_version"]),
                     pairing=runtime_manifest.get("pairing"),
+                    # `.get`, like `pairing`: a producer that predates §5.5's
+                    # narrowing emits no such record and is not incomplete.
+                    carried_definitions=runtime_manifest.get("carried_definitions"),
                 ),
             )
             if fault_hook is not None:
