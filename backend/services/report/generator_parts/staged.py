@@ -346,6 +346,16 @@ async def _assemble_report(
 ):
     # Save graphic abstract image to figures dir if available
     graphic_abstract_path = None
+    graphic_abstract_metadata = None
+    if report_state.graphic_abstract:
+        graphic = report_state.graphic_abstract
+        graphic_abstract_metadata = {
+            "selected_index": int(getattr(graphic, "selected_index", 0) or 0),
+            "revision_count": int(getattr(graphic, "revision_count", 0) or 0),
+            "review_available": getattr(graphic, "review_available", None),
+            "selection_available": getattr(graphic, "selection_available", None),
+            "is_text_mode": bool(getattr(graphic, "is_text_mode", False)),
+        }
     if report_state.graphic_abstract and report_state.graphic_abstract.image_base64:
         try:
             from ...utils.image_utils import save_graphic_abstract_image
@@ -463,6 +473,7 @@ async def _assemble_report(
         "figures": generator.generated_figures,
         "tables": generator.generated_tables,
         "graphic_abstract_path": graphic_abstract_path,
+        "graphic_abstract": graphic_abstract_metadata,
         "generated_at": bindings.datetime.now().isoformat(),
         "status": report_status,
         "progress": 100,

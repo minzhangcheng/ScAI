@@ -2,7 +2,7 @@
 
 Moved verbatim out of backend/agents/pi_agent.py; composed into PIAgent.
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import asyncio
 import logging
 
@@ -283,6 +283,22 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
     def _build_ga_revision_history_text(self, revision_history: List[Dict[str, Any]]) -> str:
         return build_ga_revision_history_text(revision_history)
 
+    @staticmethod
+    def _unavailable_graphic_abstract_review(reason: str) -> Dict[str, Any]:
+        """Record that no graphic-abstract visual verdict was obtained."""
+        bounded_reason = str(reason or "Graphic abstract review unavailable").strip()[:500]
+        bounded_reason = bounded_reason or "Graphic abstract review unavailable"
+        return {
+            "review_unavailable": True,
+            "review_reason": bounded_reason,
+            "quality_score": None,
+            "feedback": bounded_reason,
+            "strengths": [],
+            "issues": [],
+            "suggestions": [],
+            "must_fix": [],
+        }
+
     async def review_graphic_abstract(
         self,
         state: AnalysisState,
@@ -351,14 +367,9 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
         if not self.has_vision:
             # No vision capability — cannot meaningfully review graphic abstract
             logger.info(f"[PI] Skipping graphic abstract vision review (has_vision=False)")
-            return {
-                "quality_score": 6,
-                "feedback": "Vision not available for this model. General improvement: ensure clear visual hierarchy and complete representation of key findings.",
-                "strengths": [],
-                "issues": [],
-                "suggestions": ["Ensure all key findings are visually represented", "Use clear labels and professional colors"],
-                "must_fix": []
-            }
+            return self._unavailable_graphic_abstract_review(
+                "Graphic abstract review unavailable: PI model has no vision capability"
+            )
 
         try:
             self._set_llm_context()
@@ -374,44 +385,49 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
         except Exception as e:
             logger.warning(f"[PI] Vision API failed for graphic abstract review: {e}")
             # Cannot meaningfully review without seeing the image
-            return {
-                "quality_score": 6,
-                "feedback": "Unable to review image visually. General improvement: ensure clear visual hierarchy and complete representation of key findings.",
-                "strengths": [],
-                "issues": [],
-                "suggestions": ["Ensure all key findings are visually represented", "Use clear labels and professional colors"],
-                "must_fix": []
-            }
+            return self._unavailable_graphic_abstract_review(
+                f"Graphic abstract vision review failed: {str(e)[:400]}"
+            )
 
         data = self._safe_parse_json(response_text, default={})
 
-        if data and "feedback" in data:
-            result = {
-                "quality_score": int(data.get("quality_score", 5)),
-                "feedback": data.get("feedback", ""),
-                "strengths": data.get("strengths", []),
-                "issues": data.get("issues", []),
-                "suggestions": data.get("suggestions", []),
-                "must_fix": normalize_text_list(data.get("must_fix"), limit=20)
-            }
-            logger.info(f"[PI] Graphic abstract review: score={result['quality_score']}")
-            return result
+        if not isinstance(data, dict):
+            return self._unavailable_graphic_abstract_review(
+                "Graphic abstract review response could not be parsed"
+            )
 
-        return {
-            "quality_score": 5,
-            "feedback": "Unable to parse review. Consider improving visual clarity and scientific completeness.",
-            "strengths": [],
-            "issues": [],
-            "suggestions": ["Improve visual hierarchy and labeling"],
-            "must_fix": []
+        raw_score = data.get("quality_score")
+        feedback = data.get("feedback")
+        if (
+            isinstance(raw_score, bool)
+            or not isinstance(raw_score, int)
+            or not 1 <= raw_score <= 10
+            or not isinstance(feedback, str)
+            or not feedback.strip()
+        ):
+            return self._unavailable_graphic_abstract_review(
+                "Graphic abstract review response was missing valid score or feedback"
+            )
+
+        result = {
+            "review_unavailable": False,
+            "review_reason": None,
+            "quality_score": raw_score,
+            "feedback": feedback,
+            "strengths": normalize_text_list(data.get("strengths"), limit=20),
+            "issues": normalize_text_list(data.get("issues"), limit=20),
+            "suggestions": normalize_text_list(data.get("suggestions"), limit=20),
+            "must_fix": normalize_text_list(data.get("must_fix"), limit=20),
         }
+        logger.info(f"[PI] Graphic abstract review: score={result['quality_score']}")
+        return result
 
     async def select_best_graphic_abstract(
         self,
         state: AnalysisState,
         candidates: List[str],
         revision_history: List[Dict[str, Any]]
-    ) -> int:
+    ) -> Optional[int]:
         """
         Select the best graphic abstract from all candidates using vision API.
 
@@ -421,9 +437,13 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
             revision_history: All rounds' feedback history
 
         Returns:
-            Index of the best candidate (0-based)
+            Index of the best candidate (0-based), or ``None`` when no
+            technically valid visual selection was obtained.
         """
         logger.info(f"[{self.session_id}][PI] Selecting best graphic abstract from {len(candidates)} candidates")
+
+        if not candidates:
+            return None
 
         revision_text = self._build_ga_revision_history_text(revision_history)
 
@@ -465,9 +485,8 @@ Consider:
 """
 
         if not self.has_vision:
-            # No vision — default to last candidate (most revised)
-            logger.info(f"[PI] Skipping graphic abstract selection (has_vision=False), using last candidate")
-            return len(candidates) - 1
+            logger.info("[PI] Skipping graphic abstract selection (has_vision=False)")
+            return None
 
         try:
             self._set_llm_context()
@@ -482,22 +501,25 @@ Consider:
             response_text = response.content if response and response.content else ""
         except Exception as e:
             logger.warning(f"[PI] Vision API failed for graphic abstract selection: {e}")
-            # Default to last candidate (most revised)
-            return len(candidates) - 1
+            return None
 
         data = self._safe_parse_json(response_text, default={})
 
-        if data and "selected_index" in data:
-            idx = int(data["selected_index"])
-            if 0 <= idx < len(candidates):
-                reason = data.get("reason", "No reason provided")
-                logger.info(f"[PI] Selected graphic abstract {idx + 1}/{len(candidates)}: {reason}")
-                return idx
-            else:
-                logger.warning(f"[PI] Invalid selected_index {idx}, defaulting to last")
-
-        # Default to last candidate
-        return len(candidates) - 1
+        if not isinstance(data, dict) or "selected_index" not in data:
+            return None
+        try:
+            idx = data["selected_index"]
+            if isinstance(idx, bool) or not isinstance(idx, int):
+                raise ValueError("selection index must be an integer")
+        except (TypeError, ValueError, OverflowError):
+            logger.warning("[PI] Graphic abstract selection response had an invalid index")
+            return None
+        if 0 <= idx < len(candidates):
+            reason = data.get("reason", "No reason provided")
+            logger.info(f"[PI] Selected graphic abstract {idx + 1}/{len(candidates)}: {reason}")
+            return idx
+        logger.warning(f"[PI] Invalid selected_index {idx}")
+        return None
 
     async def generate_graphic_abstract_prompt(
         self,

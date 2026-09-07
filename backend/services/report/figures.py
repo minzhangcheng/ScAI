@@ -2,6 +2,7 @@
 import os
 import io
 import base64
+import hashlib
 import re as _re
 import shutil
 import logging
@@ -226,6 +227,12 @@ class FiguresMixin:
                 "revision_of_id": getattr(pf, "revision_of_id", None),
                 "supersedes_id": getattr(pf, "supersedes_id", None),
                 "is_published_head": bool(getattr(pf, "is_published_head", False)),
+                "review_status": str(
+                    getattr(getattr(pf, "review_status", None), "value", getattr(pf, "review_status", ""))
+                    or ""
+                ),
+                "review_unavailable": bool(getattr(pf, "review_unavailable", False)),
+                "is_publication": True,
                 "provenance_kind": "registered_publication",
                 "is_legacy": False,
             })
@@ -287,6 +294,9 @@ class FiguresMixin:
                 "revision_of_id": candidate.get("revision_of_id"),
                 "supersedes_id": candidate.get("supersedes_id"),
                 "is_published_head": bool(candidate.get("is_published_head")),
+                "review_status": candidate.get("review_status") or "",
+                "review_unavailable": bool(candidate.get("review_unavailable")),
+                "is_publication": bool(candidate.get("is_publication", False)),
                 "provenance_kind": candidate.get("provenance_kind") or "unregistered",
                 "is_legacy": bool(candidate.get("is_legacy")),
                 "legacy_artifact_id": candidate.get("legacy_artifact_id"),
@@ -382,6 +392,9 @@ class FiguresMixin:
                     "plan_step_id": (metadata or {}).get("plan_step_id"),
                     "plan_id": (metadata or {}).get("plan_id"),
                     "purpose": (metadata or {}).get("purpose") or "result",
+                    "review_status": (metadata or {}).get("review_status") or "",
+                    "review_unavailable": bool((metadata or {}).get("review_unavailable")),
+                    "is_publication": registered is not None,
                     "provenance_kind": (
                         (admitted or {}).get("provenance_kind")
                         or ("registered_publication" if registered is not None else "")
@@ -409,7 +422,8 @@ class FiguresMixin:
         if not self.workspace_dir or not self.workspace_dir.exists():
             return existing_tables
 
-        for record in eligible_artifacts(publication_tables):
+        candidates = []
+        for record in list(eligible_artifacts(publication_tables)):
             csv_file = Path(str(getattr(record, "csv_path", "") or ""))
             if not csv_file.exists():
                 for candidate in (
@@ -423,16 +437,36 @@ class FiguresMixin:
                 continue
             if csv_file.stem in (invalidated_stems or set()):
                 continue
-            dest_csv = self.tables_dir / csv_file.name
+            candidates.append((record, csv_file))
+
+        basename_counts: Dict[str, int] = {}
+        for _record, csv_file in candidates:
+            basename_counts[csv_file.name] = basename_counts.get(csv_file.name, 0) + 1
+
+        for record, csv_file in candidates:
+            source_basename = csv_file.name
+            destination_basename = source_basename
+            if basename_counts[source_basename] > 1:
+                table_id = str(getattr(record, "id", None) or "").strip()
+                identity = table_id or str(
+                    getattr(record, "csv_sha256", None) or csv_file.resolve()
+                )
+                token = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+                destination_basename = (
+                    f"{csv_file.stem}--{token}{csv_file.suffix}"
+                )
+            dest_csv = self.tables_dir / destination_basename
             if not copy_verified_artifact(
                 csv_file, dest_csv, record, kind="table"
             ):
                 continue
             tbl_info = {
-                "filename": csv_file.name,
+                "filename": destination_basename,
                 "name": getattr(record, "name", "") or csv_file.stem,
                 "description": getattr(record, "description", "") or "",
                 "csv_path": str(dest_csv),
+                "source_filename": source_basename,
+                "csv_sha256": getattr(record, "csv_sha256", None),
                 "columns": list(getattr(record, "columns", None) or []),
                 "preview_data": list(
                     getattr(record, "preview_data", None) or []

@@ -72,6 +72,10 @@ async def test_regeneration_and_figureless_generator_html_are_stable(tmp_path):
         "abstract": "A",
         "conclusions": "C",
         "generated_at": "2026-01-01T00:00:00",
+        "status": "partial",
+        "current_step": "Technical review availability recorded",
+        "partial_reason": "analysis_quality",
+        "partial_reasons": ["analysis_quality", "figure_coverage"],
         "sections": [{
             "id": "results",
             "title": "Results",
@@ -81,7 +85,20 @@ async def test_regeneration_and_figureless_generator_html_are_stable(tmp_path):
             "tables": [],
         }],
         "score_definitions": [],
+        "graphic_abstract": {
+            "review_available": False,
+            "selection_available": False,
+        },
+        "quality_disclosures": {
+            "status": "incomplete",
+            "cautions": ["Scientific evidence remains limited."],
+            "post_execution_reviews": [{
+                "review_status": "failed",
+                "review_reason": "API <down & retry>",
+            }],
+        },
     }
+    original_report = json.loads(json.dumps(report))
     regenerated_dir = tmp_path / "regenerated"
     (regenerated_dir / "figures").mkdir(parents=True)
     (regenerated_dir / "tables").mkdir()
@@ -97,6 +114,8 @@ async def test_regeneration_and_figureless_generator_html_are_stable(tmp_path):
     )
     generated = await generator._generate_html_report(report, "en", state=None)
 
+    assert report == original_report
+
     # What this used to assert: two hardcoded sha256 digests of the whole page.
     # 0.49.3 deliberately replaced the status banner and quality-disclosure
     # sections with one consolidated limitations block, the digests were never
@@ -105,6 +124,10 @@ async def test_regeneration_and_figureless_generator_html_are_stable(tmp_path):
     # the properties a regression would actually violate instead.
     regenerated_html = Path(regenerated).read_text(encoding="utf-8")
     generated_html = Path(generated).read_text(encoding="utf-8")
+    persisted_report = json.loads(
+        (regenerated_dir / "report.json").read_text(encoding="utf-8")
+    )
+    assert persisted_report == original_report
 
     for label, page in (("regenerator", regenerated_html), ("generator", generated_html)):
         # Every template slot is filled: an unfilled one renders as literal
@@ -118,6 +141,8 @@ async def test_regeneration_and_figureless_generator_html_are_stable(tmp_path):
         assert "Figureless" in page, f"{label}: title missing"
         assert "Results" in page, f"{label}: section title missing"
         assert "No figures" in page, f"{label}: section content missing"
+        assert "technical-review-notice" in page
+        assert "API &lt;down &amp; retry&gt;" in page
         # A report with nothing to qualify carries no limitations block.
         assert "Detailed evidence qualifications" not in page, (
             f"{label}: clean report grew an empty limitations block"

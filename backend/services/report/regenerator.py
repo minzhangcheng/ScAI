@@ -26,6 +26,7 @@ from backend.services.report.interaction_records import render_direction_selecti
 from backend.services.report.quality import (
     render_report_limitations_html,
     render_report_status_line_html,
+    render_technical_review_notice_html,
 )
 from backend.config import get_session_logs, get_session_workspace
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
@@ -1020,7 +1021,8 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         "title": _safe_format_value(report.get("title", "Analysis Report")),
         "generated_at": "Generated: " + report.get("generated_at", datetime.now().isoformat()),
         "report_limitations_html": _safe_format_value(
-            render_report_limitations_html(report)
+            render_technical_review_notice_html(report)
+            + render_report_limitations_html(report)
         ),
         "report_status_line_html": _safe_format_value(
             render_report_status_line_html(report)

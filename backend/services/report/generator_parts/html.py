@@ -506,7 +506,8 @@ def _write_html_report(
             "title": _safe_format_value(report.get("title", "Analysis Report")),
             "generated_at": ("Generated: ") + report.get("generated_at", ""),
             "report_limitations_html": _safe_format_value(
-                bindings.render_report_limitations_html(report)
+                bindings.render_technical_review_notice_html(report)
+                + bindings.render_report_limitations_html(report)
             ),
             "report_status_line_html": _safe_format_value(
                 bindings.render_report_status_line_html(report)

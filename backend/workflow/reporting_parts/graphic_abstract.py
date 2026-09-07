@@ -436,6 +436,8 @@ class GraphicAbstractMixin:
 
             candidates = [graphic.image_base64]
             revision_history = []
+            review_by_candidate: Dict[int, Optional[bool]] = {}
+            review_path_unavailable = False
 
             # Send initial image to frontend
             await self._send_message(
@@ -463,20 +465,36 @@ class GraphicAbstractMixin:
                     candidates[-1],
                     revision_history
                 )
+                candidate_index = len(candidates) - 1
+                review_unavailable = review.get("review_unavailable") is True
+                review_by_candidate[candidate_index] = (
+                    False if review_unavailable else True
+                )
 
                 # Record feedback
                 revision_history.append({
                     "round": revision_round + 1,
+                    "candidate_index": candidate_index,
                     "feedback": review.get("feedback", ""),
                     "suggestions": review.get("suggestions", []),
                     "must_fix": review.get("must_fix", []),
-                    "quality_score": review.get("quality_score")
+                    "quality_score": review.get("quality_score"),
+                    "review_unavailable": review_unavailable,
+                    "review_reason": review.get("review_reason"),
                 })
 
                 logger.info(
                     f"[{self.session_id}] PI review round {revision_round + 1}: "
                     f"score={review.get('quality_score', 'N/A')}"
                 )
+
+                if review_unavailable:
+                    review_path_unavailable = True
+                    logger.info(
+                        f"[{self.session_id}] Graphic abstract review unavailable for "
+                        f"candidate {candidate_index + 1}; retaining the latest valid image"
+                    )
+                    break
 
                 # Painter revises (sees current image + all feedback)
                 try:
@@ -520,19 +538,46 @@ class GraphicAbstractMixin:
                     break  # Stop revisions, PI will pick from available candidates
 
             # Step 4: PI selects the best from all candidates
-            if len(candidates) > 1:
+            selection_available: Optional[bool]
+            if len(candidates) > 1 and not review_path_unavailable:
                 await self._send_message(
                     "status",
                     f"PI selecting best graphic abstract from {len(candidates)} candidates...",
                     AgentType.PI
                 )
-                selected_idx = await self.pi_agent.select_best_graphic_abstract(
-                    analysis_state,
-                    candidates,
-                    revision_history
-                )
+                try:
+                    selected_idx = await self.pi_agent.select_best_graphic_abstract(
+                        analysis_state,
+                        candidates,
+                        revision_history
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.session_id}] Graphic abstract selection unavailable: {e}"
+                    )
+                    selected_idx = None
+                selection_available = selected_idx is not None
+                if selected_idx is None:
+                    selected_idx = len(candidates) - 1
+            elif len(candidates) > 1:
+                # No visual selection is attempted after an unavailable review;
+                # retaining the newest valid image is deterministic and carries
+                # no PI selection verdict.
+                selected_idx = len(candidates) - 1
+                selection_available = None
             else:
                 selected_idx = 0
+                selection_available = None
+
+            if not (0 <= selected_idx < len(candidates)):
+                logger.warning(
+                    f"[{self.session_id}] Selected graphic abstract index {selected_idx} "
+                    "was out of bounds; retaining the latest candidate"
+                )
+                selected_idx = len(candidates) - 1
+                selection_available = False
+
+            selected_review_available = review_by_candidate.get(selected_idx)
 
             # Update graphic abstract with selected image and metadata
             graphic.image_base64 = candidates[selected_idx]
@@ -540,6 +585,8 @@ class GraphicAbstractMixin:
             graphic.revision_history = revision_history
             graphic.all_candidates = candidates
             graphic.selected_index = selected_idx
+            graphic.review_available = selected_review_available
+            graphic.selection_available = selection_available
             analysis_state.graphic_abstract = graphic
 
             # Send final selected image to frontend

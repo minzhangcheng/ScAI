@@ -18,6 +18,7 @@ from backend.services.report.generator import (
 from backend.services.report.quality import (
     build_quality_disclosures,
     render_report_limitations_html,
+    render_technical_review_notice_html,
 )
 from backend.workflow.reporting_parts.final_report import (
     analysis_completion_message,
@@ -448,6 +449,120 @@ def test_report_limitations_hook_omits_blocks_without_mutating_details():
     assert report["quality_disclosures"]["blocking_issues"] == [
         "Round 2 evidence is unverified."
     ]
+
+
+def test_technical_review_notice_is_selective_and_escaped():
+    report = {
+        "status": "partial",
+        "partial_reasons": ["analysis_quality"],
+        "figures": [{
+            "id": "figure-unavailable",
+            "filename": "panel<&.png",
+            "is_publication": True,
+            "review_unavailable": True,
+            "review_status": "approved",
+        }, {
+            "id": "figure-pending",
+            "filename": "pending.png",
+            "is_publication": True,
+            "review_status": "pending",
+        }],
+        "graphic_abstract": {
+            "review_available": None,
+            "selection_available": False,
+        },
+        "quality_disclosures": {
+            "cautions": ["Scientific evidence is partial."],
+            "post_execution_reviews": [{
+                "review_status": "pending",
+                "lifecycle": "reserved",
+                "lifecycle_status": "reserved",
+                "supplementary_execution": {"status": "unknown"},
+            }, {
+                "review_status": "failed",
+                "review_reason": "Review planning failed: API <down & retry>",
+                "supplementary_execution": {"status": "unknown"},
+            }, {
+                "review_status": "failed",
+                "persistence_status": "failed",
+                "persistence_failure": "Persistence <error & retry>",
+                "supplementary_execution": {"status": "failed"},
+            }],
+        },
+    }
+
+    notice = render_technical_review_notice_html(report)
+
+    assert notice.count("technical-review-notice") == 1
+    assert "panel&lt;&amp;.png" in notice
+    assert "pending.png" in notice
+    assert "Graphic abstract candidate selection was unavailable" in notice
+    assert "Technical review remains pending" in notice
+    assert "API &lt;down &amp; retry&gt;" in notice
+    assert "Persistence &lt;error &amp; retry&gt;" in notice
+    assert "Scientific evidence is partial" not in notice
+    assert "<script" not in notice
+
+
+def test_technical_notice_ignores_legacy_graphic_metadata_and_generic_partial():
+    report = {
+        "status": "partial",
+        "partial_reason": "analysis_quality",
+        "graphic_abstract": {
+            "review_available": None,
+            "selection_available": None,
+        },
+        "quality_disclosures": {
+            "post_execution_reviews": [{
+                "review_status": "completed",
+                "lifecycle": "completed",
+                "review_reason": "A scientific caveat remains.",
+            }],
+        },
+    }
+
+    assert render_technical_review_notice_html(report) == ""
+
+
+def test_technical_notice_suppresses_scientific_trigger_after_supplementary_failure():
+    report = {
+        "quality_disclosures": {
+            "post_execution_reviews": [{
+                "review_status": "failed",
+                "lifecycle": "failed",
+                "lifecycle_status": "failed",
+                "review_reason": "Scientific trigger: missing interaction evidence",
+                "supplementary_execution": {"status": "failed"},
+            }],
+        },
+    }
+
+    notice = render_technical_review_notice_html(report)
+
+    assert "technical-review-notice" in notice
+    assert "Supplementary technical review execution failed" in notice
+    assert "Scientific trigger" not in notice
+
+
+def test_technical_notice_normalizer_keeps_api_failure_reason_without_execution():
+    state = SimpleNamespace(
+        round_results=[],
+        annotation_record=None,
+        annotation_state=None,
+        post_execution_reviews=[{
+            "review_status": "failed",
+            "review_reason": "Review planning failed: API <down & retry>",
+        }],
+    )
+
+    quality = build_quality_disclosures(state)
+    notice = render_technical_review_notice_html({
+        "quality_disclosures": quality,
+    })
+
+    review = quality["post_execution_reviews"][0]
+    assert review["supplementary_execution"]["status"] == "unknown"
+    assert "API &lt;down &amp; retry&gt;" in notice
 
 
 def test_detailed_report_event_carries_partial_and_quality_contracts():

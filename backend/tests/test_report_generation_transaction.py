@@ -1,6 +1,7 @@
 """Atomic publication contracts for complete detailed-report generations."""
 
 import asyncio
+import hashlib
 import json
 import os
 import tarfile
@@ -15,7 +16,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from backend.agents.supervisor.report_content import ReportContentMixin
-from backend.models.schemas import AnalysisState
+from backend.models.schemas import (
+    AnalysisState,
+    FigureReviewStatus,
+    PublicationTable,
+)
 from backend.services.report import output_generation
 from backend.services.report.generator import (
     DetailedReportGenerator,
@@ -80,6 +85,113 @@ def test_legacy_flat_report_remains_readable_without_pointer(tmp_path):
     (tmp_path / "report.html").write_text("legacy", encoding="utf-8")
 
     assert resolve_current_report_dir(tmp_path) == tmp_path
+
+
+@pytest.mark.asyncio
+async def test_same_basename_publication_tables_keep_distinct_report_artifacts(
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    source_a = workspace / "round-a" / "markers.csv"
+    source_b = workspace / "round-b" / "markers.csv"
+    source_a.parent.mkdir(parents=True)
+    source_b.parent.mkdir(parents=True)
+    source_a.write_text("gene,value\nA,1\n", encoding="utf-8")
+    source_b.write_text("gene,value\nB,2\n", encoding="utf-8")
+
+    def table(table_id, source, execution_id):
+        payload = source.read_bytes()
+        return PublicationTable(
+            id=table_id,
+            name=table_id,
+            description="registered table",
+            csv_path=str(source),
+            csv_sha256=hashlib.sha256(payload).hexdigest(),
+            columns=["gene", "value"],
+            preview_data=[{"gene": table_id, "value": 1}],
+            total_rows=1,
+            review_status=FigureReviewStatus.APPROVED,
+            source_execution_id=execution_id,
+        )
+
+    generator = DetailedReportGenerator(
+        llm_client=object(),
+        pi_model="pi",
+        bio_model="bio",
+        output_dir=str(tmp_path / "report"),
+        workspace_dir=str(workspace),
+    )
+    scanned = generator._scan_existing_tables([
+        table("table-a", source_a, "execution-a"),
+        table("table-b", source_b, "execution-b"),
+    ])
+
+    assert len(scanned) == 2
+    assert {entry["source_filename"] for entry in scanned} == {"markers.csv"}
+    assert len({entry["filename"] for entry in scanned}) == 2
+    assert all("--" in entry["filename"] for entry in scanned)
+    for entry in scanned:
+        assert Path(entry["csv_path"]).read_bytes() == (
+            source_a.read_bytes() if entry["table_id"] == "table-a"
+            else source_b.read_bytes()
+        )
+        assert entry["csv_sha256"] == hashlib.sha256(
+            Path(entry["csv_path"]).read_bytes()
+        ).hexdigest()
+
+    unique_source = workspace / "unique.csv"
+    unique_source.write_text("gene,value\nU,3\n", encoding="utf-8")
+    unique_generator = DetailedReportGenerator(
+        llm_client=object(),
+        pi_model="pi",
+        bio_model="bio",
+        output_dir=str(tmp_path / "unique-report"),
+        workspace_dir=str(workspace),
+    )
+    unique = unique_generator._scan_existing_tables([
+        table("table-unique", unique_source, "execution-unique"),
+    ])
+    assert [entry["filename"] for entry in unique] == ["unique.csv"]
+
+    section = await generator._generate_section_from_existing_figures(
+        AnalysisState(user_id="owner", name="Tables"),
+        {
+            "id": "registered-tables",
+            "title": "Registered tables",
+            "description": "",
+            "analysis_type": "general",
+            "existing_figures": [],
+            "existing_tables": scanned,
+            "narrative": "Retained table evidence.",
+        },
+        {"summary": "", "bioinformatics": [], "cluster_annotations": ""},
+        "en",
+        force_fallback=True,
+    )
+    section_names = {table["filename"] for table in section["tables"]}
+    assert section_names == {entry["filename"] for entry in scanned}
+    for filename in section_names:
+        expected = next(
+            entry for entry in scanned if entry["filename"] == filename
+        )
+        section_table = next(
+            entry for entry in section["tables"] if entry["filename"] == filename
+        )
+        assert section_table["table_id"] == expected["table_id"]
+        assert section_table["csv_sha256"] == expected["csv_sha256"]
+        assert section_table["source_filename"] == expected["source_filename"]
+        assert f"tables/{filename}" in (
+            await generator._generate_html_report(
+                {
+                    "title": "Tables",
+                    "sections": [section],
+                    "abstract": "",
+                    "conclusions": "",
+                    "generated_at": "",
+                },
+                "en",
+            )
+        ).read_text(encoding="utf-8")
 
 
 def test_pointer_flip_exposes_only_complete_old_or_new_tree(monkeypatch, tmp_path):

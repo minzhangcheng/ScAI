@@ -151,9 +151,24 @@ async def get_detailed_report_html(session_id: str, request: Request, branch_id:
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if not branch_id:
-        if not state.detailed_report_html_path:
-            raise HTTPException(status_code=404, detail="Detailed report not yet generated")
-        html_path = Path(state.detailed_report_html_path)
+        # The published generation is authoritative for the main report.  The
+        # session pointer is retained only as the compatibility fallback for
+        # the old flat incremental report producer.
+        report_dir = resolve_published_report_dir(session_id, None)
+        html_path = report_dir / "report.html"
+        if not html_path.exists():
+            legacy_path = resolve_report_output_dir(session_id, None) / "detailed_report.html"
+            pointer_path = (
+                Path(state.detailed_report_html_path)
+                if state.detailed_report_html_path else None
+            )
+            if (
+                pointer_path is None
+                or pointer_path.resolve() != legacy_path.resolve()
+                or not pointer_path.exists()
+            ):
+                raise HTTPException(status_code=404, detail="Detailed report not yet generated")
+            html_path = pointer_path
     else:
         target_lineage_id = resolve_report_target_lineage(branch_id)
         branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
