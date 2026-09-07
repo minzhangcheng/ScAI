@@ -744,10 +744,11 @@ def check_resampling_resolution(findings, score_definitions):
     out = []
     ranked = [
         s for s in (score_definitions or ())
-        if score_kind(s) == "ranked_enrichment" and not _uses_adaptive_estimator(s)
+        if score_kind(s) == "ranked_enrichment"
     ]
     declared = {
         getattr(s, "score_name", ""): _declared_resamples(s) for s in ranked
+        if not _uses_adaptive_estimator(s)
     }
     counts = [n for n in declared.values() if n]
 
@@ -787,6 +788,15 @@ def check_resampling_resolution(findings, score_definitions):
                 if not _RESAMPLED_RESULT.search(sent):
                     continue
                 if _ADAPTIVE_ESTIMATOR.search(sent):
+                    continue
+                # Keep estimator identity until the result is attributed. If
+                # attribution is ambiguous and may include a multilevel score,
+                # another score's permutation count cannot bound this value.
+                candidates = [
+                    s for s in ranked
+                    if _names_score(sent, getattr(s, "score_name", ""))
+                ] or ranked
+                if any(_uses_adaptive_estimator(s) for s in candidates):
                     continue
                 resamples = _resamples_for(sent, declared)
                 if not resamples:

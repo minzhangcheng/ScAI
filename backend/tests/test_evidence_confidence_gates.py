@@ -15,6 +15,8 @@ decide acceptance itself.
 """
 from types import SimpleNamespace
 
+import pytest
+
 from backend.services.analysis_plan import panel_overlap
 from backend.services.statistical_gates import (
     check_panel_redundancy,
@@ -234,6 +236,46 @@ def test_a_sentence_naming_the_multilevel_estimator_is_left_alone():
         [score],
     )
     assert out == []
+
+
+@pytest.mark.parametrize("text", [
+    "GSEA result for adaptive_panel reached nominal p = 1e-6.",
+    "GSEA results for ordinary_panel and adaptive_panel reached p = 1e-6.",
+    "GSEA reached nominal p = 1e-6.",
+])
+def test_multilevel_identity_is_preserved_among_mixed_scores(text):
+    ordinary = _score("ordinary_panel", n_resamples=1000)
+    adaptive = _score("adaptive_panel", permutation_num=1000)
+    adaptive.parameters["method"] = "multilevel"
+
+    assert check_resampling_resolution([text], [ordinary, adaptive]) == []
+
+    # An attributed ordinary result still receives its own floor observation.
+    out = check_resampling_resolution(
+        ["GSEA result for ordinary_panel reached nominal p = 1e-6."],
+        [ordinary, adaptive],
+    )
+    assert [finding.gate for finding in out] == ["p-below-resampling-resolution"]
+
+
+@pytest.mark.parametrize("label", [
+    "q", "qval", "qvalue", "q-value", "q_value", "FDR", "BH", "padj",
+    "adjusted p", "p adjusted", "p-value adjusted", "p_adjusted",
+])
+def test_adjusted_value_spellings_do_not_receive_a_nominal_floor(label):
+    score = _score("ordinary_panel", n_resamples=1000)
+    assert check_resampling_resolution(
+        [f"GSEA result for ordinary_panel reached {label} = 0.0004."], [score],
+    ) == []
+
+
+@pytest.mark.parametrize("label", ["p", "pvalue", "p-value", "p_value"])
+def test_nominal_value_spellings_still_receive_a_floor_observation(label):
+    score = _score("ordinary_panel", n_resamples=1000)
+    out = check_resampling_resolution(
+        [f"GSEA result for ordinary_panel reached {label} = 0.0004."], [score],
+    )
+    assert [finding.gate for finding in out] == ["p-below-resampling-resolution"]
 
 
 def test_a_repeated_conventional_cutoff_is_not_a_resolution_floor():
