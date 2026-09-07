@@ -113,8 +113,11 @@ rules:
   title: Gene sets must be bounded at both ends
   enforcement: guidance
   applies_when: Any gene-set score or enrichment test.
-  rule: Bound set size from below and above after mapping into the analysed matrix. Do not
-    lower the tool default. Report the matched count, not the nominal panel size.
+  rule: 'Bound set size from below and above after mapping into the analysed matrix, state the
+    bounds used, and report the matched count, not the nominal panel size. The bounds are
+    tool defaults for enrichment tests, not a universal floor: change them only with a stated
+    reason, and do not apply them to module scores, where a small curated panel may be scored
+    with its matched count disclosed.'
   why: 'Below the floor the running-sum statistic is dominated by a handful of genes and the
     permutation null is too coarse to separate signal from noise. Above the ceiling the opposite
     failure appears: very broad sets enrich for almost any ranking, at trivial fold, because
@@ -125,10 +128,12 @@ rules:
     A negative conclusion drawn from such a panel is surfaced separately by
     no-negative-claim-from-an-underpowered-panel for PI review.'
   python: 'gseapy.prerank already defaults to min_size=15 and max_size=500, which is stricter
-    than the 10 that clusterProfiler uses as its floor. Do not lower it: passing min_size
-    below the default admits panels the tool would otherwise refuse. The ceiling is not uniform
-    across the toolkit -- gseapy.gsva defaults to max_size=1000 -- so pass both bounds explicitly
-    rather than relying on whichever entry point you happened to call.'
+    than the 10 that clusterProfiler uses as its floor; gseapy.enrich applies no size bound of
+    its own. Do not lower a bound silently: passing min_size below the default admits panels
+    the tool would otherwise refuse, so state the value and the reason. The ceiling is not
+    uniform across the toolkit -- gseapy.gsva defaults to max_size=1000 -- so pass both bounds
+    explicitly rather than relying on whichever entry point you happened to call.
+    scanpy.tl.score_genes has no size floor; report the matched count instead.'
   citations:
   - Subramanian et al. 2005 PNAS 102:15545 -- the weighted running-sum statistic
   - Yu et al. 2012 OMICS 16:284-287 -- clusterProfiler, source of the minGSSize/maxGSSize
@@ -139,7 +144,8 @@ rules:
   enforcement: advisory
   applies_when: A non-significant result is used to argue against a mechanism.
   rule: A non-significant result from a panel below the minimum size does not support a negative
-    conclusion. Report it as underpowered, or widen the panel and re-test.
+    conclusion. Report it as a small matched panel that cannot carry the negative claim, or
+    widen the panel and re-test.
   why: 'Failing to reject with almost no power says nothing about the null. A positive result
     from such a panel may still be reported, as an observation that names the matched count,
     but it is not stronger evidence: under low power only a large observed effect reaches
@@ -333,9 +339,10 @@ rules:
     rule is guidance rather than a gate because a sweep leaves no trace in structured state:
     verifying it would mean pattern-matching the agent''s own code, which checks that a word
     appeared rather than that the work was done.'
-  python: Loop scanpy.tl.leiden over roughly 0.2 to 2.0, storing each partition under its
-    own key, then compare cluster flow across the sweep and check that each cluster carries
-    distinct markers.
+  python: Loop scanpy.tl.leiden over roughly 0.2 to 2.0 (flavor="igraph", n_iterations=2,
+    directed=False; scanpy's default backend is still leidenalg), storing each partition
+    under its own key, then compare cluster flow across the sweep, check that each cluster
+    carries distinct markers, and report the sweep together with the value chosen.
   citations:
   - Zappia & Oshlack 2018 GigaScience 7:giy083 -- clustering trees across multiple resolutions
   source_skill: single-cell/clustering
@@ -376,8 +383,10 @@ rules:
   title: A curated set is not automatically the right panel
   enforcement: guidance
   applies_when: Scoring a gene set fetched from an external resource.
-  rule: Inspect the members before scoring. When a set mixes genes that promote a process
-    with genes that restrain it, split it and score the parts separately.
+  rule: 'Inspect the members before scoring. When a set mixes genes that promote a process
+    with genes that restrain it, consider splitting it and scoring the parts separately;
+    the split stops activators and repressors from cancelling, it does not by itself
+    establish that the process is more or less active.'
   why: 'Ontology sets are frequently broad, small, and direction-mixed. A module score over
     such a set rises whether the process is active or being actively opposed, so the score
     cannot distinguish the two states -- the number looks like evidence while carrying almost
@@ -385,7 +394,11 @@ rules:
     resource, its biological-process branch publishes explicit positive- and negative-regulation
     terms, several hundred processes carry both, and the regulator genes sit inside the base
     term. So the split is a mechanical operation on identifiers rather than a judgement call,
-    wherever those terms exist.'
+    wherever those terms exist. What the split cannot do is turn expression into activity:
+    the regulation terms describe what a gene product does to the process, not what its
+    transcript level says about the process in these cells, and feedback, protein-level
+    control and context intervene. For an activity question, footprint methods over signed
+    target networks are the closer instrument, within the coverage of their networks.'
   python: 'fetch_gene_set returns the members. When the set is direction-mixed, call it again
     with partition_by_direction=true: the ontology publishes explicit regulation terms for
     a process, and the tool uses them to split the set into positive, negative, ambiguous
@@ -445,24 +458,32 @@ rules:
   - Wijesooriya et al. 2022 PLoS Comput Biol 18(3):e1009935
   source_skill: pathway-analysis/go-enrichment
 - id: composition-lives-on-a-simplex
-  title: Proportions are not independent, so per-cluster tests on them are invalid
+  title: Proportions live on a simplex, so choose the unit and the model before testing them
   enforcement: advisory
   applies_when: Comparing cell-type or cluster proportions between conditions. Also applies
     to a contingency-table test run over cells on a per-cell categorical breakdown, which
     is the same simplex violation counted rather than proportioned.
-  rule: Do not run a per-cluster t-test, Wilcoxon or chi-square on proportions as the primary
-    test of composition change. Use a compositional model, or report proportions descriptively
-    with intervals.
+  rule: 'Never test composition with cells as the unit: a chi-square or Fisher test over a
+    cell-count table, or any per-cell test, counts thousands of dependent draws as independent.
+    With biological samples as the unit and at least two independent samples per group, a
+    per-population test on variance-stabilised sample proportions is acceptable and must
+    state the relative-abundance caveat; a joint
+    compositional model is a candidate where one is available. Otherwise report proportions
+    descriptively with intervals.'
   why: 'Proportions sum to one, so they live on a simplex and are mechanically coupled: when
     one population expands, every other proportion is forced down even if its absolute count
-    never moved. A per-cluster test reads that arithmetic as biology, and the resulting false
-    positives are correlated across clusters, so they look like a coherent story rather than
-    noise.'
-  python: 'No compositional model is installed in this stack -- scCODA, sccomp, pertpy, propeller
-    and milopy are all absent, so the recommended tools are unavailable. Within ScAI the defensible
-    options are: report proportions with confidence intervals as description, or apply a variance-stabilising
-    transform by hand (centred log-ratio, or arcsin-sqrt) and fit a sample-level linear model
-    on the transformed values. Say which was done.'
+    never moved. A cell-level test additionally treats cells from one sample as independent
+    and manufactures significance. A per-population test on sample-level proportions does not
+    have that defect -- propeller is exactly such a test, with empirical-Bayes variance
+    moderation -- but its result is still about relative abundance and can be driven by a
+    change elsewhere on the simplex, which is the caveat to state.'
+  python: 'No joint compositional model is installed in this stack -- scCODA, sccomp, pertpy,
+    propeller and milopy are all absent. The defensible options are: report per-sample
+    proportions with confidence intervals as description; or, with samples as the unit,
+    transform the per-sample proportions (arcsin-square-root, or logit / centred log-ratio
+    with an explicit zero-handling rule such as a stated pseudocount) and fit one statsmodels
+    linear model per population, adjusting across populations. Say that this lacks propeller''s
+    variance moderation, which was done, and what the denominator was.'
   citations:
   - Buttner et al. 2021 Nat Commun 12:6876 -- scCODA, Bayesian Dirichlet-multinomial compositional
     analysis
@@ -527,18 +548,25 @@ rules:
   title: A pre-test filter must not use the contrast it will be tested on
   enforcement: guidance
   applies_when: Filtering features before differential testing.
-  rule: Filter on a statistic that is independent of the test statistic under the null, such
-    as overall mean abundance. Never filter on anything computed from the group labels.
+  rule: 'Filter on a statistic that is independent of the test statistic under the null, such
+    as overall mean abundance, or with a design-aware rule that uses the group sizes but not
+    the contrast (edgeR''s filterByExpr keeps a feature that clears a count threshold in at
+    least as many samples as the smallest group). Never filter on the contrast itself: a
+    per-group difference, or a variance computed across the conditions being compared.'
   why: Filtering before testing increases power only when the filter carries no information
     about the contrast under the null. Filtering on something like the minimum count within
     one group, or on variance computed across the conditions being compared, selects features
     that already look different and inflates the type-I error of the subsequent test. Most
     pipelines do this without noticing.
-  python: Filter on mean or total counts across all samples, not on a per-group quantity.
-    Note that selecting highly variable genes before a condition contrast is exactly this
-    violation when the variance is driven by the condition.
+  python: 'decoupler.filter_by_expr(adata, group=..., min_count=..., min_total_count=...)
+    implements the filterByExpr rule and is design-aware in the acceptable sense. Selecting
+    highly variable genes within the same data before a condition contrast carries the same
+    risk when the condition drives the variance; if formal inference follows such a
+    selection, say so and prefer a mean-abundance filter for the tested feature set.'
   citations:
   - Bourgon, Gentleman & Huber 2010 PNAS 107:9546
+  - Chen, Lun & Smyth 2016 F1000Res 5:1438 -- edgeR quasi-likelihood pipeline, including
+    the filterByExpr rule that uses the smallest group size
   source_skill: differential-expression/de-results
 - id: inspect-the-p-value-histogram
   title: The p-value histogram diagnoses model misspecification for free
@@ -716,3 +744,148 @@ rules:
   - Tirosh et al. 2016 Science 352:189-196 -- control-set module scoring underlying score_genes
     / AddModuleScore
   source_skill: single-cell/markers-annotation
+- id: verify-the-input-scale-before-preprocessing
+  title: 'Integer-looking values are a clue to the input scale, not proof of it'
+  enforcement: guidance
+  applies_when: 'Loading an expression matrix whose processing history is not known.'
+  rule: 'Establish what .X holds before any normalisation: raw counts, normalised values, or
+    log values. Integrality is a clue, not proof. Read the layers, .raw, any processing note in
+    uns, and the description the data was uploaded with. Never copy an already-normalised .X
+    into a counts layer, and never normalise twice.'
+  why: 'An h5ad can arrive already normalised or log-transformed. Running normalize_total and
+    log1p again compresses the dynamic range and shifts every downstream statistic, and a
+    "counts" layer manufactured from normalised values silently breaks every count-based
+    model fed from it. Nothing later in the pipeline can detect that this happened.'
+  python: 'Print the value range and the fraction of integer entries of .X and of each layer,
+    check adata.raw and adata.uns for a record of prior processing, and state the conclusion
+    before calling scanpy.pp.normalize_total. If no raw counts exist anywhere, say so, because
+    it constrains every count-based method later.'
+  citations:
+  - 'No upstream citation: this is ScAI''s own guidance, written because uploaded objects
+    arrive with unknown processing history. Not claimed as a bioSkills rule.'
+  source_skill: scai-native/input-scale
+- id: doublet-detection-follows-the-capture-design
+  title: 'Doublets are called per capture library, and a library is not a biological sample'
+  enforcement: guidance
+  applies_when: 'Deciding whether and how to run doublet detection on droplet data.'
+  rule: 'Decide from the design whether and how to run doublet detection, and record the
+    decision. For per-library captures run it per library by default; pooled donors, hashed
+    libraries, or data that arrived already doublet-filtered each need their own
+    justification. The column passed as the batch key must hold the capture library, which is
+    not the same thing as the biological sample.'
+  why: 'Simulated doublets are built from the cells of one capture, so pooling libraries mixes
+    doublet rates and expression backgrounds that differ between captures and blunts the
+    classifier. Running per library is the default the method assumes; it is not a universal
+    rule, because demultiplexed pools and hashed libraries already carry doublet calls of
+    their own, and a pre-filtered object should not be filtered twice.'
+  python: 'scanpy.pp.scrublet(adata, batch_key=<library column>) runs Scrublet per library and
+    writes doublet_score and predicted_doublet into obs; scvi-tools SOLO is a second opinion
+    where the first call is ambiguous. Report the expected doublet rate you passed and the
+    number of calls per library.'
+  citations:
+  - Wolock, Lopez & Klein 2019 Cell Syst 8:281-291 -- Scrublet
+  - Bernstein et al. 2020 Cell Syst 11:95-101 -- SOLO
+  source_skill: scai-native/quality-control
+- id: qc-metrics-are-observations-not-filters
+  title: 'A quality metric is computed where it applies and never removes cells on its own'
+  enforcement: guidance
+  applies_when: 'Choosing quality-control cutoffs for cells.'
+  rule: 'Compute the quality observations that apply to the dataset -- per-sample median
+    absolute deviation flags, the mitochondrial and ribosomal fractions and, where relevant,
+    the haemoglobin fraction, and cell-cycle scores -- and evaluate whether each applies here
+    rather than running the list by default. No threshold removes cells automatically: the
+    analyst chooses and justifies each cutoff from the observed distributions and reports what
+    was removed and why.'
+  why: 'Fixed cutoffs copied from another study encode that study''s tissue, protocol and
+    depth. Distribution-based flags per sample adapt to what was measured, but they too are
+    observations for a decision, not the decision. A mitochondrial cutoff appropriate to
+    whole-cell data does not transfer to single-nucleus data, and cell-cycle signal is a
+    covariate to inspect before deciding whether it should be regressed at all.'
+  python: 'scanpy.pp.calculate_qc_metrics with the relevant qc_vars, then per-sample MAD flags
+    computed by hand; scanpy.tl.score_genes_cell_cycle for the cycle scores, inspected on the
+    embedding before any regress_out decision.'
+  citations:
+  - Germain et al. 2020 Genome Biol 21:227 -- pipeComp, MAD-based cell filtering
+  - Luecken & Theis 2019 Mol Syst Biol 15:e8746 -- current best practices in single-cell RNA-seq
+  - Heumos et al. 2023 Nat Rev Genet 24:550-572 -- best practices for single-cell analysis
+  source_skill: scai-native/quality-control
+- id: hvg-flavor-must-match-the-input-representation
+  title: 'The HVG flavor decides which representation it must be given'
+  enforcement: guidance
+  applies_when: 'Selecting highly variable genes, especially on multi-sample data.'
+  rule: 'Match the flavor to the representation: seurat_v3 expects raw counts, the default
+    flavors expect log-normalised values. On multi-sample data a batch-aware selection is an
+    option to evaluate, not a requirement.'
+  why: 'seurat_v3 models mean-variance on counts; handing it log values fits the wrong trend,
+    and scanpy warns on non-integer input rather than refusing (the flavor itself needs
+    scikit-misc, which this stack installs). A batch key spreads the selection across samples
+    so one deep sample does not dictate the feature set, which matters when the samples differ
+    in depth or composition, and matters less when they do not.'
+  python: 'scanpy.pp.highly_variable_genes(adata, flavor="seurat_v3", batch_key=...) needs the
+    count representation: when .X has already been normalised by the time features are
+    selected, which is the usual order, pass layer="counts" so the flavor sees counts.'
+  citations:
+  - Stuart et al. 2019 Cell 177:1888-1902 -- Seurat v3 variance-stabilising feature selection
+  source_skill: scai-native/preprocessing
+- id: scanpy-marker-fold-changes-overstate-low-expression
+  title: 'rank_genes_groups fold changes are not condition-level effect estimates'
+  enforcement: guidance
+  applies_when: 'Reading logfoldchanges from a marker test, or ranking markers for annotation.'
+  rule: 'Treat the logfoldchanges column of a cluster marker test as a ranking aid. Report the
+    detection fraction alongside the score, and take condition-level fold changes from a
+    sample-level model, not from this table.'
+  why: 'The value is computed from the exponentiated means of log-transformed values, so a
+    gene detected in a handful of cells can carry a very large ratio with almost no evidence
+    behind it, and a gene that ranks high on the test statistic can be a broadly expressed one
+    rather than a specific marker. Neither number is an estimate of a condition effect.'
+  python: 'scanpy.tl.rank_genes_groups(adata, groupby, method="wilcoxon", pts=True) records the
+    in-group and out-group detection fractions; scanpy.get.rank_genes_groups_df exposes them.
+    scanpy.tl.filter_rank_genes_groups writes filtered results under a new key with NaN for
+    filtered genes, so keep the original ranking and pass the key explicitly when reading it.'
+  citations:
+  - 'No upstream citation: ScAI''s own guidance, read from the scanpy 1.11.5 implementation of
+    rank_genes_groups. Not claimed as a bioSkills rule.'
+  source_skill: scai-native/markers-annotation
+- id: ambient-rna-is-a-signal-to-look-for
+  title: 'Ambient contamination shows as another population''s markers everywhere at low level'
+  enforcement: guidance
+  applies_when: 'Interpreting marker lists, or a cluster whose top genes belong to a different
+    abundant population.'
+  rule: 'Before reading a low-level signal of one population inside another as biology, check
+    whether it is ambient: the highly expressed genes of an abundant population appearing at
+    low level across every cluster. Estimate a background profile where the inputs allow it,
+    and otherwise state the possibility instead of ruling it out.'
+  why: 'Cell-free transcripts in the droplet suspension are captured with every cell, so the
+    most abundant population''s transcripts leak into all barcodes. The leak scales with that
+    population''s abundance and with how much lysis the preparation caused; it is not a
+    property of the receiving cell type.'
+  python: 'An empty-droplet profile from the unfiltered matrix is the usual estimate; when only
+    the filtered matrix exists, inspect whether the suspect genes are detected at low level in
+    every cluster. scvi-tools SCAR accepts a supplied ambient profile as well as one estimated
+    from raw droplets; state where the profile came from and how good it is.'
+  citations:
+  - Young & Behjati 2020 GigaScience 9:giaa151 -- SoupX, ambient mRNA contamination
+  - Sheng et al. 2022 bioRxiv 2022.01.14.476312 -- scAR, probabilistic ambient denoising
+  source_skill: scai-native/quality-control
+- id: descriptive-effect-sizes-without-replication
+  title: 'Without independent replication, describe the difference between specimens and stop there'
+  enforcement: guidance
+  applies_when: 'Reporting a contrast between populations or conditions from a design with one
+    sample per group.'
+  rule: 'Describe the difference with effect sizes that do not need an error rate -- an AUROC,
+    the difference in detection fraction, a standardised mean difference -- and say that they
+    describe these specimens. They do not restore a condition-level inference that the design
+    cannot support.'
+  why: 'A statistic computed over cells from one specimen per condition measures how the two
+    specimens differ; a p-value on it answers a question about cells, not conditions. The
+    effect sizes are still useful as description and as input to a later design, provided the
+    text does not let them stand in for the replication that is missing.'
+  python: 'Compute the AUROC directly, e.g. U / (n1 * n2) from scipy.stats.mannwhitneyu on the
+    normalised values (the rank_genes_groups score is a z statistic, not an AUROC); take the
+    detection fractions from pts=True; compute a standardised mean difference from the group
+    means and pooled standard deviation. Label the result descriptive, as
+    one-sample-per-condition-is-unidentifiable requires.'
+  citations:
+  - 'No upstream citation: ScAI''s own guidance on what to report instead of a p-value once
+    one-sample-per-condition-is-unidentifiable applies. Not claimed as a bioSkills rule.'
+  source_skill: scai-native/statistical-gates

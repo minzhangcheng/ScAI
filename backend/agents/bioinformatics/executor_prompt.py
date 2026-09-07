@@ -100,7 +100,10 @@ SECURITY RESTRICTIONS:
 
 
 def _executor_prompt_methods() -> str:
-    """Analysis-method guidance: workflow, scoring discipline, defensive coding."""
+    """Analysis-method guidance: workflow, scoring discipline, defensive coding.
+
+    A plain string, not an f-string: braces here are literal and must be single.
+    """
     return """
 WORKFLOW GUIDELINES:
 - When known, nominate execution_purpose and plan_step_ids on execute_code. These
@@ -125,9 +128,9 @@ WORKFLOW GUIDELINES:
   * Batch correction: `'X_pca_harmony' in adata.obsm` (or similar) — if True, SKIP
   * Trajectory/Velocity: `'velocity' in adata.layers` — if True, SKIP scvelo steps
   * At the START of any analysis, run a quick diagnostic:
-    print(f"obs columns: {{list(adata.obs.columns)}}")
-    print(f"obsm keys: {{list(adata.obsm.keys())}}")
-    print(f"uns keys: {{list(adata.uns.keys())}}")
+    print(f"obs columns: {list(adata.obs.columns)}")
+    print(f"obsm keys: {list(adata.obsm.keys())}")
+    print(f"uns keys: {list(adata.uns.keys())}")
     to see what's already available, then SKIP to the new analysis directly.
   * **OBS_NAMES / VAR_NAMES UNIQUENESS (CRITICAL):**
     After ANY of these operations, you MUST call adata.obs_names_make_unique() and adata.var_names_make_unique():
@@ -247,7 +250,7 @@ GENE MODULE SCORING — USE FULL GENE SET (CRITICAL):
      `.raw` therefore holds normalized log values, NOT counts — that is what use_raw=True consumers below expect. Raw integer counts belong in `adata.layers['counts']`, saved before normalization. Never store counts in `.raw`: score_genes(use_raw=True) would then silently score on counts and return numbers that look plausible and are wrong.
   2. Check gene overlap BEFORE scoring:
      overlap = [g for g in gene_list if g in adata.raw.var_names]
-     print(f"Gene overlap: {{len(overlap)}}/{{len(gene_list)}}")
+     print(f"Gene overlap: {len(overlap)}/{len(gene_list)}")
   3. Score with use_raw=True: sc.tl.score_genes(adata, gene_list, score_name='...', use_raw=True)
   4. If overlap < 50% of gene_list, investigate: wrong organism? wrong gene naming convention?
 
@@ -290,16 +293,24 @@ DEFENSIVE CODING (CRITICAL — prevents KeyError / empty DataFrame crashes):
   When iterating over clusters or cell types for DE/enrichment analysis, ALWAYS check for empty results:
     df = sc.get.rank_genes_groups_df(adata, group=cluster)
     if df.empty or 'names' not in df.columns:
-        print(f"WARNING: No DE genes for {{cluster}}, skipping")
+        print(f"WARNING: No DE genes for {cluster}, skipping")
         continue
     genes = df.head(15)['names'].tolist()
   This applies to: rank_genes_groups_df, gseapy.enrichr, gseapy.prerank, pathway analysis, any per-group iteration.
   NEVER assume a DataFrame slice will be non-empty — always guard with `.empty` check or try/except.
 
 CELL TYPE ANNOTATION WORKFLOW:
-1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')
+1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon', pts=True)
+   pts=True records the fraction of cells expressing each gene inside and outside the
+   group; a marker that ranks high on the Wilcoxon score but is detected in most cells
+   everywhere is a broadly expressed gene, not a specific marker. Keep the original
+   ranking under the default key (annotate_clusters reads it) and, if you also apply
+   sc.tl.filter_rank_genes_groups, print the filter you used: it writes NaN for filtered
+   genes into a NEW key, so pass that key explicitly if you read from it. Note that
+   scanpy's logfoldchanges are computed from expm1 of mean log values and overstate
+   lowly expressed genes; condition-level fold changes belong to pseudobulk, not here.
 2. Extract top 10-20 marker genes per cluster into a dict AND PRINT IT:
-   markers = {{}}
+   markers = {}
    for cluster in adata.obs['leiden'].cat.categories:
        df = sc.get.rank_genes_groups_df(adata, group=cluster)
        if df.empty:
@@ -388,19 +399,24 @@ Before running sc.tl.pca() or any dimensionality reduction:
   and figure from that representation. The runtime invalidates earlier same-round
   publication artifacts when it detects such a representation change.
 
-**HARMONY BATCH CORRECTION (CRITICAL — dimension mismatch prevention)**:
-When using harmonypy for batch correction, ALWAYS verify dimensions match:
+**HARMONY BATCH CORRECTION (CRITICAL — output orientation)**:
+harmonypy's `Z_corr` orientation changed between releases: the installed 0.2.0 returns
+(n_cells, n_pcs) directly, older releases returned (n_pcs, n_cells). scanpy 1.11.5's
+`sc.external.pp.harmony_integrate` still transposes unconditionally and fails with this
+harmonypy, so call harmonypy directly and check BOTH dimensions before assigning:
   import harmonypy as hm
-  # Use the SAME adata that was used for PCA — do NOT subset/filter between PCA and Harmony
-  ho = hm.run_harmony(adata.obsm['X_pca'], adata.obs, 'batch_column')
-  # Verify shape BEFORE assignment
-  print(f"Harmony output shape: {{ho.Z_corr.T.shape}}, adata n_obs: {{adata.n_obs}}")
-  assert ho.Z_corr.T.shape[0] == adata.n_obs, "Shape mismatch! Do not assign."
-  adata.obsm['X_pca_harmony'] = ho.Z_corr.T
+  X_pca = adata.obsm['X_pca']                      # (n_cells, n_pcs)
+  ho = hm.run_harmony(X_pca, adata.obs, 'batch_column')
+  Z = ho.Z_corr
+  if Z.shape != X_pca.shape and Z.shape == X_pca.shape[::-1]:   # (n_pcs, n_cells): older harmonypy
+      Z = Z.T
+  assert Z.shape == X_pca.shape, f"unexpected Harmony output shape {{Z.shape}} for input {{X_pca.shape}}"
+  adata.obsm['X_pca_harmony'] = Z
   # Then recompute neighbors/UMAP using the corrected embedding
   sc.pp.neighbors(adata, use_rep='X_pca_harmony')
   sc.tl.umap(adata)
-NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the dimension mismatch.
+Run Harmony on the same object that produced X_pca so the row order is the cell order;
+if the assertion fails, print both shapes and stop rather than guessing an orientation.
 
 **CRITICAL: REPRODUCIBILITY IS MANDATORY**
 - ALWAYS use random_state=42 or seed=42 in EVERY function that accepts it
