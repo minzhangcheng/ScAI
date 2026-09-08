@@ -89,6 +89,18 @@ def stop_session(session_id: str) -> str:
     return f"/api/session/{_segment(session_id)}/stop"
 
 
+def session_snapshots(session_id: str) -> str:
+    return f"/api/session/{_segment(session_id)}/snapshots"
+
+
+def session_snapshot(session_id: str, snapshot_id: str) -> str:
+    return f"{session_snapshots(session_id)}/{_segment(snapshot_id)}"
+
+
+def restore_snapshot(session_id: str, snapshot_id: str) -> str:
+    return f"{session_snapshot(session_id, snapshot_id)}/restore"
+
+
 OUTSIDE_V1 = {
     "health": "v1 has no version or liveness probe.",
     "login": "v1 has no authentication.",
@@ -99,4 +111,7 @@ OUTSIDE_V1 = {
     "import_cancel": "cancels the portable import job.",
     "session_export": "v1 export is not the portable session archive.",
     "stop_session": "v1 cannot stop a running analysis.",
+    "session_snapshots": "v1 has no decision snapshots.",
+    "session_snapshot": "deletes one decision snapshot.",
+    "restore_snapshot": "forks a session from one decision snapshot.",
 }

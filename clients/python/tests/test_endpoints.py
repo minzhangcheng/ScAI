@@ -58,7 +58,8 @@ def test_registry_matches_retained_routes():
         "analysis_config", "analysis_artifact", "upload_init", "upload_chunk",
         "upload_complete", "health", "login", "api_keys", "sessions",
         "session_import", "import_status", "import_cancel", "session_export",
-        "stop_session",
+        "stop_session", "session_snapshots", "session_snapshot",
+        "restore_snapshot",
     }
     builders = {
         name for name, value in vars(endpoints).items()
@@ -70,7 +71,12 @@ def test_registry_matches_retained_routes():
     assert set(endpoints.OUTSIDE_V1) == {
         "health", "login", "api_keys", "sessions", "session_import",
         "import_status", "import_cancel", "session_export", "stop_session",
+        "session_snapshots", "session_snapshot", "restore_snapshot",
     }
+    assert endpoints.restore_snapshot("s", "r003-round-g57") == (
+        "/api/session/s/snapshots/r003-round-g57/restore"
+    )
+    assert endpoints.session_snapshot("s", "..") == "/api/session/s/snapshots/%2E%2E"
     assert endpoints.analysis("a/b") == "/api/v1/analyses/a%2Fb"
     assert endpoints.analysis("..") == "/api/v1/analyses/%2E%2E"
     assert endpoints.analysis_artifact("a/b", "figures/x y.png") == (

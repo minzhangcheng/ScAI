@@ -196,6 +196,8 @@ def test_the_snapshot_v2_package_is_gone():
 #: made one on request would be a second producer with different semantics.
 PART_B_SNAPSHOT_ROUTES: frozenset[str] = frozenset({
     "/api/session/{session_id}/snapshots",
+    "/api/session/{session_id}/snapshots/{snapshot_id}",
+    "/api/session/{session_id}/snapshots/{snapshot_id}/restore",
 })
 
 

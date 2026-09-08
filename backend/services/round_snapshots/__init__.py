@@ -41,6 +41,11 @@ from .layout import (
     uploads_root,
 )
 from .listing import read_session_listing
+from .restore import (
+    SnapshotRestoreError,
+    restore_snapshot_into_new_session,
+    restored_session_name,
+)
 from .writer import (
     SnapshotAbandoned,
     SnapshotPrecondition,
@@ -65,6 +70,7 @@ __all__ = [
     "SnapshotAbandoned",
     "SnapshotManifestError",
     "SnapshotPrecondition",
+    "SnapshotRestoreError",
     "SnapshotsDisabled",
     "WORD_GATES",
     "build_continuation",
@@ -80,6 +86,8 @@ __all__ = [
     "parse_snapshot_id",
     "read_session_listing",
     "reclaim_abandoned_capture_work",
+    "restore_snapshot_into_new_session",
+    "restored_session_name",
     "read_snapshot_manifest",
     "restored_status_for",
     "retention_rank",

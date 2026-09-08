@@ -307,6 +307,61 @@ class Client:
         r.raise_for_status()
         return r.json().get("sessions", [])
 
+    def list_snapshots(self, session_id: str) -> Dict[str, Any]:
+        """Every decision snapshot this session has, and every capture that failed.
+
+        Returns a dict with ``enabled``, ``snapshots`` and ``failed``. When
+        ``enabled`` is false the installation does not take snapshots at all,
+        which is a different thing from a session that has produced none.
+
+        Each snapshot carries ``retention_rank`` (1 keeps longest) and
+        ``deletion_order`` (1 goes first), already computed by the server so
+        every client gives up the same one when asked to free space.
+        """
+        r = self._http.get(endpoints.session_snapshots(session_id))
+        if r.status_code == 401:
+            raise AuthError("Authentication failed")
+        r.raise_for_status()
+        return r.json()
+
+    def restore_snapshot(
+        self,
+        session_id: str,
+        snapshot_id: str,
+        *,
+        wait: bool = True,
+        poll_interval: float = 2.0,
+        timeout: Optional[int] = None,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> str:
+        """Fork a session as it was before one decision. The source is untouched.
+
+        Returns the new session id, or the job id when ``wait`` is false. The
+        job is reported through the import registry, because a restore is an
+        import from a local bundle.
+        """
+        r = self._http.post(endpoints.restore_snapshot(session_id, snapshot_id))
+        if r.status_code == 401:
+            raise AuthError("Authentication failed")
+        if r.status_code >= 400:
+            raise ScaiError(f"Restore failed: HTTP {r.status_code}: {r.text}")
+        job_id = r.json().get("job_id")
+        if not job_id:
+            raise ScaiError(f"Unexpected restore response: {r.json()}")
+        if not wait:
+            return job_id
+        return self._wait_for_import(
+            job_id, poll_interval, timeout, on_progress, id_field="new_session_id",
+        )
+
+    def delete_snapshot(self, session_id: str, snapshot_id: str) -> None:
+        """Give up one restore point. Nothing else is touched."""
+        r = self._http.delete(endpoints.session_snapshot(session_id, snapshot_id))
+        if r.status_code == 401:
+            raise AuthError("Authentication failed")
+        if r.status_code >= 400:
+            raise ScaiError(f"Delete failed: HTTP {r.status_code}: {r.text}")
+
     def import_session(
         self,
         archive_path: str | Path,
@@ -496,7 +551,14 @@ class Client:
         poll_interval: float,
         timeout: Optional[int],
         on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        id_field: str = "session_id",
     ) -> str:
+        """Poll one import-shaped job until it names the session it made.
+
+        ``id_field`` differs by producer: an archive import reports
+        ``session_id`` because it may reuse the archive's own, while a snapshot
+        restore reports ``new_session_id`` because it always allocates one.
+        """
         start = time.time()
         while True:
             r = self._http.get(endpoints.import_status(import_id))
@@ -512,9 +574,9 @@ class Client:
                     pass
             st = info.get("status")
             if st == "completed":
-                session_id = info.get("session_id")
+                session_id = info.get(id_field)
                 if not session_id:
-                    raise ScaiError(f"Import completed but no session_id: {info}")
+                    raise ScaiError(f"Import completed but no {id_field}: {info}")
                 return session_id
             if st == "failed":
                 raise ImportFailed(import_id, info.get("error", "unknown"))

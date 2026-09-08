@@ -447,11 +447,15 @@ def test_no_route_creates_a_snapshot():
     A create endpoint would be a second producer with different semantics: it
     could run mid-cell, against a generation nothing had committed, and produce
     a bundle whose pair describes a position the dump never held.
+
+    Stated as "nothing posts to the collection", not "nothing posts": restoring
+    is a POST to one snapshot, and it creates a *session*, not a snapshot.
     """
     from backend.tests.test_route_registry import _current_routes
 
+    collection = "/api/session/{session_id}/snapshots"
     creators = [
         (path, methods) for path, methods in _current_routes()
-        if "snapshot" in path.lower() and "POST" in methods
+        if path == collection and "POST" in methods
     ]
     assert creators == []

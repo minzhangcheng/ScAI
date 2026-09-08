@@ -92,13 +92,17 @@ class _Sandbox:
     writer's freshness rule is stated in terms of exactly that.
     """
 
-    def __init__(self, session_id: str, revision: int, digest: str, *, current: int | None = None):
+    def __init__(
+        self, session_id: str, revision: int, digest: str, *,
+        current: int | None = None, round_number: int = 3,
+    ):
         self.session_id = session_id
         self._exec_lock = asyncio.Lock()
         self.km = object()
         self.notebook_state = _Notebook(
             session_id, revision, digest, revision if current is None else current,
         )
+        self.round_number = round_number
         self.saves = 0
         self.save_result = True
         self.synced = []
@@ -112,7 +116,7 @@ class _Sandbox:
         record["committed_revision"] = revision
         record["saved_revision"] = revision
         record["last_attempt_status"] = "succeeded"
-        _write_pair(self.session_id, revision)
+        _write_pair(self.session_id, revision, round_number=self.round_number)
         _rewrite_runtime_manifest(self.session_id, revision)
         return True
 
@@ -125,14 +129,85 @@ def _digest_of(path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _write_pair(session_id: str, revision: int) -> None:
+def _write_checkpoint_db(path, session_id: str, round_number: int) -> None:
+    """A real graph checkpoint, because the restore reads one back.
+
+    Placeholder bytes were enough while only the capture was under test -- it
+    copies the file and hashes it -- but a restore opens it through LangGraph's
+    own serializer and pulls the root position out, so the harness has to
+    produce something that actually is one.
+    """
+    import sqlite3
+
+    from backend.models.schemas import AnalysisState
+    from backend.utils.checkpoint import DurableJsonPlusSerializer
+
+    serde = DurableJsonPlusSerializer(allowed_json_modules=[
+        ("backend.models.schemas", name)
+        for name in ("AgentType", "AnalysisState", "AnalysisPhase",
+                     "RoundResult", "TaskStatus", "MessageRole")
+    ])
+    kind, blob = serde.dumps_typed({
+        "v": 1,
+        "id": "checkpoint-1",
+        "channel_values": {
+            "analysis_state": AnalysisState(
+                id=session_id, name="Liver atlas", user_id="owner-1",
+                current_round=round_number,
+            ),
+            "current_round": round_number,
+            "planning_stage": "full",
+            "plan_approved": True,
+            "should_continue": True,
+        },
+        "channel_versions": {},
+        "versions_seen": {},
+    })
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS checkpoints "
+            "(thread_id TEXT, checkpoint_ns TEXT, checkpoint_id TEXT, "
+            "type TEXT, checkpoint BLOB)"
+        )
+        connection.execute("DELETE FROM checkpoints")
+        connection.execute(
+            "INSERT INTO checkpoints VALUES (?, ?, ?, ?, ?)",
+            (session_id, "", "checkpoint-1", kind, blob),
+        )
+
+
+def _write_pair(session_id: str, revision: int, *, round_number: int = 3) -> None:
     from backend.config import get_session_states
     from backend.utils.sandbox_parts.regular_save import GENERATION_PAIR_DIRNAME
 
     pair = get_session_states(session_id) / GENERATION_PAIR_DIRNAME / str(revision)
     pair.mkdir(parents=True, exist_ok=True)
-    (pair / "state.json").write_text(json.dumps({"session_id": session_id}))
-    (pair / "checkpoints.sqlite").write_bytes(b"SQLite format 3\x00" + bytes(64))
+    (pair / "state.json").write_text(json.dumps({
+        "session_id": session_id,
+        "lifecycle_generation": 1,
+        # The notebook metadata a real commit captures beside the dump. A
+        # restore projects the new session's persistence record from this, and
+        # coherence is decided on the result, so a placeholder here would make
+        # every restored session read as having no runtime at all.
+        "runtime_persistence": {
+            "status": "current",
+            "current_revision": revision,
+            "saved_revision": revision,
+            "committed_revision": revision,
+            "committed_source": "regular_save",
+            "committed_digest": _digest_of(
+                get_session_states(session_id) / f"{session_id}_session.pkl"
+            ),
+            "committed_pairing": {"state_version": 1189, "checkpoint": "d" * 64},
+            "last_attempt_status": "succeeded",
+            # Omitting this reads as "committed a revision nobody attempted",
+            # which coherence calls inconsistent -- a real save always records it.
+            "last_attempt_revision": revision,
+            "last_saved_at": "2026-09-08T10:00:00+00:00",
+            "lifecycle_generation": 1,
+        },
+    }, indent=2))
+    _write_checkpoint_db(pair / "checkpoints.sqlite", session_id, round_number)
 
 
 def _rewrite_runtime_manifest(session_id: str, revision: int) -> None:
@@ -164,7 +239,10 @@ def _rewrite_runtime_manifest(session_id: str, revision: int) -> None:
     )
 
 
-def _seed_session(session_id: str, *, revision: int = 57, dump: bytes = b"a dump") -> str:
+def _seed_session(
+    session_id: str, *, revision: int = 57, dump: bytes = b"a dump",
+    round_number: int = 3,
+) -> str:
     """A session on disk with one committed generation and its pair."""
     from backend.config import (
         ensure_session_dirs,
@@ -181,7 +259,7 @@ def _seed_session(session_id: str, *, revision: int = 57, dump: bytes = b"a dump
     pkl.write_bytes(dump)
     _write_pkl_signature(pkl, _integrity_dir(session_id))
     _rewrite_runtime_manifest(session_id, revision)
-    _write_pair(session_id, revision)
+    _write_pair(session_id, revision, round_number=round_number)
     (states / f"{session_id}.ipynb").write_text(json.dumps({"cells": []}))
 
     workspace = get_session_workspace(session_id)
@@ -225,8 +303,12 @@ def capture(monkeypatch, tmp_path):
 
     def _build(*, revision=57, current=None, round_number=3, dump=b"a dump"):
         session_id = "snap-" + uuid.uuid4().hex[:12]
-        digest = _seed_session(session_id, revision=revision, dump=dump)
-        sandbox = _Sandbox(session_id, revision, digest, current=current)
+        digest = _seed_session(
+            session_id, revision=revision, dump=dump, round_number=round_number,
+        )
+        sandbox = _Sandbox(
+            session_id, revision, digest, current=current, round_number=round_number,
+        )
         return _Workflow(sandbox), _state(session_id, round_number=round_number)
 
     return _build

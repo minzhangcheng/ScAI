@@ -106,6 +106,56 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_snapshots(args: argparse.Namespace) -> int:
+    """List, restore or delete a session's decision snapshots.
+
+    There is no ``create``: a snapshot is taken automatically before each
+    decision an analysis asks about itself, and a command that made one on
+    request would be a second producer with different semantics.
+    """
+    with _client(args) as client:
+        if args.action == "restore":
+            new_id = client.restore_snapshot(
+                args.session_id, args.snapshot_id, wait=not args.no_wait,
+            )
+            print(new_id)
+            return 0
+        if args.action == "delete":
+            client.delete_snapshot(args.session_id, args.snapshot_id)
+            log(f"deleted {args.snapshot_id}")
+            return 0
+
+        listing = client.list_snapshots(args.session_id)
+        if args.json:
+            print(json.dumps(listing, indent=2, ensure_ascii=False))
+            return 0
+        if not listing.get("enabled"):
+            log("snapshots are not enabled on this installation")
+            return 0
+        rows = listing.get("snapshots") or []
+        if not rows:
+            log("no snapshots")
+        else:
+            table(
+                [
+                    [
+                        row["snapshot_id"],
+                        row["gate"],
+                        str(row["round"]),
+                        str(row["retention_rank"]),
+                        str(row["deletion_order"]),
+                        "superseded" if row.get("superseded") else "",
+                        row["created_at"],
+                    ]
+                    for row in rows
+                ],
+                ["ID", "DECISION", "ROUND", "KEEP", "DROP", "", "CREATED"],
+            )
+        for row in listing.get("failed") or []:
+            log(f"no snapshot for {row['snapshot_id']}: {row['reason']}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     with _client(args) as client:
         print(json.dumps(client.get_job(args.session_id).status(), indent=2, ensure_ascii=False))
