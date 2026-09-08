@@ -494,6 +494,156 @@ def test_regular_runtime_commit_rolls_back_pkl_when_metadata_fails(tmp_path):
 
 
 
+def _paired_fixture(tmp_path):
+    """A dump about to be committed, and the three files it is paired with."""
+    import sqlite3
+
+    states = tmp_path / "states"
+    states.mkdir()
+    live = states / "s_session.pkl"
+    staged = states / "s_session.pkl.tmp"
+    staged.write_bytes(b"new-generation")
+    state_json = states / "s_state.json"
+    state_json.write_text(json.dumps({"session_id": "s", "state_version": 12}))
+    checkpoint = states / "checkpoints.sqlite"
+    with sqlite3.connect(checkpoint) as conn:
+        conn.execute("CREATE TABLE checkpoints (thread_id TEXT, blob TEXT)")
+        conn.execute("INSERT INTO checkpoints VALUES ('s', 'position-7')")
+    executor = states / "s_bioinfo_checkpoint.json"
+    executor.write_text(json.dumps({"step_number": 40, "round_number": 2}))
+    return states, live, staged, state_json, checkpoint, executor
+
+
+def test_a_commit_captures_the_generation_it_can_be_continued_from(tmp_path):
+    """Spec B2-1: a dump alone is not a restore point.
+
+    The namespace is only continuable beside the workflow state, the graph
+    position and the executor's own step position. Committing the dump without
+    them is what leaves a healthy generation unusable after a crash, because
+    the live copies of all three have moved on by then.
+    """
+    states, live, staged, state_json, checkpoint, executor = _paired_fixture(tmp_path)
+    integrity = tmp_path / "integrity"
+
+    _commit_pkl_transaction(
+        staged,
+        live,
+        integrity,
+        lambda: None,
+        target_revision=7,
+        generation_root=states / "generation",
+        paired_sources={
+            "state": state_json,
+            "checkpoint": checkpoint,
+            "executor_checkpoint": executor,
+        },
+    )
+
+    pair = states / "generation" / "7"
+    assert json.loads((pair / "state.json").read_text())["state_version"] == 12
+    assert json.loads((pair / "executor_checkpoint.json").read_text())["step_number"] == 40
+
+    import sqlite3
+
+    with sqlite3.connect(pair / "checkpoints.sqlite") as conn:
+        assert conn.execute("SELECT blob FROM checkpoints").fetchone()[0] == "position-7"
+
+
+def test_an_absent_executor_checkpoint_is_recorded_as_absent(tmp_path):
+    """A round boundary reached after the executor finished has none.
+
+    Absent must not read as a component that failed to copy: the first would
+    make every round-boundary save fail, and the second has to keep failing the
+    commit.
+    """
+    states, live, staged, state_json, checkpoint, executor = _paired_fixture(tmp_path)
+    executor.unlink()
+    integrity = tmp_path / "integrity"
+
+    _commit_pkl_transaction(
+        staged,
+        live,
+        integrity,
+        lambda: None,
+        target_revision=3,
+        generation_root=states / "generation",
+        paired_sources={
+            "state": state_json,
+            "checkpoint": checkpoint,
+            "executor_checkpoint": executor,
+        },
+    )
+
+    pair = states / "generation" / "3"
+    assert (pair / "state.json").is_file()
+    assert not (pair / "executor_checkpoint.json").exists()
+
+
+def test_a_failed_commit_leaves_no_half_written_pair(tmp_path):
+    """The pair rolls back with the generation it describes.
+
+    A pair that outlived its rollback would name a dump that is no longer on
+    disk, which is worse than no pair at all -- recovery would offer it.
+    """
+    states, live, staged, state_json, checkpoint, executor = _paired_fixture(tmp_path)
+    integrity = tmp_path / "integrity"
+    live.write_bytes(b"old")
+    from backend.utils.sandbox import _write_pkl_signature
+
+    _write_pkl_signature(live, integrity)
+
+    with pytest.raises(RuntimeError, match="metadata"):
+        _commit_pkl_transaction(
+            staged,
+            live,
+            integrity,
+            lambda: (_ for _ in ()).throw(RuntimeError("metadata failed")),
+            target_revision=9,
+            generation_root=states / "generation",
+            paired_sources={
+                "state": state_json,
+                "checkpoint": checkpoint,
+                "executor_checkpoint": executor,
+            },
+        )
+
+    assert live.read_bytes() == b"old"
+    assert not (states / "generation" / "9" / "state.json").exists()
+    assert not (states / "generation" / "9" / "checkpoints.sqlite").exists()
+
+
+def test_only_the_newest_pair_is_kept(tmp_path):
+    """Retention is one (B2-1). Never zero: the older pair goes only after the
+    newer one is durable."""
+    states, live, staged, state_json, checkpoint, executor = _paired_fixture(tmp_path)
+    integrity = tmp_path / "integrity"
+
+    _commit_pkl_transaction(
+        staged, live, integrity, lambda: None,
+        target_revision=4,
+        generation_root=states / "generation",
+        paired_sources={
+            "state": state_json, "checkpoint": checkpoint,
+            "executor_checkpoint": executor,
+        },
+    )
+    assert (states / "generation" / "4").is_dir()
+
+    staged.write_bytes(b"newer-generation")
+    _commit_pkl_transaction(
+        staged, live, integrity, lambda: None,
+        target_revision=5,
+        generation_root=states / "generation",
+        paired_sources={
+            "state": state_json, "checkpoint": checkpoint,
+            "executor_checkpoint": executor,
+        },
+    )
+
+    assert (states / "generation" / "5").is_dir()
+    assert not (states / "generation" / "4").exists()
+
+
 class _SimulatedProcessCrash(BaseException):
     pass
 
@@ -1169,3 +1319,90 @@ def test_restore_of_older_committed_generation_is_explicitly_degraded(
     assert persistence["degraded_to_revision"] == 7
     assert persistence["last_attempt_status"] == "failed"
     assert persistence["requires_recompute"] is True
+
+
+def test_a_committed_generation_records_how_long_it_took(tmp_path):
+    """Spec B3-2 ships this with the decision to keep N at 30.
+
+    The duration of one save is the constraint that decision turns on -- six to
+    nine minutes at the end of a long run, with the execution lock held -- and
+    it existed only in container logs, which vanish on restart. Evaluating N
+    had to extrapolate it from two other sessions for exactly that reason.
+    """
+    from backend.utils.sandbox import NotebookState
+
+    state = NotebookState("timed", str(tmp_path))
+    state.update_runtime_persistence(
+        "current", current_revision=7, saved_revision=7,
+        commit_source="regular_save", runtime_digest="c" * 64,
+        save_seconds=124.5,
+    )
+    assert state.runtime_persistence["last_save_seconds"] == 124.5
+
+
+def test_a_failed_attempt_leaves_the_last_good_duration_alone(tmp_path):
+    """It describes the last generation that reached disk, like every other
+    committed_* field beside it."""
+    from backend.utils.sandbox import NotebookState
+
+    state = NotebookState("timed-failure", str(tmp_path))
+    state.update_runtime_persistence(
+        "current", current_revision=7, saved_revision=7,
+        commit_source="regular_save", runtime_digest="c" * 64,
+        save_seconds=124.5,
+    )
+    state.update_runtime_persistence(
+        "failed", current_revision=8, saved_revision=7,
+        error_summary="no space left on device",
+    )
+    assert state.runtime_persistence["last_save_seconds"] == 124.5
+
+
+def test_the_save_path_measures_what_it_records():
+    """A field nothing populates is documentation, not a measurement."""
+    import pathlib as _pathlib
+
+    repo = _pathlib.Path(__file__).resolve().parents[2]
+    source = (
+        repo / "backend" / "utils" / "sandbox_parts" / "runtime_save.py"
+    ).read_text()
+    assert "save_seconds=" in source
+    assert "monotonic()" in source
+
+
+def test_a_second_save_at_the_same_revision_drops_a_stale_pair_file(tmp_path):
+    """The executor finishes and clears its checkpoint; the pair must follow.
+
+    Generation directories are named by runtime revision, so a save at an
+    unchanged revision reuses the directory -- which happens because the
+    reuse branch cannot fire once the graph has advanced. Skipping an absent
+    source left the previous save's executor_checkpoint.json in place, and a
+    restore would copy it back. Worse, it would pass the exact-revision rule,
+    because the revision it records really is this generation's.
+    """
+    states, live, staged, state_json, checkpoint, executor = _paired_fixture(tmp_path)
+    integrity = tmp_path / "integrity"
+    pair_args = dict(
+        generation_root=states / "generation",
+        paired_sources={
+            "state": state_json,
+            "checkpoint": checkpoint,
+            "executor_checkpoint": executor,
+        },
+    )
+
+    _commit_pkl_transaction(
+        staged, live, integrity, lambda: None, target_revision=4, **pair_args,
+    )
+    assert (states / "generation" / "4" / "executor_checkpoint.json").is_file()
+
+    executor.unlink()  # the executor completed and cleared its checkpoint
+    staged.write_bytes(b"same revision, the graph moved on")
+    _commit_pkl_transaction(
+        staged, live, integrity, lambda: None, target_revision=4, **pair_args,
+    )
+
+    assert not (states / "generation" / "4" / "executor_checkpoint.json").exists(), (
+        "a pair must not carry a position its generation no longer has"
+    )
+    assert (states / "generation" / "4" / "state.json").is_file()

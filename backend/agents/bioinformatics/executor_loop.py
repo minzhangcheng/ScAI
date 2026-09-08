@@ -771,6 +771,7 @@ async def prepare_loop_context(
             ],
             analysis_context=self.analysis_context,
             budget_exhausted=budget_exhausted,
+            runtime_revision=getattr(self.sandbox, "runtime_revision", None),
         )
         await checkpoint_mgr.save(checkpoint_data)
         if save_sandbox:

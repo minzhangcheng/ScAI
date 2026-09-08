@@ -14,6 +14,7 @@ reused by sandbox startup recovery.
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -285,6 +286,155 @@ def runtime_h5ad_manifest_path(
 
 
 
+def restore_generation_pair(session_id: str, *, revision: int) -> bool:
+    """Put a committed generation's captured positions back beside its dump.
+
+    The generation itself is healthy -- it passed its HMAC, its manifest
+    verifies, its digest matches. What made it unusable is that the state, the
+    graph position and the executor position all moved on before the crash was
+    noticed, so nothing on disk agreed with it any more. B2-1 captured those
+    three at commit time; this puts them back, and the run continues from the
+    step the dump was taken at rather than from the input files.
+
+    Returns False when the pair is absent or incomplete, which leaves
+    retirement as the fallback exactly as before. Half a restore point is not
+    a restore point: a state without its graph position would resume a
+    position that no longer exists.
+
+    Copies are staged beside their targets and published by rename, so a
+    failure while reading the pair leaves the live files untouched.
+    """
+    from backend.utils.checkpoint_paths import checkpoint_sqlite_path
+    from backend.utils.files import fsync_directory
+    from backend.utils.sandbox_parts.regular_save import (
+        GENERATION_PAIR_DIRNAME,
+        _copy_durable,
+    )
+
+    states_dir = _states_dir(session_id)
+    pair = states_dir / GENERATION_PAIR_DIRNAME / str(int(revision))
+    paired_state = pair / "state.json"
+    paired_checkpoint = pair / "checkpoints.sqlite"
+    if not (paired_state.is_file() and paired_checkpoint.is_file()):
+        return False
+
+    live_state = states_dir / f"{session_id}_state.json"
+    live_checkpoint = checkpoint_sqlite_path(states_dir)
+    live_executor = states_dir / f"{session_id}_bioinfo_checkpoint.json"
+    paired_executor = pair / "executor_checkpoint.json"
+
+    # Ordered so the *declaration* lands last. There is no journal here, and
+    # adding one would duplicate the commit transaction for three small files;
+    # the ordering does the same job. `<sid>_state.json` is what says the
+    # restored generation is the current one, so publishing it last means a
+    # crash between publishes leaves a record that is still newer than the
+    # generation -- coherence still reads `stale`, the next start attempts the
+    # restore again, and this function is idempotent.
+    #
+    # The other order is the dangerous one: a record claiming the older
+    # generation is current, beside a graph position from the newer work, is a
+    # mismatch nothing downstream can detect.
+    sources = [(paired_checkpoint, live_checkpoint)]
+    if paired_executor.is_file():
+        sources.append((paired_executor, live_executor))
+    sources.append((paired_state, live_state))
+
+    # What this restore costs, read from the record it is about to replace.
+    # Spec B2-3: the restored record reads `current` again -- the pair holds a
+    # generation whose current_revision equals its committed_revision -- so
+    # without carrying this across, the disclosure would go silent at the exact
+    # moment the user most needs it.
+    discarded_from = 0
+    discarded_since = None
+    try:
+        previous = (
+            json.loads(live_state.read_text()).get("runtime_persistence") or {}
+        )
+        discarded_from = int(previous.get("current_revision") or 0)
+        discarded_since = previous.get("last_saved_at")
+    except (OSError, ValueError, TypeError, AttributeError):
+        logger.warning(
+            "[%s] Could not read the record being replaced by a pair restore",
+            session_id,
+        )
+
+    incoming: list[tuple[Path, Path]] = []
+    staged_state = None
+    try:
+        for source, target in sources:
+            staged = target.with_name(target.name + ".incoming")
+            _copy_durable(source, staged)
+            if target == live_state:
+                staged_state = staged
+            incoming.append((staged, target))
+    except BaseException:
+        for staged, _target in incoming:
+            staged.unlink(missing_ok=True)
+        raise
+
+    if staged_state is not None:
+        try:
+            payload = json.loads(staged_state.read_text())
+            persistence = payload.setdefault("runtime_persistence", {})
+            persistence["pair_restore"] = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "restored_revision": int(revision),
+                "discarded_revisions": max(0, discarded_from - int(revision)),
+                "discarded_since": discarded_since,
+            }
+            with staged_state.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except (OSError, ValueError, TypeError, AttributeError):
+            # The declaration is part of the restore transaction now: without
+            # a durable annotation, leave the old declaration in place so the
+            # caller can retry instead of publishing an unverified state.
+            logger.warning(
+                "[%s] Could not prepare the restored state declaration",
+                session_id,
+                exc_info=True,
+            )
+            raise
+
+    # Publish the positions first. The state declaration is deliberately held
+    # back until every prerequisite write and cleanup below is durable, so a
+    # failure leaves the old metadata describing the still-unfinished restore.
+    for staged, target in incoming:
+        if target != live_state:
+            os.replace(staged, target)
+    fsync_directory(states_dir)
+
+    # The write-ahead log and shared-memory file belong to the database that
+    # was just replaced. SQLite would replay them over the restored one, which
+    # would put the graph back where the crash left it.
+    for companion in (
+        live_checkpoint.with_name(live_checkpoint.name + "-wal"),
+        live_checkpoint.with_name(live_checkpoint.name + "-shm"),
+    ):
+        companion.unlink(missing_ok=True)
+
+    if not paired_executor.is_file():
+        # This generation has no executor position: a round boundary reached
+        # after the executor finished clears its checkpoint. A live one is then
+        # newer than the namespace being restored -- the §3.11 mismatch in a
+        # new place, and the one place a resume would not catch it, since
+        # `validate_checkpoint` would see a checkpoint *ahead* of the committed
+        # revision and treat it as ordinary.
+        _quarantine_path(live_executor)
+    fsync_directory(states_dir)
+
+    # Publishing this declaration last makes the restore point visible only
+    # after its positions and cleanup have reached stable storage.
+    os.replace(staged_state, live_state)
+    fsync_directory(states_dir)
+
+    logger.info(
+        "[%s] Restored the generation pair for revision %d", session_id, revision,
+    )
+    return True
+
+
 def retire_live_runtime(session_id: str, *, include_checkpoint: bool = False) -> bool:
     """Move the live runtime aside so the next kernel starts empty.
 
@@ -337,4 +487,20 @@ def retire_live_runtime(session_id: str, *, include_checkpoint: bool = False) ->
         ):
             if _quarantine_path(path) is not None:
                 retired = True
+
+        # The executor's own position, and its account of what it has already
+        # done -- `step_number`, the message history, `code_history`,
+        # `analysis_log`. Left behind it is worse than the graph checkpoint
+        # above, because nothing catches it: `validate_checkpoint` compares
+        # only `round_number` and `planning_stage`, and retirement preserves
+        # the round, so the next run restored all of it over a namespace that
+        # no longer holds anything it refers to -- while the agent was being
+        # told the kernel was empty.
+        #
+        # The report generator's checkpoint (`_report_checkpoint.json`) is
+        # deliberately not included: it resumes from session data, not from
+        # kernel state, so a retired runtime does not invalidate it.
+        executor_checkpoint = states_dir / f"{session_id}_bioinfo_checkpoint.json"
+        if _quarantine_path(executor_checkpoint) is not None:
+            retired = True
     return retired

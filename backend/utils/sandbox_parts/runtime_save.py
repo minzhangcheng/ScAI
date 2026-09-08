@@ -4,7 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 import json
+import time
 from typing import Any, Dict
+
+from backend.utils.runtime_names import PRIVATE_EXCLUSION_SCRIPT
 
 
 class RuntimeCoverageError(RuntimeError):
@@ -24,6 +27,7 @@ _COVERAGE_MARKERS = {
 # absent without complaint.
 _OPTIONAL_MARKERS = {
     "carried_definitions": "__SCAI_CARRIED_DEFINITIONS__:",
+    "excluded_private": "__SCAI_EXCLUDED_PRIVATE__:",
 }
 
 
@@ -85,13 +89,15 @@ def _parse_coverage_markers(output: str) -> dict | None:
     return found
 
 
-def _classify_skipped(skipped, *, excluded_by_kind, excluded_volatile):
-    """One coverage record from the three channels the kernel reports.
+def _classify_skipped(skipped, *, excluded_by_kind, excluded_volatile,
+                      excluded_private=()):
+    """One coverage record from the four channels the kernel reports.
 
-    A value dill refused, a value never offered because of its kind, and a
-    value excluded as a volatile handle are three different facts about the
-    same generation; collapsing them loses the only signal that says whether a
-    name is worth recomputing.
+    A value dill refused, one never offered because of its kind, one excluded
+    as a volatile handle, and one excluded for having a private name are four
+    different facts about the same generation; collapsing them loses the only
+    signal that says whether a name is worth recomputing. The last defaults to
+    empty, so a producer that predates it classifies as it used to.
     """
     entries: dict = {}
     for item in skipped or ():
@@ -105,6 +111,7 @@ def _classify_skipped(skipped, *, excluded_by_kind, excluded_volatile):
     for reason, source in (
         ("excluded_by_kind", excluded_by_kind),
         ("excluded_volatile", excluded_volatile),
+        ("excluded_private", excluded_private),
     ):
         for item in source or ():
             name = str(item.get("name") or "")
@@ -544,10 +551,8 @@ def _scai_is_own_definition(_o):
     except Exception:
         return False
 
-_live = {}
-for _scai_name in list(globals().keys()):
-    if not _scai_name.startswith('_'):
-        _live[_scai_name] = globals()[_scai_name]
+""" + PRIVATE_EXCLUSION_SCRIPT + """
+_live = {_n: globals()[_n] for _n in _scai_snapshot if not _n.startswith('_')}
 
 # Every AnnData is required no matter what it is called. Matching canonical
 # names alone silently dropped things like `adata_hepatocyte`, which is exactly
@@ -709,6 +714,8 @@ print("__SCAI_EXCLUDED_VOLATILE__:" + _scai_json.dumps(
     sorted(_excluded_volatile, key=lambda _e: _e["name"])))
 print("__SCAI_CARRIED_DEFINITIONS__:" + _scai_json.dumps(
     sorted(_carried_definitions, key=lambda _e: _e["name"])))
+print("__SCAI_EXCLUDED_PRIVATE__:" + _scai_json.dumps(
+    sorted(_excluded_private, key=lambda _e: _e["name"])))
 """
     return save_code
 
@@ -745,6 +752,7 @@ async def _execute_save(
     *,
     bindings,
 ) -> bool:
+    started = time.monotonic()
     sandbox = context.sandbox
     result = await sandbox._execute_unlocked(
         save_code,
@@ -812,6 +820,8 @@ async def _execute_save(
             skipped,
             excluded_by_kind=coverage["excluded_by_kind"],
             excluded_volatile=coverage["excluded_volatile"],
+            # `.get`, like the carried record: optional, not incomplete.
+            excluded_private=coverage.get("excluded_private") or [],
         )
         if coverage
         else []
@@ -892,6 +902,7 @@ async def _execute_save(
                     commit_source="regular_save",
                     runtime_digest=target_digest,
                     committed_pairing=context.pairing,
+                    save_seconds=round(time.monotonic() - started, 3),
                 )
 
         commit_outcome: Dict[str, Any] = {
@@ -924,6 +935,10 @@ async def _execute_save(
                                     "serializer_version": "dill-zstd-1",
                                 },
                                 target_revision=context.revision,
+                                generation_root=bindings.Path(
+                                    sandbox.notebook_state.state_dir
+                                ) / bindings.GENERATION_PAIR_DIRNAME,
+                                paired_sources=bindings.paired_generation_sources(sandbox),
                                 authoritative_pkl_names=saved_names,
                                 fault_hook=getattr(
                                     sandbox, "_regular_save_fault_hook", None

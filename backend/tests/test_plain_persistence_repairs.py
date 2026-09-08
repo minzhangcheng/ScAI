@@ -129,6 +129,211 @@ async def test_send_failure_no_longer_marks_dirty():
     assert sb.runtime_revision == 0
 
 
+def _committed_pair(sid, revision):
+    """A generation pair as B2-1's commit leaves it."""
+    import json as _json
+    import sqlite3
+
+    from backend.config import get_session_states
+    from backend.models.schemas import AnalysisState
+    from backend.utils.checkpoint import DurableJsonPlusSerializer
+
+    states = get_session_states(sid)
+    pair = states / "generation" / str(revision)
+    pair.mkdir(parents=True, exist_ok=True)
+    (pair / "state.json").write_text(_json.dumps({"session_id": sid}))
+    kind, payload = DurableJsonPlusSerializer().dumps_typed({
+        "channel_values": {"analysis_state": AnalysisState(
+            id=sid, user_id="u1", current_round=2,
+        )},
+    })
+    with sqlite3.connect(pair / "checkpoints.sqlite") as conn:
+        conn.execute("CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, "
+                     "checkpoint_id TEXT, type TEXT, checkpoint BLOB, blob TEXT)")
+        conn.execute("INSERT INTO checkpoints VALUES (?, '', '1', ?, ?, 'paired')",
+                     (sid, kind, payload))
+    (pair / "executor_checkpoint.json").write_text(
+        _json.dumps({"step_number": 20, "runtime_revision": revision})
+    )
+    return states
+
+
+def _stale_persistence(committed, current):
+    return {
+        "status": "live_dirty",
+        "current_revision": current,
+        "saved_revision": committed,
+        "committed_revision": committed,
+        "committed_source": "regular_save",
+        "committed_digest": "a" * 64,
+        "last_attempt_status": "succeeded",
+        "last_attempt_revision": committed,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pair_start_restores_progress_before_publication_and_graph_resume(monkeypatch):
+    import aiosqlite
+    from typing import TypedDict
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from langgraph.graph import END, START, StateGraph
+    from backend.config import get_session_states
+    from backend.models.schemas import AnalysisPlan, AnalysisState, TaskStatus
+    from backend.routes import lifecycle
+    from backend.routes.websockets import _needs_report_only
+    from backend.services.session_store import load_session_from_disk
+    from backend.state import sessions
+    from backend.utils import runtime_apply
+    from backend.utils.checkpoint import DurableJsonPlusSerializer
+
+    sid = str(uuid.uuid4())
+    states = get_session_states(sid)
+    pair = states / "generation" / "44"
+    pair.mkdir(parents=True)
+    record = _stale_persistence(44, 44)
+    record["status"] = "current"
+    (pair / "state.json").write_text(json.dumps({
+        "session_id": sid, "runtime_persistence": record,
+    }))
+    (states / f"{sid}_state.json").write_text(json.dumps({
+        "session_id": sid, "runtime_persistence": _stale_persistence(44, 61),
+    }))
+    runtime_apply._live_pkl(sid).write_bytes(b"committed")
+    old = AnalysisState(
+        id=sid, user_id="u1", current_round=1,
+        current_plan=AnalysisPlan(id="paired-plan", phase="exploration"),
+        runtime_persistence=record,
+    )
+    schema = TypedDict("PairGraphState", {"analysis_state": AnalysisState})
+    builder = StateGraph(schema)
+    seen = []
+
+    def work(value):
+        seen.append((value["analysis_state"].current_round,
+                     value["analysis_state"].current_plan.id))
+        return value
+
+    builder.add_node("work", work)
+    builder.add_edge(START, "work")
+    builder.add_edge("work", END)
+    config = {"configurable": {"thread_id": sid}}
+    async with aiosqlite.connect(pair / "checkpoints.sqlite") as conn:
+        saver = AsyncSqliteSaver(conn, serde=DurableJsonPlusSerializer())
+        graph = builder.compile(checkpointer=saver, interrupt_before=["work"])
+        await graph.ainvoke({"analysis_state": old}, config)
+
+    current = old.model_copy(deep=True)
+    current.current_round = 3
+    current.current_plan.id = "newer-plan"
+    current.final_report_requested = True
+    current.status = TaskStatus.PAUSED
+    current.custom_models = {"pi": "current-model"}
+    current.agent_server_configs = {"pi": {"api_key": "current-key"}}
+    current.runtime_persistence = _stale_persistence(44, 61)
+    monkeypatch.setitem(sessions, sid, current)
+    monkeypatch.setattr(lifecycle, "require_session_ownership", AsyncMock(return_value=current))
+    monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
+    original_restore = runtime_apply.restore_generation_pair
+
+    def restore_after_progress_save(*args, **kwargs):
+        persisted = load_session_from_disk(sid)
+        assert persisted.current_round == 1
+        assert persisted.current_plan.id == "paired-plan"
+        assert persisted.runtime_persistence["current_revision"] == 61
+        return original_restore(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_apply, "restore_generation_pair", restore_after_progress_save)
+    await lifecycle.run_analysis(sid, SimpleNamespace(state=SimpleNamespace(user_id="u1")))
+    assert sessions[sid] is current
+    assert current.current_round == 1
+    assert current.current_plan.id == "paired-plan"
+    assert current.custom_models == {"pi": "current-model"}
+    assert current.agent_server_configs["pi"]["api_key"] == "current-key"
+    assert not _needs_report_only(current, 3, False)
+    assert load_session_from_disk(sid).current_plan.id == "paired-plan"
+    # Exercise the same injection followed by continuation that resume uses.
+    async with aiosqlite.connect(states / "checkpoints.sqlite") as conn:
+        saver = AsyncSqliteSaver(conn, serde=DurableJsonPlusSerializer())
+        graph = builder.compile(checkpointer=saver, interrupt_before=["work"])
+        await graph.aupdate_state(config, {"analysis_state": current})
+        await graph.ainvoke(None, config)
+    assert seen == [(1, "paired-plan")]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_generation_with_a_pair_is_restored_not_retired(monkeypatch):
+    """Spec B2-2: the committed generation is healthy after a crash.
+
+    What made it unusable is that the state and both positions moved past it,
+    which after any interruption is always true (§3.1). Retiring it there is
+    what turned "at most one round or N minutes at risk" into "re-run from the
+    input files".
+    """
+    from backend.models.schemas import AnalysisState
+    from backend.routes import lifecycle
+    from backend.utils.runtime_apply import _live_pkl
+
+    sid = str(uuid.uuid4())
+    states = _committed_pair(sid, 44)
+    live_checkpoint = states / "checkpoints.sqlite"
+    live_checkpoint.write_bytes(b"position the crash left behind")
+    _live_pkl(sid).write_bytes(b"the committed generation")
+
+    state = AnalysisState(
+        id=sid, user_id="u1", current_round=2, status="paused",
+        runtime_persistence=_stale_persistence(44, 61),
+    )
+    monkeypatch.setattr(lifecycle, "require_session_ownership", AsyncMock(return_value=state))
+    monkeypatch.setattr(lifecycle, "async_save_session", AsyncMock())
+    monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
+
+    await lifecycle.run_analysis(sid, SimpleNamespace(state=SimpleNamespace(user_id="u1")))
+
+    assert _live_pkl(sid).exists(), "a healthy generation must not be retired"
+    assert not state.runtime_recompute_pending
+
+    # The notebook record carries the disclosure independently of graph state.
+    import json as _json
+
+    restored_record = _json.loads(
+        (states / f"{sid}_state.json").read_text()
+    )["runtime_persistence"]
+    assert restored_record["pair_restore"]["restored_revision"] == 44
+
+    import sqlite3
+
+    with sqlite3.connect(live_checkpoint) as conn:
+        assert conn.execute("SELECT blob FROM checkpoints").fetchone()[0] == "paired"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_generation_without_a_pair_still_retires(monkeypatch):
+    """Retirement is the fallback, not the default, and must stay reachable."""
+    from backend.config import get_session_states
+    from backend.models.schemas import AnalysisState
+    from backend.routes import lifecycle
+    from backend.utils.runtime_apply import _live_pkl
+
+    sid = str(uuid.uuid4())
+    states = get_session_states(sid)
+    states.mkdir(parents=True, exist_ok=True)
+    (states / "checkpoints.sqlite").write_bytes(b"checkpoint")
+    _live_pkl(sid).write_bytes(b"generation")
+
+    state = AnalysisState(
+        id=sid, user_id="u1", current_round=2, status="paused",
+        runtime_persistence=_stale_persistence(44, 61),
+    )
+    monkeypatch.setattr(lifecycle, "require_session_ownership", AsyncMock(return_value=state))
+    monkeypatch.setattr(lifecycle, "async_save_session", AsyncMock())
+    monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
+
+    await lifecycle.run_analysis(sid, SimpleNamespace(state=SimpleNamespace(user_id="u1")))
+
+    assert not _live_pkl(sid).exists()
+    assert state.runtime_recompute_pending
+
+
 @pytest.mark.asyncio
 async def test_rerun_now_retires_checkpoint_before_choosing_intent(monkeypatch):
     from backend.config import get_session_states

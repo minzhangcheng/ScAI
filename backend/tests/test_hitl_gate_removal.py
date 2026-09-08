@@ -110,7 +110,6 @@ async def test_a_failed_final_save_still_closes_the_kernel(tmp_path, monkeypatch
         state_dir=str(tmp_path / "states"),
         working_dir=str(tmp_path / "workspace"),
     )
-    monkeypatch.setattr(sb, "await_pending_saves", AsyncMock(return_value=None))
     monkeypatch.setattr(
         sb, "_save_session_locked", AsyncMock(side_effect=RuntimeError("dump failed"))
     )
@@ -271,7 +270,6 @@ async def test_a_failed_closing_save_still_writes_the_notebook(tmp_path, monkeyp
         state_dir=str(tmp_path / "states"),
         working_dir=str(tmp_path / "workspace"),
     )
-    monkeypatch.setattr(sb, "await_pending_saves", AsyncMock(return_value=None))
     monkeypatch.setattr(
         sb, "_save_session_locked", AsyncMock(side_effect=RuntimeError("dump failed"))
     )
@@ -300,7 +298,6 @@ async def test_a_closing_save_that_reports_no_generation_still_writes_the_notebo
         state_dir=str(tmp_path / "states"),
         working_dir=str(tmp_path / "workspace"),
     )
-    monkeypatch.setattr(sb, "await_pending_saves", AsyncMock(return_value=None))
     monkeypatch.setattr(sb, "_save_session_locked", AsyncMock(return_value=False))
     notebook_save = MagicMock()
     monkeypatch.setattr(sb.notebook_state, "save", notebook_save)

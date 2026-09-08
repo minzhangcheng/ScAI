@@ -69,12 +69,53 @@ async def _run_analysis_locked(session_id: str, user_id: str):
         getattr(state, "runtime_restore_status", "complete"),
         coherence=state_runtime_coherence(state),
     ):
-        closed = await bindings.teardown_running_workflow(
-            session_id, discard_runtime=True, retire_runtime=True,
-        )
-        if closed is False:
-            raise HTTPException(status_code=409, detail="Previous workflow cleanup is incomplete")
-        state.runtime_recompute_pending = True
+        # Spec B2-2. `stale` here says the state and the two positions moved
+        # past the committed generation -- not that the generation is bad. By
+        # §3.1 that is true of any run interrupted anywhere except the instant
+        # a save completed, so retiring on it made "re-run from the input
+        # files" the ordinary outcome of every crash. If B2-1 captured this
+        # generation's pair, put the positions back and continue from the step
+        # the dump was taken at. Retirement stays the fallback for a generation
+        # with no usable pair, and for `unavailable` and `inconsistent`.
+        from backend.utils.runtime_apply import restore_generation_pair
+        from backend.services.generation_pair_state import read_generation_pair_state
+        from backend.services.session_store import refresh_runtime_persistence_projection
+
+        committed = dict(
+            getattr(state, "runtime_persistence", None) or {}
+        ).get("committed_revision")
+        restored = False
+        if committed is not None:
+            closed = await bindings.teardown_running_workflow(
+                session_id, discard_runtime=True, retain_restore_point=True,
+            )
+            if closed is False:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Previous workflow cleanup is incomplete",
+                )
+            paired_state = await read_generation_pair_state(state, revision=int(committed))
+            if paired_state is not None:
+                # Progress must reach session.json before the notebook record
+                # can declare the pair current. Both WebSocket routing and
+                # resume's aupdate_state then see the paired plan and results.
+                # Keep the existing object identity for cached route references.
+                for name in type(state).model_fields:
+                    setattr(state, name, getattr(paired_state, name))
+                await bindings.async_save_session(session_id, state, force=True)
+                restored = restore_generation_pair(session_id, revision=int(committed))
+                if restored:
+                    refresh_runtime_persistence_projection(session_id, state)
+
+        # An unusable paired analysis state takes the same recompute path as a
+        # missing pair; it cannot safely drive the graph over the old namespace.
+        if not restored:
+            closed = await bindings.teardown_running_workflow(
+                session_id, discard_runtime=True, retire_runtime=True,
+            )
+            if closed is False:
+                raise HTTPException(status_code=409, detail="Previous workflow cleanup is incomplete")
+            state.runtime_recompute_pending = True
         state.restore_resume_kind = None
         state.restore_resume_workflow_state = None
 

@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Final, List, Optional
 
@@ -422,10 +422,18 @@ class NotebookState:
         top_offenders: Optional[List[Dict[str, Any]]] = None,
         recommended_action: Optional[str] = None,
         committed_pairing: Optional[Dict[str, Any]] = None,
+        save_seconds: Optional[float] = None,
         persist: bool = True,
     ) -> Dict[str, Any]:
         """Persist the live runtime lifecycle without exposing raw tracebacks."""
-        now = datetime.now().isoformat()
+        # Offset-bearing, because these values are read outside the process
+        # that wrote them. `save_cadence.last_committed_epoch` turns
+        # `last_saved_at` back into an epoch to measure the save floor, and the
+        # browser turns it into a local time to show the user -- both resolve a
+        # naive string in *their* zone, not in the writer's. The containers run
+        # UTC while a browser does not, so the "last successful save" shown in
+        # the UI was off by the viewer's offset.
+        now = datetime.now(timezone.utc).isoformat()
         previous = dict(self.runtime_persistence)
         from backend.utils.error_parsing import bounded_diagnostic, compact_traceback
 
@@ -556,7 +564,22 @@ class NotebookState:
                 "degraded_recovery": False,
                 "degraded_from_revision": None,
                 "degraded_to_revision": None,
+                # Spec B2-3: the disclosure describes one event, and this is
+                # the point at which the session is genuinely current again.
+                # Clearing it on anything less -- an ordinary dirty cell, say
+                # -- would take it away before it had been read; leaving it
+                # would accumulate into the permanent warning 0.55.4 removed.
+                "pair_restore": None,
             })
+            if save_seconds is not None:
+                # Spec B3-2. How long the generation that just reached disk
+                # took to write. It is the number the decision to keep N at 30
+                # turns on -- one save is six to nine minutes at the end of a
+                # long run, with the execution lock held -- and it existed only
+                # in container logs, which do not survive a restart. Written
+                # only on success, beside the other committed_* facts, so it
+                # always describes the last generation that actually landed.
+                self.runtime_persistence["last_save_seconds"] = float(save_seconds)
         elif status == "failed":
             self.runtime_persistence.update({
                 "last_failed_at": now,
@@ -598,7 +621,7 @@ class NotebookState:
                 if commit_source is not None
                 else self.runtime_persistence.get("commit_source")
             ),
-            "last_restored_at": datetime.now().isoformat(),
+            "last_restored_at": datetime.now(timezone.utc).isoformat(),
             "degraded_recovery": bool(degraded_recovery),
             "degraded_from_revision": attempted if degraded_recovery else None,
             "degraded_to_revision": restored_revision if degraded_recovery else None,
@@ -614,7 +637,7 @@ class NotebookState:
             ),
             "source": "notebook_state",
             "lifecycle_generation": self.lifecycle_generation,
-            "metadata_updated_at": datetime.now().isoformat(),
+            "metadata_updated_at": datetime.now(timezone.utc).isoformat(),
         })
         self._migrate_committed_runtime_metadata()
         self.save_metadata()

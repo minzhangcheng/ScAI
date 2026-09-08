@@ -454,28 +454,43 @@ class KernelMixin:
         alive for a person to answer is the gate this replaced. The state is
         then stale rather than current, and the UI says so.
         """
-        # Pending saves themselves need this lock. Drain before acquiring it.
-        if save:
-            await self.await_pending_saves()
+        # ``_exec_lock`` is the ordering, and the only ordering there has ever
+        # been here: every save holds it for its whole duration, so acquiring it
+        # cannot overlap one. An explicit drain used to run before this line and
+        # read as the guarantee -- it drained a set nothing in production ever
+        # filled, so the lock was doing the work the drain was credited with.
         async with self._exec_lock:
             if save:
-                try:
-                    saved = await self._save_session_locked()
-                    if saved is not True:
-                        raise RuntimeError(
-                            "runtime persistence did not commit a current generation"
+                from backend.services.save_cadence import runtime_save_due
+
+                # Spec 5.1's third boundary, asked through the module that owns
+                # the other two. Unconditional today, so this changes nothing
+                # that happens; it changes where the fact is written down. The
+                # reason existed in `save_cadence` with no caller while the
+                # closing save reached the kernel by another route entirely, and
+                # a conditional closing save now has somewhere to live.
+                closing_due = runtime_save_due(self, "closing")
+            else:
+                closing_due = False
+            if save:
+                if closing_due:
+                    try:
+                        saved = await self._save_session_locked()
+                        if saved is not True:
+                            raise RuntimeError(
+                                "runtime persistence did not commit a current generation"
+                            )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # One attempt (spec 5.1). The previous committed generation is
+                        # intact and the failure is already recorded; shutting down
+                        # anyway is the point of removing the gate.
+                        logger.exception(
+                            "Final runtime persistence failed for %s; the previous "
+                            "committed generation is kept and the kernel is closed",
+                            self.session_id,
                         )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    # One attempt (spec 5.1). The previous committed generation is
-                    # intact and the failure is already recorded; shutting down
-                    # anyway is the point of removing the gate.
-                    logger.exception(
-                        "Final runtime persistence failed for %s; the previous "
-                        "committed generation is kept and the kernel is closed",
-                        self.session_id,
-                    )
                 # Independent of the dump, per spec 5.1: when the runtime could not
                 # be persisted the notebook is the only remaining record of what
                 # ran, which is exactly when losing it costs most.
