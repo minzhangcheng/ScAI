@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.3 · **Last updated**: 2026-09-08
+**Version**: 0.55.4 · **Last updated**: 2026-09-08
 
 ## 1. Runtime Architecture
 
@@ -279,6 +279,41 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.55.x — (2026-09-08 onward)**
+
+- `0.55.4` — The spec 5.1 runtime-persistence banner no longer warns for
+  the whole duration of a run. A live kernel is `stale` by construction:
+  `current_revision` advances on every cell while `committed_revision` advances
+  only at a save point, and the cadence saves at round boundaries — so between
+  two of them the verdict is `stale` continuously with every save succeeding,
+  observed on both live sessions of a deployment as `stale` on every sample
+  across four minutes. The amber warning was therefore permanent, and a warning
+  that is always on carries no signal.
+  While the session is still live — `running`, `generating_report`, or one of
+  the `waiting_*` states — and the last save attempt did not fail, the banner
+  now renders the same disclosure, last successful save included, in neutral
+  in-progress wording rather than as a warning. `paused`, `pending`, the
+  terminal states, a failed save attempt, and `inconsistent` all keep the
+  warning: a pause can outlive the process, after which the namespace really is
+  gone, and a generation committed against a state that was never persisted is
+  not repaired by continued running.
+  The change is confined to the frontend presentation. The backend `coherence`
+  semantics and `is_forward_resume_blocked` are untouched, so what the API
+  reports and what a resume is allowed to do are unchanged. The frontend suite
+  passed `285` with `0` failures; the backend was unchanged and not re-run. No
+  image build, push, or deployment was performed.
+  The release also folds in a documentation-only addition on GPU use, written
+  against the stack as it already ships. `README.md` gains a "GPU
+  acceleration for optional analyses" section — `scvi-tools` and its PyTorch
+  models are the one GPU-sensitive optional path, and the rest of the bundled
+  analysis packages run the CPU path — together with a `docker run` example
+  carrying `--gpus all`. Both administrator manuals gain "GPU acceleration
+  for analysis methods", a per-package table classifying each pinned analysis
+  dependency as a CPU path or a GPU-recommended one, and "Creating a
+  GPU-enabled Docker container", which gives the creation steps, notes that
+  the flag cannot be added to a container that already exists, and verifies
+  the mapped device with `torch.cuda.is_available()`. This is text only: no
+  code, dependency pin, or runtime behaviour changed with it, and nothing in
+  ScAI requests a GPU that did not request one before.
 
 - `0.55.3` — Four more defects from a second review of the same release, all
   of them the persisted record disagreeing with what actually happened.

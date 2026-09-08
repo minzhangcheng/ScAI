@@ -17,6 +17,58 @@ ScAI 在生产模式下由同一个 FastAPI/Uvicorn 进程在端口 `3000` 提�
 
 请为上传的数据集、生成的产物、日志、临时上传文件和依赖项预留存储空间。主机必须能够访问已配置的模型端点，并在启动期间访问 Python 软件包注册表。Docker 启动会安装 Python requirements，因此首次启动可能明显较慢；前端依赖只在构建镜像时解析。
 
+### 分析方法的 GPU 加速
+
+GPU 不是必需项。随镜像提供的分析栈支持 CPU 回退；映射 GPU 也不会自动使
+每个软件包都改用 GPU。下面的分类对应 `requirements.txt` 和默认分析工作流中的软件包：
+
+| 软件包或工作负载 | GPU 建议 |
+|---|---|
+| `scvi-tools==1.3.3` 及其 PyTorch 后端（选择使用时的 `SCVI`、`SOLO`、`SCAR`、`totalVI` 等模型） | 支持 CPU；对大型单细胞/单核数据集的模型拟合和多轮训练，建议使用 GPU。默认 `accelerator="auto"` 会在 GPU 可见时自动选择 GPU，否则使用 CPU。 |
+| Scanpy/AnnData 预处理、QC、标准化、高变基因、PCA、UMAP、Leiden/igraph、NumPy/SciPy/Numba/scikit-learn | 当前镜像使用 CPU 路径，不需要 GPU。 |
+| `scvelo`、`cellrank`、`harmonypy`、`bbknn`、`scanorama`、`scrublet`、`doubletdetection`、`celltypist` | 当前镜像使用 CPU 路径，不需要 GPU。 |
+| `gseapy`、`decoupler`、`pyscenic`、`infercnvpy`、`squidpy`、`liana`、`omnipath`、`pydeseq2` 和 `muon` | 当前镜像使用 CPU 路径，不需要 GPU。 |
+| HDF5/Zarr I/O、Dask-image、Pillow、Matplotlib、Seaborn 和 Plotly | CPU、I/O 或渲染工作，不需要 GPU。 |
+
+镜像没有安装 RAPIDS、cuML、cuGraph 或 CuPy 作为替代后端。因此，仅映射 GPU
+不会自动加速 Scanpy 的 PCA/UMAP、Leiden、RNA velocity、整合或上表中的其他 CPU
+步骤。这些方法若要使用 GPU，需要单独验证 GPU 后端和依赖镜像；不要直接在生产
+`/dep` 环境中临时添加。GPU 也不能替代大型 AnnData 对内存和磁盘容量的需求。
+
+### 创建支持 GPU 的 Docker 容器
+
+仅当主机已安装兼容的 NVIDIA 驱动、NVIDIA Container Toolkit，并且 Docker 能够访问
+至少一块 GPU 时使用此选项。`--gpus` 必须在创建容器时提供；对已有容器执行
+`docker restart` 不会增加 GPU 设备。
+
+```bash
+docker pull ghcr.io/minzhangcheng/scai:latest
+docker run -d --name scai \
+  --gpus all \
+  -p 3000:3000 \
+  -v "$(pwd)/scai-dep:/dep" \
+  -v "$(pwd)/scai-data:/data" \
+  --env-file <PROTECTED_ENV_FILE> \
+  --restart unless-stopped \
+  ghcr.io/minzhangcheng/scai:latest
+```
+
+如果只分配 GPU 0，将 `--gpus all` 替换为 `--gpus '"device=0"'`。重建已有实例时，
+必须保留原有的 `/dep`、`/data` 挂载，以及相同的 `SCAI_JWT_SECRET` 和
+`SCAI_CONFIG_SECRET`。同时应按照内存规划章节设置合适的 `--memory` 限额。
+
+依赖安装完成后，用下面的命令确认 PyTorch 看到了映射的 GPU：
+
+```bash
+docker exec scai /dep/venv/bin/python -c \
+  'import torch; print({"cuda_available": torch.cuda.is_available(), "device_count": torch.cuda.device_count(), "devices": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]})'
+```
+
+`cuda_available` 应为 `True`，`device_count` 至少为 `1`。`torch.version.cuda` 只表示
+已安装 PyTorch 构建所支持的 CUDA 版本，并不能证明容器实际能访问 GPU。如果检查失败，
+请先检查主机的 `nvidia-smi`、NVIDIA Container Toolkit、Docker runtime 配置和容器设备
+映射，再开始分析。
+
 ### 内存容量规划
 
 实例的内存几乎全部消耗在分析内核上，而不是后端。**每个处于分析中的会话各自持有一个
@@ -263,8 +315,8 @@ docker build -t ghcr.io/minzhangcheng/scai:latest .
 ```
 
 ```bash
-./build.sh --version 0.55.3
-./build.sh --version 0.55.3 --push
+./build.sh --version 0.55.4
+./build.sh --version 0.55.4 --push
 ```
 
 如果未指定 `--version`，辅助脚本使用 `git describe --tags --abbrev=0` 返回的最新 Git 标签；如果不存在标签，则使用 `latest`。`--push` 会将两个标签推送到 `ghcr.io/minzhangcheng/scai`；使用前请先向该注册表进行 Docker 身份验证。该辅助脚本不接受注册表、镜像名称、平台或构建参数 flags。

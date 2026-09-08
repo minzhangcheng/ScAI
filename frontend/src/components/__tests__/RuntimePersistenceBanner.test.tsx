@@ -77,4 +77,104 @@ describe('RuntimePersistenceBanner', () => {
     )
     expect(screen.getByRole('status').textContent).not.toContain('Invalid Date')
   })
+
+  /**
+   * A running kernel is stale by construction. `current_revision` advances on
+   * every cell while `committed_revision` only advances at a save point, so
+   * between two round-boundary saves the verdict is `stale` continuously --
+   * observed on both live sessions of a deployment, `stale` on every sample
+   * across four minutes with `last_attempt_status` "succeeded" throughout.
+   * Rendering spec 5.1's warning for that made it permanent, and a warning
+   * that is always on says nothing. The disclosure stays; its severity does
+   * not.
+   */
+  describe('while the analysis is still live', () => {
+    it('reports unsaved work as ordinary progress, not as a warning', () => {
+      render(
+        <RuntimePersistenceBanner
+          record={{
+            coherence: 'stale',
+            status: 'live_dirty',
+            last_attempt_status: 'succeeded',
+            exposure_since: '2026-09-08T08:29:33',
+          }}
+          sessionStatus="running"
+        />,
+      )
+
+      const text = screen.getByRole('status').textContent ?? ''
+      expect(text).not.toContain('not guaranteed')
+      expect(text).toContain('Analysis in progress')
+      expect(text).toContain('Last successful save')
+    })
+
+    it('keeps the warning when the last save attempt failed', () => {
+      render(
+        <RuntimePersistenceBanner
+          record={{ coherence: 'stale', last_attempt_status: 'failed' }}
+          sessionStatus="running"
+        />,
+      )
+
+      expect(screen.getByRole('status').textContent).toContain('not guaranteed')
+    })
+
+    it('keeps the warning for a generation that is inconsistent, not merely behind', () => {
+      render(
+        <RuntimePersistenceBanner
+          record={{ coherence: 'inconsistent', last_attempt_status: 'succeeded' }}
+          sessionStatus="running"
+        />,
+      )
+
+      expect(screen.getByRole('status').textContent).toContain('not guaranteed')
+    })
+
+    it('covers the states that wait on a user with the kernel still held', () => {
+      const { rerender } = render(
+        <RuntimePersistenceBanner
+          record={{ coherence: 'stale', last_attempt_status: 'succeeded' }}
+          sessionStatus="waiting_plan_review"
+        />,
+      )
+      expect(screen.getByRole('status').textContent).toContain('Analysis in progress')
+
+      rerender(
+        <RuntimePersistenceBanner
+          record={{ coherence: 'stale', last_attempt_status: 'succeeded' }}
+          sessionStatus="generating_report"
+        />,
+      )
+      expect(screen.getByRole('status').textContent).toContain('Analysis in progress')
+    })
+
+    it('warns once the run is no longer live, pause included', () => {
+      for (const sessionStatus of ['paused', 'completed', 'failed', 'stopped', 'pending'] as const) {
+        const { unmount } = render(
+          <RuntimePersistenceBanner
+            record={{ coherence: 'stale', last_attempt_status: 'succeeded' }}
+            sessionStatus={sessionStatus}
+          />,
+        )
+        expect(screen.getByRole('status').textContent, sessionStatus).toContain(
+          'not guaranteed',
+        )
+        unmount()
+      }
+    })
+
+    it('renders the live wording in Chinese', () => {
+      render(
+        <RuntimePersistenceBanner
+          record={{ coherence: 'stale', last_attempt_status: 'succeeded' }}
+          sessionStatus="running"
+          isZh
+        />,
+      )
+
+      const text = screen.getByRole('status').textContent ?? ''
+      expect(text).toContain('分析进行中')
+      expect(text).not.toContain('不保证')
+    })
+  })
 })

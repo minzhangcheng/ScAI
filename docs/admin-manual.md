@@ -17,6 +17,68 @@ The supported deployment choices are:
 
 Size storage for uploaded datasets, generated artifacts, logs, temporary uploads, and dependencies. The host must be able to reach configured model endpoints and the Python package registry during startup. Docker startup installs Python requirements, so the first start can be substantially slower; frontend dependencies are resolved only while the image is built.
 
+### GPU acceleration for analysis methods
+
+GPU access is optional. The shipped stack has a CPU fallback, and adding a GPU
+does not change the scientific method or make every package GPU-accelerated.
+The following classification describes the packages pinned in
+`requirements.txt` and the default analysis workflow:
+
+| Package or workload | GPU guidance |
+|---|---|
+| `scvi-tools==1.3.3` and its PyTorch backend (`SCVI`, `SOLO`, `SCAR`, `totalVI`, and similar models when selected) | CPU is supported; GPU is recommended for large single-cell/single-nucleus model fitting and repeated training epochs. The default `accelerator="auto"` selects a visible GPU and otherwise uses CPU. |
+| Scanpy/AnnData preprocessing, QC, normalization, HVG selection, PCA, UMAP, Leiden/igraph, NumPy/SciPy/Numba/scikit-learn | CPU path in the shipped image; no GPU is required. |
+| `scvelo`, `cellrank`, `harmonypy`, `bbknn`, `scanorama`, `scrublet`, `doubletdetection`, `celltypist` | CPU path in the shipped image; GPU is not required. |
+| `gseapy`, `decoupler`, `pyscenic`, `infercnvpy`, `squidpy`, `liana`, `omnipath`, `pydeseq2`, and `muon` | CPU path in the shipped image; GPU is not required. |
+| HDF5/Zarr I/O, Dask-image, Pillow, Matplotlib, Seaborn, and Plotly | CPU/I/O or rendering work; GPU is not required. |
+
+The image does not install RAPIDS, cuML, cuGraph, or CuPy as alternate
+backends. Therefore GPU mapping alone does not accelerate Scanpy PCA/UMAP,
+Leiden, RNA velocity, integration, or the other CPU rows above. Those methods
+would need a separately validated GPU backend and dependency image; do not add
+one ad hoc to a production `/dep` environment. A GPU also does not replace the
+RAM and disk capacity required by large AnnData objects.
+
+### Creating a GPU-enabled Docker container
+
+Use this option when the host has a compatible NVIDIA driver, NVIDIA Container
+Toolkit, and at least one GPU available to Docker. The `--gpus` flag must be
+present when the container is created; `docker restart` cannot add GPU devices
+to an existing container.
+
+```bash
+docker pull ghcr.io/minzhangcheng/scai:latest
+docker run -d --name scai \
+  --gpus all \
+  -p 3000:3000 \
+  -v "$(pwd)/scai-dep:/dep" \
+  -v "$(pwd)/scai-data:/data" \
+  --env-file <PROTECTED_ENV_FILE> \
+  --restart unless-stopped \
+  ghcr.io/minzhangcheng/scai:latest
+```
+
+To assign only GPU 0, replace `--gpus all` with
+`--gpus '"device=0"'`. Preserve the existing `/dep` and `/data` volumes and
+the same `SCAI_JWT_SECRET` and `SCAI_CONFIG_SECRET` values when recreating an
+existing instance. Apply a suitable `--memory` limit as described in the
+memory-sizing section.
+
+After startup and dependency installation, verify that PyTorch can see the
+mapped device:
+
+```bash
+docker exec scai /dep/venv/bin/python -c \
+  'import torch; print({"cuda_available": torch.cuda.is_available(), "device_count": torch.cuda.device_count(), "devices": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]})'
+```
+
+`cuda_available` should be `True` and `device_count` should be at least `1`.
+`torch.version.cuda` only reports the CUDA version supported by the installed
+PyTorch build; it does not prove that the container has access to a GPU. If
+the check is false, inspect the host's `nvidia-smi`, NVIDIA Container Toolkit,
+Docker runtime configuration, and the container's device mapping before
+starting an analysis.
+
 ### Memory sizing
 
 Almost all of an instance's memory is consumed by the analysis kernels, not by
@@ -294,8 +356,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.55.3
-./build.sh --version 0.55.3 --push
+./build.sh --version 0.55.4
+./build.sh --version 0.55.4 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.

@@ -2,7 +2,7 @@
 
 ScAI is a general-purpose, multi-agent platform for biomedical analysis. It coordinates sequencing analysis, pathology imaging, biochemical indicators, literature research, and human review in one iterative workflow. Models can be configured per agent through OpenAI-compatible endpoints, Google APIs, or local deployments.
 
-**Version**: 0.55.3 | **License**: Apache 2.0
+**Version**: 0.55.4 | **License**: Apache 2.0
 
 ## Core Capabilities
 
@@ -27,6 +27,25 @@ docker run -d --name scai \
 ```
 
 Open [http://localhost:3000](http://localhost:3000). The `/dep` volume persists dependencies and `/data` persists application data. See the [Administrator Manual](docs/admin-manual.md) for deployment options.
+
+### GPU acceleration for optional analyses
+
+ScAI's shipped analysis stack is CPU-compatible. GPU is not required for the standard Scanpy/AnnData workflow. The main GPU-sensitive optional path is `scvi-tools==1.3.3`, which uses PyTorch for models such as SCVI, SOLO, and SCAR. Those models fall back to CPU, but fitting large single-cell or single-nucleus datasets, or running many training epochs, can be substantially slower without a GPU. With scvi-tools' default `accelerator="auto"`, a visible GPU is selected automatically; otherwise training remains on CPU.
+
+The other bundled analysis packages use the shipped CPU path: Scanpy/AnnData, NumPy/SciPy/Numba/scikit-learn, Leiden/igraph, scvelo/CellRank, Harmony/BBKNN/Scanorama, Scrublet/DoubletDetection, CellTypist, GSEApy/decoupler/pySCENIC, infercnvpy/Squidpy, LIANA/OmniPath, and PyDESeq2. GPU mapping does not automatically accelerate these packages. See the [Administrator Manual](docs/admin-manual.md#gpu-acceleration-for-analysis-methods) for the full classification and verification steps.
+
+If the host has an NVIDIA driver and NVIDIA Container Toolkit, add `--gpus all` when creating the container:
+
+```bash
+docker run -d --name scai \
+  --gpus all \
+  -p 3000:3000 \
+  -v ./scai-dep:/dep \
+  -v ./scai-data:/data \
+  ghcr.io/minzhangcheng/scai:latest
+```
+
+GPU access is a creation-time Docker setting; restarting an existing container does not add it. The container must be recreated with the flag, while preserving the existing `/dep` and `/data` volumes and protected secrets.
 
 ## Direct Run
 

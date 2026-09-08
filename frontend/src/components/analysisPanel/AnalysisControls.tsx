@@ -67,10 +67,16 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
       {/* What the last committed generation promises (spec 5.1). Persistent
           and non-blocking: the capture gate that used to stop the analysis
           here is gone, and there is nothing a dialog could offer — the
-          previous generation is intact and the run continues either way. */}
+          previous generation is intact and the run continues either way.
+
+          The status goes in because the same record means different things on
+          either side of it: while the run is live, "the state is newer than
+          the newest committed runtime" is what a working kernel looks like
+          between save points, not a loss. */}
       <div className="mb-2 empty:mb-0">
         <RuntimePersistenceBanner
           record={currentSession.runtimePersistence as never}
+          sessionStatus={currentSession.status}
           isZh={language === 'zh'}
         />
       </div>
