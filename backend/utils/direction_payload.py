@@ -363,6 +363,10 @@ EVIDENCE_PROMPT_FIELDS: Sequence[str] = (
     "analogous_evidence_count",
     "contradictory_evidence_count",
     "species_tissue_qualification",
+    # Ahead of the prose fields on purpose: budgeted_prompt_block drops
+    # tail-first, and the article identities are what let a reader check the
+    # counts rather than take them on faith.
+    "key_evidence",
     "gap_assessment",
     "summary",
     "limitations",

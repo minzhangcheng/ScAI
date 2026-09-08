@@ -9,8 +9,10 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 import re
 import time
+import weakref
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -19,6 +21,57 @@ import httpx
 logger = logging.getLogger(__name__)
 
 PUBMED_QUERY_POLICY_VERSION = 2
+
+# NCBI E-utilities request policy.
+#
+# ``tool`` and ``email`` identify the caller so NCBI can make contact before it
+# blocks anyone; neither raises a quota. The ceiling is per IP address: three
+# requests per second without an API key, ten with one, and anything over it
+# comes back as HTTP 429.
+#
+# The previous throttle was a 0.4 s sleep sitting *between* one call's esearch
+# and its efetch. That paces a single sequential caller and nothing else. The
+# direction-novelty gate evaluates candidates concurrently, so several tasks
+# issued requests within the same second; NCBI rejected whole batches and the
+# only trace was a missing evidence axis on one direction. Every request now
+# passes through one process-wide gate, so concurrency cannot exceed the rate,
+# and a rejection is retried instead of costing a batch.
+NCBI_TOOL_NAME = "ScAI"
+NCBI_RATE_LIMIT_PER_SECOND = 3.0
+NCBI_RATE_LIMIT_PER_SECOND_WITH_KEY = 10.0
+NCBI_RATE_LIMIT_RETRIES = 3
+NCBI_RATE_LIMIT_BACKOFF_SECONDS = 1.0
+
+
+class _EntrezThrottle:
+    """A shared request gate: one slot per interval, per event loop.
+
+    Keyed by loop so a test that builds its own loop is not paced by another
+    one's timestamps, and weakly so a finished loop does not stay referenced.
+    """
+
+    def __init__(self) -> None:
+        self._states: "weakref.WeakKeyDictionary[Any, List[Any]]" = (
+            weakref.WeakKeyDictionary()
+        )
+
+    async def acquire(self, rate_per_second: float) -> None:
+        loop = asyncio.get_running_loop()
+        state = self._states.get(loop)
+        if state is None:
+            state = [asyncio.Lock(), 0.0]
+            self._states[loop] = state
+        interval = 1.0 / max(rate_per_second, 0.1)
+        async with state[0]:
+            now = time.monotonic()
+            wait_for = state[1] - now
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+                now = time.monotonic()
+            state[1] = max(now, state[1]) + interval
+
+
+_entrez_throttle = _EntrezThrottle()
 
 
 def _normalized_search_text(value: str) -> str:
@@ -718,8 +771,9 @@ IMPORTANT:
                     break
                 query = next_query
 
-            # Rate limiting for NCBI E-utilities (3 req/s without API key)
-            await asyncio.sleep(0.4)
+            # Request pacing now lives in _entrez_get, which gates every
+            # E-utilities call process-wide rather than only the ones this
+            # sequential loop happens to make.
 
         if not all_articles:
             report_text = (
@@ -1120,12 +1174,75 @@ IMPORTANT:
 
         return articles
 
+    def _entrez_api_key(self) -> str:
+        """An optional NCBI API key. Absent is the normal, supported case.
+
+        A key is never required to use E-utilities; it only lifts the per-IP
+        ceiling from three requests per second to ten. It is read from the
+        environment rather than the literature config so that raising the
+        ceiling stays an operational choice and needs no config migration.
+        """
+        return str(
+            getattr(self, "pubmed_api_key", "") or os.environ.get("NCBI_API_KEY", "")
+        ).strip()
+
+    def _entrez_identity_params(self) -> Dict[str, str]:
+        """The caller identification NCBI asks every client to send."""
+        params: Dict[str, str] = {"tool": NCBI_TOOL_NAME}
+        if self.pubmed_email:
+            params["email"] = self.pubmed_email
+        api_key = self._entrez_api_key()
+        if api_key:
+            params["api_key"] = api_key
+        return params
+
+    async def _entrez_get(
+        self,
+        url: str,
+        params: Dict[str, str],
+        client_kwargs: Dict[str, Any],
+    ) -> httpx.Response:
+        """One throttled E-utilities request, retried when NCBI rejects the rate."""
+        rate = (
+            NCBI_RATE_LIMIT_PER_SECOND_WITH_KEY
+            if self._entrez_api_key()
+            else NCBI_RATE_LIMIT_PER_SECOND
+        )
+        last_error: Optional[Exception] = None
+        for attempt in range(NCBI_RATE_LIMIT_RETRIES + 1):
+            await _entrez_throttle.acquire(rate)
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                resp = await client.get(url, params=params)
+            if resp.status_code != 429:
+                resp.raise_for_status()
+                return resp
+            last_error = httpx.HTTPStatusError(
+                "NCBI E-utilities returned 429 Too Many Requests",
+                request=resp.request,
+                response=resp,
+            )
+            if attempt < NCBI_RATE_LIMIT_RETRIES:
+                delay = NCBI_RATE_LIMIT_BACKOFF_SECONDS * (2 ** attempt)
+                logger.warning(
+                    "[Literature] NCBI rate limit hit (attempt %s/%s); retrying in %.1fs",
+                    attempt + 1,
+                    NCBI_RATE_LIMIT_RETRIES + 1,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        assert last_error is not None
+        raise last_error
+
     async def _pubmed_search(
         self,
         query: str,
         max_results: int = 20
     ) -> List[Dict[str, str]]:
         """Search PubMed using NCBI E-utilities and return article metadata."""
+        client_kwargs: Dict[str, Any] = {"timeout": 30.0}
+        if self.proxy_url:
+            client_kwargs["proxy"] = self.proxy_url
+
         # Step 1: esearch to get PMIDs
         search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
         search_params: Dict[str, str] = {
@@ -1134,18 +1251,11 @@ IMPORTANT:
             "retmax": str(max_results),
             "retmode": "json",
             "sort": "relevance",
+            **self._entrez_identity_params(),
         }
-        if self.pubmed_email:
-            search_params["email"] = self.pubmed_email
 
-        client_kwargs: Dict[str, Any] = {"timeout": 30.0}
-        if self.proxy_url:
-            client_kwargs["proxy"] = self.proxy_url
-
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            resp = await client.get(search_url, params=search_params)
-            resp.raise_for_status()
-            search_data = resp.json()
+        resp = await self._entrez_get(search_url, search_params, client_kwargs)
+        search_data = resp.json()
 
         pmids = search_data.get("esearchresult", {}).get("idlist", [])
         if not pmids:
@@ -1157,16 +1267,11 @@ IMPORTANT:
             "db": "pubmed",
             "id": ",".join(pmids),
             "retmode": "xml",
+            **self._entrez_identity_params(),
         }
-        if self.pubmed_email:
-            fetch_params["email"] = self.pubmed_email
 
-        await asyncio.sleep(0.4)  # Rate limiting
-
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            resp = await client.get(fetch_url, params=fetch_params)
-            resp.raise_for_status()
-            xml_text = resp.text
+        resp = await self._entrez_get(fetch_url, fetch_params, client_kwargs)
+        xml_text = resp.text
 
         # Step 3: Parse XML
         return self._parse_pubmed_xml(xml_text)

@@ -334,7 +334,9 @@ Return a JSON array. Return [] if no sufficiently novel direction exists."""
 
 Score every one of the {candidate_count} candidates. Return all {candidate_count}; this step ranks, it does not filter. Selecting which directions to pursue happens in a later step that reads your ranking, and a candidate missing from your reply cannot be reconsidered there.
 
-For each candidate, keep every field it already has and add:
+For each candidate return its direction_id and ONLY the fields below. Every other field it
+already carries is merged back onto it automatically, so restating them spends the response
+budget this step needs to finish:
 - novelty_score: 0-10 (higher = more novel vs existing literature)
 - evidence_strength: "strong" | "moderate" | "weak"
 - confidence: "high" | "medium" | "low"
@@ -439,6 +441,7 @@ Apply ALL of the following scoring rules:
 9. **Composite priority (single definition)**: overall_priority is derived from ALL of the scoring dimensions below, with data_reliability, data_sufficiency and artifact_risk acting as limiting factors — a candidate cannot be high priority while any of those is unfavourable, however novel or impactful it looks. When dimensions conflict, give explicit reasoning. This rule is the only definition of overall_priority; no other rule overrides it.
 10. **Conflict reconciliation**: when literature_novelty and biology_expectedness conflict, reconcile the discrepancy explicitly in literature_support_summary, data_support_summary, or risk_flags.
 11. **Negative-validation caveat**: when an evidence record has negative_validation_confidence=medium, any literature_novelty=high must be explicitly justified in literature_support_summary because at least one evidence axis is incomplete.
+12. **Read the evidence, not only its count**: key_evidence names the articles behind direct_evidence_count and contradictory_evidence_count. Retrieval is keyword-based, so an article can be counted as direct while addressing a different question. When the named titles do not bear on this candidate, say so in literature_support_summary and do not let the count alone move literature_novelty in either direction.
 
 ### SCORING DIMENSIONS
 
@@ -472,6 +475,7 @@ validation_feasibility:
 - low: technically prohibitive, unavailable reagents/models, or cannot distinguish competing hypotheses.
 
 If direction evidence contains novelty_status=known_area, literature_novelty should usually be low or medium unless novelty comes from a new model, species, tissue, cell type, perturbation, or validation strategy.
+If direction evidence contains novelty_status=adjacent_work_only, the search retrieved related work but nothing that studies this question directly. Related work is context, not an answer: neither the volume of it nor the absence of a direct hit settles the question, and literature_support_summary must say which of the two the record actually shows.
 If direction evidence contains novelty_status=unknown_due_to_timeout or unknown_due_to_failure, literature_novelty must be unknown and recommendation must be conservative.
 Contradictory evidence must never be discounted for being contradictory, and must never be left out of the summaries. Weight every piece of evidence — supporting and contradictory alike — by the same criteria: study design and statistical power, how directly it addresses this claim, and how well its model, tissue, and species apply here. One well-powered direct contradiction outweighs several indirect or correlational supports, and the reverse also holds; do not average them as if the categories were symmetric.
 
@@ -489,21 +493,14 @@ Return a complete structured report JSON:
     "research_direction_candidates": [
         {{
             "direction_id": "dir_001",
-            "direction": "...",
-            "core_observation": "...",
-            "main_hypothesis": "...",
-            "alternative_hypotheses": ["..."],
-            "artifact_risks": ["..."],
-            "supporting_data": [{{"source": "bioinformatics", "evidence": "...", "strength": "high|medium|low"}}],
-            "contradictory_or_missing_evidence": ["..."],
+            "evidence_ref": "dir_001",
             "contradicts_stated_premise": false,
-            "validation_plan": {{"next_analysis": ["..."], "wet_lab_validation": ["..."], "decision_criteria": ["..."]}},
+            "validation_plan": {{"decision_criteria": ["..."]}},
             "biological_plausibility": "high|medium|low",
             "validation_feasibility": "high|medium|low",
             "artifact_risk": "high|medium|low",
             "recommendation": "prioritize|secondary|needs_more_data|avoid",
             "pi_review_summary": "...",
-            "rationale": "...",
             "data_support_summary": "...",
             "literature_support_summary": "...",
             "data_reliability": "high|medium|low",
@@ -516,15 +513,24 @@ Return a complete structured report JSON:
             "methodological_gap": "none|minor|major",
             "overall_priority": "high|medium|low",
             "risk_flags": ["..."],
-            "prerequisite_dependencies": ["dir_id", "..."],
-            "evidence_ref": "dir_001"
+            "prerequisite_dependencies": ["dir_id", "..."]
         }}
     ],
-    "raw_direction_candidates": <echo the raw candidates exactly as provided above>,
-    "direction_literature_evidence": <echo the evidence matrix exactly as provided above>,
     "direction_dependency_graph": {{"dir_001": ["dir_002"], ...}},
     "direction_selection_summary": {{}}
 }}
+
+Return one entry for every candidate you were given, keyed by direction_id.
+
+Return ONLY the fields shown above. Everything else a candidate already carries -- direction,
+core_observation, main_hypothesis, alternative_hypotheses, artifact_risks, supporting_data,
+contradictory_or_missing_evidence, rationale, key_genes, key_pathways, key_cell_types and the
+suggested_* lists -- is merged onto your entry automatically, and so are the raw candidate list
+and the evidence matrix. Under validation_plan give only decision_criteria; the analysis and
+wet-lab entries are carried over. Restating any of it buys nothing and costs the one thing this
+reply is short of: a scoring response long enough to restate its own input does not finish
+inside the request deadline, and a scoring step that does not finish loses the whole round's
+literature evidence with it.
 """
         response = await self.chat(prompt, temperature=0.3)
         data = self._safe_parse_json(response, default={})

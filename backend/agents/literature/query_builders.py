@@ -26,6 +26,67 @@ from .shared import (  # noqa: F401
 )
 
 
+# Candidate term hygiene.
+#
+# key_pathways, key_cell_types and tissue are free text written by a model, and
+# they arrive as descriptive labels rather than index terms: "Integrated Stress
+# Response (ISR)", "Nrf2/Antioxidant Response", "Hepatocyte (Pericentral)",
+# "Liver, with primary emphasis on hepatocytes". Quoted verbatim as "..."[tiab],
+# PubMed matches none of them. Inside an OR list that is only a wasted arm, but
+# tissue is ANDed into the direct-prior-work and prior-art queries, so an
+# unmatchable tissue phrase returns the whole query empty -- one observed run
+# lost its only matched-model query exactly that way and then recorded zero
+# direct evidence for the direction.
+#
+# The rules below are domain-neutral. They split on punctuation the writer
+# already used, keep a parenthesised acronym as an alternative, drop clauses too
+# long to be an index term, and deduplicate. Nothing here knows what a tissue,
+# a pathway or an organism is.
+_TERM_SPLIT_PATTERN = re.compile(r"[/;,]")
+_PARENTHETICAL_PATTERN = re.compile(r"\(([^()]*)\)")
+_MAX_INDEXABLE_WORDS = 4
+_MAX_ACRONYM_LENGTH = 8
+
+
+def _split_free_text_label(label: str) -> List[str]:
+    """Searchable phrases contained in one free-text label."""
+    alternatives: List[str] = []
+    for inner in _PARENTHETICAL_PATTERN.findall(label):
+        acronym = inner.strip()
+        if (
+            acronym
+            and len(acronym.split()) == 1
+            and len(acronym) <= _MAX_ACRONYM_LENGTH
+        ):
+            alternatives.append(acronym)
+    base = _PARENTHETICAL_PATTERN.sub(" ", label)
+
+    pieces: List[str] = []
+    for raw_piece in _TERM_SPLIT_PATTERN.split(base) + alternatives:
+        piece = " ".join(str(raw_piece).split()).strip(" -_.:")
+        if not piece:
+            continue
+        if len(piece.split()) > _MAX_INDEXABLE_WORDS:
+            # A clause this long is a description, not something PubMed indexes.
+            continue
+        pieces.append(piece)
+    return pieces
+
+
+def normalize_search_terms(raw_terms: List[Any]) -> List[str]:
+    """Searchable phrases from free-text labels, order-preserving and deduped."""
+    normalized: List[str] = []
+    seen = set()
+    for raw in raw_terms:
+        for piece in _split_free_text_label(str(raw or "")):
+            key = piece.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(piece)
+    return normalized
+
+
 class QueryBuildersMixin:
     """Tiered PubMed query construction and term selection."""
 
@@ -214,13 +275,20 @@ class QueryBuildersMixin:
         return query.strip()
 
     def _candidate_terms(self, candidate: Dict[str, Any]) -> Dict[str, List[str]]:
+        # organism and tissue stay single-element: every builder reads [0] and
+        # ANDs it as a mandatory arm. Normalising can empty that arm, and an
+        # omitted constraint is strictly better than one that matches nothing.
+        organism = normalize_search_terms([candidate.get("organism") or ""])
+        tissue = normalize_search_terms([candidate.get("tissue") or ""])
         return {
-            "genes": [str(x).strip() for x in as_list(candidate.get("key_genes")) if str(x).strip()],
-            "cells": [str(x).strip() for x in as_list(candidate.get("key_cell_types")) if str(x).strip()],
-            "pathways": [str(x).strip() for x in as_list(candidate.get("key_pathways")) if str(x).strip()],
-            "methods": [str(x).strip() for x in as_list(candidate.get("suggested_methods")) if str(x).strip()],
-            "organism": [str(candidate.get("organism") or "").strip()],
-            "tissue": [str(candidate.get("tissue") or "").strip()],
+            "genes": normalize_search_terms(as_list(candidate.get("key_genes"))),
+            "cells": normalize_search_terms(as_list(candidate.get("key_cell_types"))),
+            "pathways": normalize_search_terms(as_list(candidate.get("key_pathways"))),
+            "methods": normalize_search_terms(as_list(candidate.get("suggested_methods"))),
+            "organism": [organism[0] if organism else ""],
+            "tissue": [tissue[0] if tissue else ""],
+            # Left verbatim: the tier-3 fallback splits it into bare words and
+            # never quotes it, so it is not subject to the phrase problem above.
             "context": [str(candidate.get("experimental_context") or "").strip()],
         }
 

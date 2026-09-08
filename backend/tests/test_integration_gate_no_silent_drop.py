@@ -54,12 +54,14 @@ def _raw_pair():
 
 @pytest.mark.parametrize(
     "novelty_status",
-    ["unknown_due_to_timeout", "unknown_due_to_failure", "unknown", "known_area", "genuine_novelty"],
+    ["unknown_due_to_timeout", "unknown_due_to_failure", "unknown", "known_area",
+     "adjacent_work_only", "genuine_novelty"],
 )
 def test_omitted_candidate_returns_whatever_the_novelty_verdict_was(novelty_status):
-    # known_area is returned whenever the search found any article at all, so
-    # treating it as a verdict that justifies a drop is treating prior-art
-    # volume as a verdict -- the exact thing the gate must not do.
+    # A retrieval outcome is not a decision. known_area now requires a direct
+    # hit and adjacent_work_only carries "related work only", but neither is
+    # grounds to drop a candidate: that would make prior-art volume the verdict,
+    # the exact thing this gate must not do.
     scored = [{"direction_id": "int_001", "direction": "Kept direction", "priority_rank": 1}]
 
     restored = _restore_unscored_candidates(scored, _raw_pair())

@@ -311,6 +311,7 @@ class DirectionLiteratureEvidence(BaseModel):
     methodological_precedent: List[PubMedEvidenceItem] = Field(default_factory=list)
     queries: List[DirectionSearchQuery] = Field(default_factory=list)
     species_tissue_qualification: SpeciesTissueQualification = ""
+    key_evidence: str = ""
     gap_assessment: str = ""
     summary: str = ""
     limitations: List[str] = Field(default_factory=list)
@@ -320,8 +321,8 @@ class DirectionLiteratureEvidence(BaseModel):
     contradiction_level: Literal["strong", "moderate", "weak", "none", "unknown"] = "unknown"
     prior_art_level: Literal["high", "medium", "low", "unknown"] = "unknown"
     novelty_status: Literal[
-        "genuine_novelty", "known_area", "unknown_due_to_failure",
-        "unknown_due_to_timeout", "unknown"
+        "genuine_novelty", "known_area", "adjacent_work_only",
+        "unknown_due_to_failure", "unknown_due_to_timeout", "unknown"
     ] = "unknown"
     similar_published_directions: List[Dict[str, Any]] = Field(default_factory=list)
     knowledge_gap_summary: str = ""

@@ -93,6 +93,7 @@ class DirectionNoveltyMixin:
             "methodological_precedent": [],
             "queries": [],
             "species_tissue_qualification": "",
+            "key_evidence": "",
             "gap_assessment": "",
             "summary": "",
             "limitations": [],
@@ -483,6 +484,7 @@ class DirectionNoveltyMixin:
             "methodological_precedent": [e.model_dump() for e in methodological_ev],
             "queries": [q.model_dump() for q in queries],
             "species_tissue_qualification": best_qualification,
+            "key_evidence": self._build_key_evidence(direct_ev, contradictory_ev),
             "gap_assessment": gap,
             "summary": summary,
             "limitations": all_limitations,
@@ -527,6 +529,7 @@ class DirectionNoveltyMixin:
             "contradictory_evidence": [e.model_dump() for e in contradictory_ev],
             "methodological_precedent": [e.model_dump() for e in methodological_ev],
             "queries": [q.model_dump() for q in queries],
+            "key_evidence": self._build_key_evidence(direct_ev, contradictory_ev),
             "limitations": result.get("limitations", []) + limitations,
             "timed_out": timed_out,
             "fallback_tier": fallback_tier,
@@ -588,6 +591,46 @@ Respond JSON: {{"strong": <count strongly relevant>, "moderate": <count moderate
         return {"status": status_from_judge(judge), "judge": judge}
 
     @staticmethod
+    def _build_key_evidence(
+        direct_ev: List["PubMedEvidenceItem"],
+        contradictory_ev: List["PubMedEvidenceItem"],
+        *,
+        per_bucket: int = 3,
+        title_chars: int = 90,
+    ) -> str:
+        """Name the articles behind the counts, for whoever reads this record.
+
+        The PI scoring step is handed counts and a prose summary and no article
+        identity at all, so it can neither check a "direct evidence: 4" claim nor
+        cite one, and a mis-bucketed article is indistinguishable from a real
+        hit. Bounded on purpose: this shares a per-record slot with the rest of
+        the evidence block.
+        """
+        def render(label: str, items: List["PubMedEvidenceItem"]) -> str:
+            if not items:
+                return ""
+            shown = []
+            for item in items[:per_bucket]:
+                pmid = getattr(item, "pmid", "") or "?"
+                year = getattr(item, "year", "") or ""
+                title = (getattr(item, "title", "") or "").strip()[:title_chars]
+                stamp = f" ({year})" if year else ""
+                shown.append(f"PMID {pmid}{stamp} {title}".strip())
+            hidden = len(items) - len(shown)
+            suffix = f" (+{hidden} more)" if hidden > 0 else ""
+            return f"{label}: " + "; ".join(shown) + suffix
+
+        parts = [
+            part
+            for part in (
+                render("direct", direct_ev),
+                render("contradictory", contradictory_ev),
+            )
+            if part
+        ]
+        return " | ".join(parts)
+
+    @staticmethod
     def _partition_evidence(
         items: List["PubMedEvidenceItem"],
     ) -> Tuple[List["PubMedEvidenceItem"], ...]:
@@ -622,8 +665,15 @@ Respond JSON: {{"strong": <count strongly relevant>, "moderate": <count moderate
             return "unknown_due_to_timeout"
         if confidence == "failed":
             return "unknown_due_to_failure"
-        if direct_count > 0 or analogous_count > 0:
+        if direct_count > 0:
             return "known_area"
+        if analogous_count > 0:
+            # Related work is not prior work on this question. Collapsing the two
+            # made "known_area" the verdict for every candidate that retrieved
+            # anything at all -- and since triage assigns most articles to the
+            # analogous bucket, that was every candidate, whether or not one
+            # paper addressed the question. Say which of the two was found.
+            return "adjacent_work_only"
         if novelty == "high" and neg_conf in {"high", "medium"}:
             return "genuine_novelty"
         return "unknown"

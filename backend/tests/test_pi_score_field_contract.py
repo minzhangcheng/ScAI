@@ -29,7 +29,7 @@ def test_score_prompt_research_candidates_carry_scored_fields():
     # The output schema for research_direction_candidates must include scored fields,
     # not the legacy expected_innovation/expected_novelty triple.
     block = SRC.split("def score_directions_with_evidence", 1)[1].split("async def", 1)[0]
-    template = block.split('"research_direction_candidates"', 1)[1].split('"raw_direction_candidates"', 1)[0]
+    template = block.split('"research_direction_candidates"', 1)[1].split('"direction_dependency_graph"', 1)[0]
     assert "direction_id" in template
     assert "overall_priority" in template
     assert "evidence_ref" in template

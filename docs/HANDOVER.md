@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.8 · **Last updated**: 2026-09-08
+**Version**: 0.55.9 · **Last updated**: 2026-09-08
 
 ## 1. Runtime Architecture
 
@@ -301,6 +301,62 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.55.x — (2026-09-08 onward)**
+
+- `0.55.9` — Repairs the literature search behind research-direction discovery,
+  from an audit of two completed runs. Every candidate direction came back marked
+  as already covered by prior art, and in one of the two runs the scoring step
+  that reads that evidence never returned at all.
+
+  The scoring prompt asked the PI to echo the candidate list and the evidence
+  matrix back inside its own reply, both of which the caller reattaches after
+  parsing. On a six-candidate list that restatement carried the response past the
+  request deadline four times in succession; the round then advanced with no
+  direction selected and the whole round's literature evidence went with it. The
+  prompt now contracts for the scored fields alone, keyed by `direction_id`, and
+  names the fields that are carried over so they are not repeated.
+
+  Candidate terms are free text and were quoted verbatim as `[tiab]` phrases.
+  Descriptive labels such as "Integrated Stress Response (ISR)" or
+  "Nrf2/Antioxidant Response" match nothing, which inside an OR list only wastes
+  an arm; but the tissue term is ANDed into the direct-prior-work and prior-art
+  queries, so a clause like "Liver, with primary emphasis on hepatocytes"
+  returned the entire query empty and the direction then recorded zero direct
+  evidence. `normalize_search_terms` splits on the punctuation the writer already
+  used, keeps a parenthesised acronym as an alternative, drops clauses too long
+  to be an index term, and deduplicates. A tissue constraint that survives none
+  of that is omitted rather than ANDed as a phrase that can only match nothing.
+  The rules read no subject vocabulary and stay domain-neutral.
+
+  The scorer received evidence counts and a prose summary with no article
+  identity, so an article counted as direct prior work was indistinguishable
+  from a keyword collision. Each evidence record now carries `key_evidence`,
+  naming the direct and contradictory articles by PMID, year and title, ordered
+  ahead of the prose fields so the prompt budget keeps it; a scoring rule directs
+  the PI to read those titles rather than the count beside them.
+
+  A retrieval verdict of `known_area` was returned whenever any article at all
+  survived triage. Triage assigns most articles to the analogous bucket, so that
+  was every candidate, whether or not a single paper addressed the question. The
+  new `adjacent_work_only` status separates related work from prior work on the
+  question itself, and the scoring prompt states that neither the volume of
+  adjacent work nor the absence of a direct hit settles the matter.
+
+  E-utilities requests were paced by one sleep placed between a single call's
+  esearch and its efetch. That bounds one sequential caller and nothing else,
+  while the novelty gate evaluates four candidates concurrently, so requests
+  landed inside the same second and NCBI rejected whole batches with an HTTP 429
+  that surfaced only as a missing evidence axis on one direction. Every request
+  now passes through one process-wide gate at the per-IP ceiling, carries the
+  `tool` and `email` identification NCBI asks every client to send, and retries a
+  rejection instead of losing the batch. An API key stays optional: it lifts the
+  ceiling from three requests per second to ten, is read from `NCBI_API_KEY`, and
+  is never required, because identification and quota are separate things.
+
+  Two defects from the same audit are deliberately not addressed here. Queries
+  still carry no term for the experimental perturbation, so "direct" evidence
+  means the same gene in any context; and challenge queries still have no species
+  or tissue anchor. Both change what a novelty verdict means and are held for a
+  separate decision.
 
 - `0.55.8` — Rebuilds the PubMed search that grounds cell-type annotation, from
   an audit of two completed runs. The retrieved pool was largely off topic, and
