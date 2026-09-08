@@ -1,5 +1,6 @@
 """Context isolation and plan-revision resume tests for BioinformaticsAgent."""
 
+from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -10,6 +11,8 @@ from backend.agents.bioinformatics_agent import (
     build_approved_plan_context,
     inject_revised_plan_context,
 )
+from backend.agents import bioinformatics_agent as bioinformatics_facade
+from backend.agents.bioinformatics import executor_loop
 from backend.constants import PLAN_REVISION_NEEDED_TAG
 from backend.models.schemas import (
     AgentType,
@@ -336,6 +339,93 @@ async def test_resume_preserves_executor_messages_and_persists_new_plan(
     assert saved["messages"][:3] == original_messages
     assert "APPROVED PLAN REVISION" in saved["messages"][-1]["content"]
     assert saved["analysis_context"] == {"kept": True}
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restores_current_step_and_replaced_transcript(
+    monkeypatch,
+    tmp_path,
+):
+    agent = _bare_agent(monkeypatch, tmp_path)
+    response = LLMToolResponse(
+        content="continue",
+        tool_calls=[],
+        model="test-model",
+        usage={},
+        raw_response=None,
+        raw_assistant_message=None,
+    )
+    fake_client = MagicMock()
+    fake_client.base_url = "https://example.invalid/v1"
+    fake_client.chat_with_tools = AsyncMock(return_value=response)
+    monkeypatch.setattr(
+        BioinformaticsAgent,
+        "llm_client",
+        property(lambda self: fake_client),
+    )
+    saved_payload = None
+
+    class _Checkpoint:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def load(self):
+            return deepcopy(saved_payload) if saved_payload is not None else None
+
+        async def save(self, data):
+            nonlocal saved_payload
+            saved_payload = deepcopy(data)
+
+        def clear(self):
+            pass
+
+        def should_checkpoint(self, step):
+            return step == 2
+
+    setattr_facade(
+        monkeypatch, "backend.agents.bioinformatics_agent", "CheckpointManager", _Checkpoint
+    )
+    executor_loop.bind_facade(bioinformatics_facade)
+    state = AnalysisState(id="test-session", user_id="test-user")
+    context = await executor_loop.prepare_loop_context(
+        agent,
+        state,
+        initial_instruction="Run analysis.",
+        max_steps=5,
+        resume_from_checkpoint=False,
+    )
+    context.max_text_responses = 3
+    original_messages = [{"role": "system", "content": "system"}]
+    original_messages.extend(
+        {
+            "role": "user" if index % 2 == 0 else "assistant",
+            "content": f"message-{index}",
+        }
+        for index in range(84)
+    )
+    context.messages = original_messages
+
+    await executor_loop.start_turn(context)
+    trimmed_messages = deepcopy(context.messages)
+    assert len(trimmed_messages) < len(original_messages)
+    assert trimmed_messages != original_messages
+
+    await executor_loop.start_turn(context)
+
+    assert saved_payload is not None
+    assert saved_payload["step_number"] == context.step_count == 2
+    assert saved_payload["messages"] == trimmed_messages
+
+    restored_agent = _bare_agent(monkeypatch, tmp_path)
+    restored_context = await executor_loop.prepare_loop_context(
+        restored_agent,
+        state,
+        initial_instruction="Discarded on resume.",
+        max_steps=5,
+        resume_from_checkpoint=True,
+    )
+    assert restored_context.step_count == saved_payload["step_number"]
+    assert restored_context.messages == saved_payload["messages"]
 
 
 @pytest.mark.asyncio

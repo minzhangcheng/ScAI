@@ -1,4 +1,4 @@
-import { ExternalLink, FileText, Image, Loader2, Package, RefreshCw, Table } from 'lucide-react'
+import { ExternalLink, FileText, Image, Loader2, MessageCircle, Package, RefreshCw, Table } from 'lucide-react'
 
 import { API_BASE } from '../../constants/api'
 import { ErrorBanner } from '../shared/ErrorBanner'
@@ -14,7 +14,7 @@ export function ReportView({ controller }: ReportViewProps) {
     archiveWarning, currentSession, doGenerateReport, downloadError, downloadReportArtifact,
     generating, language, openHtmlInNewTab, preview, report, reportArchives, safeDownload,
     setDownloadError, setShowValidationDialog, showConfigPanel, showValidationDialog, t,
-    validating, validationMessage, validationUncertain, generateReport,
+    validating, validationMessage, validationUncertain, generateReport, continueFollowupInChat,
   } = controller
   if (!currentSession) {
     return (
@@ -182,6 +182,83 @@ export function ReportView({ controller }: ReportViewProps) {
               />
             </div>
           </div>
+        )}
+
+        {report?.followups && report.followups.length > 0 && (
+          <section className="mt-4 pt-4 border-t border-slate-200" aria-labelledby="report-followups-heading">
+            <h3 id="report-followups-heading" className="text-sm font-semibold text-slate-700 mb-2">
+              {language === 'zh' ? '后续问题' : 'Follow-ups'}
+            </h3>
+            <div className="space-y-2">
+              {report.followups.map((followup) => {
+                const disposition = String(followup.disposition || '').toLowerCase()
+                const needsNewData = disposition === 'needs_new_data'
+                const canContinue = disposition !== 'closed'
+                  && Boolean(followup.suggested_instruction?.trim())
+                const dispositionLabel = needsNewData
+                  ? (language === 'zh' ? '需要新数据' : 'Needs new data')
+                  : disposition === 'offer_in_chat'
+                    ? (language === 'zh' ? '在 Chat 中继续' : 'Continue in Chat')
+                    : disposition === 'deepen_now'
+                      ? (language === 'zh' ? '现在深入' : 'Deepen now')
+                      : (language === 'zh' ? 'PI 已记录' : 'Recorded by PI')
+                return (
+                  <article key={followup.followup_id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="text-sm font-medium text-slate-800">{followup.question}</p>
+                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                        needsNewData
+                          ? 'bg-amber-100 text-amber-800'
+                          : 'bg-accent-100 text-accent-800'
+                      }`}>
+                        {dispositionLabel}
+                      </span>
+                    </div>
+                    {followup.why_it_matters && (
+                      <p className="mt-1 text-xs text-slate-600">{followup.why_it_matters}</p>
+                    )}
+                    {followup.reason && (
+                      <p className="mt-1 text-xs text-slate-500">{followup.reason}</p>
+                    )}
+                    {followup.suggested_instruction && (
+                      <p className="mt-1 text-xs text-slate-700">
+                        <span className="font-medium">{language === 'zh' ? '建议指令：' : 'Suggested instruction: '}</span>
+                        {followup.suggested_instruction}
+                      </p>
+                    )}
+                    {followup.required_input && (
+                      <p className="mt-1 text-xs text-amber-800">
+                        <span className="font-medium">{language === 'zh' ? '所需输入：' : 'Required input: '}</span>
+                        {followup.required_input}
+                      </p>
+                    )}
+                    {followup.execution_outcome && (
+                      <p className="mt-1 text-xs text-slate-600">
+                        <span className="font-medium">{language === 'zh' ? '尝试结果：' : 'Attempted outcome: '}</span>
+                        {followup.execution_outcome}
+                      </p>
+                    )}
+                    {followup.source_round && (
+                      <p className="mt-1 text-[11px] text-slate-400">
+                        {language === 'zh' ? `来源：第 ${followup.source_round} 轮` : `Source: Round ${followup.source_round}`}
+                        {followup.direction ? ` · ${followup.direction}` : ''}
+                      </p>
+                    )}
+                    {canContinue && (
+                      <button
+                        type="button"
+                        onClick={() => continueFollowupInChat(followup)}
+                        className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-accent-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-accent-700"
+                      >
+                        <MessageCircle className="h-3.5 w-3.5" />
+                        {language === 'zh' ? '在 Chat 中继续' : 'Continue in Chat'}
+                      </button>
+                    )}
+                  </article>
+                )
+              })}
+            </div>
+          </section>
         )}
       </div>
 

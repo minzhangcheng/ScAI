@@ -16,12 +16,15 @@ from .method_rules import rule_text
 from .statistical_gate_vocabulary import (  # noqa: F401
     FAMILY_REQUIRED_KINDS,
     _ACTIVITY,
+    _ADAPTIVE_ESTIMATOR,
+    _ADJUSTED_P_LABEL,
     _ALT_INFERENCE,
     _BOUNDED_COMPARATORS,
     _CONVENTIONAL_CUTOFFS,
     _COUNT_TEST,
     _DA,
     _DE,
+    _ESTIMATOR_PARAM_KEYS,
     _FLOOR_ROUNDING_TOLERANCE,
     _MODULE,
     _NAMED_TEST,
@@ -59,10 +62,13 @@ from .statistical_gate_vocabulary import (  # noqa: F401
     infer_method_kind,
     score_kind,
 )
-#: Below this many samples per group, a permutation-based q-value cannot be
-#: trusted. Phenotype permutation degrades under it, and the number of distinct
-#: label partitions becomes small enough to floor the attainable p-value: at 3
-#: versus 3 there are only 10, so nothing below ~0.1 is reachable at all.
+#: GSEA's user-guide line for choosing phenotype permutation over gene-set
+#: permutation. A guideline about resolution and power, not a validity line:
+#: below it the number of distinct label assignments is small (3 versus 3
+#: independent samples allow 20, or 10 up to the symmetry of a two-sided
+#: statistic), so the attainable p-values are few and coarse. Whether a
+#: permutation test is valid at all depends on exchangeability, pairing or
+#: stratification, and the statistic, not on this count.
 MIN_SAMPLES_PER_GROUP_FOR_PERMUTATION = 7
 
 #: Shared membership, as a fraction of the SMALLER panel, above which two panels
@@ -70,6 +76,15 @@ MIN_SAMPLES_PER_GROUP_FOR_PERMUTATION = 7
 #: a majority: below it the panels still have independent content, above it the
 #: smaller one's result is mostly the larger one's result.
 PANEL_REDUNDANCY_CONTAINMENT = 0.5
+
+#: Comparators that make a quoted value a strict upper bound. "p < floor" is
+#: the overclaim the resolution observation exists for.
+_STRICT_UPPER_COMPARATORS = ("<", "below", "under", "less than")
+#: Comparators that are correct reporting at the floor ("p <= 1/(B+1)") or
+#: that bound from below and say nothing about a floor.
+_NON_STRICT_OR_LOWER_COMPARATORS = (
+    "<=", "≤", "at most", ">", ">=", "≥", "above", "greater than", "at least",
+)
 
 @dataclass
 class GateFinding:
@@ -524,13 +539,48 @@ def check_underpowered_negative_claims(findings, score_definitions):
     return out
 
 
-def check_permutation_at_small_n(findings, score_definitions, samples_per_group):
-    """Surface permutation q-values below the viable sample resolution.
+def _permutation_unit(score) -> str:
+    """'phenotype' when the registration says samples were permuted, else 'gene'.
 
-    Scoped to small n on purpose. A gene-permutation null is
-    anti-conservative at every sample size, while at 3 versus 3 there are only
-    10 distinct label partitions and nothing below about 0.1 is reachable.
-    The PI decides how that limitation affects the claim.
+    Read from the declared parameters first, then from the method name.
+    gseapy.gsea is the phenotype-permutation entry point (its default
+    permutation_type), gseapy.prerank the gene-permutation one, so the
+    library-qualified name decides. The ambiguous cases default to 'gene': a
+    bare "GSEA" is far more often a preranked run than a phenotype one.
+    """
+    params = getattr(score, "parameters", None) or {}
+    declared = ""
+    if isinstance(params, dict):
+        for key in ("permutation_type", "permutation", "permute"):
+            if params.get(key):
+                declared = str(params[key]).lower()
+                break
+    if declared:
+        if "phenotype" in declared or "sample" in declared or "label" in declared:
+            return "phenotype"
+        if "gene" in declared:
+            return "gene"
+    tok = _tokens(str(getattr(score, "method", "") or ""))
+    if tok & {"prerank", "preranked", "fgsea"}:
+        return "gene"
+    if "gsea" in tok and (tok & {"gseapy", "phenotype"}):
+        return "phenotype"
+    return "gene"
+
+
+def check_permutation_at_small_n(findings, score_definitions, samples_per_group):
+    """Surface permutation-based q-values reported from very few samples per group.
+
+    Two different limitations, kept apart. A phenotype permutation over n
+    samples per group has only as many distinct label assignments as the
+    design allows, so its p-values are coarse and its power low; whether it is
+    valid at all depends on exchangeability, pairing and the statistic, not on
+    a sample count. A gene-set permutation (gseapy.prerank) never permutes
+    samples, so n does not enter its null, which is anti-conservative at any
+    n; what n does affect is the ranking statistic the sets were scored on,
+    which is why this observation is still scoped to small n for it. A finding
+    that names scores of both kinds gets both observations. The PI decides how
+    either limitation bears on the claim.
     """
     if not samples_per_group:
         return []
@@ -542,11 +592,9 @@ def check_permutation_at_small_n(findings, score_definitions, samples_per_group)
     if smallest is None or smallest >= MIN_SAMPLES_PER_GROUP_FOR_PERMUTATION:
         return []
 
-    permutation_scores = [
-        getattr(s, "score_name", "") for s in (score_definitions or [])
-        if score_kind(s) == "ranked_enrichment"
-    ]
-    if not permutation_scores:
+    ranked = [s for s in (score_definitions or [])
+              if score_kind(s) == "ranked_enrichment"]
+    if not ranked:
         return []
 
     out = []
@@ -554,19 +602,41 @@ def check_permutation_at_small_n(findings, score_definitions, samples_per_group)
         lowered = str(text).lower()
         if not any(token in lowered for token in ("fdr", "q-val", "q val", "qval")):
             continue
-        if not any(name and name.lower() in lowered for name in permutation_scores):
+        named = [s for s in ranked
+                 if getattr(s, "score_name", "")
+                 and str(getattr(s, "score_name", "")).lower() in lowered]
+        if not named:
             continue
-        out.append(GateFinding(
-            gate="permutation-at-small-n",
-            rule_id="gene-permutation-is-anticonservative",
-            detail=(
-                f"this finding rests on a permutation q-value, but the smallest "
-                f"group has {smallest} sample(s), below the "
-                f"{MIN_SAMPLES_PER_GROUP_FOR_PERMUTATION} needed for the null to "
-                f"be valid. Report effect size and direction concordance, and "
-                f"state that the q-value is not interpretable at this sample size."
-            ),
-        ))
+        units = {_permutation_unit(s) for s in named}
+        if "phenotype" in units:
+            out.append(GateFinding(
+                gate="permutation-at-small-n",
+                rule_id="resampling-p-has-a-resolution-floor",
+                detail=(
+                    f"this finding rests on a phenotype-permutation q-value with "
+                    f"{smallest} sample(s) in the smallest group. That few samples "
+                    f"allow only a small number of distinct label assignments, so the "
+                    f"attainable p-values are few and coarse and power is low; whether "
+                    f"the test is valid depends on exchangeability, pairing or "
+                    f"stratification and the statistic, not on the count. Report the "
+                    f"number of distinct assignments the test could use, the effect "
+                    f"size and direction concordance, and treat the q-value as coarse."
+                ),
+            ))
+        if "gene" in units:
+            out.append(GateFinding(
+                gate="permutation-at-small-n",
+                rule_id="gene-permutation-is-anticonservative",
+                detail=(
+                    f"this finding rests on a gene-set permutation q-value computed on "
+                    f"a ranking derived from {smallest} sample(s) in the smallest group. "
+                    f"The permutation is over genes, so the sample count does not enter "
+                    f"its null, which is anti-conservative at any n; what the sample "
+                    f"count does affect is the ranking statistic itself, which is noisy "
+                    f"at this n. Report effect size and direction concordance and say "
+                    f"the q-value is a ranking device here, not a calibrated error rate."
+                ),
+            ))
         break
     return out
 
@@ -589,16 +659,32 @@ def _declared_resamples(score) -> Optional[int]:
 
 
 def _quoted_p_values(text):
-    """(comparator, value) for every p/q-like number stated in a text."""
+    """(label, comparator, value) for every p/q-like number stated in a text."""
     out = []
     for match in _P_NUMERIC_VALUE.finditer(str(text)):
-        symbol, word, number = match.group(1), match.group(2), match.group(3)
+        label, symbol, word, number = match.groups()
         comparator = (symbol or word or "").strip().lower()
         try:
-            out.append((comparator, float(number)))
+            out.append((label.strip().lower(), comparator, float(number)))
         except (TypeError, ValueError):
             continue
     return out
+
+
+def _is_nominal_p(label) -> bool:
+    """Whether a quoted label names a nominal p-value rather than an adjusted one."""
+    return not _ADJUSTED_P_LABEL.search(str(label))
+
+
+def _uses_adaptive_estimator(score) -> bool:
+    """Whether a score declared a tail estimator (multilevel) instead of plain counting."""
+    params = getattr(score, "parameters", None) or {}
+    if not isinstance(params, dict):
+        return False
+    return any(
+        _ADAPTIVE_ESTIMATOR.search(str(params.get(key, "")))
+        for key in _ESTIMATOR_PARAM_KEYS
+    )
 
 
 def _names_score(text, score_name):
@@ -631,20 +717,38 @@ def _resamples_for(text, declared):
 
 
 def check_resampling_resolution(findings, score_definitions):
-    """Surface p-values below the resolution their resamples can attain.
+    """Surface resampling p-values quoted at or below the resolution their resamples attain.
 
-    The checks distinguish a declared numerical contradiction, an undeclared
-    resample count, and repeated floor values. All three are observations; the
-    PI decides whether they require rewording, recomputation, or a limitation.
+    Two observations. (1) A resampling score whose resample count is not on
+    record. (2) A quoted nominal p-value at or below 1/(B+1): with the +1
+    estimator that value is itself the valid p-value and the smallest one B
+    resamples can produce, so it is reported as p = 1/(B+1), never as a strict
+    inequality below it, and results tied there are not ranked on it. Both are
+    observations; the PI decides whether rewording or more resamples follow.
+
+    Deliberately absent, because the floor arithmetic does not describe them:
+    adjusted values (a GSEA FDR comes from the pooled null of every set in the
+    call and can sit below the per-set floor, and prose does not say whether a
+    quoted FDR is that or a Benjamini-Hochberg q); scores that declared a tail
+    estimator (gseapy's method="multilevel"), whose precision is not set by a
+    resample count -- such scores are excluded from both observations; and
+    sentences that name the multilevel estimator themselves. Also absent: an
+    inference that one value shared by several results is a resolution floor.
+    Benjamini-Hochberg's step-up monotonisation ties adjusted values by
+    construction, so a shared q-value is routine and proves nothing.
     """
     texts = _texts(findings)
     if not texts:
         return []
 
     out = []
-    ranked = [s for s in (score_definitions or ()) if score_kind(s) == "ranked_enrichment"]
+    ranked = [
+        s for s in (score_definitions or ())
+        if score_kind(s) == "ranked_enrichment"
+    ]
     declared = {
         getattr(s, "score_name", ""): _declared_resamples(s) for s in ranked
+        if not _uses_adaptive_estimator(s)
     }
     counts = [n for n in declared.values() if n]
 
@@ -659,12 +763,18 @@ def check_resampling_resolution(findings, score_definitions):
             detail=(
                 "this score is a resampling-based enrichment, but no resample count "
                 "is on record for it, so the smallest p-value it could have produced "
-                "is unknown and a reader cannot tell an estimate from a bound. "
+                "is unknown and a reader cannot tell an estimate at the resolution "
+                "limit from a measured tail probability. "
                 f"Re-register it with the count in parameters (any of: "
                 f"{', '.join(_RESAMPLE_PARAM_KEYS[:4])})."),
         ))
 
-    # (2) A floor value quoted as though it were an estimate.
+    # (2) A value at or below the floor. "p <= floor" and "at most" are correct
+    # reporting and pass; ">" comparators say nothing about a floor and pass; an
+    # estimate ("=" or bare) at or below the floor is observed; a strict "<" is
+    # observed only when the value quoted IS the floor, since "p < 1/(B+1)" is
+    # the overclaim while "FDR < 1e-4" is usually a selection threshold or an
+    # analytic value sharing the sentence.
     #
     # Scoped to the sentence rather than the whole finding, because the ordinary
     # shape of a finding reports a resampling result and an analytic one side by
@@ -677,65 +787,68 @@ def check_resampling_resolution(findings, score_definitions):
             for sent in _sentences(text):
                 if not _RESAMPLED_RESULT.search(sent):
                     continue
+                if _ADAPTIVE_ESTIMATOR.search(sent):
+                    continue
+                # Keep estimator identity until the result is attributed. If
+                # attribution is ambiguous and may include a multilevel score,
+                # another score's permutation count cannot bound this value.
+                candidates = [
+                    s for s in ranked
+                    if _names_score(sent, getattr(s, "score_name", ""))
+                ] or ranked
+                if any(_uses_adaptive_estimator(s) for s in candidates):
+                    continue
                 resamples = _resamples_for(sent, declared)
                 if not resamples:
                     continue
                 floor = 1.0 / (resamples + 1)
-                for comparator, value in _quoted_p_values(sent):
-                    if comparator in _BOUNDED_COMPARATORS:
+                for label, comparator, value in _quoted_p_values(sent):
+                    if not _is_nominal_p(label):
                         continue
                     if value <= 0 or value > floor * _FLOOR_ROUNDING_TOLERANCE:
                         continue
+                    if comparator in _NON_STRICT_OR_LOWER_COMPARATORS:
+                        continue
+                    if comparator in _STRICT_UPPER_COMPARATORS and (
+                        value < floor / _FLOOR_ROUNDING_TOLERANCE
+                    ):
+                        continue
                     if any(abs(value - c) < 1e-12 for c in _CONVENTIONAL_CUTOFFS):
                         # A conventional cutoff restated is a threshold, not an
-                        # estimate -- the same carve-out observation (3) makes.
-                        # gseapy's default of 1000 draws puts the floor within
-                        # rounding distance of 0.001, so without this the check
-                        # flags the most standard sentence in the method.
+                        # estimate. gseapy's default of 1000 draws puts the floor
+                        # within rounding distance of 0.001, so without this the
+                        # check flags the most standard sentence in the method.
                         continue
-                    hit = (value, resamples, floor)
+                    hit = (comparator, value, resamples, floor)
                     break
                 if hit:
                     break
             if hit:
                 break
         if hit:
-            value, resamples, floor = hit
+            comparator, value, resamples, floor = hit
+            strict = comparator in _STRICT_UPPER_COMPARATORS
+            how = (
+                f"as a strict inequality below {value:g}" if strict
+                else f"as an estimate of {value:g}"
+            )
             out.append(GateFinding(
                 gate="p-below-resampling-resolution",
                 rule_id="resampling-p-has-a-resolution-floor",
                 also_see=("gene-permutation-is-anticonservative",),
                 detail=(
-                    f"this finding states a resampling p-value of {value:g} as an "
-                    f"estimate, but the smallest value {resamples} resamples can "
-                    f"produce is {floor:.3g}. Every result at that value is tied "
-                    f"with every other one there, so the number carries no ordering "
-                    f"and no precision. State it as an inequality (p < "
-                    f"{floor:.3g}), rank on the effect statistic instead, or "
-                    f"re-run with more resamples."),
+                    f"this finding quotes a resampling p-value {how}, but with "
+                    f"{resamples} resamples the smallest value the estimator can "
+                    f"produce is {floor:.3g}, so this is the resolution limit rather "
+                    f"than a measured tail probability. With the +1 estimator that "
+                    f"limit is itself the valid p-value: report it as p = {floor:.3g} "
+                    f"(the limit at B = {resamples}), not as p < {floor:.3g}, which the "
+                    f"resamples cannot establish. Confirm which estimator the tool "
+                    f"used, do not rank results tied at the limit against each other, "
+                    f"and re-run with more resamples or a multilevel estimator if a "
+                    f"smaller value matters (a score registered with "
+                    f"method=\"multilevel\" is not held to this limit)."),
             ))
-
-    # (3) One value shared across several findings is the floor showing through.
-    repeated = {}
-    for text in texts:
-        for _, value in _quoted_p_values(text):
-            if value <= 0 or any(abs(value - c) < 1e-12 for c in _CONVENTIONAL_CUTOFFS):
-                continue
-            repeated.setdefault(value, 0)
-            repeated[value] += 1
-    tied = sorted(v for v, n in repeated.items() if n >= 3)
-    if tied:
-        out.append(GateFinding(
-            gate="adjusted-p-tied-across-results",
-            rule_id="resampling-p-has-a-resolution-floor",
-            severity="advise",
-            detail=(
-                f"the same p/q-value ({', '.join(f'{v:g}' for v in tied[:3])}) is quoted "
-                f"for three or more separate results. Independent tests do not normally "
-                f"agree to full precision; a shared value is usually a resolution floor, "
-                f"which multiplicity adjustment preserves. Say which results are tied and "
-                f"do not rank them against each other on that value."),
-        ))
     return out
 
 

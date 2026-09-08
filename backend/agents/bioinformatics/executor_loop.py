@@ -756,18 +756,18 @@ async def prepare_loop_context(
             step_name=step_name,
             state=state,
             planning_stage=planning_stage,
-            step_number=step_count,
-            total_steps=max_steps,
-            attempt_start_step=attempt_start_step,
+            step_number=loop_context.step_count,
+            total_steps=loop_context.max_steps,
+            attempt_start_step=loop_context.attempt_start_step,
             active_plan_id=_active_plan_id(),
-            messages=messages,
-            findings=all_findings,
-            figures=all_figures,
+            messages=loop_context.messages,
+            findings=loop_context.findings,
+            figures=loop_context.figures,
             code_history=[
                 ce.model_dump(mode="json") for ce in self.code_history
             ],
             analysis_log=[
-                step.model_dump(mode="json") for step in analysis_log
+                step.model_dump(mode="json") for step in loop_context.analysis_log
             ],
             analysis_context=self.analysis_context,
             budget_exhausted=budget_exhausted,
@@ -792,35 +792,6 @@ async def prepare_loop_context(
                 # The record is published either way. A failed save keeps the
                 # previous committed generation and does not stop the run.
                 self.sandbox.sync_runtime_persistence_state(state)
-
-    # A resumed executor must keep its original tool transcript, but an
-    # approved replacement plan has to be made visible before the next LLM
-    # call. A plan ID in the checkpoint prevents duplicate injection on
-    # ordinary retries. Legacy/rebuilt checkpoints receive the plan once.
-    if checkpoint and checkpoint_valid and state.current_plan:
-        checkpoint_plan_id = checkpoint.get('active_plan_id')
-        if restored_messages_rebuilt:
-            checkpoint_plan_id = None
-        if inject_revised_plan_context(
-            messages,
-            state.current_plan,
-            checkpoint_plan_id,
-        ):
-            try:
-                await _save_executor_checkpoint(
-                    f"step_{step_count}_plan_{state.current_plan.id}",
-                )
-                logger.info(
-                    "[Bioinformatics] Injected approved plan %s into resumed "
-                    "executor checkpoint (previous plan=%s)",
-                    state.current_plan.id,
-                    checkpoint_plan_id,
-                )
-            except Exception as e:
-                logger.warning(
-                    "[Bioinformatics] Failed to persist resumed plan context: %s",
-                    e,
-                )
 
     annotation_completed = False
     # Restore annotation_completed from analysis_log so the PI observation is
@@ -860,6 +831,35 @@ async def prepare_loop_context(
         mechanism_programs_registered=mechanism_programs_registered,
         evidence_gate_findings=evidence_gate_findings,
     )
+
+    # A resumed executor must keep its original tool transcript, but an
+    # approved replacement plan has to be made visible before the next LLM
+    # call. A plan ID in the checkpoint prevents duplicate injection on
+    # ordinary retries. Legacy/rebuilt checkpoints receive the plan once.
+    if checkpoint and checkpoint_valid and state.current_plan:
+        checkpoint_plan_id = checkpoint.get('active_plan_id')
+        if restored_messages_rebuilt:
+            checkpoint_plan_id = None
+        if inject_revised_plan_context(
+            messages,
+            state.current_plan,
+            checkpoint_plan_id,
+        ):
+            try:
+                await _save_executor_checkpoint(
+                    f"step_{step_count}_plan_{state.current_plan.id}",
+                )
+                logger.info(
+                    "[Bioinformatics] Injected approved plan %s into resumed "
+                    "executor checkpoint (previous plan=%s)",
+                    state.current_plan.id,
+                    checkpoint_plan_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[Bioinformatics] Failed to persist resumed plan context: %s",
+                    e,
+                )
 
     return loop_context
 

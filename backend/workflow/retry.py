@@ -81,7 +81,10 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                 except UpstreamExhaustedError as e:
                     last_error = e
                     action = await self._wait_for_llm_intervention(
-                        e, node_name, state["analysis_state"]
+                        e, node_name, state["analysis_state"],
+                        require_explicit_resolution=(
+                            node_name == "bioinformatics_analysis"
+                        ),
                     )
                     if action == LlmFailureAction.RETRY:
                         attempt = 0

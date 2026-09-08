@@ -226,6 +226,45 @@ def test_kernel_launch_environment_is_session_scoped(tmp_path):
     assert "kernel_startup" in env["PYTHONPATH"].split(os.pathsep)[0]
 
 
+def test_kernel_launch_environment_exposes_the_celltypist_cache(tmp_path, monkeypatch):
+    """celltypist creates its model folder at import time, so CELLTYPIST_FOLDER
+    has to be a write root; the host cache is linked in so a kernel reads models
+    without a download."""
+    import backend.config
+
+    monkeypatch.setattr(backend.config, "DATA_BASE_DIR", tmp_path / "data")
+    cache = tmp_path / "data" / "celltypist" / "data" / "models"
+    cache.mkdir(parents=True)
+    (cache / "Cached.pkl").write_bytes(b"x")
+    (cache / "models.json").write_text("{}")
+    sandbox = _sandbox(tmp_path)
+
+    env = sandbox._kernel_launch_environment()
+
+    folder = Path(env["CELLTYPIST_FOLDER"])
+    assert folder == sandbox._session_tmp.resolve() / "celltypist"
+    assert folder.is_dir()
+    roots = [Path(r) for r in json.loads(env["SCAI_KERNEL_WRITE_ROOTS"])]
+    assert any(folder.is_relative_to(root) for root in roots)
+    link = folder / "data" / "models" / "Cached.pkl"
+    assert link.is_symlink()
+    assert link.read_bytes() == b"x"
+    assert (folder / "data" / "models" / "models.json").is_symlink()
+
+
+def test_kernel_launch_environment_survives_an_absent_celltypist_cache(
+    tmp_path, monkeypatch
+):
+    import backend.config
+
+    monkeypatch.setattr(backend.config, "DATA_BASE_DIR", tmp_path / "absent")
+    sandbox = _sandbox(tmp_path)
+
+    env = sandbox._kernel_launch_environment()
+
+    assert (Path(env["CELLTYPIST_FOLDER"]) / "data" / "models").is_dir()
+
+
 def test_kernel_command_runs_trusted_launcher_before_ipykernel(tmp_path):
     sandbox = _sandbox(tmp_path)
     manager = _FakeKernelManager(kernel_name="python3")

@@ -7,8 +7,11 @@ the same platform-owned floor.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
+
+from backend.models.schemas import CodeExecution
 
 from backend.agents.bioinformatics.innovation_baseline_figures import (
     build_innovation_baseline_figure_specs,
@@ -154,7 +157,7 @@ def test_probe_output_parses_and_rejects_an_unusable_payload():
 
 
 def test_probe_code_is_syntactically_valid_and_prints_the_marker():
-    code = build_innovation_baseline_probe_code()
+    code = build_innovation_baseline_probe_code(["adata"])
     compile(code, "<probe>", "exec")
     assert "__SCAI_INNOVATION_BASELINE_PROBE__" in code
     # The probe must never mutate the analysis state it inspects.
@@ -206,7 +209,7 @@ def _make_enrichment_table(rows=40):
     })
 
 
-def _exec_probe(namespace):
+def _exec_probe(namespace, output_names):
     import contextlib
     import io
 
@@ -214,7 +217,9 @@ def _exec_probe(namespace):
     with contextlib.redirect_stdout(buffer):
         exec(
             compile(
-                build_innovation_baseline_probe_code(), "<innovation-probe>", "exec"
+                build_innovation_baseline_probe_code(output_names),
+                "<innovation-probe>",
+                "exec",
             ),
             namespace,
             namespace,
@@ -228,7 +233,7 @@ def test_real_probe_discovers_scores_differential_and_enrichment_results():
         "adata": _make_adata(),
         "deg_results": _make_de_table(),
         "go_bp": _make_enrichment_table(),
-    })
+    }, ["adata", "deg_results", "go_bp"])
 
     assert parsed is not None
     assert parsed["var"] == "adata"
@@ -247,9 +252,34 @@ def test_real_probe_does_not_mistake_a_small_table_for_a_volcano():
     parsed = _exec_probe({
         "adata": _make_adata(),
         "tiny_de": _make_de_table(rows=5),
-    })
+    }, ["adata", "tiny_de"])
     assert parsed is not None
     assert parsed["de_tables"] == []
+
+
+def test_real_probe_uses_only_the_explicit_output_allowlist():
+    pytest.importorskip("anndata")
+    parsed = _exec_probe(
+        {
+            "old_adata": _make_adata(),
+            "old_de": _make_de_table(),
+            "current_adata": _make_adata(),
+            "current_de": _make_de_table(),
+        },
+        ["current_adata", "current_de"],
+    )
+
+    assert parsed is not None
+    assert parsed["var"] == "current_adata"
+    assert [table["var"] for table in parsed["de_tables"]] == ["current_de"]
+
+
+def test_empty_output_allowlist_does_not_scan_result_shaped_globals():
+    pytest.importorskip("anndata")
+    parsed = _exec_probe(
+        {"old_adata": _make_adata(), "old_de": _make_de_table()}, []
+    )
+    assert parsed is None
 
 
 def test_all_generated_panels_pass_the_sandbox_code_validator():
@@ -260,7 +290,7 @@ def test_all_generated_panels_pass_the_sandbox_code_validator():
         "adata": _make_adata(),
         "deg_results": _make_de_table(),
         "go_bp": _make_enrichment_table(),
-    })
+    }, ["adata", "deg_results", "go_bp"])
     specs = build_innovation_baseline_figure_specs(probe, round_number=3)
     assert len(specs) == 3
     for spec in specs:
@@ -280,7 +310,7 @@ def test_all_real_panels_render_and_pass_the_blocking_layout_gate():
         "deg_results": _make_de_table(),
         "go_bp": _make_enrichment_table(),
     }
-    probe = _exec_probe(namespace)
+    probe = _exec_probe(namespace, ["adata", "deg_results", "go_bp"])
     specs = build_innovation_baseline_figure_specs(probe, round_number=3)
     assert len(specs) == 3
 
@@ -307,8 +337,10 @@ class _Sandbox:
     def __init__(self, result=None, raises=False):
         self.result = result
         self.raises = raises
+        self.codes = []
 
     async def execute(self, code, **kwargs):
+        self.codes.append(code)
         if self.raises:
             raise RuntimeError("kernel unavailable")
         return self.result
@@ -327,11 +359,50 @@ class _Agent:
         return f"rendered:{kwargs['figure_name']}"
 
 
+def _receipt(
+    *,
+    outputs=("adata", "deg_results"),
+    round_number=3,
+    plan_id="plan-1",
+    lineage_id="main",
+    analysis_generation=4,
+    cohort_generation=2,
+    cohort_digest="d" * 64,
+    **overrides,
+):
+    values = {
+        "id": "receipt-current",
+        "code": "current_analysis()",
+        "round_number": round_number,
+        "evidence_schema_version": 2,
+        "plan_id": plan_id,
+        "execution_status": "succeeded",
+        "lineage_id": lineage_id,
+        "analysis_generation": analysis_generation,
+        "cohort_generation": cohort_generation,
+        "cohort_digest": cohort_digest,
+        "realized_persistent_outputs": list(outputs),
+    }
+    values.update(overrides)
+    return CodeExecution(**values)
+
+
 class _State:
-    def __init__(self, current_round=3, publication_figures=()):
+    def __init__(self, current_round=3, publication_figures=(), code_history=None):
         self.current_round = current_round
         self.publication_figures = list(publication_figures)
-        self.restore_branch_id = None
+        self.restore_branch_id = "main"
+        self.current_plan = SimpleNamespace(id="plan-1")
+        self.sandbox_state = {
+            "analysis_generation": 4,
+            "cohort_identity_v1": {
+                "cohort_generation": 2,
+                "cohort_digest": "d" * 64,
+            },
+        }
+        self.code_history = list(
+            code_history if code_history is not None else [_receipt()]
+        )
 
 
 def _probe_line():
@@ -360,10 +431,53 @@ def test_service_registers_each_panel_as_platform_rendered():
     assert sorted(rendered) == [
         "r3_platform_score_distribution", "r3_platform_volcano_deg_results"
     ]
+    assert "'adata'" in agent.sandbox.codes[0]
+    assert "'deg_results'" in agent.sandbox.codes[0]
     for call in agent.figure_calls:
         assert call["diagnostic"] is True
         assert call["purpose"] == "baseline"
         assert call["review_callback"] is None
+
+
+def test_service_probe_allowlist_comes_from_current_receipt_outputs():
+    import asyncio
+
+    sandbox = _Sandbox(_Result(output=_probe_line()))
+    state = _State(
+        code_history=[_receipt(outputs=("current_adata", "current_de"))]
+    )
+    agent = _Agent(sandbox)
+    asyncio.run(ensure_innovation_baseline_figures(agent, state))
+
+    assert "'current_adata'" in sandbox.codes[0]
+    assert "'current_de'" in sandbox.codes[0]
+    assert "old_adata" not in sandbox.codes[0]
+    assert "globals().items" not in sandbox.codes[0]
+
+
+@pytest.mark.parametrize("receipt", [
+    _receipt(round_number=2),
+    _receipt(plan_id="plan-old"),
+    _receipt(lineage_id="branch-old"),
+    _receipt(analysis_generation=3),
+    _receipt(cohort_generation=1),
+    _receipt(cohort_digest="e" * 64),
+    _receipt(execution_status="failed"),
+    _receipt(error="execution failed"),
+    _receipt(evidence_schema_version=1),
+])
+def test_non_current_or_failed_receipts_produce_no_baseline(receipt):
+    import asyncio
+
+    sandbox = _Sandbox(_Result(output=_probe_line()))
+    agent = _Agent(sandbox)
+    assert asyncio.run(
+        ensure_innovation_baseline_figures(
+            agent, _State(code_history=[receipt])
+        )
+    ) == {}
+    assert sandbox.codes == []
+    assert agent.figure_calls == []
 
 
 def test_one_failed_panel_does_not_suppress_the_others():
@@ -479,7 +593,7 @@ def test_the_volcano_uses_the_adjusted_p_value_when_the_table_has_one():
     the generic `pval` IS a substring of its `pvals`. Matching by hint order alone
     handed the raw p-value to a panel that draws a 0.05 line and calls it
     significance."""
-    parsed = _exec_probe({"marker_de": _make_scanpy_de_table()})
+    parsed = _exec_probe({"marker_de": _make_scanpy_de_table()}, ["marker_de"])
 
     assert parsed is not None
     assert parsed["de_tables"][0]["pval"] == "pvals_adj"
@@ -491,7 +605,7 @@ def test_a_short_differential_table_produces_no_panel_at_all():
     substring-matches scanpy's `names`, so falling through published gene symbols
     as a ranked bar chart of enriched terms. The executor is told to take per
     cluster top-N frames, so short differential tables are routine."""
-    parsed = _exec_probe({"top20": _make_scanpy_de_table(rows=20)})
+    parsed = _exec_probe({"top20": _make_scanpy_de_table(rows=20)}, ["top20"])
 
     assert parsed is None, "a 20-row differential frame supports no baseline panel"
 
@@ -509,7 +623,7 @@ def test_table_panels_survive_a_kernel_with_no_anndata():
     saved = sys.modules.get("anndata", "absent")
     sys.modules["anndata"] = None
     try:
-        parsed = _exec_probe(namespace)
+        parsed = _exec_probe(namespace, ["marker_de", "go_bp"])
     finally:
         if saved == "absent":
             sys.modules.pop("anndata", None)
@@ -523,35 +637,39 @@ def test_table_panels_survive_a_kernel_with_no_anndata():
 
 
 def test_the_volcano_legend_counts_the_table_not_the_subsample():
-    """Points are thinned above a cap so the PNG stays renderable. Deriving the
-    legend from what survived stated a significant-feature count that was a
-    fraction of the truth, inside a figure registered as a platform diagnostic
-    and therefore never put in front of a reviewer."""
+    """The host must not choose a significance threshold, and the p-value
+    column the platform picks may be raw rather than adjusted, so the volcano
+    draws every row as one neutral series and the legend reports the full
+    table's row count and the column names used -- never a classification
+    derived from a hard-coded cutoff."""
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    np = pytest.importorskip("numpy")
+    pytest.importorskip("numpy")
 
     table = _make_scanpy_de_table(rows=200_000)
-    truth = int((
-        (-np.log10(table["pvals_adj"].to_numpy()) >= 1.30103)
-        & (np.abs(table["logfoldchanges"].to_numpy()) >= 1.0)
-    ).sum())
-    assert truth > 0
+    total = len(table)
 
     namespace = {"marker_de": table}
-    parsed = _exec_probe(namespace)
+    parsed = _exec_probe(namespace, ["marker_de"])
     volcano = next(
         spec for spec in build_innovation_baseline_figure_specs(parsed, round_number=2)
         if spec.figure_type == "volcano"
     )
+
+    assert "1.30103" not in volcano.code
+    assert ">= 1.0" not in volcano.code
+    assert "axvline" not in volcano.code
+    assert "axhline" not in volcano.code
 
     plt.close("all")
     exec(compile(volcano.code, "<volcano>", "exec"), namespace, namespace)
     labels = [text.get_text() for text in namespace["_ib_ax"].get_legend().get_texts()]
     plt.close("all")
 
-    assert any(f"{truth:,}" in label for label in labels), labels
+    assert any(f"{total:,}" in label for label in labels), labels
+    assert any("logfoldchanges" in label for label in labels), labels
+    assert any("pvals_adj" in label for label in labels), labels
 
 
 def _scored_adata(score_names, n_obs=200):
@@ -582,7 +700,7 @@ def test_the_score_panel_shows_this_rounds_scores_not_round_ones_qc():
         "stress_score", "redox_score", "copper_signature_score",
     ])
 
-    parsed = _exec_probe({"adata": adata})
+    parsed = _exec_probe({"adata": adata}, ["adata"])
 
     assert parsed is not None
     assert "copper_signature_score" in parsed["score_keys"]
@@ -596,7 +714,9 @@ def test_the_object_carrying_the_rounds_score_wins_over_the_bigger_one():
     full = _scored_adata(["doublet_score"], n_obs=400)
     subset = _scored_adata(["doublet_score", "copper_signature_score"], n_obs=120)
 
-    parsed = _exec_probe({"adata": full, "adata_subset": subset})
+    parsed = _exec_probe(
+        {"adata": full, "adata_subset": subset}, ["adata", "adata_subset"]
+    )
 
     assert parsed is not None
     assert parsed["var"] == "adata_subset"

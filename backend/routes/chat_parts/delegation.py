@@ -91,6 +91,9 @@ def _replace_latest_delegation_message(
         replacement.setdefault("id", current.get("id") or str(uuid.uuid4()))
         if current.get("reply_to"):
             replacement.setdefault("reply_to", current["reply_to"])
+        for key in ("followup_id", "branch_id"):
+            if current.get(key):
+                replacement.setdefault(key, current[key])
         state.chat_messages[index] = replacement
         return True
     return False
@@ -102,14 +105,14 @@ def _active_delegation_identity(state: AnalysisState) -> Dict[str, str]:
         if current.get("delegation_active"):
             return {
                 key: current[key]
-                for key in ("id", "reply_to")
+                for key in ("id", "reply_to", "followup_id", "branch_id")
                 if current.get(key)
             }
     for current in reversed(state.chat_messages):
         if current.get("role") == "assistant" and current.get("reply_to"):
             return {
                 key: current[key]
-                for key in ("id", "reply_to")
+                for key in ("id", "reply_to", "followup_id", "branch_id")
                 if current.get(key)
             }
     return {}
@@ -128,6 +131,9 @@ def _replace_latest_chat_terminal(
             continue
         replacement.setdefault("id", current.get("id") or str(uuid.uuid4()))
         replacement.setdefault("reply_to", current["reply_to"])
+        for key in ("followup_id", "branch_id"):
+            if current.get(key):
+                replacement.setdefault(key, current[key])
         state.chat_messages[index] = replacement
         return True
     return False
@@ -174,6 +180,7 @@ def _build_synthesis_prompt(
     user_message: str,
     delegation: Dict[str, Any],
     agent_results: Dict[str, Dict[str, Any]],
+    source_context: str = "",
 ) -> str:
     """Build PI synthesis prompt from delegation results."""
     parts = [
@@ -212,6 +219,11 @@ def _build_synthesis_prompt(
         "- If figures were generated during the analysis, you can reference them with [[FIGURE:figure_name]]\n"
         "- Always respond in English\n"
     )
+    if source_context and source_context.strip():
+        parts.append(
+            "\n## Server-resolved selected-direction context\n"
+            + source_context.strip()
+        )
     if delegation.get("synthesis_instruction"):
         parts.append(f"Additional guidance: {delegation['synthesis_instruction']}")
 
@@ -463,6 +475,27 @@ async def _execute_chat_agent_inner(
     else:
         raise ValueError(f"Unknown agent for chat delegation: {agent_name}")
 
-async def _run_chat_delegation(session_id: str, state: Any, delegation: Dict[str, Any], user_message: str, image_b64_list: List[str], saved_files: List[Dict[str, Any]]):
+async def _run_chat_delegation(
+    session_id: str,
+    state: Any,
+    delegation: Dict[str, Any],
+    user_message: str,
+    image_b64_list: List[str],
+    saved_files: List[Dict[str, Any]],
+    *,
+    followup_id: str = "",
+    branch_id: str = "main",
+    source_context: str = "",
+):
     delegation_flow.bind_facade(sys.modules[__name__])
-    return await delegation_flow._run_chat_delegation(session_id, state, delegation, user_message, image_b64_list, saved_files)
+    return await delegation_flow._run_chat_delegation(
+        session_id,
+        state,
+        delegation,
+        user_message,
+        image_b64_list,
+        saved_files,
+        followup_id=followup_id,
+        branch_id=branch_id,
+        source_context=source_context,
+    )

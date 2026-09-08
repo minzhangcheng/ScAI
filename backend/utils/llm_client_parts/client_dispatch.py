@@ -357,7 +357,9 @@ class ClientDispatchMixin:
         cache (only success writes _PROBE_CACHE); only records the site-level
         _NO_RESPONSES_ENDPOINT fact for a truly absent responses endpoint."""
         if protocol == "responses":
-            if modality == VISION_MODALITY and is_responses_vision_shape_error(error):
+            if modality == VISION_MODALITY and is_responses_vision_shape_error(
+                error, vision_request=True
+            ):
                 logger.warning(
                     f"[{self.agent_name}] Responses vision shape rejected at "
                     f"{self.base_url}; switching this vision request to chat"
@@ -373,7 +375,9 @@ class ClientDispatchMixin:
                                f"switching to chat")
                 return "chat"
         if protocol == "chat":
-            if modality == VISION_MODALITY and is_vision_request_shape_error(error):
+            if modality == VISION_MODALITY and is_vision_request_shape_error(
+                error, vision_request=True
+            ):
                 logger.warning(
                     f"[{self.agent_name}] Chat vision shape rejected at "
                     f"{self.base_url}; switching this vision request to Responses"
@@ -480,7 +484,9 @@ class ClientDispatchMixin:
                         # a different wire protocol.
                         if is_tool_choice_error(e):
                             raise
-                        if is_transient_probe_error(e):
+                        if is_transient_probe_error(
+                            e, vision_request=modality == VISION_MODALITY
+                        ):
                             await asyncio.sleep(PROBE_RETRY_DELAYS[attempt])
                             continue
                         redirect = self._note_probe_protocol_failure(
@@ -538,7 +544,15 @@ class ClientDispatchMixin:
             # In probe mode, the probe loop owns ALL retry logic; the backoff
             # layer must not intervene.  In decided mode, only deterministic
             # wrong-protocol errors are non-retryable (they trigger redirect).
-            np = (lambda e: True) if probe else (lambda e: not is_transient_probe_error(e))
+            np = (
+                (lambda e: True)
+                if probe
+                else (
+                    lambda e: not is_transient_probe_error(
+                        e, vision_request=interaction_type == "vision"
+                    )
+                )
+            )
             if protocol == "responses":
                 return lambda: invoke(self._get_responses_adapter(),
                                       make_responses_adapter_call, max_retries_override=mr,

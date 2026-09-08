@@ -4,14 +4,55 @@ import { WS_AUTH_SUBPROTOCOL } from '../../constants/auth'
 import { API_BASE } from '../../constants/api'
 import { WS_CONNECT_TIMEOUT_MS, apiFetch, useConfig, useUserConfig } from '../../hooks/useApi'
 import { useSelfClearingError } from '../../hooks/useSelfClearingError'
-import { useAppStore } from '../../stores/appStore'
+import { useAppStore, type Session } from '../../stores/appStore'
 import { getToken } from '../../utils/authStorage'
 import { fetchAndDownload } from '../../utils/download'
 import { devLog } from '../../utils/logger'
+import { chatOwnerKey, normalizeBranchId } from '../../utils/chatOwnership'
 import { reportBranchQuery } from '../../utils/reportBranch'
 import { useTranslation } from '../../i18n/translations'
 
 export { reportBranchQuery } from '../../utils/reportBranch'
+
+function reportOwnerMatches(
+  ownerKey: string | null,
+  generation: number | undefined,
+  ownerRef: { current: string | null },
+  generationRef: { current: number },
+): boolean {
+  const current = useAppStore.getState().currentSession
+  return ownerKey !== null
+    && ownerRef.current === ownerKey
+    && (generation === undefined || generationRef.current === generation)
+    && chatOwnerKey(current?.id, current?.restoreBranchId) === ownerKey
+}
+
+function handoffReportFollowup(
+  followup: ReportFollowup,
+  currentSession: Session | null,
+  report: DetailedReport | null,
+  ownerKey: string | null,
+  generation: number,
+  ownerRef: { current: string | null },
+  generationRef: { current: number },
+  setPendingChatFollowup: (draft: import('../../stores/domain').PendingChatFollowup | null) => void,
+  setActiveTab: (tab: import('../../stores/appState').AppState['activeTab']) => void,
+): void {
+  if (!currentSession?.id || !followup.followup_id || !followup.suggested_instruction?.trim()) return
+  const currentBranchId = normalizeBranchId(currentSession.restoreBranchId)
+  if (!reportOwnerMatches(ownerKey, generation, ownerRef, generationRef)) return
+  const reportBranch = report?.branch_id || report?.appendix?.branch_id
+  if (reportBranch && normalizeBranchId(reportBranch) !== currentBranchId) return
+  const branchId = followup.branch_id || reportBranch || currentSession.restoreBranchId || 'main'
+  if (normalizeBranchId(branchId) !== currentBranchId) return
+  setPendingChatFollowup({
+    sessionId: currentSession.id,
+    branchId,
+    followupId: followup.followup_id,
+    instruction: followup.suggested_instruction.trim(),
+  })
+  setActiveTab('chat')
+}
 
 type ReportDownloadEndpoint = 'download-all-figures' | 'download-all-tables' | 'download-full'
 
@@ -44,6 +85,22 @@ interface ReportSection {
   tables: ReportTable[]
 }
 
+export interface ReportFollowup {
+  followup_id: string
+  question: string
+  why_it_matters?: string
+  disposition?: 'deepen_now' | 'offer_in_chat' | 'needs_new_data' | 'closed' | string
+  reason?: string
+  suggested_instruction?: string
+  required_input?: string
+  source_round?: number
+  direction?: string
+  branch_id?: string
+  evidence_references?: string[]
+  execution_outcome?: string
+  execution_reference?: string
+}
+
 interface ReportAppendix {
   project_name?: string
   project_description?: string
@@ -53,6 +110,7 @@ interface ReportAppendix {
   treatment_groups?: Array<{ name: string; description: string; sample_count: number }>
   data_files?: Array<{ filename: string; section: string; data_type: string }>
   human_messages?: string[]
+  branch_id?: string | null
 }
 
 export interface DetailedReport {
@@ -70,11 +128,13 @@ export interface DetailedReport {
   progress: number
   current_step: string
   html_path?: string
+  branch_id?: string | null
   appendix?: ReportAppendix
   partial_reason?: 'degraded_fallback' | 'section_coverage' | 'figure_coverage' | 'approved_partial' | string | null
   figureless_sections?: string[]
   missing_sections?: string[]
   unreported_figures?: string[]
+  followups?: ReportFollowup[]
 }
 
 interface ReportPreview {
@@ -173,7 +233,10 @@ export function partialReportNotice(
 }
 
 export function useReportController() {
-  const { currentSession, language, addMessage, setReportGenerated, authUser, showConfigPanel } = useAppStore()
+  const {
+    currentSession, language, addMessage, setReportGenerated, authUser, showConfigPanel,
+    setActiveTab, setPendingChatFollowup,
+  } = useAppStore()
   const { t } = useTranslation(language)
   const adminConfig = useConfig()
   const userConfig = useUserConfig()
@@ -192,9 +255,18 @@ export function useReportController() {
   const [showValidationDialog, setShowValidationDialog] = useState(false)
   const [validationMessage, setValidationMessage] = useState('')
   const [validationUncertain, setValidationUncertain] = useState(false)
+  const reportOwnerRef = useRef<string | null>(null)
+  const reportGenerationRef = useRef(0)
+  const reportOwnerKey = chatOwnerKey(currentSession?.id, currentSession?.restoreBranchId)
   useEffect(() => {
+    const generation = reportGenerationRef.current + 1
+    reportGenerationRef.current = generation
+    reportOwnerRef.current = reportOwnerKey
+    setReport(null)
+    setPreview(null)
+    setReportArchives([])
     if (currentSession?.id && currentSession?.status === 'completed') {
-      loadReport()
+      void loadReport(reportOwnerKey, generation)
     }
     return () => {
       if (retryTimerRef.current) {
@@ -206,15 +278,17 @@ export function useReportController() {
     if (currentSession?.status === 'completed' && !report && !loading && !generating) {
       retryTimerRef.current = setTimeout(() => {
         devLog('ReportPanel: Retrying report load...')
-        loadReport()
+        void loadReport(reportOwnerKey, reportGenerationRef.current)
       }, 3000)
       return () => {
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
       }
     }
-  }, [currentSession?.status, report, loading, generating])
+  }, [currentSession?.status, report, loading, generating, reportOwnerKey])
   useEffect(() => {
     if (!generating || !currentSession?.id) return
+    const ownerKey = reportOwnerKey
+    const generation = reportGenerationRef.current
     let isMounted = true
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/report/${currentSession.id}`
     const token = getToken()
@@ -230,7 +304,7 @@ export function useReportController() {
       }
     }, WS_CONNECT_TIMEOUT_MS)
     websocket.onmessage = (event) => {
-      if (!isMounted) return
+      if (!isMounted || !reportOwnerMatches(ownerKey, generation, reportOwnerRef, reportGenerationRef)) return
       let data
       try {
         data = JSON.parse(event.data)
@@ -259,7 +333,10 @@ export function useReportController() {
         setReport(completedReport)
         setGenerating(false)
         setReportGenerated(true)
-        Promise.all([loadPreview(), fetchArchives()])
+        void Promise.all([
+          loadPreview(ownerKey, generation),
+          fetchArchives(ownerKey, generation),
+        ])
         const completion = reportCompletionContent(completedReport, language)
         addMessage({
           id: `report-complete-${Date.now()}`,
@@ -302,48 +379,58 @@ export function useReportController() {
       }
       wsRef.current = null
     }
-  }, [generating, currentSession?.id])
-  const loadReport = async () => {
+  }, [generating, currentSession?.id, currentSession?.restoreBranchId, reportOwnerKey])
+  const loadReport = async (ownerKey = reportOwnerKey, generation = reportGenerationRef.current) => {
     if (!currentSession?.id) return
     setLoading(true)
     setError(null)
     try {
       const data = await apiFetch<any>(`/session/${currentSession.id}/detailed-report${branchQuery}`)
+      if (!reportOwnerMatches(ownerKey, generation, reportOwnerRef, reportGenerationRef)) return
       if (data?.report) {
         setReport(data.report)
         if (data.report.status === 'completed' || data.report.status === 'partial') {
           setReportGenerated(true)
         }
-        await Promise.all([loadPreview(), fetchArchives()])
+        await Promise.all([
+          loadPreview(ownerKey, generation),
+          fetchArchives(ownerKey, generation),
+        ])
       }
     } catch (e) {
       console.error('Failed to load report:', e)
     } finally {
-      setLoading(false)
+      if (reportOwnerMatches(ownerKey, generation, reportOwnerRef, reportGenerationRef)) setLoading(false)
     }
   }
-  const loadPreview = async () => {
+  const loadPreview = async (
+    ownerKey = reportOwnerKey,
+    generation = reportGenerationRef.current,
+  ) => {
     if (!currentSession?.id) return
     try {
       const data = await apiFetch<any>(`/session/${currentSession.id}/report/preview${branchQuery}`)
-      if (data) {
+      if (data && reportOwnerMatches(ownerKey, generation, reportOwnerRef, reportGenerationRef)) {
         setPreview(data)
       }
     } catch (e) {
       console.error('Failed to load preview:', e)
     }
   }
-  const fetchArchives = useCallback(async () => {
+  const fetchArchives = useCallback(async (
+    ownerKey = reportOwnerKey,
+    generation = reportGenerationRef.current,
+  ) => {
     if (!currentSession?.id) return
     try {
       const data = await apiFetch<any>(`/session/${currentSession.id}/report/archives${branchQuery}`)
-      if (data) {
+      if (data && reportOwnerMatches(ownerKey, generation, reportOwnerRef, reportGenerationRef)) {
         setReportArchives(data)
       }
     } catch {
-      setReportArchives([])
+      if (reportOwnerMatches(ownerKey, generation, reportOwnerRef, reportGenerationRef)) setReportArchives([])
     }
-  }, [currentSession?.id, currentSession?.restoreBranchId])
+  }, [currentSession?.id, currentSession?.restoreBranchId, reportOwnerKey])
   const doGenerateReport = async () => {
     if (!currentSession?.id) return
     setGenerating(true)
@@ -432,11 +519,16 @@ export function useReportController() {
     if (!currentSession?.id) return
     window.open(`${API_BASE}/session/${currentSession.id}/report/html${branchQuery}`, '_blank')
   }
+  const continueFollowupInChat = (followup: ReportFollowup) => handoffReportFollowup(
+    followup, currentSession, report, reportOwnerKey, reportGenerationRef.current,
+    reportOwnerRef, reportGenerationRef, setPendingChatFollowup, setActiveTab,
+  )
   return {
     archiveWarning, currentSession, doGenerateReport, downloadError, downloadReportArtifact,
     error, generating, language, loading, openHtmlInNewTab, preview, report, reportArchives,
     safeDownload, setDownloadError, setShowValidationDialog, showConfigPanel,
     showValidationDialog, t, validating, validationMessage, validationUncertain, generateReport,
+    continueFollowupInChat,
   }
 }
 

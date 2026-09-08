@@ -154,7 +154,7 @@ async def test_headless_runner_runs_when_it_holds_the_reservation(monkeypatch):
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def _save(_session_id, _state):
+    async def _save(_session_id, _state, force=False):
         return None
 
     async def _update(session_id, current):
@@ -214,7 +214,7 @@ async def test_headless_runner_registers_before_first_state_sync(monkeypatch):
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def _save(_session_id, current):
+    async def _save(_session_id, current, force=False):
         saved.append(current)
 
     async def _update(session, current):
@@ -300,7 +300,7 @@ async def test_headless_state_callback_accepts_graph_state_swap(monkeypatch):
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=5)
 
-    async def _save(_session_id, current):
+    async def _save(_session_id, current, force=False):
         saved.append(current)
 
     async def _update(session, current):
@@ -349,7 +349,7 @@ async def test_headless_state_callback_rejects_superseded_workflow(monkeypatch):
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def _save(_session_id, current):
+    async def _save(_session_id, current, force=False):
         saved.append(current)
 
     async def _update(session, current):
@@ -384,7 +384,7 @@ async def _capture_headless_callbacks(
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def _save(_session_id, _state):
+    async def _save(_session_id, _state, force=False):
         return None
 
     async def _update(session_id, current):
@@ -424,7 +424,7 @@ async def test_headless_message_callback_delivers_live_and_persists_sanitized(mo
     async def resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def save(_session_id, current):
+    async def save(_session_id, current, force=False):
         saved.append(current)
 
     monkeypatch.setattr(workflow_module, "SingleCellAnalysisWorkflow", Workflow)
@@ -535,7 +535,7 @@ async def test_headless_state_swap_carries_and_persists_live_history(monkeypatch
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def _save(_session_id, current):
+    async def _save(_session_id, current, force=False):
         saved.append(current)
 
     async def _update(session, current):

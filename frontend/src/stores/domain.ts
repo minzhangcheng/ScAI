@@ -18,6 +18,14 @@ export interface AuthUser {
   status?: 'active' | 'pending' | 'readonly' | 'deleting'
 }
 
+/** A report follow-up handoff waiting for the user to edit and send in Chat. */
+export interface PendingChatFollowup {
+  sessionId: string
+  branchId: string
+  followupId: string
+  instruction: string
+}
+
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ContentBlock = Record<string, any>

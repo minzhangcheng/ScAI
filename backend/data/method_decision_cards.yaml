@@ -37,6 +37,7 @@ cards:
           - A separable batch variable affects a shared cell-state structure.
         limitations:
           - Mixing is not proof of biological validity and correction can attenuate real group structure.
+          - Check the orientation of the corrected matrix against the installed harmonypy version before assigning it to obsm; recent releases return cells x components directly.
         python_stack:
           - harmonypy
           - scanpy.external.pp.harmony_integrate
@@ -96,6 +97,8 @@ cards:
         limitations:
           - Aggregation changes the estimand and must preserve pairing, covariates, and sample structure.
         python_stack:
+          - decoupler.get_pseudobulk
+          - decoupler.filter_by_expr
           - pydeseq2
           - statsmodels
       - name: repeated-measure or hierarchical model
@@ -118,6 +121,7 @@ cards:
       - Match the independent unit, estimand, and uncertainty to the intended claim.
       - Separate exploratory marker description from replicated group-level inference.
       - Verify the input scale before selecting a count or transformed-expression model.
+      - Design-aware expression filtering (minimum counts in at least the smallest group size) is acceptable; filtering on the contrast itself is not.
     parameters_to_justify:
       - design formula, contrast, and handling of paired or repeated observations
       - aggregation unit, filtering, normalization, and tested representation
@@ -228,14 +232,17 @@ cards:
           - Reference labels and omissions are inherited; forced mapping can conceal out-of-reference states.
         python_stack:
           - scvi-tools
-          - ingest-compatible reference mapping
+          - scvi.model.SCANVI (reference mapping / label transfer; needs a compatible annotated reference and training)
+          - scanpy.tl.ingest (projects labels through a fitted embedding; the reference and query must share the preprocessing)
       - name: automated expression classifier
         answers: Predicts labels from a trained reference or classifier at cell level.
         consider_when:
           - Training provenance, feature compatibility, and rejection or uncertainty behavior are available.
         limitations:
           - Accuracy depends on reference complexity, class balance, and label depth.
+          - Model files may need to be fetched and cached before use; package presence alone does not guarantee a runnable model.
         python_stack:
+          - celltypist (pretrained cell-type models; reads the host cache linked into CELLTYPIST_FOLDER for the session, filled by scripts/fetch_celltypist_models.py; the model's species and population coverage must match the query)
           - sklearn
       - name: marker-based cluster annotation
         answers: Interprets cluster identities from positive, negative, and ambiguous marker evidence.
@@ -318,6 +325,15 @@ cards:
           - Kinetic violations, sparse layers, and preprocessing choices can make directions unreliable.
         python_stack:
           - scvelo
+          - scvi.external.VELOVI (a variational candidate with uncertainty estimates; a candidate, not an unconditional improvement)
+      - name: kernel-based fate mapping without splicing layers
+        answers: Builds a cell-cell transition matrix from a chosen signal and analyses macrostates and fate probabilities.
+        consider_when:
+          - A justified pseudotime with a root, a differentiation-potential proxy, or experimental time points with transport couplings is available.
+        limitations:
+          - Each kernel inherits the assumptions of its input signal; CytoTRACEKernel implements the original CytoTRACE-style scoring, not CytoTRACE 2; RealTimeKernel needs experimental time points and couplings; a modelled direction is not a measured fate.
+        python_stack:
+          - cellrank (PseudotimeKernel, CytoTRACEKernel, RealTimeKernel, VelocityKernel)
     selection_considerations:
       - Choose the method family from the question; PAGA, DPT, and velocity are not technical fallbacks for one another.
       - Root and direction claims need evidence independent of an attractive embedding.
@@ -448,6 +464,7 @@ cards:
           - Independent samples and a defensible compositional model or reference are available.
         limitations:
           - Effects are relative and depend on reference or log-ratio assumptions.
+          - A per-type sample-level test on variance-stabilised proportions (arcsin-square-root or logit) is acceptable when sample is the unit; it is not the same as a joint compositional model, and zero proportions need an explicit handling rule.
         python_stack:
           - statsmodels
           - scipy

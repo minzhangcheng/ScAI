@@ -7,6 +7,8 @@ def test_stage1_forbids_deg():
                                   has_bulk=False, has_scrna=True, direction="")
     assert "QC" in txt
     assert "Do NOT run condition-level differential expression" in txt
+    # Doublet detection and HVG selection are batch-aware where the design says so.
+    assert "batch_key" in txt
 
 
 def test_stage2_is_downstream_only():
@@ -15,6 +17,10 @@ def test_stage2_is_downstream_only():
     assert "STAGE 2" in txt
     assert "Do NOT re-run QC, clustering, or cell type annotation" in txt
     assert "differential expression" in txt.lower()
+    # The two concrete downstream recipes are offered as options, not defaults.
+    assert "get_pseudobulk" in txt
+    assert "by_sample" in txt
+    assert "df_to_lr" in txt
 
 
 def test_innovation_branch_unaffected():
@@ -36,7 +42,8 @@ def test_stage2_builder_leaves_mixed_bulk_method_to_agents():
     assert "PI" in txt and "Bioinformatics" in txt
     assert "approved plan" in txt
     assert "MANDATORY" not in txt
-    assert "pydeseq2" not in txt.lower()
+    bulk_section = txt.split("Bulk scientific ownership", 1)[1]
+    assert "pydeseq2" not in bulk_section.lower()
     assert "nnls" not in txt.lower()
 
 
@@ -44,7 +51,8 @@ def test_stage2_builder_bulk_only_uses_the_same_neutral_contract():
     txt = _build_stage2_instruction(has_bulk=True, has_scrna=False)
     assert "Bulk scientific ownership" in txt
     assert "PI" in txt and "Bioinformatics" in txt
-    assert "pydeseq2" not in txt.lower()
+    bulk_section = txt.split("Bulk scientific ownership", 1)[1]
+    assert "pydeseq2" not in bulk_section.lower()
     assert "fallback" not in txt.lower()
 
 
@@ -64,7 +72,7 @@ def test_measured_replication_does_not_override_pi_stage2_plan():
     lowered = unreplicated.lower()
     assert "pi-approved plan" in lowered
     assert "claim level chosen by the pi" in lowered
-    assert "pydeseq2" not in lowered
+    assert "pydeseq2" not in lowered.split("bulk scientific ownership", 1)[1]
 
 
 def test_measured_replication_does_not_override_pi_exploration_plan():
@@ -115,5 +123,5 @@ def test_replicated_scrna_does_not_select_a_scientific_method():
     ).lower()
     assert "pi-approved plan" in txt
     assert "bulk scientific ownership" in txt
-    assert "pydeseq2" not in txt
+    assert "pydeseq2" not in txt.split("bulk scientific ownership", 1)[1]
     assert "bulk deg significance" not in txt

@@ -9,7 +9,7 @@ vi.mock('../../utils/authStorage', () => ({
   clearToken: vi.fn(),
 }))
 
-function session(id: string): Session {
+function session(id: string, restoreBranchId?: string): Session {
   return {
     id,
     name: id,
@@ -21,6 +21,7 @@ function session(id: string): Session {
     dataFiles: [],
     biochemistryIndicators: [],
     roundResults: [],
+    ...(restoreBranchId ? { restoreBranchId } : {}),
   }
 }
 
@@ -61,6 +62,7 @@ describe('ChatPanel history response ownership', () => {
       language: 'en',
       currentSession: session('A'),
       chatMessages: [],
+      pendingChatFollowup: null,
       chatLoading: false,
       chatDelegationActive: false,
       chatDelegationPlan: null,
@@ -394,6 +396,156 @@ describe('ChatPanel history response ownership', () => {
     expect(store.chatMessages[1].figures).toEqual([
       { name: 'result_plot', path: '/data/result_plot.png' },
     ])
+    view.unmount()
+  })
+
+  it('loads an owned report follow-up as an editable draft and clears it after acceptance', async () => {
+    useAppStore.setState({ currentSession: session('A', 'branch-a') })
+    useAppStore.setState({
+      pendingChatFollowup: {
+        sessionId: 'A',
+        branchId: 'branch-a',
+        followupId: 'fu-a',
+        instruction: 'Compare the selected direction across conditions.',
+      },
+    })
+    const view = render(<ChatPanel />)
+    await act(async () => {
+      pending[0].resolve(jsonResponse({ messages: [] }))
+      await Promise.resolve()
+    })
+
+    const textarea = view.container.querySelector('textarea') as HTMLTextAreaElement
+    expect(textarea.value).toBe('Compare the selected direction across conditions.')
+    fireEvent.change(textarea, { target: { value: 'Edited follow-up instruction.' } })
+    fireEvent.click(Array.from(view.container.querySelectorAll('button')).at(-1)!)
+    const send = pending[1]
+    const optimistic = useAppStore.getState().chatMessages[0]
+    expect(optimistic.followup_id).toBe('fu-a')
+    expect(optimistic.branch_id).toBe('branch-a')
+    expect((send.body as FormData).get('followup_id')).toBe('fu-a')
+    expect((send.body as FormData).get('branch_id')).toBe('branch-a')
+
+    await act(async () => {
+      send.resolve(jsonResponse({
+        id: 'assistant-followup',
+        content: 'Accepted.',
+        reply_to: optimistic.id,
+      }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(useAppStore.getState().pendingChatFollowup).toBeNull()
+    view.unmount()
+  })
+
+  it('reloads chat history when updateSession changes the branch and drops the old owner', async () => {
+    useAppStore.setState({ currentSession: session('A', 'branch-a') })
+    const view = render(<ChatPanel />)
+    act(() => useAppStore.getState().updateSession({ restoreBranchId: 'branch-b' }))
+    expect(pending).toHaveLength(2)
+    expect(pending[0].signal?.aborted).toBe(true)
+
+    await act(async () => {
+      pending[1].resolve(jsonResponse({
+        messages: [{ id: 'branch-b-message', role: 'assistant', content: 'branch B' }],
+      }))
+      await Promise.resolve()
+      pending[0].resolve(jsonResponse({
+        messages: [{ id: 'branch-a-message', role: 'assistant', content: 'stale branch A' }],
+      }))
+      await Promise.resolve()
+    })
+    expect(useAppStore.getState().chatMessages.map(message => message.id)).toEqual([
+      'branch-b-message',
+    ])
+    view.unmount()
+  })
+
+  it('clears an edited follow-up draft when updateSession changes its branch', async () => {
+    useAppStore.setState({
+      currentSession: session('A', 'branch-a'),
+      pendingChatFollowup: {
+        sessionId: 'A',
+        branchId: 'branch-a',
+        followupId: 'fu-branch',
+        instruction: 'Initial follow-up.',
+      },
+    })
+    const view = render(<ChatPanel />)
+    await act(async () => {
+      pending[0].resolve(jsonResponse({ messages: [] }))
+      await Promise.resolve()
+    })
+
+    const textarea = view.container.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'Edited follow-up text.' } })
+    act(() => useAppStore.getState().updateSession({ restoreBranchId: 'branch-b' }))
+
+    expect(textarea.value).toBe('')
+    expect(useAppStore.getState().pendingChatFollowup).toBeNull()
+    expect(pending[0].signal?.aborted).toBe(true)
+    await act(async () => {
+      pending[1].resolve(jsonResponse({ messages: [] }))
+      await Promise.resolve()
+    })
+    view.unmount()
+  })
+
+  it('preserves ordinary text when updateSession changes the branch', async () => {
+    useAppStore.setState({ currentSession: session('A', 'branch-a') })
+    const view = render(<ChatPanel />)
+    await act(async () => {
+      pending[0].resolve(jsonResponse({ messages: [] }))
+      await Promise.resolve()
+    })
+
+    const textarea = view.container.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'Ordinary draft text.' } })
+    act(() => useAppStore.getState().updateSession({ restoreBranchId: 'branch-b' }))
+
+    expect(textarea.value).toBe('Ordinary draft text.')
+    expect(useAppStore.getState().pendingChatFollowup).toBeNull()
+    expect(pending[0].signal?.aborted).toBe(true)
+    await act(async () => {
+      pending[1].resolve(jsonResponse({ messages: [] }))
+      await Promise.resolve()
+    })
+    view.unmount()
+  })
+
+  it('preserves an edited owned follow-up draft when its request fails', async () => {
+    useAppStore.setState({
+      currentSession: session('A', 'branch-a'),
+      pendingChatFollowup: {
+        sessionId: 'A',
+        branchId: 'branch-a',
+        followupId: 'fu-retry',
+        instruction: 'Initial follow-up.',
+      },
+    })
+    const view = render(<ChatPanel />)
+    await act(async () => {
+      pending[0].resolve(jsonResponse({ messages: [] }))
+      await Promise.resolve()
+    })
+    const textarea = view.container.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'Edited follow-up for retry.' } })
+    fireEvent.click(Array.from(view.container.querySelectorAll('button')).at(-1)!)
+    const send = pending[1]
+
+    await act(async () => {
+      send.reject(new Error('temporary failure'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(textarea.value).toBe('Edited follow-up for retry.')
+    expect(useAppStore.getState().pendingChatFollowup).toMatchObject({
+      sessionId: 'A',
+      branchId: 'branch-a',
+      followupId: 'fu-retry',
+      instruction: 'Edited follow-up for retry.',
+    })
     view.unmount()
   })
 })

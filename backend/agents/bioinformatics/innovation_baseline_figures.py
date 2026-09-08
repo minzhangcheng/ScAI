@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import logging
+from collections.abc import Iterable
 from typing import Any, Dict, List, Mapping, Optional
 
 logger = logging.getLogger(__name__)
@@ -108,18 +109,36 @@ class InnovationBaselineFigureSpec:
     code: str
 
 
-def build_innovation_baseline_probe_code() -> str:
+def _valid_output_names(output_names: Optional[Iterable[Any]]) -> List[str]:
+    """Keep only safe, ordered kernel identifiers from the explicit allowlist."""
+    result: List[str] = []
+    for value in output_names or []:
+        name = str(value or "").strip()
+        if name and name.isidentifier() and name not in result:
+            result.append(name)
+    return result
+
+
+def build_innovation_baseline_probe_code(
+    output_names: Optional[Iterable[Any]] = None,
+) -> str:
     """Return kernel code that reports what this round can still visualize.
 
     Discovery happens in the live kernel because the analysis agent names its
-    own objects. The probe reports metadata only; it never draws or mutates.
+    own objects. ``output_names`` is an explicit receipt-derived allowlist; the
+    probe reports metadata only and never draws or mutates. A declared realized
+    output is a successful output-name declaration, not host-measured proof that
+    the execution materially changed the object.
     """
+
+    allowed_names = _valid_output_names(output_names)
 
     return (
         "import json as _ib_json\n"
         "_ib_out = {}\n"
         "try:\n"
         "    import pandas as _ib_pd\n"
+        f"    _ib_output_names = {allowed_names!r}\n"
         f"    _ib_group_hints = {list(_GROUP_KEYS)!r}\n"
         f"    _ib_lfc_hints = {list(_LFC_HINTS)!r}\n"
         f"    _ib_pval_hints = {list(_PVAL_HINTS)!r}\n"
@@ -199,8 +218,9 @@ def build_innovation_baseline_probe_code() -> str:
         "    _ib_best = None\n"
         "    try:\n"
         "        import anndata as _ib_ad\n"
-        "        for _ib_name, _ib_obj in list(globals().items()):\n"
-        "            if _ib_name.startswith('_') or not isinstance(_ib_obj, _ib_ad.AnnData):\n"
+        "        for _ib_name in _ib_output_names:\n"
+        "            _ib_obj = globals().get(_ib_name)\n"
+        "            if not isinstance(_ib_obj, _ib_ad.AnnData):\n"
         "                continue\n"
         "            _ib_group_key, _ib_group_levels = _ib_pick_group(_ib_obj.obs)\n"
         "            _ib_scores = _ib_score_columns(_ib_obj.obs)\n"
@@ -222,8 +242,9 @@ def build_innovation_baseline_probe_code() -> str:
         "        _ib_best = None\n"
         "    _ib_de = []\n"
         "    _ib_enr = []\n"
-        "    for _ib_name, _ib_obj in list(globals().items()):\n"
-        "        if _ib_name.startswith('_') or not isinstance(_ib_obj, _ib_pd.DataFrame):\n"
+        "    for _ib_name in _ib_output_names:\n"
+        "        _ib_obj = globals().get(_ib_name)\n"
+        "        if not isinstance(_ib_obj, _ib_pd.DataFrame):\n"
         "            continue\n"
         "        _ib_rows = int(len(_ib_obj))\n"
         "        _ib_cols = list(_ib_obj.columns)\n"
@@ -438,43 +459,25 @@ def _build_volcano_code(table: Mapping[str, Any]) -> str:
         "_ib_ok = _ib_np.isfinite(_ib_x) & _ib_np.isfinite(_ib_p) & (_ib_p > 0)\n"
         "_ib_x = _ib_x[_ib_ok]\n"
         "_ib_y = -_ib_np.log10(_ib_p[_ib_ok])\n"
-        # Counted over the whole table and BEFORE any thinning. Deriving the
-        # legend from the subsample stated a significant-feature count that
-        # was a fraction of the truth, inside a figure that skips review.
-        "_ib_full = (_ib_y >= 1.30103) & (_ib_np.abs(_ib_x) >= 1.0)\n"
-        "_ib_n_sig = int(_ib_full.sum())\n"
-        "_ib_n_other = int((~_ib_full).sum())\n"
+        # No significance threshold is drawn: the host must not choose a
+        # scientific cutoff, and the p-value column picked above may be raw
+        # rather than multiple-testing-adjusted, so a fixed line would not
+        # even be a consistent error rate. Every finite row is plotted as one
+        # neutral series, and the legend reports the row count and the
+        # column names used instead of a classification.
         "_ib_total = int(_ib_x.size)\n"
         f"_ib_cap = {_MAX_SCATTER_POINTS!r}\n"
         "_ib_thinned = _ib_total > _ib_cap\n"
         "if _ib_thinned:\n"
-        "    _ib_sig_idx = _ib_np.nonzero(_ib_full)[0]\n"
-        "    _ib_oth_idx = _ib_np.nonzero(~_ib_full)[0]\n"
-        "    if _ib_sig_idx.size > _ib_cap // 2:\n"
-        "        _ib_sig_idx = _ib_sig_idx[_ib_np.linspace(\n"
-        "            0, _ib_sig_idx.size - 1, _ib_cap // 2, dtype=int)]\n"
-        "    _ib_room = max(1, _ib_cap - int(_ib_sig_idx.size))\n"
-        "    if _ib_oth_idx.size > _ib_room:\n"
-        "        _ib_oth_idx = _ib_oth_idx[_ib_np.linspace(\n"
-        "            0, _ib_oth_idx.size - 1, _ib_room, dtype=int)]\n"
-        "    _ib_keep = _ib_np.sort(_ib_np.concatenate([_ib_sig_idx, _ib_oth_idx]))\n"
+        "    _ib_keep = _ib_np.linspace(0, _ib_total - 1, _ib_cap, dtype=int)\n"
         "    _ib_x, _ib_y = _ib_x[_ib_keep], _ib_y[_ib_keep]\n"
         "_ib_fig, _ib_ax = _ib_plt.subplots(figsize=(6.6, 5.2), layout='constrained')\n"
         "if _ib_x.size:\n"
-        "    _ib_sig = (_ib_y >= 1.30103) & (_ib_np.abs(_ib_x) >= 1.0)\n"
         "    _ib_ax.scatter(\n"
-        "        _ib_x[~_ib_sig], _ib_y[~_ib_sig], s=5, alpha=0.35, linewidths=0,\n"
-        "        color='#9aa0a6', rasterized=_ib_x.size > 50000,\n"
-        "        label=f'other (n={_ib_n_other:,})',\n"
+        "        _ib_x, _ib_y, s=5, alpha=0.45, linewidths=0,\n"
+        "        color='#4878a8', rasterized=_ib_x.size > 50000,\n"
+        f"        label=f'n = {{_ib_total:,}} rows; x: {lfc}, y: -log10({pval})',\n"
         "    )\n"
-        "    _ib_ax.scatter(\n"
-        "        _ib_x[_ib_sig], _ib_y[_ib_sig], s=7, alpha=0.75, linewidths=0,\n"
-        "        color='#c0392b', rasterized=_ib_x.size > 50000,\n"
-        "        label=f'|lfc|>=1 and p<0.05 (n={_ib_n_sig:,})',\n"
-        "    )\n"
-        "    _ib_ax.axhline(1.30103, color='#546e7a', lw=0.8, ls='--')\n"
-        "    _ib_ax.axvline(-1.0, color='#546e7a', lw=0.8, ls='--')\n"
-        "    _ib_ax.axvline(1.0, color='#546e7a', lw=0.8, ls='--')\n"
         "    _ib_ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1.0),\n"
         "                  frameon=False, fontsize=8, markerscale=2.0)\n"
         "    if _ib_thinned:\n"
@@ -574,7 +577,7 @@ def build_innovation_baseline_figure_specs(
         specs.append(InnovationBaselineFigureSpec(
             name=f"{prefix}_volcano_{cleaned['var']}",
             description=(
-                "Platform-generated effect-size versus significance view of "
+                "Platform-generated effect-size versus p-value view of "
                 f"{cleaned['var']}; the differential result's baseline view."
             ),
             figure_type="volcano",
@@ -649,6 +652,95 @@ def should_render_innovation_baselines(current_round: Any) -> bool:
         return False
 
 
+def _entry_value(entry: Any, key: str, default: Any = None) -> Any:
+    if isinstance(entry, Mapping):
+        return entry.get(key, default)
+    return getattr(entry, key, default)
+
+
+def _active_receipt_identity(state: Any) -> Optional[Dict[str, Any]]:
+    """Return the current technical identity, or no identity to query."""
+    plan_id = str(
+        getattr(getattr(state, "current_plan", None), "id", "") or ""
+    ).strip()
+    sandbox_state = getattr(state, "sandbox_state", None)
+    cohort = (
+        sandbox_state.get("cohort_identity_v1")
+        if isinstance(sandbox_state, Mapping)
+        else None
+    )
+    if not plan_id or not isinstance(sandbox_state, Mapping):
+        return None
+    if not isinstance(cohort, Mapping):
+        return None
+    if "cohort_generation" not in cohort or "cohort_digest" not in cohort:
+        return None
+    try:
+        return {
+            "round_number": int(getattr(state, "current_round", 0) or 0),
+            "plan_id": plan_id,
+            "lineage_id": getattr(state, "restore_branch_id", None) or "main",
+            "analysis_generation": int(
+                sandbox_state.get("analysis_generation", 0) or 0
+            ),
+            "cohort_generation": int(cohort.get("cohort_generation", 0) or 0),
+            "cohort_digest": str(cohort.get("cohort_digest") or ""),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _receipt_matches_current(receipt: Any, active: Mapping[str, Any]) -> bool:
+    """Match lifecycle and identity fields without reading execution prose."""
+    if (
+        _entry_value(receipt, "evidence_schema_version") != 2
+        or _entry_value(receipt, "execution_status") != "succeeded"
+        or _entry_value(receipt, "error")
+    ):
+        return False
+    try:
+        return (
+            int(_entry_value(receipt, "round_number", 0) or 0)
+            == active["round_number"]
+            and str(_entry_value(receipt, "plan_id", "") or "")
+            == active["plan_id"]
+            and (_entry_value(receipt, "lineage_id", None) or "main")
+            == active["lineage_id"]
+            and int(_entry_value(receipt, "analysis_generation", 0) or 0)
+            == active["analysis_generation"]
+            and int(_entry_value(receipt, "cohort_generation", 0) or 0)
+            == active["cohort_generation"]
+            and str(_entry_value(receipt, "cohort_digest", "") or "")
+            == active["cohort_digest"]
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _current_realized_output_names(state: Any) -> List[str]:
+    """Select declared outputs from newest matching successful receipts.
+
+    The names bound here are declarations recorded by successful executions;
+    they do not prove that an object was newly created or materially changed.
+    """
+    active = _active_receipt_identity(state)
+    if active is None:
+        return []
+    names: List[str] = []
+    history = list(getattr(state, "code_history", None) or [])
+    for receipt in reversed(history):
+        if not _receipt_matches_current(receipt, active):
+            continue
+        outputs = _entry_value(receipt, "realized_persistent_outputs", None) or []
+        if isinstance(outputs, (str, bytes)):
+            outputs = [outputs]
+        for value in outputs:
+            name = str(value or "").strip()
+            if name and name.isidentifier() and name not in names:
+                names.append(name)
+    return names
+
+
 async def ensure_innovation_baseline_figures(
     agent: Any, state: Any
 ) -> Dict[str, str]:
@@ -667,9 +759,17 @@ async def ensure_innovation_baseline_figures(
     sandbox = getattr(agent, "sandbox", None)
     if sandbox is None:
         return {}
+    output_names = _current_realized_output_names(state)
+    if not output_names:
+        logger.info(
+            "[Bioinformatics] No current receipt-declared outputs for "
+            "innovation baseline"
+        )
+        return {}
     try:
         probe_result = await sandbox.execute(
-            build_innovation_baseline_probe_code(),
+            build_innovation_baseline_probe_code(output_names),
+            records_history=False,
             skip_safety_check=True,
             mutates_namespace=False,
         )

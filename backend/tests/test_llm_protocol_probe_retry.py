@@ -29,7 +29,8 @@ async def test_chat_probe_fallback_retries_transient_without_upstream_wrapper(mo
     sentinel = object()
 
     setattr_facade(monkeypatch, "backend.utils.llm_client", "_route_protocol_order", lambda base_url, model: ["chat", "responses"])
-    setattr_facade(monkeypatch, "backend.utils.llm_client", "is_transient_probe_error", lambda exc: isinstance(exc, ProbeTransientError))
+    setattr_facade(monkeypatch, "backend.utils.llm_client", "is_transient_probe_error",
+                    lambda exc, *, vision_request=False: isinstance(exc, ProbeTransientError))
     setattr_facade(monkeypatch, "backend.utils.llm_client", "PROBE_RETRY_DELAYS", [0, 0])
 
     async def make_inline_call(*, non_retryable_predicate=None, max_retries_override=None):

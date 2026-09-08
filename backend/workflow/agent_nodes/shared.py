@@ -59,17 +59,49 @@ inside it is yours to make from the data. If a step does not apply to this datas
 say which one and why rather than silently skipping it):
 1. Load the input data (h5ad file)
 2. Basic QC: filter cells by min_genes, filter genes by min_cells, compute QC metrics.
-   Choose the cutoffs from the observed distributions, not from a remembered default
-3. Doublet detection assessment (scrublet or equivalent)
-4. Batch effect assessment: check if multiple samples/batches exist, evaluate need for correction
+   Choose the cutoffs from the observed distributions, not from a remembered default.
+   Verify the input scale before anything else: is adata.X raw integer counts? Integrality
+   of the values is a clue, not proof — also read adata.layers, adata.raw, any processing
+   note in adata.uns, and the description the data was uploaded with. Never copy an
+   already-normalised .X into adata.layers['counts']; if no raw counts exist anywhere, say
+   so, because it constrains every count-based method later.
+   Compute, where they apply to this dataset, the observations that make the distributions
+   readable: per-sample MAD-based outlier flags, ribosomal and haemoglobin fractions
+   alongside the mitochondrial one, and cell-cycle scoring
+   (sc.tl.score_genes_cell_cycle). Evaluate whether each one applies here rather than
+   running the whole list by default. A mitochondrial cutoff appropriate to whole-cell data
+   does not transfer to single-nucleus data.
+   No threshold removes cells automatically: none of these observations is a filter on its
+   own. You choose and justify each cutoff from the observed distributions and report what
+   was removed and why
+3. Doublet detection: assess from the design whether and how to run it, and record what you
+   decided. For per-library captures, run it per library by default
+   (sc.pp.scrublet(adata, batch_key=...)); scvi-tools SOLO is available as a second opinion
+   where the first call is ambiguous. Pooled donors, hashed libraries, or data that arrived
+   already doublet-filtered each need their own justification for what you run. A capture
+   library is not the same thing as a biological sample — check which of the two the column
+   you pass as batch_key actually holds
+4. Batch effect assessment: check if multiple samples/batches exist, evaluate need for
+   correction. Besides the embedding coloured by the batch/sample key, compute a
+   per-cluster sample-mixing statistic — a sample-by-cluster crosstab, or an entropy of the
+   sample labels within each cluster — so the PI has a numeric basis instead of an
+   impression of a plot. Better mixing is not by itself evidence that an integration is more
+   correct: an integration can also mix samples by removing the biology that separated them
 5. Normalization (scanpy.pp.normalize_total), log1p. Keep the raw integer counts in
    adata.layers['counts'] before you normalize — downstream count-based models need them
-6. Highly variable gene selection (scanpy.pp.highly_variable_genes)
+6. Highly variable gene selection (scanpy.pp.highly_variable_genes). For multi-sample data,
+   flavor="seurat_v3" with batch_key= is one option worth evaluating; it expects raw counts,
+   so it needs layer="counts" — by this point .X is already normalised
 7. PCA (scanpy.pp.pca)
 8. UMAP (scanpy.pp.neighbors + scanpy.tl.umap)
 9. Clustering (scanpy.tl.leiden). Justify the resolution you picked; if the cluster count
-   is unstable across nearby resolutions, report that rather than presenting one as settled
-10. Cell type annotation: find marker genes per cluster (scanpy.tl.rank_genes_groups), then call annotate_clusters tool
+   is unstable across nearby resolutions, report that rather than presenting one as settled.
+   scanpy's default backend is still leidenalg; flavor="igraph", n_iterations=2,
+   directed=False is the current equivalent where it applies. Report the resolution sweep
+   and the value you chose together — the chosen value alone is not auditable
+10. Cell type annotation: find marker genes per cluster (scanpy.tl.rank_genes_groups), then call annotate_clusters tool;
+    where a cached CellTypist model covers the organism, run it as an independent second label set and report
+    the per-cluster agreement rather than letting either label set silently override the other
 
 QUALITY-CONTROL FIGURE: the platform renders one for this stage itself, from what the
 kernel holds — the distribution of each per-observation quality metric this run computed,
@@ -264,7 +296,25 @@ and proceed to downstream analysis ONLY:"""
    method open, these are available and appropriate to single-cell data — pick from
    them by what the question needs, not by working down the list:
    - pathway enrichment over the differential results (organism-appropriate libraries)
-   - cell-cell communication (liana), when the design supports comparing interactions
+   - pseudobulk differential expression, where the plan asks for a between-condition
+     comparison whose units are samples: aggregate with
+     dc.get_pseudobulk(adata, sample_col=..., groups_col=..., layer="counts", mode="sum",
+     min_cells=..., min_counts=...) (decoupler 1.8), filter with
+     dc.filter_by_expr(..., group=...), then fit pydeseq2 with a design formula that names
+     the covariates this design actually needs. For a magnitude claim, test against a
+     non-zero threshold with lfc_null and alt_hypothesis rather than filtering on the fold
+     change afterwards; apply lfc_shrink(coeff=...) only when that coefficient is the
+     contrast being reported. State the minimum cells per sample you required and which
+     samples it dropped.
+   - cell-cell communication (liana), when the design supports comparing interactions.
+     Across conditions there are two separate routes and they must not be chained:
+     (a) per-sample scoring with
+     li.mt.rank_aggregate.by_sample(adata, groupby=..., sample_key=..., resource_name=...),
+     followed by a sample-level comparison or a multi-sample decomposition chosen from the
+     design; or (b) per-cell-type sample-level pseudobulk DE first, then li.multi.df_to_lr
+     to map those DE statistics onto ligand-receptor pairs. On route (b) the interaction_*
+     columns are means of the ligand and receptor statistics, not a calibrated communication
+     p-value: they rank and describe interactions, they do not test them.
    - trajectory / pseudotime, when a continuum is the question and a root can be justified
    Say which you did not run and why; an analysis that does not fit the question is
    correctly left undone, not silently skipped.

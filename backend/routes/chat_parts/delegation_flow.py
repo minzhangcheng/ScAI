@@ -15,11 +15,21 @@ _DELEGATION_STOP = object()
 async def _execute_delegation_success(
     session_id, state, delegation, user_message, saved_files,
     llm_manager, config, start_time, extra_clients,
+    *, followup_id: str = "", branch_id: str = "main", source_context: str = "",
 ):
     import traceback
     from backend.utils.agent_llm import get_agent_llm_client
 
     delegates = delegation.get("delegates", [])
+
+    def _delegation_instruction(raw: Any) -> str:
+        instruction = str(raw or "")
+        if source_context and source_context.strip():
+            instruction += (
+                "\n\n## Server-resolved selected-direction context\n"
+                + source_context.strip()
+            )
+        return instruction
 
     # 3. Create message callback that sends to WebSocket + persists
     async def chat_msg_callback(msg: WebSocketMessage):
@@ -82,7 +92,8 @@ async def _execute_delegation_success(
                 if agent_client is not llm_manager.openrouter:
                     extra_clients.append(agent_client)
                 result, extra = await _execute_chat_agent(
-                    session_id, state, agent_name, d.get("instruction", ""),
+                    session_id, state, agent_name,
+                    _delegation_instruction(d.get("instruction", "")),
                     agent_client, chat_msg_callback, saved_files
                 )
                 extra_clients.extend(extra)
@@ -107,7 +118,8 @@ async def _execute_delegation_success(
                 if a_client is not llm_manager.openrouter:
                     extra_clients.append(a_client)
                 tasks.append(_execute_chat_agent(
-                    session_id, state, a_name, d.get("instruction", ""),
+                    session_id, state, a_name,
+                    _delegation_instruction(d.get("instruction", "")),
                     a_client, chat_msg_callback, saved_files
                 ))
             # Global timeout to prevent indefinite hang if an agent's LLM call stalls
@@ -154,7 +166,12 @@ async def _execute_delegation_success(
         "status": "synthesizing", "message": "PI synthesizing results...",
     })
 
-    synthesis_prompt = _build_synthesis_prompt(user_message, delegation, agent_results)
+    synthesis_prompt = _build_synthesis_prompt(
+        user_message,
+        delegation,
+        agent_results,
+        source_context=source_context,
+    )
     delegation_provider = AgentSettingsProvider(state, config, global_client=llm_manager.openrouter, session_id=session_id)
     pi_model = delegation_provider.get_model(PI_AGENT_NAME)
     pi_temp = delegation_provider.get_temperature(PI_AGENT_NAME)
@@ -221,6 +238,11 @@ async def _execute_delegation_success(
         "timestamp": datetime.now().isoformat(),
         "pending_figures": False,
     }
+    if followup_id:
+        assistant_msg.update({
+            "followup_id": followup_id,
+            "branch_id": branch_id,
+        })
     if merged_figures:
         assistant_msg["figures"] = merged_figures
 
@@ -242,6 +264,7 @@ async def _execute_delegation_success(
         "timestamp": datetime.now().isoformat(),
         "reply_to": assistant_msg.get("reply_to"),
         "pending_figures": False,
+        **({"followup_id": followup_id, "branch_id": branch_id} if followup_id else {}),
     })
 
     duration = time.time() - start_time
@@ -257,6 +280,10 @@ async def _run_chat_delegation(
     user_message: str,
     image_b64_list: List[str],
     saved_files: List[Dict[str, Any]],
+    *,
+    followup_id: str = "",
+    branch_id: str = "main",
+    source_context: str = "",
 ):
     """Background task: orchestrate delegated agent work, then PI synthesizes results."""
     import traceback
@@ -288,6 +315,9 @@ async def _run_chat_delegation(
         outcome = await _execute_delegation_success(
             session_id, state, delegation, user_message, saved_files,
             llm_manager, config, start_time, _delegation_extra_clients,
+            followup_id=followup_id,
+            branch_id=branch_id,
+            source_context=source_context,
         )
         if outcome is _DELEGATION_STOP:
             return

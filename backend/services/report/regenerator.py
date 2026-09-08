@@ -26,6 +26,7 @@ from backend.services.report.interaction_records import render_direction_selecti
 from backend.services.report.quality import (
     render_report_limitations_html,
     render_report_status_line_html,
+    render_technical_review_notice_html,
 )
 from backend.config import get_session_logs, get_session_workspace
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
@@ -883,6 +884,65 @@ def _render_regenerated_sections(
     return toc_items, sections_html
 
 
+def _append_followups_section(report: dict, toc_items: list, sections_html: list) -> None:
+    """Render persisted report follow-ups without exposing internal IDs."""
+    followups = [item for item in (report.get("followups") or []) if isinstance(item, dict)]
+    if not followups:
+        return
+
+    title = "Follow-ups"
+    toc_items.append(
+        f'<li><a href="#followups">{title}</a>'
+        f'<span class="section-type specific">Next steps</span></li>'
+    )
+    disposition_labels = {
+        "deepen_now": "Deepen now",
+        "offer_in_chat": "Continue in Chat",
+        "needs_new_data": "Needs new data",
+        "closed": "Closed by PI",
+    }
+    cards = []
+    for item in followups:
+        question = html_module.escape(str(item.get("question") or ""))
+        why = str(item.get("why_it_matters") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        instruction = str(item.get("suggested_instruction") or "").strip()
+        required_input = str(item.get("required_input") or "").strip()
+        disposition = str(item.get("disposition") or "").strip().lower()
+        source_round = item.get("source_round")
+        direction = str(item.get("direction") or "").strip()
+        source = f"Round {source_round}" if source_round else "Source round not recorded"
+        if direction:
+            source += f" · {html_module.escape(direction)}"
+        body = [f"<h4>{question}</h4>"]
+        if why:
+            body.append(f"<p><strong>Why it matters:</strong> {markdown_to_html(why)}</p>")
+        body.append(
+            f"<p><strong>Disposition:</strong> "
+            f"{html_module.escape(disposition_labels.get(disposition, disposition or 'Recorded by PI'))}</p>"
+        )
+        if reason:
+            body.append(f"<p><strong>PI reason:</strong> {markdown_to_html(reason)}</p>")
+        if instruction:
+            body.append(f"<p><strong>Suggested instruction:</strong> {markdown_to_html(instruction)}</p>")
+        if required_input:
+            body.append(f"<p><strong>Required input:</strong> {markdown_to_html(required_input)}</p>")
+        outcome = str(item.get("execution_outcome") or "").strip()
+        if outcome:
+            body.append(f"<p><strong>Attempted outcome:</strong> {markdown_to_html(outcome)}</p>")
+        body.append(f'<p class="followup-source"><strong>Source:</strong> {source}</p>')
+        cards.append('<div class="followup-card">' + "".join(body) + "</div>")
+
+    sections_html.append(
+        f'''<div class="section" id="followups">
+            <div class="section-header"><h2>{title}
+                <span class="analysis-type-badge specific">Next steps</span>
+            </h2></div>
+            <div class="section-content">{"".join(cards)}</div>
+        </div>'''
+    )
+
+
 def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     """
     Generate HTML report with embedded base64 images.
@@ -921,6 +981,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     toc_items, sections_html = _render_regenerated_sections(
         report, all_figures, section_figure_map, used_figures,
     )
+    _append_followups_section(report, toc_items, sections_html)
 
     # Convert markdown in abstract and conclusions
     abstract_html = markdown_to_html(report.get("abstract", ""))
@@ -960,7 +1021,8 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         "title": _safe_format_value(report.get("title", "Analysis Report")),
         "generated_at": "Generated: " + report.get("generated_at", datetime.now().isoformat()),
         "report_limitations_html": _safe_format_value(
-            render_report_limitations_html(report)
+            render_technical_review_notice_html(report)
+            + render_report_limitations_html(report)
         ),
         "report_status_line_html": _safe_format_value(
             render_report_status_line_html(report)

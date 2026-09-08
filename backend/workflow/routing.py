@@ -1,7 +1,7 @@
 """Pure routing functions for the workflow graph. Stateless except for logging."""
 import logging
 
-from ..models.schemas import TaskStatus
+from ..models.schemas import AnalysisPhase, TaskStatus
 from .state import WorkflowState
 
 logger = logging.getLogger(__name__)
@@ -123,6 +123,22 @@ class RoutingMixin:
         # Check explicit should_continue flag (set by human intervention)
         if state.get("should_continue") is False:
             logger.info(f"[{self.session_id}] Stopping: should_continue flag is False")
+            return "stop"
+
+        # A failed core Exploration result is a technical stop.  Keep this
+        # decision tied to the objective result itself because later nodes may
+        # clear ``failed_node`` while preserving the failed Bioinformatics
+        # payload; Innovation retains its existing direction-batch routing.
+        if (
+            getattr(analysis_state, "analysis_phase", None)
+            == AnalysisPhase.EXPLORATION
+            and isinstance(state.get("bioinformatics_result"), dict)
+            and state["bioinformatics_result"].get("status") == "failed"
+        ):
+            logger.info(
+                f"[{self.session_id}] Stopping: Exploration Bioinformatics "
+                "result failed"
+            )
             return "stop"
 
         # Integration-loop guard (spec §9.2): never hard-stop on max_rounds while

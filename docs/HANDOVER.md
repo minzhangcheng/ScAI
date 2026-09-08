@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.52.11 · **Last updated**: 2026-09-05
+**Version**: 0.55.1 · **Last updated**: 2026-09-08
 
 ## 1. Runtime Architecture
 
@@ -59,7 +59,6 @@ scai/
 | `files.py`         | File serving (uploaded data, generated figures).                                          |
 | `lifecycle.py`     | Start / pause / resume / stop analysis.                                                   |
 | `interaction.py`   | HITL inputs: human guidance, annotation confirmation, direction selection.                |
-| `snapshots.py`     | Internal checkpoint lifecycle and compatibility management endpoints.                    |
 | `export_import.py` | Session export (`.tar.gz` / `.zip`) and import with background job tracking.              |
 | `chat.py`          | PI-Agent chat endpoints, including on-the-fly file uploads and agent delegation.          |
 | `reports.py`       | Report generate / list / download / HTML / regenerate.                                    |
@@ -114,9 +113,9 @@ workspace, the dill state directory, and the private kernel temporary
 directory. Cache and home variables are redirected into that temporary root;
 allowed roots must exist, must not be symlinks, and must not resolve to `/`.
 The enclosing session directory remains kernel-read-only, protecting
-`session.json`, uploads, reports, Snapshot V2 objects, and journals. Runtime
-snapshot material is first written to `states/.kernel-staging`, which the host
-validates before performing the authoritative object-store commit.
+`session.json`, uploads, reports, and journals. The kernel writes its runtime
+dump into the dill state directory, and the host verifies and commits it as a
+runtime generation from there.
 
 Python wrappers and the audit hook produce actionable errors and cover normal
 Python metadata mutations, while Landlock constrains native SQLite, HDF5, and
@@ -275,7 +274,143 @@ six minutes per occurrence rather than blocking.
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
+**0.55.x — (2026-09-08 onward)**
+
+- `0.55.1` — Replaces Snapshot V2 with plain runtime persistence, and merges
+  `main` at `0.54.1`. A session now keeps one signed runtime dump instead of a
+  per-round snapshot tree: the snapshot browser, the runtime-persistence HITL
+  gate, the h5ad sidecar manifest, the runtime required tier, the runtime
+  dependency tracker, and the serialisability judgment made in the cell that
+  bound a value are all removed, together with the routes, models, and frontend
+  actions that existed only to drive them. Storage left behind by an older
+  build is inert, and an archive built before the removal still imports.
+  Each save writes an HMAC-signed generation manifest committed atomically,
+  records every exclusion channel as generation coverage, and verifies a
+  generation before binding it; a dump from an older build is loaded through
+  the legacy-state sanitizer rather than trusted. Runtime coherence is now
+  reported rather than inferred, so a stale runtime cannot be continued
+  silently and the re-run it offers really does start from an empty runtime.
+  Crash recovery no longer wedges on that check: the kernel-revision verdict
+  stands on its own and only a backward state version is inconsistent, a
+  refused resume pauses the run instead of abandoning it, and the export's
+  generation check no longer hashes on the event loop. Any execution that can
+  mutate the namespace marks the runtime dirty, including one that failed.
+  `include_runtime=true` now either produces a runtime or refuses. The runtime
+  save runs on a schedule whose intra-round floor governs only a session with
+  live uncommitted work, so a first step no longer dumps an empty kernel.
+  Exported notebooks open with the kernel bootstrap cells, record failed cells,
+  name the inputs each cell reads, and resolve upload references through the
+  replay workspace, so a notebook replays outside ScAI in a fresh kernel of the
+  same installation. The per-frame index considered for large AnnData objects
+  was measured and declined: a single `obs` column write and
+  `sc.pp.normalize_total` each rewrite the whole frame, so the duplication an
+  index would remove comes only from idle rounds. Merging `main` keeps its
+  report-handoff direction context, the `0.53.5` unattended-gate terminal wait
+  (now without the restore hook it used to poll, which no longer exists), and
+  the `0.54.1` method guidance.
+  `backend-full` passed `5669` with `32` skipped; the `41` remaining failures
+  are this branch's known set, and the evidence differ reports no test
+  introduced and none fixed against the pre-merge baseline. The `kernel`
+  profile passed `159`, `client` passed `40`, and the frontend passed `296`
+  vitest tests across `137` suites with `tsc --noEmit` clean. All eight
+  version-consistency checks passed. No image build, push, deployment, or
+  historical-session repair was performed.
+
+**0.54.x — (2026-09-07 onward)**
+
+- `0.54.1` — Merges `method_optimize` while retaining the Python-only analysis
+  stack and PI-owned, non-blocking scientific judgment. Corrects resampling
+  resolution, small-panel and effect-size wording, dependence-aware multiple
+  testing, sample-level composition analysis, and design-aware filtering.
+  Runtime resolution observations distinguish nominal from adjusted values and
+  preserve multilevel score identity even alongside ordinary permutation scores.
+  Harmonizes PI, executor, Stage 1/2, and default prompt guidance for input scale,
+  library-aware doublet assessment, Harmony output orientation, pseudobulk DE,
+  the separate LIANA comparison routes, and supported Python method alternatives.
+  CellTypist gains an optional host-fetched data-volume cache linked into each
+  kernel; partial fetches report missing models, and annotation guidance exposes
+  the per-cell label distribution behind each cluster vote. Reports and CSV use
+  small-matched-panel wording, baseline volcano plots avoid host-chosen discovery
+  thresholds, and method decision cards remain disabled by default.
+  Focused regressions including all eight version-consistency checks passed
+  `313` tests, with `5` live-kernel tests skipped. The immutable runner accepted
+  evidence from an identical temporary checkout because the primary checkout
+  directory is not readable by the runner UID; its permissions were preserved.
+  No client, kernel, backend-full, frontend, image build, push, deployment, or
+  historical-session repair was performed.
+
+**0.53.x — (2026-09-07 onward)**
+
+- `0.53.5` — Keeps a technical Bioinformatics interruption in the same
+  Round/Stage and preserves the approved plan for an explicit Retry after the
+  bounded unattended retry budget is exhausted. A failed Exploration result
+  now proceeds to the existing partial-summary/report path instead of silently
+  starting another Exploration round, while Innovation and optional-agent
+  routing retain their existing behavior. Vision requests now recognize the
+  gateway's flat SDK-shaped `Invalid input` 400 for the image-bearing message,
+  redirect once to the alternate protocol, and retain the existing figure
+  revision text fallback without disabling vision capability. Focused evidence
+  passed `170/170` tests and version consistency passed `8/8`; no client,
+  kernel, backend-full, frontend, image build, deployment, or historical-session
+  repair was performed.
+
+- `0.53.4` — Keeps graphic-abstract review state honest when vision review or
+  candidate selection is unavailable, preserving usable artifacts without
+  fabricated scores or revision advice. Registered report tables with the same
+  basename now retain distinct artifact identities, bytes, hashes, and report
+  links. Reports disclose explicit technical review availability in generated
+  and regenerated HTML without turning scientific observations into gates, and
+  detailed-report HTML follows the published generation while preserving the
+  legacy main-report fallback and branch isolation. The report generator also
+  restores the missing `build_report_followups` binding used by the staged
+  fallback path. Focused backend evidence passed 122/122 tests, and version
+  consistency passed 8/8; no client, kernel, backend-full, frontend, image-build,
+  deployment, or historical-session repair was performed.
+
+- `0.53.3` — Keeps Bioinformatics executor checkpoints aligned with the live
+  loop context: resumed runs now persist the current step number and the
+  post-compaction transcript instead of initialization-time values, so an
+  interrupted analysis can continue from its saved work. The revised-plan
+  checkpoint remains durable before the next LLM turn, and a focused regression
+  covers list replacement, save/restore, and plan-revision persistence. Focused
+  backend evidence passed `10/10` tests; no client, kernel, backend-full,
+  frontend, image-build, deployment, or historical-session repair was
+  performed.
+
+- `0.53.2` — Preserves current-round identity when workspace figures are
+  adopted: typed analysis-log entries now join to current successful schema-v2
+  execution receipts, carry source, round, plan, lineage, analysis-generation,
+  and cohort metadata, and leave unverifiable legacy renders visible to the PI
+  without adopting them. Innovation baseline probes now inspect only output
+  identifiers declared by those current receipts instead of scanning the whole
+  kernel namespace, so older differential, enrichment, or AnnData variables are
+  not relabeled as later-round results. Report round attribution gives an exact
+  registered path-and-bytes match precedence over stale same-name supervision
+  records; unregistered repeated names use the latest logged writer. Focused
+  backend evidence passed `81/81` tests; no client, kernel, backend-full,
+  frontend, image-build, deployment, or historical-session repair was
+  performed.
+
+- `0.53.1` — Adds conditional deepening for selected innovation directions: one
+  PI-owned review can request a bounded supplementary pass within the shared
+  budget, while durable reservation and replay preserve original and
+  supplementary execution evidence without rerunning a paid pass. Early
+  direction context and bounded follow-ups now flow through synthesis and
+  detailed reports. Actionable follow-ups open editable, lineage-scoped Chat
+  drafts without automatic execution, and Chat outcomes preserve session and
+  branch identity across success, error, cancellation, history, and WebSocket
+  paths. Generated and regenerated report HTML share the same Markdown escaping
+  behavior. Focused backend evidence passed `87/87` nodes, the report-rendering
+  regression passed `3/3`, and the isolated frontend suite passed `413/413`
+  tests in `188/188` suites. No client, kernel, backend-full, image-build,
+  deployment, or historical-session mutation was performed.
+
 **0.52.x — (2026-09-03 onward)**
+
+- `0.52.12` — Keeps replay-safe vision retries bound to the configured agent
+  model by forwarding `model` on every `chat_with_vision` attempt. Regression
+  coverage verifies that the configured model is preserved across all retry
+  calls.
 
 - `0.52.11` — Stops the exploration gate from retiring a research direction over
   evidence a computational round cannot produce. `select_best_directions` told

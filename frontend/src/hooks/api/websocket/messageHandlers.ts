@@ -9,6 +9,13 @@ import { mergeRealtimeMessages } from '../realtimeHistory'
 import { reloadSessionState } from './sessionReload'
 import type { MessageHandlerContext } from './types'
 
+function chatIdentityFields(value: any): Pick<ChatMessage, 'followup_id' | 'branch_id'> {
+  return {
+    ...(value?.followup_id ? { followup_id: String(value.followup_id) } : {}),
+    ...(value?.branch_id ? { branch_id: String(value.branch_id) } : {}),
+  }
+}
+
 function handleStateSync(data: any, context: MessageHandlerContext): void {
   const { isCurrentAttempt, stateSyncEpochRef } = context
   // Normalise: some backend paths nest fields under `content`
@@ -25,9 +32,10 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
       role: terminalChat.role === 'user' ? 'user' : 'assistant',
       content: terminalChat.content || '',
       timestamp: terminalChat.timestamp || data.timestamp || new Date().toISOString(),
-      pending_figures: terminalChat.pending_figures,
-      reply_to: terminalChat.reply_to,
-    }))
+          pending_figures: terminalChat.pending_figures,
+          reply_to: terminalChat.reply_to,
+          ...chatIdentityFields(terminalChat),
+        }))
   }
 
   // Check for version conflict - reload full session state from server
@@ -210,6 +218,20 @@ export function handleWebSocketMessage(
 
     // Handle chat_result - final response from chat delegation
     if (data.type === 'chat_result') {
+      const terminal = data.content || {}
+      if (terminal.id) {
+        const current = useAppStore.getState().chatMessages
+        useAppStore.getState().setChatMessages(upsertChatMessage(current, {
+          id: terminal.id,
+          role: 'assistant',
+          content: terminal.content || '',
+          timestamp: terminal.timestamp || data.timestamp || new Date().toISOString(),
+          figures: terminal.figures,
+          pending_figures: terminal.pending_figures,
+          reply_to: terminal.reply_to,
+          ...chatIdentityFields(terminal),
+        }))
+      }
       // Refresh full chat history from backend to ensure consistency
       const sessionId = useAppStore.getState().currentSession?.id
       if (sessionId) {
@@ -253,6 +275,7 @@ export function handleWebSocketMessage(
           timestamp: data.timestamp || new Date().toISOString(),
           pending_figures: false,
           reply_to: terminal.reply_to,
+          ...chatIdentityFields(terminal),
         }))
       }
       useAppStore.getState().setChatLoading(false)
@@ -274,13 +297,15 @@ export function handleWebSocketMessage(
           timestamp: data.timestamp || new Date().toISOString(),
           pending_figures: false,
           reply_to: terminal.reply_to,
+          ...chatIdentityFields(terminal),
         }))
       } else {
-        useAppStore.getState().addChatMessage({
-          role: 'assistant',
-          content: `Error: ${terminal.error || 'Unknown error during analysis'}`,
-          timestamp: new Date().toISOString(),
-        })
+          useAppStore.getState().addChatMessage({
+            role: 'assistant',
+            content: `Error: ${terminal.error || 'Unknown error during analysis'}`,
+            timestamp: new Date().toISOString(),
+            ...chatIdentityFields(terminal),
+          })
       }
       useAppStore.getState().setChatLoading(false)
       useAppStore.getState().setChatDelegationActive(false)

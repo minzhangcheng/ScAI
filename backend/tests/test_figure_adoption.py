@@ -16,6 +16,7 @@ writes the fields the contract actually reads.
 import pytest
 
 from backend.models.schema_parts.enums import FigureReviewStatus
+from backend.models.schemas import AnalysisStep, CodeExecution
 from backend.services.figure_adoption import (
     AdoptionCandidate,
     FigureBinding,
@@ -34,7 +35,7 @@ from backend.services.report.artifacts import (
 
 # --------------------------------------------------------------- fixtures
 
-def _render(path, *, pdf=True):
+def _render(path, *, pdf=True, seed=0):
     """A real image big enough for image_file_sha256's floors."""
     import matplotlib
     matplotlib.use("Agg")
@@ -42,7 +43,7 @@ def _render(path, *, pdf=True):
     import numpy as np
 
     fig, ax = plt.subplots(figsize=(4, 3), dpi=120)
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(seed)
     ax.imshow(rng.random((64, 64)))
     fig.savefig(path, format="jpg")
     if pdf:
@@ -61,6 +62,33 @@ def workspace(tmp_path):
     return tmp_path
 
 
+def _receipt(
+    *,
+    receipt_id="receipt-1",
+    plan_id="plan-1",
+    round_number=1,
+    lineage_id="main",
+    analysis_generation=4,
+    cohort_generation=2,
+    cohort_digest="c" * 64,
+    **overrides,
+):
+    values = {
+        "id": receipt_id,
+        "code": "current_analysis()",
+        "round_number": round_number,
+        "evidence_schema_version": 2,
+        "plan_id": plan_id,
+        "execution_status": "succeeded",
+        "lineage_id": lineage_id,
+        "analysis_generation": analysis_generation,
+        "cohort_generation": cohort_generation,
+        "cohort_digest": cohort_digest,
+    }
+    values.update(overrides)
+    return CodeExecution(**values)
+
+
 def _state(tmp_path, *, plan_id="plan-1", round_number=1):
     from backend.models.schemas import AnalysisState
 
@@ -73,6 +101,17 @@ def _state(tmp_path, *, plan_id="plan-1", round_number=1):
         steps = []
 
     state.current_plan = _Plan()
+    state.restore_branch_id = "main"
+    state.sandbox_state = {
+        "analysis_generation": 4,
+        "cohort_identity_v1": {
+            "cohort_generation": 2,
+            "cohort_digest": "c" * 64,
+        },
+    }
+    state.code_history = [_receipt(
+        plan_id=plan_id, round_number=round_number,
+    )]
     return state
 
 
@@ -88,13 +127,14 @@ def _req(step, figure_type, key=None):
     )
 
 
-def _cand(workspace, stem):
+def _cand(workspace, stem, source_execution_id="receipt-1"):
     jpg = workspace / "figures" / f"{stem}.jpg"
     return AdoptionCandidate(
         name=stem,
         path=str(jpg),
         pdf_path=str(jpg.with_suffix(".pdf")),
         provenance=f"execute_code step N: produced {stem}",
+        source_execution_id=source_execution_id,
     )
 
 
@@ -349,15 +389,176 @@ def test_candidates_carry_execution_provenance(workspace, tmp_path, monkeypatch)
     """The PI needs to know which execution produced a file; that is the only
     signal that distinguishes a draft from the render that superseded it."""
     state = _state(tmp_path)
-    state.analysis_log = [
-        {"step_number": 7, "step_type": "execute_code",
-         "code_description": "Produce the primary result view",
-         "saved_figure_filenames": ["volcano_primary.jpg"]},
-    ]
+    state.analysis_log = [AnalysisStep(
+        step_number=7,
+        step_type="execute_code",
+        code_description="Produce the primary result view",
+        execution_id="receipt-1",
+        saved_figure_filenames=["volcano_primary.jpg"],
+    )]
     cands = build_adoption_candidates(state, workspace)
     by_name = {c.name: c for c in cands}
     assert "volcano_primary" in by_name
     assert "Produce the primary result view" in by_name["volcano_primary"].provenance
+    assert by_name["volcano_primary"].source_execution_id == "receipt-1"
+
+
+def test_last_unverifiable_writer_does_not_fall_back_to_an_older_receipt(
+    workspace, tmp_path
+):
+    state = _state(tmp_path)
+    state.analysis_log = [
+        AnalysisStep(
+            step_number=7,
+            step_type="execute_code",
+            code_description="Current writer",
+            execution_id="receipt-1",
+            saved_figure_filenames=["volcano_primary.jpg"],
+        ),
+        AnalysisStep(
+            step_number=8,
+            step_type="execute_code",
+            code_description="Stale writer",
+            execution_id="receipt-old",
+            saved_figure_filenames=["volcano_primary.jpg"],
+        ),
+    ]
+    state.code_history.append(_receipt(
+        receipt_id="receipt-old", round_number=0,
+    ))
+
+    candidates = build_adoption_candidates(state, workspace)
+    candidate = next(item for item in candidates if item.name == "volcano_primary")
+    assert candidate.source_execution_id is None
+    assert "no current execution association" in candidate.provenance
+    assert validate_bindings(
+        [FigureBinding(3, "volcano", candidate.name, "c")],
+        [_req(3, "volcano")],
+        [candidate],
+    )
+    assert adopt_bindings(
+        state,
+        [FigureBinding(3, "volcano", candidate.name, "c")],
+        [candidate],
+    ) == []
+
+
+def test_verified_candidates_precede_unverified_workspace_context(
+    workspace, tmp_path
+):
+    state = _state(tmp_path)
+    state.analysis_log = [AnalysisStep(
+        step_number=7,
+        step_type="execute_code",
+        code_description="Current writer",
+        execution_id="receipt-1",
+        saved_figure_filenames=["draft_render.jpg"],
+    )]
+    candidates = build_adoption_candidates(state, workspace)
+    assert candidates[0].name == "draft_render"
+    assert candidates[0].source_execution_id == "receipt-1"
+    assert all(item.source_execution_id is None for item in candidates[1:])
+
+
+def test_adopted_identity_is_copied_from_the_current_receipt(
+    workspace, tmp_path
+):
+    state = _state(tmp_path)
+    state.analysis_log = [AnalysisStep(
+        step_number=7,
+        step_type="execute_code",
+        code_description="Current writer",
+        execution_id="receipt-1",
+        saved_figure_filenames=["volcano_primary.jpg"],
+    )]
+    candidate = next(
+        item for item in build_adoption_candidates(state, workspace)
+        if item.name == "volcano_primary"
+    )
+    assert adopt_bindings(
+        state,
+        [FigureBinding(3, "volcano", candidate.name, "c")],
+        [candidate],
+    )
+    figure = state.publication_figures[0]
+    assert figure.source_execution_id == "receipt-1"
+    assert figure.round_number == 1
+    assert figure.plan_id == "plan-1"
+    assert figure.lineage_id == "main"
+    assert figure.analysis_generation == 4
+    assert figure.cohort_generation == 2
+    assert figure.cohort_digest == "c" * 64
+    assert is_report_eligible(figure) is True
+
+
+def test_same_step_and_type_in_two_rounds_have_distinct_logical_heads(
+    workspace, tmp_path
+):
+    state = _state(tmp_path, round_number=1)
+    first = _cand(workspace, "volcano_primary")
+    adopt_bindings(
+        state,
+        [FigureBinding(3, "volcano", first.name, "round one")],
+        [first],
+    )
+
+    second_path = workspace / "figures" / "volcano_round_two.jpg"
+    _render(second_path)
+    state.current_round = 2
+    state.code_history.append(_receipt(
+        receipt_id="receipt-2", round_number=2,
+    ))
+    second = _cand(workspace, "volcano_round_two", "receipt-2")
+    adopt_bindings(
+        state,
+        [FigureBinding(3, "volcano", second.name, "round two")],
+        [second],
+    )
+
+    assert len(state.publication_figures) == 2
+    assert {
+        (figure.round_number, figure.logical_figure_id)
+        for figure in state.publication_figures
+    } == {
+        (1, "adopted:plan-1:1:3:volcano"),
+        (2, "adopted:plan-1:2:3:volcano"),
+    }
+
+
+def test_registered_render_is_not_re_adopted_even_when_layout_blocked(
+    workspace, tmp_path
+):
+    state = _state(tmp_path)
+    candidate = _cand(workspace, "volcano_primary")
+    adopt_bindings(
+        state,
+        [FigureBinding(3, "volcano", candidate.name, "c")],
+        [candidate],
+    )
+    state.publication_figures[0].layout_violations = [{
+        "kind": "text_over_text", "severity": "block",
+    }]
+
+    assert all(
+        item.name != "volcano_primary"
+        for item in build_adoption_candidates(state, workspace)
+    )
+
+
+def test_same_stem_with_new_bytes_remains_a_candidate(workspace, tmp_path):
+    state = _state(tmp_path)
+    candidate = _cand(workspace, "volcano_primary")
+    adopt_bindings(
+        state,
+        [FigureBinding(3, "volcano", candidate.name, "c")],
+        [candidate],
+    )
+    _render(workspace / "figures" / "volcano_primary.jpg", seed=1)
+
+    assert any(
+        item.name == "volcano_primary"
+        for item in build_adoption_candidates(state, workspace)
+    )
 
 
 # ------------------------------------------------------------- the wiring

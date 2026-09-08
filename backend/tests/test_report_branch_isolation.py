@@ -1,8 +1,10 @@
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 
 from backend.services.report.paths import (
     _sanitize_branch_id,
@@ -10,6 +12,9 @@ from backend.services.report.paths import (
     resolve_report_target_lineage,
 )
 from backend.services.report.output_generation import ReportGenerationError
+from backend.routes.reports import get_detailed_report_html
+from backend.models.schemas import AnalysisState
+from backend.tests.split_facade import patch_facade
 
 
 def test_main_report_output_uses_reports_root(tmp_path, monkeypatch):
@@ -94,6 +99,116 @@ def test_hashed_branch_wins_over_ambiguous_legacy_and_symlink_is_rejected(
 def test_report_target_lineage_does_not_depend_on_current_session_branch():
     assert resolve_report_target_lineage(branch_id=None) == "main"
     assert resolve_report_target_lineage(branch_id="branch-a") == "branch-a"
+
+
+@pytest.mark.asyncio
+async def test_detailed_html_prefers_published_main_and_keeps_branch_isolation(
+    tmp_path,
+):
+    main_dir = tmp_path / "main-generation"
+    branch_dir = tmp_path / "branch-generation"
+    legacy_dir = tmp_path / "legacy"
+    main_dir.mkdir()
+    branch_dir.mkdir()
+    legacy_dir.mkdir()
+    (main_dir / "report.html").write_text("published-main", encoding="utf-8")
+    (branch_dir / "report.html").write_text("published-branch", encoding="utf-8")
+    stale_pointer = legacy_dir / "detailed_report.html"
+    stale_pointer.write_text("stale-incremental", encoding="utf-8")
+
+    state = AnalysisState(
+        id="session-report",
+        user_id="user-1",
+        detailed_report_html_path=str(stale_pointer),
+    )
+    request = SimpleNamespace(state=SimpleNamespace(user_id="user-1"))
+
+    async def fake_owner(session_id: str, user_id: str):
+        return state
+
+    def published_dir(_session_id, branch_id):
+        return branch_dir if branch_id == "branch-a" else main_dir
+
+    def output_dir(_session_id, branch_id):
+        assert branch_id is None
+        return legacy_dir
+
+    with patch_facade(
+        "backend.routes.reports",
+        "require_session_ownership",
+        side_effect=fake_owner,
+    ), patch_facade(
+        "backend.routes.reports",
+        "resolve_published_report_dir",
+        new=published_dir,
+    ), patch_facade(
+        "backend.routes.reports",
+        "resolve_report_output_dir",
+        new=output_dir,
+    ), patch_facade(
+        "backend.routes.reports",
+        "get_session_dir",
+        return_value=tmp_path,
+    ):
+        response = await get_detailed_report_html("session-report", request)
+        assert Path(response.path) == main_dir / "report.html"
+
+        response = await get_detailed_report_html(
+            "session-report", request, branch_id="branch-a"
+        )
+        assert Path(response.path) == branch_dir / "report.html"
+
+    assert stale_pointer.read_text(encoding="utf-8") == "stale-incremental"
+
+
+@pytest.mark.asyncio
+async def test_detailed_html_legacy_main_fallback_rejects_branch_pointer(tmp_path):
+    reports = tmp_path / "reports"
+    branch_dir = reports / "branches" / "branch-a"
+    published_dir = tmp_path / "published"
+    branch_dir.mkdir(parents=True)
+    published_dir.mkdir()
+    legacy_path = reports / "detailed_report.html"
+    branch_path = branch_dir / "detailed_report.html"
+    legacy_path.write_text("legacy-main", encoding="utf-8")
+    branch_path.write_text("branch-transient", encoding="utf-8")
+
+    state = AnalysisState(
+        id="session-report-legacy",
+        user_id="user-1",
+        detailed_report_html_path=str(branch_path),
+    )
+    request = SimpleNamespace(state=SimpleNamespace(user_id="user-1"))
+
+    async def fake_owner(session_id: str, user_id: str):
+        return state
+
+    with patch_facade(
+        "backend.routes.reports",
+        "require_session_ownership",
+        side_effect=fake_owner,
+    ), patch_facade(
+        "backend.routes.reports",
+        "resolve_published_report_dir",
+        new=lambda _session_id, _branch_id: published_dir,
+    ), patch_facade(
+        "backend.routes.reports",
+        "resolve_report_output_dir",
+        new=lambda _session_id, branch_id: reports,
+    ), patch_facade(
+        "backend.routes.reports",
+        "get_session_dir",
+        return_value=tmp_path,
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await get_detailed_report_html("session-report-legacy", request)
+        assert exc.value.status_code == 404
+
+        state.detailed_report_html_path = str(legacy_path)
+        response = await get_detailed_report_html(
+            "session-report-legacy", request
+        )
+        assert Path(response.path) == legacy_path
 
 
 def test_main_regenerate_target_ignores_current_restore_branch():

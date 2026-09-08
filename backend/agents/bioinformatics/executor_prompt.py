@@ -100,7 +100,10 @@ SECURITY RESTRICTIONS:
 
 
 def _executor_prompt_methods() -> str:
-    """Analysis-method guidance: workflow, scoring discipline, defensive coding."""
+    """Analysis-method guidance: workflow, scoring discipline, defensive coding.
+
+    A plain string, not an f-string: braces here are literal and must be single.
+    """
     return """
 WORKFLOW GUIDELINES:
 - When known, nominate execution_purpose and plan_step_ids on execute_code. These
@@ -125,9 +128,9 @@ WORKFLOW GUIDELINES:
   * Batch correction: `'X_pca_harmony' in adata.obsm` (or similar) — if True, SKIP
   * Trajectory/Velocity: `'velocity' in adata.layers` — if True, SKIP scvelo steps
   * At the START of any analysis, run a quick diagnostic:
-    print(f"obs columns: {{list(adata.obs.columns)}}")
-    print(f"obsm keys: {{list(adata.obsm.keys())}}")
-    print(f"uns keys: {{list(adata.uns.keys())}}")
+    print(f"obs columns: {list(adata.obs.columns)}")
+    print(f"obsm keys: {list(adata.obsm.keys())}")
+    print(f"uns keys: {list(adata.uns.keys())}")
     to see what's already available, then SKIP to the new analysis directly.
   * **OBS_NAMES / VAR_NAMES UNIQUENESS (CRITICAL):**
     After ANY of these operations, you MUST call adata.obs_names_make_unique() and adata.var_names_make_unique():
@@ -186,7 +189,7 @@ This applies to: sc.tl.score_genes, gseapy.ssgsea, gseapy.prerank, gseapy.enrich
 WHY THE PLAN COMES FIRST:
   Curating a panel is a real judgement -- an ontology term routinely mixes genes that
   drive a process with genes that suppress it, and scoring them as one module answers
-  nothing. Splitting such a set is exactly what you should do, and the partition edit
+  nothing. Splitting such a set is one legitimate way to handle it, and the partition edit
   operation exists for it. But the panel has to be fixed BEFORE the result is visible.
   Revising a panel after seeing which genes carry the signal is selection on the
   outcome, and it is indistinguishable in the final report from having got it right
@@ -209,13 +212,19 @@ PREFER A VERSIONED SET OVER A REMEMBERED ONE:
   that drive a process and genes that suppress it, so a high module score is
   equally consistent with the process running and with it being held in check.
 
-  You do not have to fix that by hand. Call fetch_gene_set with
-  partition_by_direction=true and the ontology's own regulation terms are used to
-  split the set into direction-coherent panels -- positive, negative, ambiguous
+  One option: call fetch_gene_set with partition_by_direction=true and the
+  ontology's own regulation terms split the set into positive, negative, ambiguous
   (annotated to both, so unable to support a directional claim) and core (the
-  genes that carry out the process rather than tuning it). Each part comes back
-  as a panel with its own provenance. Score them SEPARATELY; scoring them
-  together is the failure the split exists to prevent.
+  genes that carry out the process rather than tuning it) panels, each with its
+  own provenance. Scoring the parts separately stops activators and repressors
+  from cancelling inside one module score. It does not by itself establish that
+  the process is more active: GO's regulation terms describe what a gene product
+  does to the process, not what its transcript level says about the process in
+  these cells, and feedback, protein-level control and context all intervene.
+  When the question is whether a pathway or regulator is more active, consider a
+  footprint method (PROGENy or CollecTRI with decoupler's ULM/MLM) over the
+  networks they cover, or a score over the core executor genes, and say which
+  reading each result supports.
 
   Only the biological-process branch of the ontology publishes the regulation
   terms this needs, so other collections refuse the split and say so. When the
@@ -241,7 +250,7 @@ GENE MODULE SCORING — USE FULL GENE SET (CRITICAL):
      `.raw` therefore holds normalized log values, NOT counts — that is what use_raw=True consumers below expect. Raw integer counts belong in `adata.layers['counts']`, saved before normalization. Never store counts in `.raw`: score_genes(use_raw=True) would then silently score on counts and return numbers that look plausible and are wrong.
   2. Check gene overlap BEFORE scoring:
      overlap = [g for g in gene_list if g in adata.raw.var_names]
-     print(f"Gene overlap: {{len(overlap)}}/{{len(gene_list)}}")
+     print(f"Gene overlap: {len(overlap)}/{len(gene_list)}")
   3. Score with use_raw=True: sc.tl.score_genes(adata, gene_list, score_name='...', use_raw=True)
   4. If overlap < 50% of gene_list, investigate: wrong organism? wrong gene naming convention?
 
@@ -284,16 +293,24 @@ DEFENSIVE CODING (CRITICAL — prevents KeyError / empty DataFrame crashes):
   When iterating over clusters or cell types for DE/enrichment analysis, ALWAYS check for empty results:
     df = sc.get.rank_genes_groups_df(adata, group=cluster)
     if df.empty or 'names' not in df.columns:
-        print(f"WARNING: No DE genes for {{cluster}}, skipping")
+        print(f"WARNING: No DE genes for {cluster}, skipping")
         continue
     genes = df.head(15)['names'].tolist()
   This applies to: rank_genes_groups_df, gseapy.enrichr, gseapy.prerank, pathway analysis, any per-group iteration.
   NEVER assume a DataFrame slice will be non-empty — always guard with `.empty` check or try/except.
 
 CELL TYPE ANNOTATION WORKFLOW:
-1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')
+1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon', pts=True)
+   pts=True records the fraction of cells expressing each gene inside and outside the
+   group; a marker that ranks high on the Wilcoxon score but is detected in most cells
+   everywhere is a broadly expressed gene, not a specific marker. Keep the original
+   ranking under the default key (annotate_clusters reads it) and, if you also apply
+   sc.tl.filter_rank_genes_groups, print the filter you used: it writes NaN for filtered
+   genes into a NEW key, so pass that key explicitly if you read from it. Note that
+   scanpy's logfoldchanges are computed from expm1 of mean log values and overstate
+   lowly expressed genes; condition-level fold changes belong to pseudobulk, not here.
 2. Extract top 10-20 marker genes per cluster into a dict AND PRINT IT:
-   markers = {{}}
+   markers = {}
    for cluster in adata.obs['leiden'].cat.categories:
        df = sc.get.rank_genes_groups_df(adata, group=cluster)
        if df.empty:
@@ -310,6 +327,27 @@ CELL TYPE ANNOTATION WORKFLOW:
    where markers is the LITERAL dict content you saw in the print output.
 6. Apply the returned mapping: adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(cluster_to_celltype).fillna('Unknown')
 7. Generate UMAP colored by cell_type
+8. OPTIONAL second label set, only when a cached CellTypist model covers this organism and
+   the populations expected here: the models the host has cached are listed by
+   sorted(os.listdir(os.path.join(os.environ['CELLTYPIST_FOLDER'], 'data', 'models')))
+   and described by celltypist.models.models_description(). Run it on a copy carrying
+   normalize_total(target_sum=1e4) + log1p (the representation every CellTypist model was
+   trained on): res = celltypist.annotate(adata_ct, model='<file>.pkl',
+   majority_voting=True, over_clustering='leiden') so the vote runs over YOUR clusters;
+   celltypist.annotate returns an AnnotationResult, so take adata_ct = res.to_adata()
+   to get predicted_labels, majority_voting and conf_score into obs, and copy them onto
+   adata.obs. Show the per-cell distribution, not only the vote: majority_voting is one
+   label per cluster by construction, so a crosstab of it against the cluster key is a
+   diagonal that hides a 60/40 mixed cluster. Print
+   pd.crosstab(adata.obs['leiden'], adata.obs['predicted_labels'], normalize='index')
+   reduced to each cluster's top labels with their fractions, next to the majority label
+   and the annotate_clusters label. It is one evidence stream, not an override: where
+   the two disagree, or the top fraction is low, keep that in the findings and name the
+   model file and version. No
+   cached model, or none that matches, means skip this step and say so;
+   celltypist.models.download_models(model=...) can add a model that is NOT cached
+   (it needs network access), but never pass force_update=True: the cached files are
+   read-only links and rewriting them fails.
 """
 
 
@@ -323,7 +361,10 @@ def _executor_prompt_workspace() -> str:
     modality) alone -- so an agent that outlived one sandbox would have served
     the wrong path anyway.
     """
-    return """
+    # f-string with nothing to interpolate, deliberately: this block uses
+    # `{{...}}` escaping for the code examples it contains, and dropping the
+    # prefix would ship the doubled braces to the model verbatim.
+    return f"""
 === Working Directory ===
 The notebook's first cells define `_WORKSPACE_DIR` (a pathlib.Path) and change
 into it. That definition is part of the notebook, so code rooted at
@@ -394,19 +435,24 @@ Before running sc.tl.pca() or any dimensionality reduction:
   and figure from that representation. The runtime invalidates earlier same-round
   publication artifacts when it detects such a representation change.
 
-**HARMONY BATCH CORRECTION (CRITICAL — dimension mismatch prevention)**:
-When using harmonypy for batch correction, ALWAYS verify dimensions match:
+**HARMONY BATCH CORRECTION (CRITICAL — output orientation)**:
+harmonypy's `Z_corr` orientation changed between releases: the installed 0.2.0 returns
+(n_cells, n_pcs) directly, older releases returned (n_pcs, n_cells). scanpy 1.11.5's
+`sc.external.pp.harmony_integrate` still transposes unconditionally and fails with this
+harmonypy, so call harmonypy directly and check BOTH dimensions before assigning:
   import harmonypy as hm
-  # Use the SAME adata that was used for PCA — do NOT subset/filter between PCA and Harmony
-  ho = hm.run_harmony(adata.obsm['X_pca'], adata.obs, 'batch_column')
-  # Verify shape BEFORE assignment
-  print(f"Harmony output shape: {{ho.Z_corr.T.shape}}, adata n_obs: {{adata.n_obs}}")
-  assert ho.Z_corr.T.shape[0] == adata.n_obs, "Shape mismatch! Do not assign."
-  adata.obsm['X_pca_harmony'] = ho.Z_corr.T
+  X_pca = adata.obsm['X_pca']                      # (n_cells, n_pcs)
+  ho = hm.run_harmony(X_pca, adata.obs, 'batch_column')
+  Z = ho.Z_corr
+  if Z.shape != X_pca.shape and Z.shape == X_pca.shape[::-1]:   # (n_pcs, n_cells): older harmonypy
+      Z = Z.T
+  assert Z.shape == X_pca.shape, f"unexpected Harmony output shape {{Z.shape}} for input {{X_pca.shape}}"
+  adata.obsm['X_pca_harmony'] = Z
   # Then recompute neighbors/UMAP using the corrected embedding
   sc.pp.neighbors(adata, use_rep='X_pca_harmony')
   sc.tl.umap(adata)
-NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the dimension mismatch.
+Run Harmony on the same object that produced X_pca so the row order is the cell order;
+if the assertion fails, print both shapes and stop rather than guessing an orientation.
 
 **CRITICAL: REPRODUCIBILITY IS MANDATORY**
 - ALWAYS use random_state=42 or seed=42 in EVERY function that accepts it

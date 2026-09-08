@@ -274,6 +274,11 @@ def test_every_read_only_probe_opts_out_explicitly():
     expected = {
         "backend/agents/bioinformatics/executor_priors.py": 3,
         "backend/agents/bioinformatics/exploration_diagnostics.py": 1,
+        # One `execute()` call, `build_innovation_baseline_probe_code(...)`,
+        # already carrying `mutates_namespace=False`. A2-9 classified this file
+        # as mutation-capable from its name and removed the opt-out; the merge
+        # with main surfaced the mistake.
+        "backend/agents/bioinformatics/innovation_baseline_figures.py": 1,
         "backend/agents/bioinformatics/introspection.py": 4,
         "backend/agents/bioinformatics/validation.py": 4,
         "backend/services/cohort_identity.py": 1,
@@ -308,7 +313,6 @@ def test_the_mutating_cells_no_longer_opt_out():
         "backend/agents/bioinformatics/executor_execute.py",
         "backend/agents/bioinformatics/figure_generation.py",
         "backend/agents/bioinformatics/figure_revision.py",
-        "backend/agents/bioinformatics/innovation_baseline_figures.py",
         "backend/agents/bioinformatics/stage1_baseline_figures.py",
         "backend/routes/chat_parts/figures.py",
     ):

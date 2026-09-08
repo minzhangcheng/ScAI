@@ -140,13 +140,13 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         core_interventions.bind_facade(sys.modules[__name__])
         return core_interventions._generation_for(self, node)
 
-    async def _drive_hitl_gate(self, node_name: str, analysis_state: AnalysisState, *, reason: str, info_attr: str, info_payload: dict, enter_change: str, exit_change: str, clear_cache_on_retry: bool, wait_seconds: 'int | None'=None, auto_retry: bool=True) -> LlmFailureAction:
+    async def _drive_hitl_gate(self, node_name: str, analysis_state: AnalysisState, *, reason: str, info_attr: str, info_payload: dict, enter_change: str, exit_change: str, clear_cache_on_retry: bool, wait_seconds: 'int | None'=None, auto_retry: bool=True, require_explicit_resolution: bool=False) -> LlmFailureAction:
         core_interventions.bind_facade(sys.modules[__name__])
-        return await core_interventions._drive_hitl_gate(self, node_name, analysis_state, reason=reason, info_attr=info_attr, info_payload=info_payload, enter_change=enter_change, exit_change=exit_change, clear_cache_on_retry=clear_cache_on_retry, wait_seconds=wait_seconds, auto_retry=auto_retry)
+        return await core_interventions._drive_hitl_gate(self, node_name, analysis_state, reason=reason, info_attr=info_attr, info_payload=info_payload, enter_change=enter_change, exit_change=exit_change, clear_cache_on_retry=clear_cache_on_retry, wait_seconds=wait_seconds, auto_retry=auto_retry, require_explicit_resolution=require_explicit_resolution)
 
-    async def _wait_for_llm_intervention(self, error: UpstreamExhaustedError, node_name: str, analysis_state: AnalysisState, *, wait_seconds: 'int | None'=None, auto_retry: bool=True) -> LlmFailureAction:
+    async def _wait_for_llm_intervention(self, error: UpstreamExhaustedError, node_name: str, analysis_state: AnalysisState, *, wait_seconds: 'int | None'=None, auto_retry: bool=True, require_explicit_resolution: bool=False) -> LlmFailureAction:
         core_interventions.bind_facade(sys.modules[__name__])
-        return await core_interventions._wait_for_llm_intervention(self, error, node_name, analysis_state, wait_seconds=wait_seconds, auto_retry=auto_retry)
+        return await core_interventions._wait_for_llm_intervention(self, error, node_name, analysis_state, wait_seconds=wait_seconds, auto_retry=auto_retry, require_explicit_resolution=require_explicit_resolution)
 
     async def _pathology_llm_intervention_callback(self, error: UpstreamExhaustedError, image_label: str) -> LlmFailureAction:
         core_interventions.bind_facade(sys.modules[__name__])

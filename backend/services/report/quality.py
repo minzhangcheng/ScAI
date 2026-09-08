@@ -1,6 +1,7 @@
 """Deterministic analysis-quality disclosures shared by every report surface."""
 from __future__ import annotations
 
+import html as html_module
 from typing import Any, Dict, Iterable, List, Optional
 
 from backend.utils.formatting import normalize_text_list
@@ -335,6 +336,10 @@ def _review_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Li
             "round_number": round_number,
             "review_status": review_status,
             "review_reason": str(raw.get("review_reason") or ""),
+            "lifecycle": str(raw.get("lifecycle") or raw.get("lifecycle_status") or ""),
+            "lifecycle_status": str(raw.get("lifecycle_status") or ""),
+            "persistence_status": str(raw.get("persistence_status") or ""),
+            "persistence_failure": str(raw.get("persistence_failure") or "")[:4000],
             "final_gap_status": final_gap_status,
             "plan_audit": {
                 "n_steps": audit_steps,
@@ -616,3 +621,155 @@ def render_report_limitations_html(report: Dict[str, Any] | None) -> str:
     for API, persistence, regeneration, and audit consumers.
     """
     return ""
+
+
+def render_technical_review_notice_html(report: Dict[str, Any] | None) -> str:
+    """Render only explicit technical review-availability observations.
+
+    This presentation notice deliberately reads retained report metadata rather
+    than scientific cautions or the generic report status.  Missing/legacy
+    availability fields remain unknown and therefore produce no notice.
+    """
+    if not isinstance(report, dict):
+        return ""
+
+    observations: List[str] = []
+    seen_figures: set[str] = set()
+    figure_records: List[Any] = list(report.get("figures") or [])
+    for section in report.get("sections") or []:
+        if isinstance(section, dict):
+            figure_records.extend(section.get("figures") or [])
+
+    for figure in figure_records:
+        if not isinstance(figure, dict):
+            continue
+        # Workspace-only/legacy figures have no publication review contract.
+        if figure.get("is_publication") is False:
+            continue
+        identity = str(
+            figure.get("id")
+            or figure.get("logical_figure_id")
+            or figure.get("filename")
+            or figure.get("png_path")
+            or figure.get("name")
+            or "figure"
+        )
+        if identity in seen_figures:
+            continue
+        seen_figures.add(identity)
+        review_status = str(figure.get("review_status") or "").lower()
+        review_unavailable = figure.get("review_unavailable") is True
+        if review_unavailable or review_status == "pending":
+            label = str(
+                figure.get("filename")
+                or figure.get("name")
+                or "selected publication figure"
+            ).strip()[:160]
+            if review_unavailable:
+                observations.append(f"Visual review unavailable for {label}.")
+            else:
+                observations.append(f"Visual review is pending for {label}.")
+
+    graphic = report.get("graphic_abstract")
+    if not isinstance(graphic, dict):
+        graphic = report.get("graphic_abstract_metadata")
+    if isinstance(graphic, dict):
+        if graphic.get("review_available") is False:
+            observations.append("Graphic abstract visual review was unavailable.")
+        if graphic.get("selection_available") is False:
+            observations.append("Graphic abstract candidate selection was unavailable.")
+
+    quality = report.get("quality_disclosures")
+    post_reviews = quality.get("post_execution_reviews", []) if isinstance(quality, dict) else []
+    review_statuses = {
+        "unavailable", "failed", "error", "interrupted", "pending", "reserved",
+        "reservation_failed",
+    }
+    lifecycle_statuses = {
+        "reserved", "running", "pending", "interrupted", "reservation_failed",
+        "terminal_persistence_pending",
+    }
+    persistence_statuses = {"pending", "failed", "error"}
+    execution_failure_statuses = {
+        "failed", "error", "timeout", "max_steps_reached",
+        "completed_with_fallback", "interrupted",
+    }
+    no_execution_statuses = {"", "unknown", "not_run", "pending", "reserved"}
+    pre_execution_failure_statuses = {
+        "failed", "error", "unavailable", "interrupted", "reservation_failed",
+    }
+    for review in post_reviews or []:
+        if not isinstance(review, dict):
+            continue
+        statuses = {
+            key: str(review.get(key) or "").lower()
+            for key in (
+                "review_status", "lifecycle", "lifecycle_status",
+                "persistence_status",
+            )
+        }
+        supplementary = review.get("supplementary_execution")
+        supplementary = supplementary if isinstance(supplementary, dict) else {}
+        execution_status = str(supplementary.get("status") or "").lower()
+        review_reason = str(review.get("review_reason") or "").strip()
+        persistence_failure = str(review.get("persistence_failure") or "").strip()
+        explicit = (
+            statuses["review_status"] in review_statuses
+            or statuses["lifecycle"] in lifecycle_statuses
+            or statuses["lifecycle_status"] in lifecycle_statuses
+            or statuses["persistence_status"] in persistence_statuses
+        )
+        if not explicit:
+            continue
+        if persistence_failure:
+            # This field is populated by the persistence boundary itself and is
+            # therefore a retained technical reason, independent of PI wording.
+            detail = persistence_failure[:240]
+        elif execution_status in execution_failure_statuses:
+            # Once supplementary execution has a terminal result, review_reason
+            # describes why PI requested it and may contain scientific gaps.
+            detail = "Supplementary technical review execution failed"
+        elif statuses["persistence_status"] in persistence_statuses:
+            detail = "Technical review persistence status is unavailable"
+        elif (
+            statuses["review_status"] in {"pending", "reserved"}
+            or statuses["lifecycle"] in {"pending", "reserved", "running"}
+            or statuses["lifecycle_status"] in {"pending", "reserved", "running"}
+        ):
+            detail = "Technical review remains pending before a terminal result"
+        elif (
+            statuses["review_status"] == "reservation_failed"
+            or statuses["lifecycle"] == "reservation_failed"
+            or statuses["lifecycle_status"] == "reservation_failed"
+        ):
+            detail = "Technical review reservation failed"
+        elif (
+            execution_status in no_execution_statuses
+            and statuses["review_status"] in pre_execution_failure_statuses
+        ):
+            # API/unavailable/interrupted/reservation failures before a
+            # supplementary pass may retain their technical boundary reason.
+            detail = review_reason[:240] if review_reason else (
+                "Technical review was unavailable before supplementary execution"
+            )
+        else:
+            detail = "Technical review availability could not be confirmed"
+        observations.append(f"Post-execution technical review: {detail}.")
+
+    if not observations:
+        return ""
+    rendered = []
+    for observation in observations[:8]:
+        rendered.append(f"<li>{html_module.escape(observation)}</li>")
+    if len(observations) > 8:
+        rendered.append(
+            "<li>Additional technical review availability observations: "
+            f"{len(observations) - 8}.</li>"
+        )
+    return (
+        '<div class="technical-review-notice" role="note">'
+        "<strong>Technical review availability:</strong>"
+        "<ul>"
+        + "".join(rendered)
+        + "</ul><p>Report generation continued; this notice records technical availability only.</p></div>"
+    )

@@ -15,6 +15,8 @@ decide acceptance itself.
 """
 from types import SimpleNamespace
 
+import pytest
+
 from backend.services.analysis_plan import panel_overlap
 from backend.services.statistical_gates import (
     check_panel_redundancy,
@@ -103,7 +105,7 @@ def test_a_p_value_at_the_floor_is_recorded_for_pi_review():
     """
     score = _score("ranked_panel", n_resamples=500)
     out = check_resampling_resolution(
-        ["The GSEA result for ranked_panel was strongly enriched, FDR = 0.002."],
+        ["The GSEA result for ranked_panel was strongly enriched, nominal p = 0.002."],
         [score],
     )
     assert len(out) == 1
@@ -116,16 +118,23 @@ def test_the_next_attainable_value_up_has_no_resolution_observation():
     """The rounding tolerance must not reach a genuinely larger p-value."""
     score = _score("ranked_panel", n_resamples=500)
     out = check_resampling_resolution(
-        ["The GSEA result for ranked_panel gave FDR = 0.004."], [score])
+        ["The GSEA result for ranked_panel gave p = 0.004."], [score])
     assert out == []
 
 
-def test_the_same_value_reported_as_a_bound_is_accepted():
-    """Reporting the floor as an inequality is the correct reporting."""
+def test_the_floor_quoted_as_a_strict_inequality_is_also_observed():
+    """p < 1/(B+1) claims more than B resamples can establish.
+
+    With the +1 estimator a result no resample reached is p = 1/(B+1); the
+    strict inequality below it is the overstatement, not the correct form.
+    """
     score = _score("ranked_panel", n_resamples=500)
     out = check_resampling_resolution(
-        ["The GSEA result for ranked_panel reached FDR < 0.002."], [score])
-    assert out == []
+        ["The GSEA result for ranked_panel reached p < 0.002."], [score])
+    assert len(out) == 1
+    assert out[0].gate == "p-below-resampling-resolution"
+    assert "p = 0.002" in out[0].detail
+    assert "not as p < 0.002" in out[0].detail
 
 
 def test_an_analytic_p_value_is_not_subject_to_a_resampling_floor():
@@ -146,18 +155,127 @@ def test_an_undeclared_resample_count_advises_but_does_not_block():
     assert "resample count" in out[0].detail
 
 
-def test_one_value_shared_across_several_results_is_flagged():
+def test_one_value_shared_across_several_results_is_not_read_as_a_floor():
+    """Benjamini-Hochberg ties adjusted values by construction.
+
+    Its step-up monotonisation gives neighbouring features the same q-value
+    routinely, so a shared value says nothing about resampling resolution and
+    must not be surfaced as if it did. A declared resampling score is present
+    so the check has something to reason about; the shared value sits well
+    above its floor.
+    """
+    score = _score("gsea_panel", n_resamples=1000)
     out = check_resampling_resolution(
         [
-            "panel one reached FDR = 0.00617.",
-            "panel two reached FDR = 0.00617.",
-            "panel three reached FDR = 0.00617.",
+            "GSEA panel one reached FDR = 0.00617.",
+            "GSEA panel two reached FDR = 0.00617.",
+            "GSEA panel three reached FDR = 0.00617.",
         ],
-        [],
+        [score],
     )
-    assert len(out) == 1
-    assert out[0].gate == "adjusted-p-tied-across-results"
-    assert out[0].severity == "advise"
+    assert out == []
+
+
+def test_the_floor_quoted_as_at_most_is_correct_reporting():
+    """p <= 1/(B+1) is true of the estimate; only the strict form overclaims."""
+    score = _score("ranked_panel", n_resamples=500)
+    out = check_resampling_resolution(
+        ["The GSEA result for ranked_panel reached p <= 0.002."], [score])
+    assert out == []
+
+
+def test_a_strict_inequality_well_below_the_floor_is_left_alone():
+    """"p < 1e-4" in a GSEA sentence is a selection threshold, not a floor value."""
+    score = _score("ranked_panel", n_resamples=500)
+    out = check_resampling_resolution(
+        ["GSEA sets for ranked_panel were retained at p < 1e-4."], [score])
+    assert out == []
+
+
+def test_an_fdr_at_the_per_set_floor_is_not_observed():
+    """GSEA's FDR comes from the pooled null of every set in the call.
+
+    Its resolution is finer than 1/(B+1), and a sentence does not say whether
+    "FDR" is that or a Benjamini-Hochberg q that would inherit the floor, so
+    the check stays silent on adjusted values rather than misreport a pooled
+    FDR as a per-set resolution limit.
+    """
+    score = _score("ranked_panel", n_resamples=500)
+    out = check_resampling_resolution(
+        ["The GSEA result for ranked_panel reached FDR = 0.002.",
+         "The same set had q < 0.002 and padj = 0.002."],
+        [score],
+    )
+    assert out == []
+
+
+def test_a_score_using_the_multilevel_estimator_has_no_resample_floor():
+    """gseapy.prerank(method="multilevel") resolves below 1/(B+1) by design.
+
+    The declared permutation count still exists in the parameters, but it no
+    longer sets the smallest attainable value, so neither observation applies.
+    """
+    # The estimator is a score PARAMETER (gseapy's keyword), not the score's
+    # method; _score's own ``method`` argument is the tool name.
+    score = _score("ranked_panel", permutation_num=1000)
+    score.parameters["method"] = "multilevel"
+    out = check_resampling_resolution(
+        ["The GSEA result for ranked_panel reached nominal p = 1e-6."], [score])
+    assert out == []
+    undeclared = _score("ranked_panel")
+    undeclared.parameters["method"] = "multilevel"
+    out = check_resampling_resolution(["ranked_panel was enriched."], [undeclared])
+    assert out == []
+
+
+def test_a_sentence_naming_the_multilevel_estimator_is_left_alone():
+    score = _score("ranked_panel", n_resamples=1000)
+    out = check_resampling_resolution(
+        ["With the multilevel estimator, the GSEA result for ranked_panel "
+         "reached p = 2e-7."],
+        [score],
+    )
+    assert out == []
+
+
+@pytest.mark.parametrize("text", [
+    "GSEA result for adaptive_panel reached nominal p = 1e-6.",
+    "GSEA results for ordinary_panel and adaptive_panel reached p = 1e-6.",
+    "GSEA reached nominal p = 1e-6.",
+])
+def test_multilevel_identity_is_preserved_among_mixed_scores(text):
+    ordinary = _score("ordinary_panel", n_resamples=1000)
+    adaptive = _score("adaptive_panel", permutation_num=1000)
+    adaptive.parameters["method"] = "multilevel"
+
+    assert check_resampling_resolution([text], [ordinary, adaptive]) == []
+
+    # An attributed ordinary result still receives its own floor observation.
+    out = check_resampling_resolution(
+        ["GSEA result for ordinary_panel reached nominal p = 1e-6."],
+        [ordinary, adaptive],
+    )
+    assert [finding.gate for finding in out] == ["p-below-resampling-resolution"]
+
+
+@pytest.mark.parametrize("label", [
+    "q", "qval", "qvalue", "q-value", "q_value", "FDR", "BH", "padj",
+    "adjusted p", "p adjusted", "p-value adjusted", "p_adjusted",
+])
+def test_adjusted_value_spellings_do_not_receive_a_nominal_floor(label):
+    score = _score("ordinary_panel", n_resamples=1000)
+    assert check_resampling_resolution(
+        [f"GSEA result for ordinary_panel reached {label} = 0.0004."], [score],
+    ) == []
+
+
+@pytest.mark.parametrize("label", ["p", "pvalue", "p-value", "p_value"])
+def test_nominal_value_spellings_still_receive_a_floor_observation(label):
+    score = _score("ordinary_panel", n_resamples=1000)
+    out = check_resampling_resolution(
+        [f"GSEA result for ordinary_panel reached {label} = 0.0004."], [score],
+    )
+    assert [finding.gate for finding in out] == ["p-below-resampling-resolution"]
 
 
 def test_a_repeated_conventional_cutoff_is_not_a_resolution_floor():

@@ -53,6 +53,9 @@ async def generate_html_report(
         used_tables=used_tables, toc_items=toc_items,
         sections_html=sections_html, bindings=bindings,
     )
+    _append_followups_section(
+        report, toc_items=toc_items, sections_html=sections_html, bindings=bindings,
+    )
     return _write_html_report(
         generator, report, language=language, state=state,
         toc_items=toc_items, sections_html=sections_html, bindings=bindings,
@@ -380,6 +383,65 @@ def _append_supplementary_sections(
         sections_html.append(supp_tbl_html)
 
 
+def _append_followups_section(report, *, toc_items, sections_html, bindings):
+    """Render readable PI follow-ups without exposing bookkeeping IDs."""
+    followups = [item for item in (report.get("followups") or []) if isinstance(item, dict)]
+    if not followups:
+        return
+
+    title = "Follow-ups"
+    toc_items.append(
+        f'<li><a href="#followups">{title}</a>'
+        f'<span class="section-type specific">Next steps</span></li>'
+    )
+    cards = []
+    disposition_labels = {
+        "deepen_now": "Deepen now",
+        "offer_in_chat": "Continue in Chat",
+        "needs_new_data": "Needs new data",
+        "closed": "Closed by PI",
+    }
+    for item in followups:
+        esc = bindings.html_module.escape
+        question = esc(str(item.get("question") or ""))
+        why = str(item.get("why_it_matters") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        instruction = str(item.get("suggested_instruction") or "").strip()
+        required_input = str(item.get("required_input") or "").strip()
+        disposition = str(item.get("disposition") or "").strip().lower()
+        source_round = item.get("source_round")
+        direction = str(item.get("direction") or "").strip()
+        source = f"Round {source_round}" if source_round else "Source round not recorded"
+        if direction:
+            source += f" · {esc(direction)}"
+        body = [f"<h4>{question}</h4>"]
+        if why:
+            body.append(f"<p><strong>Why it matters:</strong> {bindings.markdown_to_html(why)}</p>")
+        body.append(
+            f"<p><strong>Disposition:</strong> {esc(disposition_labels.get(disposition, disposition or 'Recorded by PI'))}</p>"
+        )
+        if reason:
+            body.append(f"<p><strong>PI reason:</strong> {bindings.markdown_to_html(reason)}</p>")
+        if instruction:
+            body.append(f"<p><strong>Suggested instruction:</strong> {bindings.markdown_to_html(instruction)}</p>")
+        if required_input:
+            body.append(f"<p><strong>Required input:</strong> {bindings.markdown_to_html(required_input)}</p>")
+        outcome = str(item.get("execution_outcome") or "").strip()
+        if outcome:
+            body.append(f"<p><strong>Attempted outcome:</strong> {bindings.markdown_to_html(outcome)}</p>")
+        body.append(f"<p class=\"followup-source\"><strong>Source:</strong> {source}</p>")
+        cards.append('<div class="followup-card">' + "".join(body) + "</div>")
+
+    sections_html.append(
+        f'''<div class="section" id="followups">
+            <div class="section-header"><h2>{title}
+                <span class="analysis-type-badge specific">Next steps</span>
+            </h2></div>
+            <div class="section-content">{''.join(cards)}</div>
+        </div>'''
+    )
+
+
 
 def _write_html_report(
     generator, report, *, language, state, toc_items, sections_html, bindings,
@@ -444,7 +506,8 @@ def _write_html_report(
             "title": _safe_format_value(report.get("title", "Analysis Report")),
             "generated_at": ("Generated: ") + report.get("generated_at", ""),
             "report_limitations_html": _safe_format_value(
-                bindings.render_report_limitations_html(report)
+                bindings.render_technical_review_notice_html(report)
+                + bindings.render_report_limitations_html(report)
             ),
             "report_status_line_html": _safe_format_value(
                 bindings.render_report_status_line_html(report)

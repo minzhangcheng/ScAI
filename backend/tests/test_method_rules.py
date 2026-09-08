@@ -168,3 +168,35 @@ def test_rules_do_not_prescribe_r_only_solutions_without_saying_so():
     for rule in all_rules():
         python = str(rule.get("python", ""))
         assert python.strip(), f"{rule['id']} has no Python translation"
+
+
+# ----------------------------------------------- statistical statements audited
+
+def _corpus_text() -> str:
+    parts = []
+    for rule in all_rules():
+        for key in ("rule", "why", "python", "title"):
+            parts.append(str(rule.get(key) or ""))
+    return " ".join(parts)
+
+
+@pytest.mark.parametrize("fallacy", [
+    # A Monte Carlo value that no resample reached is p = 1/(B+1); the corpus
+    # used to instruct quoting it as a strict inequality below that.
+    'quote floor values as "p < 1/(B+1)"',
+    "report it as an inequality",
+    # Low power does not make a significant result stronger evidence.
+    "stronger signal",
+    # A significance-selected estimate is biased upward on average, not bounded.
+    "upper bounds",
+    # BH holds under positive regression dependence; overlap is not grounds for BY.
+    "understates the true error rate",
+    "understates the error rate",
+])
+def test_corpus_does_not_restate_a_known_statistical_fallacy(fallacy):
+    """Each phrase was present in the corpus once and was corrected on review.
+
+    The corpus is read by the models as guidance, so an incorrect statement
+    here is repeated into every analysis that retrieves it.
+    """
+    assert fallacy not in _corpus_text(), fallacy

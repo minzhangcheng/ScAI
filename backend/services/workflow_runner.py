@@ -137,7 +137,7 @@ async def _build_workflow_for_session(
         )
         return True
 
-    async def state_callback(updated_state):
+    async def state_callback(updated_state, *, force: bool = False):
         """Atomically carry history, publish the graph state, and persist it."""
         from backend.routes.websockets import _preserve_realtime_stream
 
@@ -174,7 +174,7 @@ async def _build_workflow_for_session(
             # The lifecycle lock excludes deletion/restore generation changes;
             # no state_lock is held while persistence snapshots the model.
             await _async_save_session_under_lifecycle(
-                session_id, updated_state,
+                session_id, updated_state, force=force,
             )
         return True
 

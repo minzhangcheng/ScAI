@@ -1,4 +1,5 @@
 """Structural and retrieval contracts for optional method decision cards."""
+import json
 import re
 
 import pytest
@@ -203,6 +204,27 @@ def test_shared_search_helper_preserves_legacy_rule_order(query):
     assert [rule["id"] for rule in search_rules(query)] == [
         rule["id"] for rule in _legacy_search(query)
     ]
+
+
+def _rendered_corpus() -> str:
+    return json.dumps(all_cards())
+
+
+@pytest.mark.parametrize(
+    "expected_substring",
+    [
+        "scvi.model.SCANVI",
+        "celltypist",
+        "CytoTRACEKernel",
+        "decoupler.get_pseudobulk",
+    ],
+)
+def test_python_stack_names_installed_tools(expected_substring):
+    assert expected_substring in _rendered_corpus()
+
+
+def test_python_stack_drops_vague_reference_mapping_entry():
+    assert "ingest-compatible reference mapping" not in _rendered_corpus()
 
 
 def test_malformed_corpus_fails_open(monkeypatch, tmp_path):

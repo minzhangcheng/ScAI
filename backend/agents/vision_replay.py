@@ -26,7 +26,7 @@ async def replay_safe_vision_call(
 ):
     """Issue one ``chat_with_vision`` request with a bounded replay budget."""
     return await retry_replay_safe_llm_call(
-        lambda: client.chat_with_vision(**vision_kwargs),
+        lambda: client.chat_with_vision(model=model, **vision_kwargs),
         agent_name=agent_name,
         model_name=str(model or ""),
         llm_server=str(getattr(client, "base_url", "") or ""),

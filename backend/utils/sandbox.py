@@ -178,11 +178,6 @@ class LocalJupyterSandbox(
             state_dir,
             lifecycle_generation=self._expected_lifecycle_generation,
         )
-        self._kernel_staging_root = (
-            self.notebook_state.state_dir / ".kernel-staging"
-        )
-        if self._kernel_staging_root.is_symlink():
-            raise RuntimeError("kernel staging root must not be a symlink")
         self._initialized = False
         self._starting = False
         persistence = self.notebook_state.runtime_persistence

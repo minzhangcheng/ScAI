@@ -188,20 +188,28 @@ def parse_provenance(raw) -> tuple[Optional[GeneSetProvenance], Optional[str]]:
 
 # --------------------------------------------------------------------------- power
 
-#: Panels smaller than this cannot support a *negative* conclusion. The value is
-#: the conventional ``minGSSize`` floor used by mainstream enrichment tooling
-#: (clusterProfiler and fgsea both default to 10); it is a reporting threshold,
-#: not a claim that smaller panels are meaningless.
+#: This is a legacy panel-size heuristic, not a statistical power calculation --
+#: real power also depends on sample size, effect size, variance and gene
+#: correlation, none of which is considered here. The value is the conventional
+#: ``minGSSize`` floor used by mainstream enrichment tooling (clusterProfiler and
+#: fgsea both default to 10); it is a reporting threshold below which a *negative*
+#: conclusion is not supported, not a claim that smaller panels are meaningless.
 MIN_PANEL_SIZE_FOR_NEGATIVE_CLAIM = 10
 
 
 def assess_panel_power(n_genes: int, n_matched: Optional[int] = None) -> dict:
-    """Describe what a panel of this size can and cannot support.
+    """Describe what a panel of this size can and cannot support, using a
+    legacy panel-size heuristic -- not a statistical power calculation.
 
-    ``n_matched`` -- how many panel genes survived mapping into the analysed
-    matrix -- is the number that actually governs power; ``n_genes`` is only the
-    nominal size. When ``n_matched`` is unknown the nominal size is used and the
-    result is marked as such.
+    A true power calculation would also need sample size, effect size,
+    variance and gene correlation; none of that is available here, so this
+    only checks matched-gene count against a conventional enrichment-tool
+    floor. ``n_matched`` -- how many panel genes survived mapping into the
+    analysed matrix -- is the count the heuristic is applied to; ``n_genes``
+    is only the nominal size. When ``n_matched`` is unknown the nominal size
+    is used and the result is marked as such. ``supports_negative_claim=True``
+    means only that the size heuristic does not object -- it is never evidence
+    that absence has actually been demonstrated.
     """
     # A panel cannot match more genes than it contains. Clamp rather than
     # refuse: the score itself is still usable, and the caller is told.
@@ -234,10 +242,14 @@ def assess_panel_power(n_genes: int, n_matched: Optional[int] = None) -> dict:
 def power_caveat(power: dict) -> str:
     """One-line caveat for a panel, or '' when none is warranted.
 
-    Carries the governing method rule so the model receives the reasoning, not
-    just the verdict. The rule lookup is deferred to call time and degrades to
-    the bare caveat if the corpus is unavailable -- guidance is an enhancement,
-    never a dependency.
+    This is a legacy panel-size heuristic, not a statistical power
+    calculation: it flags panels with fewer than
+    ``MIN_PANEL_SIZE_FOR_NEGATIVE_CLAIM`` matched genes, and says nothing
+    about sample size, effect size, variance, gene correlation or
+    measurement quality. Carries the governing method rule so the model
+    receives the reasoning, not just the verdict. The rule lookup is
+    deferred to call time and degrades to the bare caveat if the corpus is
+    unavailable -- guidance is an enhancement, never a dependency.
     """
     # Surfaced even when the panel is well powered: the count is wrong, and a
     # wrong count is worth knowing about wherever it appears.
@@ -258,11 +270,11 @@ def power_caveat(power: dict) -> str:
     else:
         head = ""
     caveat = head + (
-        f" Panel has only {power['effective_n']} usable gene(s) "
-        f"({power['basis']}), below the conventional minimum of "
-        f"{power['threshold']}. Positive enrichment may still be reported as an "
-        f"observation, but a non-significant result from this panel does NOT "
-        f"support a negative conclusion -- it is underpowered, not evidence of absence."
+        f" The panel matched only {power['effective_n']} gene(s) "
+        f"({power['basis']}), below the size heuristic of {power['threshold']} "
+        f"used by enrichment tools. Positive enrichment may still be reported as "
+        f"an observation, but a non-significant result from so few genes does "
+        f"not support a negative conclusion."
     )
     try:
         from .method_rules import rule_text

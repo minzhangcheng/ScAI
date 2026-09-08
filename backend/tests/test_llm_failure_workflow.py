@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from backend.utils.llm_client import UpstreamExhaustedError
 from backend.constants import LlmFailureAction, StateSyncChangeType
-from backend.models.schemas import AnalysisState
+from backend.models.schemas import AnalysisPlan, AnalysisState, TaskStatus
 
 
 async def _signal_action_once(mock_self, node_name, action, timeout=5.0):
@@ -83,6 +83,29 @@ def _no_backoff(monkeypatch):
         monkeypatch, "backend.workflow.core", "_unattended_gate_backoff", _record
     )
     return slept
+
+
+def _park_probe(monkeypatch):
+    """Signal the moment the gate reaches the terminal indefinite wait.
+
+    Nothing suspends between the probe and ``event.wait()``, so a test that
+    observes the flag is looking at an already-parked gate: the event has been
+    cleared and the signal it sends next cannot be lost.
+    """
+    from backend.tests.split_facade import setattr_facade
+    from backend.workflow.helpers import wait_with_skip_time as real_wait
+
+    parked = asyncio.Event()
+
+    async def _probe(event, wait_seconds, session_id, gate_name):
+        if wait_seconds == -1:
+            parked.set()
+        return await real_wait(event, wait_seconds, session_id, gate_name)
+
+    setattr_facade(
+        monkeypatch, "backend.workflow.core", "wait_with_skip_time", _probe
+    )
+    return parked
 
 
 def _exhausted(cause=None):
@@ -255,6 +278,77 @@ async def test_node_entry_resets_the_unattended_retry_budget(monkeypatch):
 
     assert result["ok"] is True
     assert "data_profiling" not in wf._unattended_gate_retries
+
+
+@pytest.mark.asyncio
+async def test_bioinformatics_unattended_exhaustion_retains_gate_and_retry_context(
+    monkeypatch,
+):
+    """Core Bioinformatics failures remain actionable after auto-retries."""
+    from backend.workflow import with_retry
+
+    _no_backoff(monkeypatch)
+    parked = _park_probe(monkeypatch)
+    wf = _gate_self()
+    wf._pause_event = None
+    wf._set_status = lambda state, status: setattr(state, "status", status)
+
+    plan = AnalysisPlan(
+        id="approved-stage2-plan",
+        phase="exploration",
+        stage="stage2",
+        status="approved",
+    )
+    analysis_state = AnalysisState(
+        user_id="u",
+        current_round=1,
+        round_wait_seconds=0,
+        current_plan=plan,
+    )
+    workflow_state = {
+        "analysis_state": analysis_state,
+        "current_round": 1,
+        "planning_stage": "stage2",
+        "plan_approved": True,
+        "skip_nodes": [],
+    }
+    calls = 0
+
+    @with_retry("bioinformatics_analysis")
+    async def node(self, state):
+        nonlocal calls
+        calls += 1
+        if calls <= 4:
+            raise _exhausted()
+        return {**state, "bioinformatics_result": {"status": "completed"}}
+
+    task = asyncio.create_task(node(wf, workflow_state))
+    while wf._generation_for("bioinformatics_analysis") < 4:
+        await asyncio.sleep(0)
+
+    assert not task.done()
+    assert analysis_state.status == TaskStatus.WAITING_INPUT
+    assert analysis_state.wait_input_reason == "llm_failure"
+    assert analysis_state.llm_failure_info["node_name"] == "bioinformatics_analysis"
+    assert analysis_state.llm_failure_info["generation"] == 4
+    assert analysis_state.current_round == 1
+    assert analysis_state.current_plan is plan
+    assert wf._llm_failure_events["bioinformatics_analysis"]
+
+    # The terminal branch parks in the indefinite wait rather than skipping.
+    await asyncio.wait_for(parked.wait(), timeout=2.5)
+    assert wf.signal_llm_failure_action(
+        "bioinformatics_analysis", LlmFailureAction.RETRY.value, 4
+    ) is True
+    result = await asyncio.wait_for(task, timeout=2.0)
+
+    assert calls == 5
+    assert result["bioinformatics_result"]["status"] == "completed"
+    assert analysis_state.current_round == 1
+    assert analysis_state.current_plan is plan
+    assert analysis_state.current_plan.stage == "stage2"
+    assert analysis_state.current_plan.status == "approved"
+
 
 
 # ── Test 1: @with_retry decorator LLM failure handling ────────────────

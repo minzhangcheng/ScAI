@@ -214,3 +214,65 @@ def build_cross_modal_appendix(state) -> list:
             }
         )
     return out
+
+
+def build_report_followups(
+    state: AnalysisState,
+    *,
+    lineage_id: str = "main",
+    max_items: int = 12,
+) -> List[Dict[str, Any]]:
+    """Flatten bounded PI follow-up records for the product-facing report.
+
+    The direction projection owns lineage matching and follow-up bounds.  This
+    helper only selects readable fields for ``report.json`` and keeps the stable
+    follow-up reference required by the Chat handoff.
+    """
+    from backend.utils.direction_payload import collect_direction_projections
+
+    target = str(lineage_id or "main").strip() or "main"
+    try:
+        cap = max(0, int(max_items))
+    except (TypeError, ValueError):
+        cap = 12
+    if cap <= 0:
+        return []
+
+    output: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for projection in collect_direction_projections(
+        state, lineage_id=target, max_directions=12,
+    ):
+        for item in projection.get("followups") or []:
+            if not isinstance(item, dict):
+                continue
+            followup_id = str(item.get("followup_id") or "").strip()
+            question = str(item.get("question") or "").strip()
+            if not followup_id or not question or followup_id in seen:
+                continue
+            record: Dict[str, Any] = {
+                "followup_id": followup_id[:160],
+                "question": question[:1000],
+                "why_it_matters": str(item.get("why_it_matters") or "")[:1200],
+                "disposition": str(item.get("disposition") or "")[:80],
+                "reason": str(item.get("reason") or "")[:1200],
+                "suggested_instruction": str(item.get("suggested_instruction") or "")[:1400],
+                "required_input": str(item.get("required_input") or "")[:1200],
+                "evidence_references": [
+                    str(value)[:160]
+                    for value in (item.get("evidence_references") or [])
+                    if str(value).strip()
+                ][:12],
+                "source_round": int(item.get("source_round", 0) or 0),
+                "direction": str(item.get("direction") or projection.get("direction") or "")[:800],
+                "branch_id": target,
+            }
+            for field_name in ("execution_outcome", "execution_reference"):
+                value = item.get(field_name)
+                if value not in (None, "", [], {}):
+                    record[field_name] = str(value)[:1200]
+            output.append(record)
+            seen.add(followup_id)
+            if len(output) >= cap:
+                return output
+    return output

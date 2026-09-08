@@ -127,7 +127,7 @@ def test_small_panel_is_underpowered():
     power = assess_panel_power(5, 5)
     assert power["underpowered"]
     assert not power["supports_negative_claim"]
-    assert "not evidence of absence" in power_caveat(power)
+    assert "does not support a negative conclusion" in power_caveat(power)
 
 
 def test_adequate_panel_is_not_underpowered():

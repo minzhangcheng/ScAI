@@ -304,6 +304,10 @@ class GraphicAbstract(BaseModel):
     revision_history: List[Dict[str, Any]] = Field(default_factory=list)  # Reviewer feedback from each round
     all_candidates: List[str] = Field(default_factory=list)  # All candidates: base64 strings in image mode, ASCII strings in text mode
     selected_index: int = 0  # Index of selected best candidate
+    # Optional tri-state availability observations. ``None`` preserves the
+    # unknown/not-applicable meaning of older persisted graphic abstracts.
+    review_available: Optional[bool] = None
+    selection_available: Optional[bool] = None
     created_at: datetime = Field(default_factory=datetime.now)
 
 class APIRequest(BaseModel):

@@ -86,6 +86,9 @@ class _Harness(PostExecutionReviewMixin):
             max_rounds=3,
         )
         self.sent = []
+        async def _save(_state, force=False):
+            return True
+        self.state_callback = _save
 
     async def _send_message(self, kind, payload, agent=None):
         self.sent.append(kind)
@@ -159,7 +162,12 @@ def _bio_agent(
 
 def _state_and_plan():
     """A round whose first approved step ran and whose second left no evidence."""
-    state = AnalysisState(user_id="u1", name="Project", initial_instruction="analyze the comparison")
+    state = AnalysisState(
+        id="sess-int",
+        user_id="u1",
+        name="Project",
+        initial_instruction="analyze the comparison",
+    )
     state.current_round = 2
     state.max_rounds = 3
     state.current_round_direction = "a test direction"
@@ -596,7 +604,9 @@ async def test_unparseable_pi_answer_degrades_to_no_action():
     audit_summary = harness._audit_round_plan_execution(state, result)
     meta, merge = await harness._run_post_execution_review(state, result, audit_summary, "full")
 
-    assert meta["review_status"] in ("no_action", "failed")
+    assert meta["review_status"] == "failed"
+    assert meta["lifecycle"] == "failed"
+    assert "no structured innovation decision" in meta["review_reason"]
     assert bio.executed_code == [] and merge == {}
 
 

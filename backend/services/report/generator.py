@@ -58,11 +58,13 @@ from backend.services.report.quality import (
     build_quality_disclosures,
     render_report_limitations_html,
     render_report_status_line_html,
+    render_technical_review_notice_html,
 )
 from backend.services.report.report_outline import build_report_outline
 from .generator_parts import (
     build_agent_models_appendix,
     build_cross_modal_appendix,
+    build_report_followups,
     ensure_report_plan_figure_coverage,
     figureless_outline_sections,
     rebind_checkpoint_asset_paths,

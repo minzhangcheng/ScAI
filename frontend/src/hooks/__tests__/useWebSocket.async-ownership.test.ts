@@ -123,6 +123,33 @@ describe('WebSocket async response ownership', () => {
     expect(store.chatMessages).toEqual([])
   })
 
+  it('preserves identity on an id-bearing chat error with empty history', () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const { result } = renderHook(() => useWebSocket())
+    act(() => result.current.connect())
+    const socket = SocketMock.instances[0]
+
+    act(() => socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_error',
+        content: {
+          id: 'chat-error-terminal',
+          error: 'delegation failed',
+          followup_id: 'fu-error',
+          branch_id: 'branch-error',
+          reply_to: 'chat-user',
+        },
+      }),
+    } as MessageEvent))
+
+    expect(useAppStore.getState().chatMessages).toEqual([expect.objectContaining({
+      id: 'chat-error-terminal',
+      followup_id: 'fu-error',
+      branch_id: 'branch-error',
+      reply_to: 'chat-user',
+    })])
+  })
+
   it('drops every old-session websocket event before reconnect', () => {
     const { result } = renderHook(() => useWebSocket())
     act(() => result.current.connect())

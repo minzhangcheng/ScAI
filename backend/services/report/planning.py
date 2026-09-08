@@ -15,6 +15,7 @@ _CLOSING_SECTION_MARKERS = (
 
 _FIGURE_PROVENANCE_FIELDS = (
     "png_path", "pdf_path", "plan_step_id", "plan_id", "purpose",
+    "review_status", "review_unavailable", "is_publication",
 )
 
 
@@ -710,6 +711,9 @@ async def _generate_section_from_existing_figures_impl(
                     "revision_of_id": fig.get("revision_of_id"),
                     "supersedes_id": fig.get("supersedes_id"),
                     "is_published_head": bool(fig.get("is_published_head")),
+                    "review_status": fig.get("review_status") or "",
+                    "review_unavailable": bool(fig.get("review_unavailable")),
+                    "is_publication": bool(fig.get("is_publication", False)),
                     "section": section_id,
                     "analysis_type": analysis_type
                 })
@@ -738,7 +742,11 @@ async def _generate_section_from_existing_figures_impl(
                     "name": matching_tbl.get("caption", tbl.get("name", tbl_filename)),
                     "caption": matching_tbl.get("caption", tbl.get("caption", "")),
                     "interpretation": matching_tbl.get("interpretation", tbl.get("interpretation", "")),
+                    "filename": tbl_filename,
                     "csv_path": csv_path,
+                    "table_id": tbl.get("table_id"),
+                    "csv_sha256": tbl.get("csv_sha256"),
+                    "source_filename": tbl.get("source_filename"),
                     "columns": tbl.get("columns", []),
                     "preview_data": tbl.get("preview_data", []),
                     "section": section_id,
@@ -811,6 +819,9 @@ async def _generate_section_from_existing_figures_impl(
             "revision_of_id": fig.get("revision_of_id"),
             "supersedes_id": fig.get("supersedes_id"),
             "is_published_head": bool(fig.get("is_published_head")),
+            "review_status": fig.get("review_status") or "",
+            "review_unavailable": bool(fig.get("review_unavailable")),
+            "is_publication": bool(fig.get("is_publication", False)),
             "section": section_id,
             "analysis_type": analysis_type
         })
@@ -830,7 +841,11 @@ async def _generate_section_from_existing_figures_impl(
             "name": tbl.get("name", tbl.get("filename", "Table")),
             "caption": tbl.get("caption", ""),
             "interpretation": tbl.get("interpretation", ""),
+            "filename": tbl.get("filename", ""),
             "csv_path": csv_path,
+            "table_id": tbl.get("table_id"),
+            "csv_sha256": tbl.get("csv_sha256"),
+            "source_filename": tbl.get("source_filename"),
             "columns": tbl.get("columns", []),
             "preview_data": tbl.get("preview_data", []),
             "section": section_id,

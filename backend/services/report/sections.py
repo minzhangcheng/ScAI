@@ -10,6 +10,10 @@ from backend.services.report.interaction_records import (
 )
 from backend.services.reproducibility import KEY_PACKAGES, REPRODUCIBILITY_DIR_NAME
 from backend.services.report.quality import build_quality_disclosures
+from backend.utils.direction_payload import (
+    build_direction_projection_block,
+    collect_direction_projections,
+)
 from typing import Dict, Any, List, Optional
 
 
@@ -18,6 +22,20 @@ def resolve_literature_model(state, default: str) -> str:
     (DR vs PubMed) recorded during analysis, else the configured default."""
     actual = getattr(state, "literature_actual_model", None)
     return actual if actual else default
+
+
+def _build_direction_report_context(state: Any) -> str:
+    """Build bounded selected-direction evidence for report conclusions."""
+    sandbox_state = getattr(state, "sandbox_state", None) or {}
+    lineage_id = str(sandbox_state.get("_report_target_lineage_id") or "main")
+    blocks: List[str] = []
+    for projection in collect_direction_projections(
+        state, lineage_id=lineage_id, max_directions=12,
+    ):
+        block = build_direction_projection_block(projection, max_chars=3000)
+        if block:
+            blocks.append(block)
+    return "\n\n".join(blocks)
 
 
 class SectionsMixin:
@@ -134,6 +152,18 @@ Objective: {state.initial_instruction}
 {key_results[:1500]}
 """
 
+        direction_context = _build_direction_report_context(state)
+        direction_context_section = (
+            "\n## Selected Direction Evidence and Follow-ups\n"
+            "Use this bounded persisted context to explain what the additional pass "
+            "changed, what remains uncertain, and which questions stay open. Preserve "
+            "contrary evidence and do not describe overlapping analyses as independent "
+            "validation.\n"
+            + direction_context
+            if direction_context else
+            "\n## Selected Direction Evidence and Follow-ups\nNo retained direction-level follow-up context was available.\n"
+        )
+
         conclusions_instruction = (
             "Write conclusions in English including: 1) Summary of main findings (cite specific numbers) "
             "2) Biological significance 3) Future directions, followed by exactly one "
@@ -157,6 +187,7 @@ Bioinformatics: {json.dumps(findings['bioinformatics'][:10], ensure_ascii=False)
 Pathology: {json.dumps(findings['pathology'][:5], ensure_ascii=False)}
 Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 {results_section}
+{direction_context_section}
 
 ## Final Summary from Analysis:
 {findings['summary'][:2000] if findings['summary'] else 'Not available'}

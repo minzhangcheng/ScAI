@@ -578,10 +578,16 @@ For each cluster, provide:
 5. Brief evidence/reasoning citing the literature
 
 IMPORTANT:
-- Be specific about cell types (e.g., "CD8+ cytotoxic T cells" not just "T cells")
-- If a cluster has ambiguous markers, list the top 2 candidates
+- Be as specific as the markers actually support, and no more: a subtype label is justified
+  only when its defining markers are present in this cluster's list, and in sparse 3'
+  data the distinguishing transcripts are often too sparse to make that call. A label more
+  specific than the evidence is unsupported, and everything downstream inherits it
+- If a cluster has ambiguous markers, list the top 2 candidates and set confidence accordingly
 - Consider the tissue context ({tissue}) when making assignments
-- Use "Unknown" only if markers truly don't match any known cell type
+- Not every cluster is a cell type. Use "Doublet/multiplet (suspected)", "Low-quality/dying
+  (suspected)", "Ambient/background (suspected)", "Mixed/unresolved", "Transitional/intermediate
+  state" or "Unknown" when they fit, rather than forcing a lineage label; for a suspected
+  technical label say in `evidence` which per-cell QC would confirm or refute it
 
 Return a JSON object with this EXACT structure:
 {{
