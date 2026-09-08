@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import asyncio
 import logging
 import time
+from ...utils.llm_client import UpstreamExhaustedError
 
 
 logger = logging.getLogger(__name__)
@@ -263,6 +264,8 @@ class DirectionNoveltyMixin:
             if deadline is not None and time.monotonic() >= deadline:
                 return evidence, meta, True, ["Direction-level timeout exceeded"]
             return evidence, meta, True, ["Cache triage timeout for query: session_cache"]
+        except UpstreamExhaustedError:
+            raise
         except Exception as exc:
             return evidence, meta, False, [f"Cache triage failed: {str(exc)[:100]}"]
         return evidence, meta, False, limitations
@@ -767,6 +770,8 @@ Respond ONLY with valid JSON (no markdown, no code fences):
                             scheduler_limitation="full_evaluation_returned_no_queries",
                         )
                     return dir_result
+                except UpstreamExhaustedError:
+                    raise
                 except Exception as exc:
                     logger.warning(f"[Literature] Direction evaluation failed for {direction_id}: {exc}")
                     fallback = await self._evaluate_minimum_attempt_candidate(
@@ -783,6 +788,16 @@ Respond ONLY with valid JSON (no markdown, no code fences):
                     return fallback
 
         # gather preserves input order, which the candidate cap above depends on.
-        return list(await asyncio.gather(
-            *(evaluate_one(index, candidate) for index, candidate in enumerate(candidates))
-        ))
+        tasks = [
+            asyncio.create_task(evaluate_one(index, candidate))
+            for index, candidate in enumerate(candidates)
+        ]
+        try:
+            return list(await asyncio.gather(*tasks))
+        except BaseException:
+            # A failed batch must settle before the workflow offers Retry;
+            # gather alone leaves sibling LLM requests running after an error.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise

@@ -1,10 +1,15 @@
 """Synthesis workflow facade retaining graph-facing mixin methods."""
 import sys
+from .helpers import WorkflowTerminatedError, WorkflowSupersededError
 from .synthesis_parts import phases as synthesis_phases
 from .synthesis_parts import support as _support
 globals().update(
     {name: value for name, value in vars(_support).items() if not name.startswith("__")}
 )
+
+class ExplorationReportSkipped(Exception):
+    """The user explicitly skipped an unavailable exploration report."""
+
 
 class SynthesisMixin:
     """Mixin providing synthesis, user-input, and convergence methods. Composed into SingleCellAnalysisWorkflow."""
@@ -146,8 +151,31 @@ class SynthesisMixin:
             report.data_quality_warnings = warnings
         return report
 
+    async def _exploration_llm_step(self, analysis_state, call, *args, **kwargs):
+        """Retry only the failed report step, retaining completed upstream work."""
+        while True:
+            try:
+                return await call(*args, **kwargs)
+            except UpstreamExhaustedError as error:
+                action = await self._wait_for_llm_intervention(
+                    error, "pi_synthesis", analysis_state,
+                    auto_retry=False, require_explicit_resolution=True,
+                )
+                if action == LlmFailureAction.RETRY:
+                    continue
+                if action == LlmFailureAction.TERMINATE:
+                    raise WorkflowTerminatedError(
+                        "User terminated exploration report generation after LLM failure"
+                    ) from error
+                raise ExplorationReportSkipped(
+                    "User skipped exploration report generation after LLM failure"
+                ) from error
+
     async def _generate_evidence_gated_exploration_report(self, graph_state, analysis_state, round_result):
-        raw_candidates = await self.pi_agent.generate_raw_direction_candidates(analysis_state, round_result)
+        raw_candidates = await self._exploration_llm_step(
+            analysis_state, self.pi_agent.generate_raw_direction_candidates,
+            analysis_state, round_result,
+        )
         if not raw_candidates:
             # No candidates to verify. The literature gate is skipped outright.
             # score_directions_with_evidence is still the Report A summariser (it
@@ -159,7 +187,8 @@ class SynthesisMixin:
                 f"[{self.session_id}] No direction candidates; skipping literature "
                 "verification, and no candidate may survive direction scoring"
             )
-            report = await self.pi_agent.score_directions_with_evidence(
+            report = await self._exploration_llm_step(
+                analysis_state, self.pi_agent.score_directions_with_evidence,
                 analysis_state, round_result, [], []
             )
             report.research_direction_candidates = []
@@ -171,12 +200,20 @@ class SynthesisMixin:
         if literature_result.get("status") in {"skipped", "disabled"}:
             reason = "Direction-level literature verification was skipped because the Literature Agent was skipped or disabled earlier in the workflow."
             direction_evidence = self._skipped_direction_evidence(raw_candidates, reason)
-            report = await self.pi_agent.score_directions_with_evidence(analysis_state, round_result, raw_candidates, direction_evidence)
+            report = await self._exploration_llm_step(
+                analysis_state, self.pi_agent.score_directions_with_evidence,
+                analysis_state, round_result, raw_candidates, direction_evidence,
+            )
             self.pi_agent._sanitize_direction_dependency_graph(report)
             return self._note_candidate_generation_failure(report)
 
         try:
-            direction_evidence = await self.literature_agent.evaluate_direction_novelty_candidates(raw_candidates, state=analysis_state)
+            direction_evidence = await self._exploration_llm_step(
+                analysis_state, self.literature_agent.evaluate_direction_novelty_candidates,
+                raw_candidates, state=analysis_state,
+            )
+        except (ExplorationReportSkipped, WorkflowTerminatedError, WorkflowSupersededError):
+            raise
         except Exception as lit_err:
             logger.exception(f"[{self.session_id}] Direction literature evidence gate failed")
             direction_evidence = build_fallback_direction_evidence(
@@ -185,7 +222,10 @@ class SynthesisMixin:
                 reason=f"Direction-level literature verification failed: {lit_err}",
                 limitations=["Literature verification failed; PI scoring must be conservative."],
             )
-        report = await self.pi_agent.score_directions_with_evidence(analysis_state, round_result, raw_candidates, direction_evidence)
+        report = await self._exploration_llm_step(
+            analysis_state, self.pi_agent.score_directions_with_evidence,
+            analysis_state, round_result, raw_candidates, direction_evidence,
+        )
         self.pi_agent._sanitize_direction_dependency_graph(report)
         return self._note_candidate_generation_failure(report)
 

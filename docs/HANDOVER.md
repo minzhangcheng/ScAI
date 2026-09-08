@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.6 · **Last updated**: 2026-09-08
+**Version**: 0.55.7 · **Last updated**: 2026-09-08
 
 ## 1. Runtime Architecture
 
@@ -301,6 +301,17 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.55.x — (2026-09-08 onward)**
+
+- `0.55.7` — Repairs the Round 1 exploration-report failure boundary. When
+  direction generation, direction-level literature evaluation, or final
+  direction scoring exhausts its LLM retries, the workflow now opens the
+  existing LLM failure intervention and keeps the run in the exploration
+  phase. Retry repeats only the failed report step, while Skip and Terminate
+  remain explicit user decisions; a failed report no longer falls through to
+  the ordinary round summary or starts the next round. Literature evaluation
+  now propagates LLM exhaustion through its concurrent candidate tasks and
+  settles sibling requests before the intervention can be retried. Focused
+  regressions passed 29/29, including real literature-triage failure paths.
 
 - `0.55.6` — Repairs the runtime save chain, from an audit recorded in
   `docs/coding/runtime-save-chain-repair-spec.md`. The chain's commit

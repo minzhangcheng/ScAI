@@ -300,6 +300,16 @@ async def build_exploration_result(self, ctx):
                 "detailed_report_url": detailed_report_url,
             }, AgentType.PI)
             report_generated = True
+        except (WorkflowTerminatedError, WorkflowSupersededError):
+            raise
+        except ExplorationReportSkipped:
+            await self._send_message(
+                "error",
+                "Exploration report generation was skipped by the user. "
+                "No exploration report or direction candidates are available; "
+                "the analysis remains in the exploration phase.",
+                AgentType.PI,
+            )
         except Exception as e:
             logger.exception(f"[{self.session_id}] Exploration report generation failed")
             await self._send_message(
