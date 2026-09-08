@@ -11,6 +11,7 @@ __all__ = [
     "setup_logging",
     "APIConfig", "ModelConfig", "AgentTemperatures", "AgentContextWindows", "AgentPrompts", "SystemConfig",
     "MINIMUM_CONTEXT_WINDOW", "DEFAULT_AGENT_CONTEXT_WINDOW",
+    "resolve_agent_context_window_default",
     "default_config", "PI_AGENT_NAME",
     "RUNTIME_SAVE_FLOOR_MINUTES", "RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT",
     "MAX_CACHED_SESSIONS", "MAX_REALTIME_MESSAGES", "SESSION_CACHE_TTL",

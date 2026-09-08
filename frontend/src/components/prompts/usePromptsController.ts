@@ -338,7 +338,7 @@ export function usePromptsController() {
         setTemperature(selectedAgent, editedTemperature)
         const storedContextWindow = contextWindowTouched
           ? editedContextWindow
-          : agentServerConfigs[selectedAgent]?.contextWindow
+          : editedModel !== (models[selectedAgent] ?? DEFAULT_MODELS[selectedAgent] ?? '') ? undefined : agentServerConfigs[selectedAgent]?.contextWindow
         setAgentServerConfig(selectedAgent, {
           ...serverConfig,
           ...(typeof storedContextWindow === 'number'

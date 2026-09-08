@@ -12,7 +12,7 @@ from cryptography.fernet import InvalidToken
 
 from backend.config import (
     SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR, REPORTS_DIR,
-    get_session_dir,
+    SystemConfig, get_session_dir, resolve_agent_context_window_default,
 )
 from backend.models.api_requests import (
     BiochemistryInput, GroupCreateRequest, GroupUpdateRequest,
@@ -27,6 +27,7 @@ from backend.state import (
 from backend.utils.auth import require_session_ownership, require_session_read_ownership
 from backend.utils.auth import get_db
 from backend.utils import crypto
+from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_path_within, validate_session_id
 from backend.utils.url_validation import validated_http_url
 from backend.utils.websocket_delivery import serialize_realtime_message
@@ -41,7 +42,12 @@ _AGENT_NAMES = (
 )
 
 
-def _new_session_agent_settings(state, settings, secret_defaults) -> None:
+def _new_session_agent_settings(
+    state,
+    settings,
+    secret_defaults,
+    config: SystemConfig | None = None,
+) -> None:
     """Copy one browser default snapshot into a new authoritative session."""
     if settings is not None:
         state.custom_prompts = {
@@ -69,7 +75,7 @@ def _new_session_agent_settings(state, settings, secret_defaults) -> None:
     for agent in _AGENT_NAMES:
         incoming = settings.agent_server_configs.get(agent) if settings is not None else None
         api_key = saved_keys.get(agent, "")
-        if incoming is None and not api_key:
+        if incoming is None and not api_key and config is None:
             continue
         raw_url = incoming.llm_base_url if incoming is not None else ""
         try:
@@ -79,6 +85,10 @@ def _new_session_agent_settings(state, settings, secret_defaults) -> None:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         server = {"llm_base_url": llm_base_url, "api_key": api_key}
+        if config is not None:
+            server["default_context_window"] = resolve_agent_context_window_default(
+                config, agent
+            )
         if incoming is not None and incoming.context_window is not None:
             server["context_window"] = incoming.context_window
         state.agent_server_configs[agent] = server
@@ -176,7 +186,8 @@ async def start_session(request: Request, body: StartRequest):
         raise HTTPException(
             503, "Encryption service unavailable; cannot load Agent defaults"
         ) from exc
-    _new_session_agent_settings(state, body.agent_settings, secret_defaults)
+    config = await resolve_config_for_user(user_id) or SystemConfig()
+    _new_session_agent_settings(state, body.agent_settings, secret_defaults, config)
 
     from backend.services.session_lifecycle import register_new_session_generation
     from backend.services.session_deletion import delete_session_generation

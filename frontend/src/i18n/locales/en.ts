@@ -240,6 +240,8 @@ export const en = {
     agentLlmServer: 'LLM Server',
     agentApiKey: 'API Key',
     agentContextWindow: 'Context Window (tokens)',
+    agentContextEffective: 'Effective budget',
+    agentContextAdaptiveHint: 'Explicit provider context-overflow errors reduce this budget by 20% for this analysis. Setting the budget or changing the model resets the automatic reduction.',
     agentContextWindowHint: 'Text context window in tokens (minimum 8,192). Reset uses the current system default.',
     agentServerHint: 'Currently using default LLM server settings. Modify to use a different platform for this agent',
     agentModelHint: 'Note: Model name format may vary by platform (e.g., OpenRouter uses provider/model format)',

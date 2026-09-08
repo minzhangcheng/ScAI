@@ -132,6 +132,7 @@ async def test_agent_server_route_uses_omitted_null_and_integer_semantics(monkey
     )
     monkeypatch.setattr(session_config, "update_session_cache", AsyncMock())
     monkeypatch.setattr(session_config, "async_save_session", AsyncMock())
+    monkeypatch.setattr(session_config, "resolve_config_for_user", AsyncMock(return_value=SystemConfig()))
 
     await session_config.update_agent_server_config(
         state.id,
@@ -162,7 +163,8 @@ async def test_agent_server_route_uses_omitted_null_and_integer_semantics(monkey
 @pytest.mark.asyncio
 async def test_atomic_settings_route_preserves_or_resets_context_override(monkeypatch):
     state = AnalysisState(id="context-atomic", user_id="user-1")
-    state.agent_server_configs["pi"] = {"context_window": 128_000}
+    state.custom_models["pi"] = "model"
+    state.agent_server_configs["pi"] = {"context_window": 128_000, "llm_base_url": "https://example.test/v1"}
     monkeypatch.setattr(
         session_config, "require_session_ownership", AsyncMock(return_value=state)
     )
@@ -185,3 +187,44 @@ async def test_atomic_settings_route_preserves_or_resets_context_override(monkey
     assert "context_window" not in state.agent_server_configs["pi"]
     assert response["agent_server_configs"]["pi"]["context_window"] is None
     assert response["agent_server_configs"]["pi"]["effective_context_window"] == 200_000
+
+
+@pytest.mark.parametrize("updates, expected", [
+    ({"temperature": 0.4}, 102400),
+    ({"context_window": 96000}, 96000),
+    ({"context_window": None}, 200000),
+    ({"model": "new-model"}, 200000),
+    ({"model": "new-model", "context_window": 64000}, 64000),
+    ({"llm_base_url": "https://other.test/v1"}, 200000),
+])
+@pytest.mark.asyncio
+async def test_adaptive_settings_reset_only_on_relevant_edits(monkeypatch, updates, expected):
+    state = AnalysisState(id="adaptive-settings", user_id="user-1")
+    state.custom_models["pi"] = "model"
+    state.agent_server_configs["pi"] = {
+        "llm_base_url": "https://example.test/v1", "context_window": 128000,
+        "default_context_window": 200000, "adaptive_context_window": 102400,
+        "adaptive_context_model": "model", "adaptive_context_endpoint": "https://example.test/v1",
+    }
+    monkeypatch.setattr(session_config, "require_session_ownership", AsyncMock(return_value=state))
+    monkeypatch.setattr(session_config, "resolve_config_for_user", AsyncMock(return_value=SystemConfig()))
+    monkeypatch.setattr(session_config, "update_session_cache", AsyncMock())
+    monkeypatch.setattr(session_config, "async_save_session", AsyncMock())
+    response = await session_config.update_agent_settings(state.id, _Request(), _settings_body(**updates))
+    assert response["agent_server_configs"]["pi"]["effective_context_window"] == expected
+    assert ("adaptive_context_window" in state.agent_server_configs["pi"]) == ("temperature" in updates)
+
+
+def test_startup_context_default_validation_and_precedence(monkeypatch):
+    from backend.config import _config
+    monkeypatch.delenv("SCAI_CONTEXT_WINDOW_DEFAULT", raising=False)
+    assert _config._resolve_default_agent_context_window() == 200000
+    monkeypatch.setenv("SCAI_CONTEXT_WINDOW_DEFAULT", "160000")
+    assert _config._resolve_default_agent_context_window() == 160000
+    monkeypatch.setattr(_config, "DEFAULT_AGENT_CONTEXT_WINDOW", 160000)
+    monkeypatch.setattr(_config, "_CONTEXT_WINDOW_ENV_SET", True)
+    assert _config.resolve_agent_context_window_default(SystemConfig(), "pi") == 160000
+    for value in ("bad", "8191"):
+        monkeypatch.setenv("SCAI_CONTEXT_WINDOW_DEFAULT", value)
+        with pytest.raises(ValueError, match="SCAI_CONTEXT_WINDOW_DEFAULT"):
+            _config._resolve_default_agent_context_window()

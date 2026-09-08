@@ -315,8 +315,8 @@ docker build -t ghcr.io/minzhangcheng/scai:latest .
 ```
 
 ```bash
-./build.sh --version 0.55.4
-./build.sh --version 0.55.4 --push
+./build.sh --version 0.55.5
+./build.sh --version 0.55.5 --push
 ```
 
 如果未指定 `--version`，辅助脚本使用 `git describe --tags --abbrev=0` 返回的最新 Git 标签；如果不存在标签，则使用 `latest`。`--push` 会将两个标签推送到 `ghcr.io/minzhangcheng/scai`；使用前请先向该注册表进行 Docker 身份验证。该辅助脚本不接受注册表、镜像名称、平台或构建参数 flags。
@@ -408,6 +408,9 @@ docker start scai
 可移植会话导出/导入用于在实例之间迁移单个会话。以 `include_runtime=true` 导出、并在导入时传 `X-Trust: true` 时会一并携带在线内核状态和工作流 checkpoint，导入后可继续分析；默认导出只携带内容，无法继续。两种方式都不能替代完整服务备份——权衡详见第 13 节。
 
 ## 10. 监控与日志
+
+后端启动前设置 `SCAI_CONTEXT_WINDOW_DEFAULT=200000`（Docker 使用 `-e`）可指定新分析的默认上下文预算；默认 200000 tokens，最小 8192。显式环境变量覆盖已保存的全局默认值，用户在 Agents 页面手动设置的预算优先。
+上游明确报告上下文超长时，对应 Agent、模型和服务端组合的预算每次降低 20%，重新压缩提示词后使用原有重试额度（通常共五次尝试）。缩减值在当前分析中持久保存，重新加载后仍有效。手动设置或重置预算、切换模型会清除自动缩减值。Agents 页面显示当前有效预算。该参数不代表 API 的输出 `max_tokens`；原始执行记录仍然保留。
 
 生产模式和 Docker 通过单一应用端口进行基本存活检查；只有直接启动的开发模式才在默认端口 `8000` 上单独暴露后端：
 

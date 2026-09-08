@@ -29,6 +29,7 @@ from .error_signals import (
     is_responses_input_shape_error,
 )
 from .errors import StreamInterruptedError, UpstreamExhaustedError
+from ..context_overflow import is_context_overflow
 
 
 # Hard per-attempt deadline for one LLM request (seconds). A reasoning model
@@ -204,6 +205,7 @@ async def retry_with_backoff(
     non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
     rate_limit_retries: Optional[int] = None,
     before_retry: Optional[Callable[[], Awaitable[None]]] = None,
+    on_context_overflow: Optional[Callable[[], Awaitable[bool]]] = None,
 ):
     """
     Execute an async function with exponential backoff retry on timeout/connection errors
@@ -336,6 +338,25 @@ async def retry_with_backoff(
                 )
                 break  # stop spinning; fall through to UpstreamExhaustedError
         except Exception as e:
+            if is_context_overflow(e):
+                last_exception = e
+                effective_max = caller_max
+                if attempt >= caller_max or on_context_overflow is None:
+                    break
+                await _await_before_retry()
+                try:
+                    recovered = await on_context_overflow()
+                except Exception:
+                    logger.warning("[%s] Context-overflow recovery failed", agent_name,
+                                   exc_info=True)
+                    recovered = False
+                if not recovered:
+                    break
+                # Recovery owns no extra attempts: consume the same retry slot
+                # used by transient errors and rebuild the adapter request.
+                await _notify_retry(attempt, 0.0, "ContextOverflow", caller_max)
+                attempt += 1
+                continue
             # An already-exhausted upstream error (e.g. raised by a nested
             # retry_with_backoff / probe loop) must not be retried or re-wrapped;
             # propagate it as-is so the workflow's HITL gate sees it.
@@ -389,7 +410,8 @@ async def retry_with_backoff(
                 break
 
     raise UpstreamExhaustedError(
-        f"[{agent_name}] Upstream LLM exhausted after {effective_max + 1} attempts. "
+        f"[{agent_name}] Upstream LLM exhausted after "
+        f"{attempt + 1 if is_context_overflow(last_exception) else effective_max + 1} attempts. "
         f"Last error: {type(last_exception).__name__}: {last_exception}",
         agent_name=agent_name,
         model=model_name,

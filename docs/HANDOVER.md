@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.4 · **Last updated**: 2026-09-08
+**Version**: 0.55.5 · **Last updated**: 2026-09-08
 
 ## 1. Runtime Architecture
 
@@ -301,6 +301,22 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.55.x — (2026-09-08 onward)**
+
+- `0.55.5` — Adds a configurable default context-window budget for new agent
+  settings, using `SCAI_CONTEXT_WINDOW_DEFAULT` at startup and falling back to
+  `200000`. Each session freezes the default it was created with, while a
+  manually configured agent budget remains authoritative. When a provider
+  explicitly rejects a text or tool request because its context is too long,
+  the request is rebuilt with a compacted prompt, the agent's effective budget
+  is reduced to 80% and persisted for the rest of that analysis, and the
+  existing retry allowance is preserved. Model, endpoint, or manual budget
+  changes clear the adaptive reduction; cold protocol discovery applies the
+  same recovery without replaying the request across protocols. The Agents
+  page refreshes the effective budget after an automatic reduction and ignores
+  stale responses from another session, attempt, or user edit. Focused backend
+  regression tests passed `102` cases and the isolated frontend suite passed
+  `307` cases, with `0` failures. No image build, push, deployment, or
+  historical-session repair was performed.
 
 - `0.55.4` — The spec 5.1 runtime-persistence banner no longer warns for
   the whole duration of a run. A live kernel is `stale` by construction:

@@ -356,8 +356,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.55.4
-./build.sh --version 0.55.4 --push
+./build.sh --version 0.55.5
+./build.sh --version 0.55.5 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -463,6 +463,17 @@ Recovery procedure: stop the service, move the damaged data root aside, restore 
 Portable session export/import moves individual sessions between installations. Exported with `include_runtime=true` and imported with `X-Trust: true` it also carries the live kernel state and workflow checkpoint, so an imported session can continue analysing; the default export carries content only and cannot resume. Either way it is not a substitute for a complete service backup — see section 13 for the trade-off.
 
 ## 10. Monitoring and logs
+
+Set `SCAI_CONTEXT_WINDOW_DEFAULT=200000` before backend startup (or pass it with
+Docker `-e`) to set the default context budget for new analyses. The default is
+200000 tokens; the minimum is 8192. An explicit environment value overrides
+persisted global defaults, while manual Agent settings take precedence.
+Explicit provider context-overflow errors reduce the affected Agent/model/endpoint
+budget by 20% and rebuild the prompt within the existing retry allowance (normally
+five total attempts). The reduced budget persists for that analysis across reloads.
+Setting or resetting the Agent budget, or changing its model, clears the reduction.
+The Agents page shows the effective budget. This setting is not the API output
+`max_tokens` parameter. Original execution records remain available.
 
 Production and Docker use the single application port for liveness. Only direct development mode exposes the backend separately on default port `8000`:
 

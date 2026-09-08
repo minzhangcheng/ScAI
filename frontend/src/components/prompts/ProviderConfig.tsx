@@ -25,7 +25,7 @@ function ContextWindowInput({ controller }: ProviderProps) {
         onChange={(event) => {
           const raw = event.target.value.trim()
           setEditedContextWindow(raw ? Number.parseInt(raw, 10) : undefined)
-          setContextWindowTouched(Boolean(raw))
+          setContextWindowTouched(true)
           setSaved(false)
         }}
         className="flex-1 px-3 py-1.5 border border-slate-300 dark:border-slate-600 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
@@ -35,6 +35,9 @@ function ContextWindowInput({ controller }: ProviderProps) {
         )}
         title={t('agentContextWindowHint')}
       />
+      <span className="text-xs text-slate-500" title={t('agentContextAdaptiveHint')}>
+        {t('agentContextEffective')}: {controller.agentServerConfigs[selectedAgent]?.effectiveContextWindow ?? 200000}
+      </span>
       <button
         type="button"
         onClick={() => {

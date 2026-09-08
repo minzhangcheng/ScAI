@@ -9,6 +9,39 @@ import { mergeRealtimeMessages } from '../realtimeHistory'
 import { reloadSessionState } from './sessionReload'
 import type { MessageHandlerContext } from './types'
 
+const contextRefreshes = new WeakMap<WebSocket, Map<AgentType, symbol>>()
+
+function refreshContextBudget(agent: AgentType, context: MessageHandlerContext): void {
+  const store = useAppStore.getState()
+  const session = store.currentSession
+  const config = store.agentServerConfigs[agent]
+  const model = store.models[agent]
+  const apiConfig = store.apiConfig
+  const token = Symbol()
+  const requests = contextRefreshes.get(context.ws) ?? new Map<AgentType, symbol>()
+  contextRefreshes.set(context.ws, requests)
+  requests.set(agent, token)
+  const ownsResponse = () => {
+    const current = useAppStore.getState()
+    return context.isCurrentAttempt() && context.ownsSocketSession()
+      && current.currentSession === session
+      && current.agentServerConfigs[agent] === config
+      && current.models[agent] === model
+      && current.apiConfig === apiConfig
+      && requests.get(agent) === token
+  }
+  void apiFetch<Record<string, { effective_context_window?: number }>>(
+    `/session/${context.session.id}/agent-server-config`, undefined, ownsResponse,
+  ).then(data => {
+    const effective = data?.[agent]?.effective_context_window
+    if (!ownsResponse() || typeof effective !== 'number') return
+    const current = useAppStore.getState()
+    current.setAgentServerConfig(agent, {
+      llmBaseUrl: '', apiKey: '', ...config, effectiveContextWindow: effective,
+    })
+  }).catch(error => { if (ownsResponse()) devLog('Context budget refresh failed:', error) })
+}
+
 function chatIdentityFields(value: any): Pick<ChatMessage, 'followup_id' | 'branch_id'> {
   return {
     ...(value?.followup_id ? { followup_id: String(value.followup_id) } : {}),
@@ -160,6 +193,13 @@ export function handleWebSocketMessage(
 
     // Server heartbeat ping — ignore silently
     if (data.type === 'ping') return
+
+    if (data.type === 'agent_context_updated') {
+      if (data.session_id === session.id && typeof data.agent === 'string') {
+        refreshContextBudget(data.agent as AgentType, context)
+      }
+      return
+    }
 
     if (
       data.type === 'session_error' &&

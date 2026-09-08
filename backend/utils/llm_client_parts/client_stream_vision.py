@@ -177,7 +177,8 @@ class ClientStreamVisionMixin:
         )
 
         stream_retry_kwargs = self._build_retry_kwargs(
-            model, request_timeout=DEFAULT_REQUEST_TIMEOUT)
+            model, request_timeout=DEFAULT_REQUEST_TIMEOUT,
+            messages=messages, max_tokens=max_tokens)
         stream_retry_kwargs["max_retries"] = MAX_RETRIES
 
         stream = await self._call_with_temp_fallback(
@@ -337,6 +338,7 @@ class ClientStreamVisionMixin:
         retry_kwargs = self._build_retry_kwargs(
             model, request_timeout=request_timeout, max_retries_override=max_retries,
             non_retryable_predicate=non_retryable_predicate,
+            messages=messages, max_tokens=max_tokens,
         )
 
         try:

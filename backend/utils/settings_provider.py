@@ -16,7 +16,7 @@ import logging
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
-from backend.config._config import APIConfig, SystemConfig
+from backend.config._config import APIConfig, SystemConfig, resolve_agent_context_window_default
 from backend.models.schemas import AnalysisState
 from backend.utils.llm_client import OpenAICompatibleClient
 from backend.state import sessions
@@ -49,13 +49,21 @@ def resolve_context_window(
     agent_server_configs: Optional[Dict[str, Any]],
     config: SystemConfig,
     agent_name: str,
+    model: Optional[str] = None,
 ) -> int:
     """Resolve a valid session override or fall back to the configured default."""
 
-    default = config.context_windows.get(agent_name)
-    raw = ((agent_server_configs or {}).get(agent_name) or {}).get(
-        "context_window"
-    )
+    entry = ((agent_server_configs or {}).get(agent_name) or {})
+    default = entry.get("default_context_window", resolve_agent_context_window_default(config, agent_name))
+    if not isinstance(default, int) or isinstance(default, bool) or default < 8192:
+        default = resolve_agent_context_window_default(config, agent_name)
+    adaptive = entry.get("adaptive_context_window")
+    endpoint = entry.get("llm_base_url") or config.api.llm_base_url
+    if (isinstance(adaptive, int) and not isinstance(adaptive, bool) and adaptive >= 8192
+            and (model is None or entry.get("adaptive_context_model") == model)
+            and entry.get("adaptive_context_endpoint") == endpoint):
+        return adaptive
+    raw = entry.get("context_window")
     if raw is None:
         return default
     if not isinstance(raw, int) or isinstance(raw, bool):
@@ -255,6 +263,7 @@ class AgentSettingsProvider:
             self._get_state().agent_server_configs,
             self._config,
             agent_name,
+            model=self.get_model(agent_name),
         )
 
     async def budget_text_dispatch(
