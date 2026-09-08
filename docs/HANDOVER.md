@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.7 · **Last updated**: 2026-09-08
+**Version**: 0.56.0 · **Last updated**: 2026-09-08
 
 ## 1. Runtime Architecture
 
@@ -226,6 +226,51 @@ Nothing reads it, nothing writes it, and deleting the session deletes it. An
 archive built before the removal still imports: its snapshot members are
 skipped rather than rejected.
 
+### Decision snapshots
+
+Part B of the plain-persistence design
+(`docs/coding/plain-persistence-part-b-spec.md`), off unless
+`SCAI_SNAPSHOT_DIR` names an absolute path. It is not a return of Snapshot V2:
+there is no object store, no branch model, no history browser, and no way to
+create one on request.
+
+A snapshot is taken immediately before each of the four decisions an analysis
+asks about itself — confirm the cell annotation, choose the direction after
+Stage 2, choose it again after each integration cycle, accept a round — and
+nowhere else. An incident gate is not a decision. An unattended run whose skip
+time is zero still gets one, because at this layer the PI deciding is the same
+decision made by a different party.
+
+`backend/services/round_snapshots/` holds the whole of it.
+`gates.round_boundary_gate` is the single owner of the predicates
+`_wait_for_user_input` used to spell inline; the node now asks it, which is
+what keeps the writer and the node from classifying a boundary differently.
+`writer.capture_decision_snapshot` performs no serialisation: it asks for the
+ordinary save when the kernel has moved past its newest committed generation,
+then copies what that save committed. The dump is held by a hardlink — valid
+only because `_commit_pkl_transaction` publishes by rename onto a fresh inode —
+so the analysis is paused for the workspace copy and nothing else, bounded by a
+stall watchdog with an absolute backstop.
+
+The annotation decision is the one that needed new wiring, because it is taken
+inside the executor's `annotate_clusters` call. The tool handler publishes a
+`PendingToolCheckpoint` for the duration of that call, and the capture
+checkpoints the executor through it before asking for the save, pairing the
+outstanding tool call with a synthetic result — without which
+`tool_calls_are_paired` rejects the transcript on restore.
+
+`restore.restore_snapshot_into_new_session` is an import from a local bundle
+and reuses the import primitives rather than copying them. The graph checkpoint
+is read once for its channels and discarded, because it is keyed by the
+source's thread id; the new session is armed as a parked semantic gate, and
+every gate route's existing no-workflow branch converts that capsule into an
+exact graph-node continuation. Reports and logs are not carried, and every path
+naming them is stripped from the restored state.
+
+Nothing is deleted automatically unless `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB`
+is set. The order is fixed at capture as `retention_rank` and surfaced as
+`deletion_order`, so the browser, the CLI and the prune cannot disagree.
+
 ## 9. Request & Data Flow
 
 1. **Config** — first-run dialog posts API keys to `/api/config`; backend validates and persists.
@@ -302,6 +347,13 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.55.x — (2026-09-08 onward)**
 
+- `0.56.0` — Adds decision snapshots: a restore point taken immediately
+  before each of the four decisions an analysis asks about itself, restorable
+  into a new session that leaves the source untouched. Off unless
+  `SCAI_SNAPSHOT_DIR` names an absolute path. The capture performs no
+  serialisation of its own — it copies what a committed generation already
+  wrote, holding the dump by hardlink so the analysis pauses only for the
+  workspace — and nothing is ever created on request or deleted automatically.
 - `0.55.7` — Repairs the Round 1 exploration-report failure boundary. When
   direction generation, direction-level literature evaluation, or final
   direction scoring exhausts its LLM retries, the workflow now opens the

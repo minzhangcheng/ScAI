@@ -3,6 +3,7 @@ import { AlertCircle, CheckCircle2, Loader2, Pause, Play, Square } from 'lucide-
 import { ValidationDialog } from '../ValidationDialog'
 import { RuntimePersistenceBanner } from '../runtime/RuntimePersistenceBanner'
 import { RuntimeWarningBanner } from '../runtime/RuntimeWarningBanner'
+import { SnapshotList } from '../runtime/SnapshotList'
 import type { AnalysisPanelController } from './useAnalysisPanelController'
 
 interface AnalysisControlsProps {
@@ -80,6 +81,13 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
           isZh={language === 'zh'}
         />
       </div>
+
+      {/* Decision snapshots (Part B spec 4.9). Absent unless the
+          administrator configured a snapshot directory *and* this session has
+          reached a decision, because a panel that appeared empty would read as
+          "this analysis produced none" rather than "this installation does not
+          take them". */}
+      <SnapshotList sessionId={currentSession.id} isZh={language === 'zh'} />
 
       {/* Header - Compact */}
       <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-700">

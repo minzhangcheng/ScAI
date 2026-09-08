@@ -249,6 +249,16 @@ After a batch of research directions, ScAI may synthesize cross-direction eviden
 
 Review the integration report when available. Select one or more candidates and continue, finalize the current analysis, or let the PI decide. If the integration countdown expires, the PI-decision path is used. Treat cross-direction links as hypotheses unless the data and external evidence establish otherwise.
 
+### Go back to an earlier decision
+
+If your administrator enabled snapshots, the analysis panel lists a restore point taken immediately before each decision above: confirming the cell annotation, choosing a research direction, choosing again after integration, and accepting a round.
+
+**Restore into a new session** opens a copy of the analysis as it stood just before that decision, waiting at the same dialog so you can answer differently. The session you are looking at is not changed, keeps running, and keeps all of its snapshots — so you can try a second direction without giving up the first.
+
+Three things a restored session does not have. It carries no reports; those belong to the run that produced them, and the restored copy has not reached that point. It may be missing values the original could not serialise, which the list shows as a count. And whatever automatic skip time the original was running under, the restored session waits for you rather than deciding on its own.
+
+Snapshots are not part of an export, and they are never created on request — each one is taken automatically, before its decision. If disk space runs short, the list says which one to give up first: the round-acceptance points go before the direction choices, and the round 1 cell annotation is kept longest.
+
 ## Review Results and Reports
 
 Open **Results** to inspect completed outputs, figures, summaries, and direction-specific findings.

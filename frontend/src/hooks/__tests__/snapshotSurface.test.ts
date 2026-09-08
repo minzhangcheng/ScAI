@@ -4,23 +4,50 @@ import * as api from '../useApi'
 import { useAppStore } from '../../stores/appStore'
 
 /**
- * The snapshot browser is gone, and nothing may reach for it.
+ * Snapshot V2's browser is gone and stays gone.
  *
- * Every one of its calls hit a route the backend no longer registers, so a
- * survivor is not a dangling import `tsc` would catch — it is a button that
- * 404s. These assert on the two surfaces a new caller would reach through: the
- * API module's exports and the store's keys.
+ * This used to assert that *nothing* matching `/snapshot/i` existed on either
+ * surface, which was right while there was no such feature. Part B is a
+ * different one -- decision snapshots, restored into a new session, with no
+ * tree, no branch model and no way to create one by hand -- so the ratchet
+ * names V2's own components instead. Anything from that list coming back is a
+ * regression; the four calls below are the whole of the replacement.
  */
-describe('no snapshot surface survives', () => {
-  it('exposes no snapshot API function', () => {
-    expect(Object.keys(api).filter(name => /snapshot/i.test(name))).toEqual([])
+
+/** V2's browser, dialogs and controller. None of these may return. */
+const RETIRED_V2_SURFACE = [
+  'SnapshotPanelView',
+  'SnapshotTree',
+  'SnapshotPreview',
+  'StorageSummary',
+  'RestoreProgressDialog',
+  'RuntimeChoiceDialog',
+  'DiscardCurrentDialog',
+  'useSnapshotPanelController',
+  'createSnapshot',
+  'listSnapshotObjects',
+]
+
+describe('no Snapshot V2 surface survives', () => {
+  it('exposes none of the retired names', () => {
+    const exported = new Set(Object.keys(api))
+    expect(RETIRED_V2_SURFACE.filter(name => exported.has(name))).toEqual([])
   })
 
-  it('holds no snapshot state', () => {
+  it('holds no snapshot state in the store', () => {
     const keys = Object.keys(useAppStore.getState()).filter(
       name => /snapshot/i.test(name),
     )
     expect(keys).toEqual([])
+  })
+
+  it('exposes exactly the Part B calls, and no way to create one', () => {
+    const snapshotCalls = Object.keys(api)
+      .filter(name => /snapshot/i.test(name))
+      .sort()
+    expect(snapshotCalls).toEqual([
+      'deleteSnapshot', 'listSnapshots', 'restoreSnapshot',
+    ])
   })
 
   it('keeps the runtime disclosure the snapshot slice used to carry', () => {
