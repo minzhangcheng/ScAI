@@ -337,4 +337,20 @@ def retire_live_runtime(session_id: str, *, include_checkpoint: bool = False) ->
         ):
             if _quarantine_path(path) is not None:
                 retired = True
+
+        # The executor's own position, and its account of what it has already
+        # done -- `step_number`, the message history, `code_history`,
+        # `analysis_log`. Left behind it is worse than the graph checkpoint
+        # above, because nothing catches it: `validate_checkpoint` compares
+        # only `round_number` and `planning_stage`, and retirement preserves
+        # the round, so the next run restored all of it over a namespace that
+        # no longer holds anything it refers to -- while the agent was being
+        # told the kernel was empty.
+        #
+        # The report generator's checkpoint (`_report_checkpoint.json`) is
+        # deliberately not included: it resumes from session data, not from
+        # kernel state, so a retired runtime does not invalidate it.
+        executor_checkpoint = states_dir / f"{session_id}_bioinfo_checkpoint.json"
+        if _quarantine_path(executor_checkpoint) is not None:
+            retired = True
     return retired

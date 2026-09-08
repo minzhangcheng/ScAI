@@ -221,3 +221,58 @@ def test_unavailable_keep_does_not_mutate_live():
     finally:
         shutil.rmtree(states, ignore_errors=True)
         shutil.rmtree(_integrity_dir(sid), ignore_errors=True)
+
+
+def test_retirement_takes_the_executor_checkpoint_with_it():
+    """Spec §3.11: an empty namespace under a forty-step history is not a
+    fresh start.
+
+    Retirement clears the dump and the graph position and has the agent told
+    "KERNEL STATE IS EMPTY. Load the input files". The executor's own step
+    checkpoint was left where it was, and `validate_checkpoint` compares only
+    `round_number` and `planning_stage` -- both of which retirement
+    preserves -- so the next run restored `step_number`, the whole message
+    history and `code_history` on top of a kernel holding nothing they refer
+    to.
+    """
+    from backend.utils.sandbox import _integrity_dir, _write_pkl_signature
+
+    sid = "sess-retire-executor-checkpoint"
+    states = get_session_states(sid)
+    states.mkdir(parents=True, exist_ok=True)
+    live = states / f"{sid}_session.pkl"
+    live.write_bytes(b"GENERATION")
+    _write_pkl_signature(live, _integrity_dir(sid))
+    executor_checkpoint = states / f"{sid}_bioinfo_checkpoint.json"
+    executor_checkpoint.write_text(
+        json.dumps({"step_number": 40, "round_number": 2})
+    )
+
+    assert runtime_apply.retire_live_runtime(sid, include_checkpoint=True) is True
+
+    assert not executor_checkpoint.exists()
+    quarantined = states / f"{sid}_bioinfo_checkpoint.json.quarantine"
+    assert json.loads(quarantined.read_text())["step_number"] == 40
+
+
+def test_a_runtime_only_retirement_leaves_the_executor_checkpoint_alone():
+    """`include_checkpoint=False` retires the generation, not the position.
+
+    The two callers that pass it that way are re-running from data with the
+    graph position deliberately kept; taking the executor's position with the
+    dump there would change what they mean.
+    """
+    from backend.utils.sandbox import _integrity_dir, _write_pkl_signature
+
+    sid = "sess-retire-runtime-only"
+    states = get_session_states(sid)
+    states.mkdir(parents=True, exist_ok=True)
+    live = states / f"{sid}_session.pkl"
+    live.write_bytes(b"GENERATION")
+    _write_pkl_signature(live, _integrity_dir(sid))
+    executor_checkpoint = states / f"{sid}_bioinfo_checkpoint.json"
+    executor_checkpoint.write_text(json.dumps({"step_number": 7}))
+
+    runtime_apply.retire_live_runtime(sid)
+
+    assert json.loads(executor_checkpoint.read_text())["step_number"] == 7
