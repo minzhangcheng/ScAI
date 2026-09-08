@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.5 · **Last updated**: 2026-09-08
+**Version**: 0.55.6 · **Last updated**: 2026-09-08
 
 ## 1. Runtime Architecture
 
@@ -301,6 +301,43 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.55.x — (2026-09-08 onward)**
+
+- `0.55.6` — Repairs the runtime save chain, from an audit recorded in
+  `docs/coding/runtime-save-chain-repair-spec.md`. The chain's commit
+  transaction was sound and is untouched; the defects were on either side of
+  it.
+  A committed generation is now continuable after a crash. The dump alone was
+  never a restore point — it needs the notebook record, the LangGraph
+  checkpoint and the executor's own step checkpoint, and the live copies of all
+  three have moved on by the time an interruption is noticed. Each commit now
+  captures those three into `<session>/states/generation/<revision>/` inside
+  the same transaction, one pair deep, the checkpoint database through SQLite's
+  backup API. `POST /run` restores that pair instead of retiring the
+  generation, so a crash costs at most the save floor rather than a re-run from
+  the input files; retirement remains the fallback when no usable pair exists.
+  Resuming that way is disclosed: `runtime_persistence.pair_restore` records
+  what continuing from the earlier generation discarded, and the banner shows
+  it until the next committed generation, because a pair restore leaves a
+  record that otherwise reads perfectly healthy.
+  Retirement also takes the executor's checkpoint with it now. It used to
+  promise the agent an empty namespace while leaving behind a step number, a
+  message history and a code history the new kernel could not account for.
+  Three mechanisms the chain claimed but did not have are gone. The closing
+  save asks `save_cadence` like the other two boundaries, so the module that
+  documents three now governs three. `save_state`, `save_state_async` and their
+  coalescing scheduler are deleted — nothing called them, so the drain in
+  `kernel.stop()` read as an ordering guarantee while draining an always-empty
+  set; the execution lock is that guarantee. Underscore-prefixed user globals
+  reach the coverage record instead of vanishing from the dump *and* from every
+  record of it.
+  Runtime-persistence timestamps carry a UTC offset. A naive string resolves in
+  the reader's zone, so with the containers on UTC and viewers not, the "last
+  successful save" line in the runtime banner was off by the viewer's offset.
+  Each save now records how long it took. The wall-clock floor stays at 30
+  minutes, decided against a completed 11-round, 35-hour run: about 11% of
+  wall-clock goes to persisting, and the binding cost is the duration of one
+  save — six to nine minutes with the execution lock held, at the end of that
+  run — which a shorter floor makes more frequent rather than shorter.
 
 - `0.55.5` — Adds a configurable default context-window budget for new agent
   settings, using `SCAI_CONTEXT_WINDOW_DEFAULT` at startup and falling back to
