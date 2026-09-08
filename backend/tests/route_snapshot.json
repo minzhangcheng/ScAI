@@ -650,6 +650,12 @@
     ]
   ],
   [
+    "/api/session/{session_id}/snapshots",
+    [
+      "GET"
+    ]
+  ],
+  [
     "/api/session/{session_id}/species-input",
     [
       "POST"

@@ -738,6 +738,10 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_RUNTIME_SAVE_FLOOR_MINUTES` | `30` | Minutes that must pass since the last **successful** runtime save before a step boundary saves again. Round and closing boundaries ignore it. Unset, non-integer or non-positive values log and fall back |
 | `SCAI_RUNTIME_MAX_RSS_GB` | `auto` | Per-session kernel RSS ceiling for regular runtime persistence; numeric values are GiB administrator caps |
 | `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB` | `auto` | Total estimated size of live AnnData objects; numeric values are GiB administrator caps |
+| `SCAI_SNAPSHOT_DIR` | unset | Root for decision snapshots. **Unset means snapshots are off; setting it turns them on** — there is no separate switch. Must be absolute, and should be on separate storage from `SCAI_DATA_DIR`. Nothing is captured yet in this version |
+| `SCAI_SNAPSHOT_STALL_SECONDS` | `120` | Abandon a snapshot capture after this long with no byte written. A hung mount makes no progress; a slow one does |
+| `SCAI_SNAPSHOT_MAX_SECONDS` | `1800` | Backstop under the stall bound, for a target that dribbles bytes without ever stalling |
+| `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | unset | Free space below which the least valuable snapshots are reclaimed. Unset means **nothing is ever deleted automatically**, which is the default |
 | `SCAI_MODE` | `prod` | Docker entrypoint mode; the production image rejects `dev` |
 | `PIP_INDEX_URL` | pip environment/default | Docker Python package index |
 | `SCAI_AUTO_FETCH_MARKERS` | `0` | Direct startup; `1` attempts marker-database download |

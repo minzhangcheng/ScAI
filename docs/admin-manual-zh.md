@@ -668,6 +668,10 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_RUNTIME_SAVE_FLOOR_MINUTES`     | `30`                      | 距上一次**成功**保存需经过的分钟数，之后步骤边界才会再次保存；轮次边界与收尾保存不受其影响。未设置、非整数或非正值会记录告警并回退 |
 | `SCAI_RUNTIME_MAX_RSS_GB`             | `auto`                    | 常规运行时持久化的逐会话内核 RSS 上限；数值表示管理员 GiB 上限                                              |
 | `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB`   | `auto`                    | 存活 AnnData 估算总量上限；数值表示管理员 GiB 上限                                                          |
+| `SCAI_SNAPSHOT_DIR`                   | 未设置                      | 决策快照的存储根目录。**未设置即关闭快照，设置即开启** —— 没有单独的开关。必须是绝对路径，并建议与 `SCAI_DATA_DIR` 位于不同存储。本版本尚不写入任何快照 |
+| `SCAI_SNAPSHOT_STALL_SECONDS`         | `120`                     | 快照写入停滞超过该秒数即放弃本次捕获。挂死的挂载点不会有任何进展，而缓慢的挂载点会 |
+| `SCAI_SNAPSHOT_MAX_SECONDS`           | `1800`                    | 停滞看门狗之下的兜底上限，用于始终有少量写入却永不完成的目标 |
+| `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | 未设置                      | 可用空间低于该值时回收价值最低的快照。未设置表示**永不自动删除**，这也是默认行为 |
 | `SCAI_MODE`                           | `prod`                    | Docker 入口程序模式；生产镜像会拒绝 `dev`                                                        |
 | `PIP_INDEX_URL`                       | pip environment/default     | Docker Python 软件包 index                                                                                 |
 | `SCAI_AUTO_FETCH_MARKERS`             | `0`                       | 直接启动；`1` 尝试下载标记数据库                                                                         |

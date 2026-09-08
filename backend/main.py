@@ -63,6 +63,7 @@ from .routes.websockets import router as websockets_router
 from .routes.reports import router as reports_router
 from .routes.admin import router as admin_router
 from .routes.user_config import router as user_config_router
+from .routes.round_snapshots import router as round_snapshots_router
 from .middleware.auth import AuthMiddleware
 from .middleware.upload_size import (
     MULTIPART_ENVELOPE_ALLOWANCE,
@@ -360,6 +361,7 @@ app.include_router(websockets_router)
 app.include_router(reports_router)
 app.include_router(admin_router)
 app.include_router(user_config_router)
+app.include_router(round_snapshots_router)
 
 # CORS
 app.add_middleware(AuthMiddleware)

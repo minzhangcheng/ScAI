@@ -71,6 +71,130 @@ def _resolve_save_floor_minutes() -> int:
 
 RUNTIME_SAVE_FLOOR_MINUTES = _resolve_save_floor_minutes()
 
+
+#: Where decision snapshots are written. Part B spec 4.1.
+#:
+#: Unset means snapshots are off; set means on. There is no separate boolean:
+#: one was specified and then withdrawn, because a switch that can disagree
+#: with the directory is a state nobody needs and every reader would have to
+#: check twice.
+#:
+#: Deliberately outside the data directory. The kernel's Landlock ruleset
+#: permits writes below a session's workspace and states directories, so a
+#: snapshot root inside one would be writable by analysis code; and on a real
+#: deployment the fast volume and the bulk volume are different mounts, which
+#: is a choice the operator has to make per installation.
+def _resolve_snapshot_dir():
+    """Read the snapshot root, refusing anything that is not usable as one.
+
+    Import time, so an unusable value logs and disables the feature rather than
+    stopping the backend: a typo in a deployment environment must not be the
+    difference between a running installation and none.
+    """
+    raw = os.environ.get("SCAI_SNAPSHOT_DIR", "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        logging.getLogger(__name__).error(
+            "SCAI_SNAPSHOT_DIR=%r is not an absolute path; snapshots are "
+            "disabled. A relative root would resolve against whatever "
+            "directory the process happened to start in.",
+            raw,
+        )
+        return None
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(DATA_BASE_DIR)
+    except ValueError:
+        pass
+    else:
+        logging.getLogger(__name__).warning(
+            "SCAI_SNAPSHOT_DIR=%s is inside the data directory. Snapshots are "
+            "meant to survive the loss of the volume a session lives on, and "
+            "a root under a session tree is reachable by kernel code.",
+            resolved,
+        )
+    return resolved
+
+
+SNAPSHOT_DIR: Optional[Path] = _resolve_snapshot_dir()
+
+
+def _resolve_snapshot_seconds(name: str, default: int) -> int:
+    """A positive whole number of seconds, or the default with a warning."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "%s=%r is not a whole number of seconds; using %d", name, raw, default,
+        )
+        return default
+    if value <= 0:
+        logging.getLogger(__name__).warning(
+            "%s=%s is not positive; using %d. A bound of zero would abandon "
+            "every capture before it started.", name, raw, default,
+        )
+        return default
+    return value
+
+
+#: No byte written to staging for this long abandons the capture. A hung mount
+#: makes no progress; a slow one does, which is why this is a stall bound and
+#: not a duration bound.
+SNAPSHOT_STALL_SECONDS: int = _resolve_snapshot_seconds(
+    "SCAI_SNAPSHOT_STALL_SECONDS", 120,
+)
+
+#: The backstop under the stall watchdog, for a target that dribbles bytes
+#: forever without ever stalling.
+SNAPSHOT_MAX_SECONDS: int = _resolve_snapshot_seconds(
+    "SCAI_SNAPSHOT_MAX_SECONDS", 1800,
+)
+
+
+def _resolve_snapshot_reserve_bytes():
+    """Free space below which the space-pressure prune runs, or None.
+
+    Unset means nothing is ever deleted automatically, which is the default the
+    project owner chose: a snapshot is the only copy of the decision it
+    precedes, and reclaiming one is a judgement about what the user is likely
+    to want back.
+    """
+    raw = os.environ.get("SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB=%r is not a whole number of "
+            "GiB; no snapshot will be deleted automatically", raw,
+        )
+        return None
+    if value <= 0:
+        logging.getLogger(__name__).warning(
+            "SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB=%s is not positive; no "
+            "snapshot will be deleted automatically", raw,
+        )
+        return None
+    return value * 1024 * 1024 * 1024
+
+
+SNAPSHOT_FREE_SPACE_RESERVE_BYTES: Optional[int] = _resolve_snapshot_reserve_bytes()
+
+
+def snapshots_enabled() -> bool:
+    """Whether this installation takes decision snapshots.
+
+    Reads the module attribute rather than a captured value, so a test that
+    sets ``SNAPSHOT_DIR`` sees the same answer every caller does.
+    """
+    return SNAPSHOT_DIR is not None
+
 _ENABLE_METHOD_DECISION_GUIDANCE = os.environ.get(
     "SCAI_ENABLE_METHOD_DECISION_GUIDANCE", ""
 ).lower() in (

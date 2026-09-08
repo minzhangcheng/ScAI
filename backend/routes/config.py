@@ -39,7 +39,12 @@ def _validated_proxy(value: str | None, *, allow_empty: bool = False) -> str:
 @router.get("/config")
 async def get_config(_: str = Depends(require_admin)):
     """Return the persisted global LLM configuration without exposing secrets."""
+    from backend.config import snapshots_enabled
+
     cfg = system_config["current"]
+    # Reported in both branches: it is a property of the deployment, not of
+    # whether an LLM has been configured, and the frontend decides whether to
+    # render the snapshot panel at all from it.
     if cfg is None:
         return {
             "configured": False,
@@ -47,6 +52,7 @@ async def get_config(_: str = Depends(require_admin)):
             "llm_base_url": "https://openrouter.ai/api/v1",
             "masked_api_key": "",
             "has_proxy_url": False,
+            "snapshots_enabled": snapshots_enabled(),
         }
     return {
         "configured": True,
@@ -54,6 +60,7 @@ async def get_config(_: str = Depends(require_admin)):
         "llm_base_url": cfg.api.llm_base_url,
         "masked_api_key": mask_api_key(cfg.api.api_key),
         "has_proxy_url": bool(cfg.api.proxy_url),
+        "snapshots_enabled": snapshots_enabled(),
     }
 
 
