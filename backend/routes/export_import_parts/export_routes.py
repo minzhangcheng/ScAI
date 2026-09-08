@@ -87,6 +87,41 @@ from .tar_builders import (
 logger = logging.getLogger(__name__)
 
 
+def _coverage_from_manifest(session_id: str, include_runtime: bool) -> dict:
+    """Spec §4.4's coverage record, read from the generation that holds it.
+
+    This used to read `runtime_persistence["saved_names"]`, which nothing ever
+    writes -- the key lives in `<sid>_session.runtime.json`, beside the dump. So
+    the field the docstring below promises a destination ("a destination that
+    rehydrates a dump missing `adata` should be able to learn that from the
+    archive") was always null.
+
+    A results-only archive reports nothing rather than some other generation's
+    numbers: there is no runtime here to describe.
+    """
+    absent = {"runtime_saved_names": None, "runtime_skipped_names": None}
+    if not include_runtime:
+        return absent
+    from backend.utils.runtime_manifest import (
+        RuntimeManifestError,
+        read_runtime_manifest,
+        runtime_manifest_path,
+    )
+
+    path = runtime_manifest_path(session_id)
+    if not path.exists():
+        return absent
+    try:
+        manifest = read_runtime_manifest(path)
+    except (RuntimeManifestError, OSError):
+        # An unreadable manifest is not a claim about coverage either way.
+        return absent
+    return {
+        "runtime_saved_names": manifest.get("saved_names"),
+        "runtime_skipped_names": manifest.get("skipped_names"),
+    }
+
+
 def _generation_facts(
     session_id: str, state_payload, include_runtime: bool,
 ) -> dict:
@@ -113,8 +148,7 @@ def _generation_facts(
         # which it could not. A destination that rehydrates a dump missing
         # `adata` should be able to learn that from the archive, not from the
         # kernel coming up short.
-        "runtime_saved_names": persistence.get("saved_names"),
-        "runtime_skipped_names": persistence.get("failed_variables"),
+        **_coverage_from_manifest(session_id, include_runtime),
     }
     if not include_runtime:
         facts["runtime_omitted_reason"] = "include_runtime=false"

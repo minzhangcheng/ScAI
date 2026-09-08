@@ -320,6 +320,13 @@ def _rekey_imported_runtime_manifest(session_id: str, pkl) -> bool:
             skipped_names=raw["skipped_names"],
             serializer_version=raw["serializer_version"],
             pairing=raw.get("pairing"),
+            # Optional like `pairing`, and dropped here until 2026-09-07: this
+            # is the fourth hop of a record that already had to be threaded
+            # through the kernel, the parser and the manifest builder, and
+            # losing it at the last one costs an imported session the only
+            # statement of what §5.5 carried and of the caveat on a carried
+            # class.
+            carried_definitions=raw.get("carried_definitions"),
         )
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         logger.warning(

@@ -239,16 +239,44 @@ def _manifest_of(tar_path, session_id):
 
 
 def test_the_manifest_names_the_generation_its_coherence_and_its_coverage():
-    """An archive is read long after its HTTP response is gone. Spec 5.4."""
-    from backend.routes.export_import_parts.export_routes import _generation_facts
+    """An archive is read long after its HTTP response is gone. Spec 5.4.
 
-    facts = _generation_facts("resumable", {
+    The coverage half of this used to be handed in through
+    `runtime_persistence["saved_names"]` -- a key nothing in production writes,
+    so the assertion proved the plumbing would work if the key existed while
+    the shipped field was always null. Coverage lives in the generation
+    manifest beside the dump, so the fixture writes one.
+    """
+    from backend.config import get_session_states
+    from backend.routes.export_import_parts.export_routes import _generation_facts
+    from backend.utils.runtime_manifest import (
+        build_runtime_manifest,
+        runtime_manifest_path,
+        write_runtime_manifest,
+    )
+
+    sid = "resumable"
+    get_session_states(sid).mkdir(parents=True, exist_ok=True)
+    write_runtime_manifest(
+        runtime_manifest_path(sid),
+        build_runtime_manifest(
+            revision=4,
+            state_revision=4,
+            pkl_digest="d" * 64,
+            saved_names=["adata", "markers"],
+            skipped_names=[{
+                "name": "model", "type": "Booster",
+                "reason": "serialization_failed",
+            }],
+            serializer_version="dill-zstd-1",
+        ),
+    )
+
+    facts = _generation_facts(sid, {
         "runtime_persistence": {
             "coherence": "current",
             "committed_revision": 4,
             "committed_digest": "d" * 64,
-            "saved_names": ["adata", "markers"],
-            "failed_variables": ["model"],
         },
     }, True)
 
@@ -256,7 +284,7 @@ def test_the_manifest_names_the_generation_its_coherence_and_its_coverage():
     assert facts["runtime_committed_revision"] == 4
     assert facts["runtime_committed_digest"] == "d" * 64
     assert facts["runtime_saved_names"] == ["adata", "markers"]
-    assert facts["runtime_skipped_names"] == ["model"]
+    assert [s["name"] for s in facts["runtime_skipped_names"]] == ["model"]
     assert "runtime_omitted_reason" not in facts
 
 

@@ -111,10 +111,12 @@ def _mark_runtime_unavailable_if_work_exists(sandbox, *, bindings) -> None:
     """
     from backend.state import sessions as live_sessions
 
+    from backend.utils.runtime_pairing import has_completed_runtime_work
+
     state = live_sessions.get(sandbox.session_id)
     if getattr(state, "runtime_recompute_pending", False):
         return
-    if state is None or int(getattr(state, "current_round", 0) or 0) <= 0:
+    if state is None or not has_completed_runtime_work(state):
         return
     if getattr(state, "runtime_restore_status", "complete") != "complete":
         return

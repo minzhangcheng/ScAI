@@ -55,7 +55,7 @@ from backend.utils.secret_redaction import ENDPOINT_FIELD_NAMES, strip_analysis_
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 
-from .core import is_runtime_h5ad_name, is_sandbox_pickle
+from .core import is_runtime_generation_name, is_runtime_h5ad_name
 
 logger = logging.getLogger(__name__)
 
@@ -276,7 +276,9 @@ def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
     cannot decrypt to empty instead of failing the load.)
     """
     def _add(state_file: Path):
-        if not include_runtime and is_sandbox_pickle(state_file.name):
+        # The dump, its manifest and that manifest's signature are one
+        # generation; a portable archive drops all three together.
+        if not include_runtime and is_runtime_generation_name(state_file.name):
             return
         # A live SQLite database is never archived by path. Runtime exports
         # add exactly one verified standalone backup below, and portable

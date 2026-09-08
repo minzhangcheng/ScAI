@@ -57,6 +57,7 @@ from .core import (
     free_disk_bytes,
     import_job_record,
     is_runtime_h5ad_name,
+    is_runtime_generation_name,
     is_sandbox_pickle,
 )
 
@@ -124,6 +125,7 @@ class ImportTarContext:
         "off_layout": 0,
         "untrusted_pickle": 0,
         "untrusted_runtime_h5ad": 0,
+        "untrusted_runtime_manifest": 0,
         "checkpoint_dropped": 0,
     })
     skipped_examples: list[str] = field(default_factory=list)
@@ -361,6 +363,17 @@ def import_tar_gz(
             validate_path_within(dest_path, get_session_dir(session_id))
             # SECURITY (S4): sandbox pickles can execute arbitrary code via dill.load.
             # Drop them unless the caller passed trust=true to take responsibility.
+            # A manifest without its dump describes a generation this
+            # archive did not bring. Dropped on the same authority as the pkl,
+            # so an older archive that still carries one cannot land it either.
+            if not trust and is_runtime_generation_name(dest_path.name):
+                if not is_sandbox_pickle(dest_path.name):
+                    logger.warning(
+                        "Skipping runtime generation manifest from imported "
+                        "archive (untrusted): %s", member.name,
+                    )
+                    context.note_skip("untrusted_runtime_manifest", member.name)
+                    continue
             is_pkl_member = is_sandbox_pickle(dest_path.name)
             if is_pkl_member:
                 if not trust:

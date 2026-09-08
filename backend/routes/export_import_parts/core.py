@@ -136,6 +136,22 @@ def is_sandbox_pickle(name: str) -> bool:
     base = name.rsplit("/", 1)[-1]
     return bool(re.match(r".*_session\.pkl(\.zst)?$", base) or base == "session.pkl")
 
+def is_runtime_generation_name(name: str) -> bool:
+    """True for any file that belongs to the committed runtime generation.
+
+    The dump, its signed manifest and that manifest's signature are one thing.
+    Shipping the manifest without the dump lands a foreign-signed file in the
+    destination, where `state_runtime_coherence` reads it, fails the HMAC and
+    reports "inconsistent" -- for a session whose actual condition is that it
+    carries no runtime at all. Export and import share this predicate so the
+    parts cannot separate.
+    """
+    base = name.rsplit("/", 1)[-1]
+    if is_sandbox_pickle(base):
+        return True
+    return bool(re.match(r".*_session\.runtime\.json(\.sig)?$", base))
+
+
 def is_runtime_h5ad_name(name: str) -> bool:
     """True if a filename belongs to the live-runtime h5ad sidecar set.
 

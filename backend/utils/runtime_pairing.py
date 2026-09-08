@@ -123,6 +123,32 @@ def is_live_runtime_continuation_safe(session_id: str, state, workflow=None) -> 
     return pause.is_set() and gate is not None and not gate.is_set()
 
 
+def has_completed_runtime_work(state) -> bool:
+    """Whether this session has produced runtime state a loss would destroy.
+
+    The old test was `current_round > 0`, and the off-by-one is the whole bug:
+    `initialize_round` sets `current_round` to N at the *start* of round N, so
+    it reads 1 for every brand-new session before anything has run.
+
+    `> 1` is the same signal read correctly -- reaching round 2 means round 1
+    finished. `round_results` says the same thing more directly, and a
+    generation that committed mid-round is evidence even when no round has
+    finished. Any of the three is enough; the absence of all three means there
+    is nothing yet to have lost.
+    """
+    if int(getattr(state, "current_round", 0) or 0) > 1:
+        return True
+    if list(getattr(state, "round_results", None) or []):
+        return True
+    persistence = getattr(state, "runtime_persistence", None) or {}
+    if isinstance(persistence, dict):
+        return bool(
+            persistence.get("committed_source")
+            and persistence.get("committed_digest")
+        )
+    return False
+
+
 def refresh_runtime_availability(state) -> None:
     """Check cold-resume file availability before the graph can advance.
 
@@ -132,7 +158,7 @@ def refresh_runtime_availability(state) -> None:
     """
     if getattr(state, "runtime_recompute_pending", False):
         return
-    if int(getattr(state, "current_round", 0) or 0) <= 0:
+    if not has_completed_runtime_work(state):
         return
     from backend.config import get_session_states
     from backend.utils.runtime_apply import _live_pkl
