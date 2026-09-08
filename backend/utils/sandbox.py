@@ -61,6 +61,7 @@ from .sandbox_parts.shared import (  # noqa: F401
     _sha256_file,
     _write_pkl_signature,
     _commit_pkl_transaction,
+    GENERATION_PAIR_DIRNAME,
     recover_regular_save_transaction,
     _verify_pkl_integrity,
     _integrity_dir,
@@ -192,8 +193,6 @@ class LocalJupyterSandbox(
         # capture in particular) can assert that all of its cells ran against
         # one namespace instead of silently mixing generations.
         self.kernel_epoch = 0
-        self._pending_save_tasks: set = set()
-        self._pending_save_task: asyncio.Task[bool] | None = None
         # Snapshot V2 runtime dependency tracking (created/loaded user globals).
         self._known_user_globals: set[str] = set()
         self._last_execution_diff: Dict[str, Any] = {

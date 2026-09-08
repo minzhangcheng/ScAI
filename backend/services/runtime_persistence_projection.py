@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -49,7 +49,7 @@ def project_runtime_persistence(
             "error_summary": error,
             "projection_status": "lifecycle_mismatch",
             "projection_error": error,
-            "observed_at": datetime.now().isoformat(),
+            "observed_at": datetime.now(timezone.utc).isoformat(),
         })
         sandbox_state = dict(getattr(state, "sandbox_state", None) or {})
         sandbox_state["runtime_persistence"] = projected
@@ -72,7 +72,7 @@ def project_runtime_persistence(
         "source": "notebook_state",
         "current_revision": current_revision,
         "saved_revision": saved_revision,
-        "observed_at": datetime.now().isoformat(),
+        "observed_at": datetime.now(timezone.utc).isoformat(),
         "projection_status": "current",
         "projection_error": None,
     })

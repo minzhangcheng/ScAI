@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import pathlib
+import re
+import typing
 
 import pytest
 
-from backend.services.save_cadence import should_save
+from backend.services.save_cadence import SaveReason, should_save
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 BACKEND = REPO / "backend"
@@ -25,6 +27,34 @@ def test_a_closing_boundary_always_saves():
         reason="closing", last_committed_at=1_000.0, now=1_001.0,
         floor_minutes=30,
     ) is True
+
+
+def test_every_save_reason_has_a_production_call_site():
+    """A reason with no caller is documentation, not a boundary.
+
+    ``"closing"`` sat in ``_UNCONDITIONAL`` with no production call for as long
+    as this module's docstring claimed to govern three boundaries: the closing
+    save reached the kernel through ``kernel.stop(save=True)`` instead. The
+    drift was invisible because the save itself worked, so only the claim was
+    wrong -- which is exactly the kind of thing a reader trusts and a test has
+    to catch.
+    """
+    reasons = set(typing.get_args(SaveReason))
+    assert reasons == {"round_boundary", "step_boundary", "closing"}
+
+    call = re.compile(r"""runtime_save_due\(\s*[^()]*?["'](\w+)["']\s*\)""", re.S)
+    called: set[str] = set()
+    for path in BACKEND.rglob("*.py"):
+        if "tests" in path.parts:
+            continue
+        called.update(call.findall(path.read_text(encoding="utf-8")))
+
+    missing = sorted(reasons - called)
+    assert not missing, (
+        "SaveReason members with no production call site: "
+        f"{missing}. Either route the boundary through runtime_save_due or "
+        "drop the reason -- a member nothing asks for is a claim, not a rule."
+    )
 
 
 def test_a_step_boundary_within_the_floor_does_not_save():
@@ -429,6 +459,28 @@ def test_the_frontend_renders_the_three_states_and_nothing_else():
 
     assert "coherence === 'current'" in banner
     assert "coherence === 'unavailable'" in banner
-    # Last successful save, never the last attempt.
+
+    # The stronger form of "must not invent a fourth": every verdict the
+    # component branches on has to be one A1 can actually produce. The former
+    # spelling of this test could only catch a new verdict if it happened to
+    # displace one of the two literals above.
+    verdicts = set(re.findall(r"coherence === '(\w+)'", banner))
+    assert verdicts <= {"current", "stale", "inconsistent", "unavailable"}, (
+        f"banner branches on a coherence verdict A1 does not emit: {verdicts}"
+    )
+
+    # Last successful save, never the last attempt. `last_attempt_at` is the
+    # field that would keep the UI reading "saved a moment ago" through an
+    # unbounded run of failures, which is the lie spec 5.1 forbids, so it must
+    # never reach this component.
     assert "exposure_since" in banner
-    assert "last_attempt" not in banner
+    assert "last_attempt_at" not in banner
+
+    # `last_attempt_status` is a different field and is required here. A live
+    # kernel is `stale` by construction -- `current_revision` advances on every
+    # cell, `committed_revision` only at a save point -- so before 0.55.4 the
+    # amber warning was on for the whole of every run and carried no signal.
+    # The banner reads this to separate a kernel that is merely ahead of its
+    # last generation from one whose saves are failing. That grades severity;
+    # it does not add a verdict, which is what the assertion above guards.
+    assert "last_attempt_status" in banner

@@ -81,6 +81,13 @@ def last_committed_epoch(sandbox) -> float | None:
     if not isinstance(raw, str) or not raw:
         return None
     try:
+        # No timezone branch on purpose. `fromisoformat` returns an aware value
+        # for the offset-bearing strings written today, and `.timestamp()` is
+        # then exact. For a naive string written by an older build it returns a
+        # naive value that `.timestamp()` resolves in this process's zone --
+        # which is the zone it was written in, since the writer was this same
+        # container. Reinterpreting those as UTC would move the floor on every
+        # deployment that does not run UTC.
         return datetime.fromisoformat(raw).timestamp()
     except ValueError:
         return None

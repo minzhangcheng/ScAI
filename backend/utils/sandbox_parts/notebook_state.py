@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Final, List, Optional
 
@@ -425,7 +425,14 @@ class NotebookState:
         persist: bool = True,
     ) -> Dict[str, Any]:
         """Persist the live runtime lifecycle without exposing raw tracebacks."""
-        now = datetime.now().isoformat()
+        # Offset-bearing, because these values are read outside the process
+        # that wrote them. `save_cadence.last_committed_epoch` turns
+        # `last_saved_at` back into an epoch to measure the save floor, and the
+        # browser turns it into a local time to show the user -- both resolve a
+        # naive string in *their* zone, not in the writer's. The containers run
+        # UTC while a browser does not, so the "last successful save" shown in
+        # the UI was off by the viewer's offset.
+        now = datetime.now(timezone.utc).isoformat()
         previous = dict(self.runtime_persistence)
         from backend.utils.error_parsing import bounded_diagnostic, compact_traceback
 
@@ -598,7 +605,7 @@ class NotebookState:
                 if commit_source is not None
                 else self.runtime_persistence.get("commit_source")
             ),
-            "last_restored_at": datetime.now().isoformat(),
+            "last_restored_at": datetime.now(timezone.utc).isoformat(),
             "degraded_recovery": bool(degraded_recovery),
             "degraded_from_revision": attempted if degraded_recovery else None,
             "degraded_to_revision": restored_revision if degraded_recovery else None,
@@ -614,7 +621,7 @@ class NotebookState:
             ),
             "source": "notebook_state",
             "lifecycle_generation": self.lifecycle_generation,
-            "metadata_updated_at": datetime.now().isoformat(),
+            "metadata_updated_at": datetime.now(timezone.utc).isoformat(),
         })
         self._migrate_committed_runtime_metadata()
         self.save_metadata()

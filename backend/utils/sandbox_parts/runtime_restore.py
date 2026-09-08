@@ -157,6 +157,7 @@ async def restore_session(sandbox, *, bindings):
     )
 
     from backend.utils.runtime_manifest import runtime_manifest_path
+    from .regular_save import GENERATION_PAIR_DIRNAME
 
     with lifecycle_file_lock(sandbox.session_id):
         assert_session_generation_active(sandbox.session_id)
@@ -175,6 +176,9 @@ async def restore_session(sandbox, *, bindings):
                 sandbox.session_id,
                 states_dir=sandbox.notebook_state.state_dir,
             ),
+            generation_root=bindings.Path(
+                sandbox.notebook_state.state_dir
+            ) / GENERATION_PAIR_DIRNAME,
             session_id=sandbox.session_id,
         )
         # A snapshot apply from the previous build and the ordinary save

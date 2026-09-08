@@ -38,6 +38,7 @@ _REGULAR_SAVE_COPY_CHUNK_BYTES: Final[int] = 8 * 1024 * 1024
 # ---------------------------------------------------------------------------
 
 from .regular_save import (  # noqa: F401
+    GENERATION_PAIR_DIRNAME,
     _sig_path,
     _pkl_hmac,
     _pkl_hmac_stream,

@@ -30,7 +30,17 @@ RUNTIME_MANIFEST_SUFFIX = "_session.runtime.json"
 #: its kind, and a value excluded as a volatile handle. Collapsing them loses
 #: the only signal that says whether a name is worth recomputing.
 SKIP_REASONS = frozenset(
-    {"serialization_failed", "excluded_by_kind", "excluded_volatile"}
+    {
+        "serialization_failed",
+        "excluded_by_kind",
+        "excluded_volatile",
+        # A user global whose name starts with an underscore. The dump has
+        # always excluded these -- IPython's history shares the namespace and
+        # is not user state -- but the exclusion ran before the reporting
+        # channels, so such a name was absent from the dump *and* from every
+        # record of it. That is the one outcome §4.4 exists to prevent.
+        "excluded_private",
+    }
 )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")

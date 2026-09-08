@@ -89,60 +89,19 @@ from .shared import (  # noqa: F401
 
 
 class PersistenceMixin:
-    """Dill state persistence and file upload into the workspace."""
+    """File upload into the workspace.
 
-    async def _run_coalesced_save(self) -> bool:
-        """Run the one shared save generation owned by this sandbox."""
-        return await self.save_session()
-
-    def _schedule_coalesced_save(self, loop: asyncio.AbstractEventLoop):
-        """Return the active save task or schedule one for this revision."""
-        active = getattr(self, "_pending_save_task", None)
-        if active is not None and not active.done():
-            return active
-
-        task = loop.create_task(self._run_coalesced_save())
-        self._pending_save_task = task
-        self._pending_save_tasks.add(task)
-
-        def _retire(completed):
-            self._pending_save_tasks.discard(completed)
-            if getattr(self, "_pending_save_task", None) is completed:
-                self._pending_save_task = None
-
-        task.add_done_callback(_retire)
-        return task
-
-    def save_state(self):
-        """Save current state synchronously - only saves notebook, not session.
-
-        Note: This method only reliably saves the notebook state. Session state
-        (Python variables) may not be saved if called from sync context.
-        Use save_state_async() for complete state persistence.
-        """
-        self.notebook_state.save()
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop - safe to create a new one
-            try:
-                asyncio.run(self.save_session())
-            except Exception as e:
-                logger.exception("Failed to save session state")
-        else:
-            self._schedule_coalesced_save(loop)
-
-    async def save_state_async(self) -> None:
-        """Save current state asynchronously through the shared generation."""
-        self.notebook_state.save()
-        task = self._schedule_coalesced_save(asyncio.get_running_loop())
-        await asyncio.shield(task)
-
-    async def await_pending_saves(self):
-        """Wait for all pending save tasks to complete."""
-        while self._pending_save_tasks:
-            tasks = list(self._pending_save_tasks)
-            await asyncio.gather(*tasks, return_exceptions=True)
+    The dill persistence this class was named for lives in
+    ``sandbox_parts/runtime_save.py`` and commits through
+    ``regular_save._commit_pkl_transaction``. What used to be here was a
+    save-coalescing path -- ``save_state``, ``save_state_async``,
+    ``_schedule_coalesced_save`` and ``await_pending_saves`` -- that no
+    production code ever called. Its task set was therefore always empty, which
+    made ``await_pending_saves`` a drain that drained nothing while reading, at
+    its one call site in ``kernel.stop``, like an ordering guarantee. The
+    guarantee is ``_exec_lock``, and it is stated there now. If coalescing is
+    wanted again it should return together with the caller that wants it.
+    """
 
     def upload_file(self, local_path: str, filename: Optional[str] = None) -> str:
         """Copy a file to the sandbox working directory"""

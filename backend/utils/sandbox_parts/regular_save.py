@@ -49,6 +49,53 @@ def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+#: The three files a committed generation has to be paired with to be
+#: continuable, as {source key: (component kind, name inside the pair)}. Spec
+#: B2-1. The names are fixed so recovery can rebuild each path from the kind
+#: and the journal's revision rather than trusting a path out of the journal.
+#: Directory under a session's states/ that holds one generation's pair.
+GENERATION_PAIR_DIRNAME = "generation"
+
+_PAIRED_COMPONENTS = {
+    "state": ("paired_state", "state.json"),
+    "checkpoint": ("paired_checkpoint", "checkpoints.sqlite"),
+    "executor_checkpoint": ("paired_executor_checkpoint", "executor_checkpoint.json"),
+}
+
+
+def _copy_sqlite_durable(src: Path, dst: Path) -> None:
+    """Copy a live SQLite database through its own backup API.
+
+    Not a byte copy: LangGraph writes the checkpoint database in WAL mode, so
+    the main file on its own is not a consistent database and its `-wal`
+    companion is not covered by this transaction. `checkpoint_identity` reads
+    the same file through a read-only URI connection for the same reason.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(src.resolve().as_uri() + "?mode=ro", uri=True)) as source:
+        with closing(sqlite3.connect(dst)) as target:
+            source.backup(target)
+    with open(dst, "rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _prune_older_generations(generation_root: Path, *, keep: int) -> None:
+    """Retention is one (B2-1), and the newest is durable before this runs."""
+    if not generation_root.is_dir():
+        return
+    for entry in generation_root.iterdir():
+        if not entry.is_dir() or entry.name == str(keep):
+            continue
+        for child in entry.iterdir():
+            _remove_durable(child)
+        try:
+            entry.rmdir()
+        except OSError:
+            logger.warning("Could not remove a superseded generation pair: %s", entry)
+
+
 def _regular_save_journal_path(live_pkl: Path) -> Path:
     return live_pkl.with_name(f"{live_pkl.name}.regular-save.json")
 
@@ -165,6 +212,7 @@ def _regular_component_paths(
     metadata_path: Path | None,
     manifest_path: Path | None,
     runtime_manifest_path: Path | None = None,
+    generation_root: Path | None = None,
 ) -> List[Tuple[Dict[str, Any], Path]]:
     """Resolve signed component descriptors to canonical trusted paths."""
     raw_components = payload.get("components")
@@ -207,6 +255,15 @@ def _regular_component_paths(
             else None
         ),
     }
+    # Rebuilt from the journal's own revision plus a trusted root, never from a
+    # path inside the journal -- the same rule as every kind above.
+    pair_dir = (
+        Path(generation_root) / str(int(payload.get("target_revision") or 0))
+        if generation_root is not None
+        else None
+    )
+    for _key, (kind, filename) in _PAIRED_COMPONENTS.items():
+        known[kind] = pair_dir / filename if pair_dir is not None else None
     resolved: List[Tuple[Dict[str, Any], Path]] = []
     seen: set[Tuple[str, str]] = set()
     for raw in raw_components:
@@ -339,6 +396,7 @@ def recover_regular_save_transaction(
     metadata_path: Path | None = None,
     manifest_path: Path | None = None,
     runtime_manifest_path: Path | None = None,
+    generation_root: Path | None = None,
     session_id: str = "",
 ) -> str | None:
     """Recover a process crash in regular runtime persistence.
@@ -353,7 +411,7 @@ def recover_regular_save_transaction(
     live_sig = _sig_path(live_pkl, integrity_dir)
     resolved_components = _regular_component_paths(
         payload, live_pkl, live_sig, metadata_path, manifest_path,
-        runtime_manifest_path,
+        runtime_manifest_path, generation_root,
     )
     component_paths = [path for _component, path in resolved_components]
 
@@ -431,6 +489,8 @@ def _commit_pkl_transaction(
     target_revision: int = 0,
     authoritative_pkl_names: set[str] | None = None,
     fault_hook=None,
+    generation_root: Path | None = None,
+    paired_sources: Dict[str, Path | None] | None = None,
 ) -> None:
     """Install a runtime generation with crash-recoverable commit semantics.
 
@@ -477,6 +537,32 @@ def _commit_pkl_transaction(
                 _regular_component(
                     kind, target,
                     previous_exists=target.is_file(), authoritative=True,
+                ),
+                target,
+            ))
+
+    # Registered before the journal, like every other component, so a crash
+    # rolls the pair back with the generation it describes. A pair that
+    # outlived its rollback would name a dump that is no longer on disk.
+    pair_dir = (
+        Path(generation_root) / str(int(target_revision))
+        if generation_root is not None and paired_sources
+        else None
+    )
+    pair_targets: List[Tuple[str, Path, Path]] = []
+    if pair_dir is not None:
+        for key, (kind, filename) in _PAIRED_COMPONENTS.items():
+            source = (paired_sources or {}).get(key)
+            if source is None or not Path(source).is_file():
+                # Absent is absent, not a failed copy. A round boundary reached
+                # after the executor finished has no step checkpoint, and
+                # demanding one would fail every save taken at one.
+                continue
+            target = pair_dir / filename
+            pair_targets.append((kind, Path(source), target))
+            component_records.append((
+                _regular_component(
+                    kind, target, previous_exists=target.is_file(),
                 ),
                 target,
             ))
@@ -570,6 +656,22 @@ def _commit_pkl_transaction(
             )
             if fault_hook is not None:
                 fault_hook("runtime_manifest_replaced")
+
+        # After `commit_metadata`, so the captured state is the one this
+        # generation belongs to rather than the one it replaced.
+        if pair_targets:
+            pair_dir.mkdir(parents=True, exist_ok=True)
+            for kind, source, target in pair_targets:
+                if kind == "paired_checkpoint":
+                    _copy_sqlite_durable(source, target)
+                else:
+                    copy_durable(source, target)
+            from backend.utils.files import fsync_directory as _fsync_dir
+
+            _fsync_dir(pair_dir)
+            if fault_hook is not None:
+                fault_hook("pair_captured")
+
         if metadata_path is not None and not _regular_metadata_matches(
             metadata_path,
             revision=int(target_revision),
@@ -593,6 +695,8 @@ def _commit_pkl_transaction(
                 else None
             ),
         }
+        for kind, _source, target in pair_targets:
+            target_paths[kind] = target
         for descriptor, path in component_records:
             kind = descriptor.get("kind")
             if kind in target_paths and target_paths[kind] is not None:
@@ -643,6 +747,8 @@ def _commit_pkl_transaction(
         [path for _descriptor, path in component_records],
         fault_hook=fault_hook,
     )
+    if pair_dir is not None and pair_targets:
+        _prune_older_generations(Path(generation_root), keep=int(target_revision))
 
 
 def _verify_pkl_integrity(pkl: Path, integrity_dir: Path) -> bool:

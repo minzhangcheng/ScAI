@@ -48,6 +48,20 @@ def test_the_three_channels_are_distinguished():
     assert by_name["fh"]["type"] == "_io.TextIOWrapper"
 
 
+def test_the_private_channel_is_distinguished_from_the_other_three():
+    """A fourth way to be absent, and it must not borrow another's reason."""
+    parsed = _classify_skipped(
+        [{"name": "ss", "type": "SingleSampleGSEA", "exc": "TypeError"}],
+        excluded_by_kind=[{"name": "helper", "type": "function"}],
+        excluded_volatile=[{"name": "fh", "type": "_io.TextIOWrapper"}],
+        excluded_private=[{"name": "_adata_raw", "type": "AnnData"}],
+    )
+    by_name = {entry["name"]: entry for entry in parsed}
+    assert by_name["_adata_raw"]["reason"] == "excluded_private"
+    assert by_name["_adata_raw"]["type"] == "AnnData"
+    assert by_name["helper"]["reason"] == "excluded_by_kind"
+
+
 def test_every_entry_carries_a_type():
     """{name, type, reason} is the contract; an empty type does not honour it."""
     parsed = _classify_skipped(
@@ -160,6 +174,67 @@ def test_generated_save_reports_all_three_channels(tmp_path):
     assert [entry["name"] for entry in parsed["excluded_volatile"]] == ["conn"]
     assert all(entry["type"] for entry in parsed["excluded_by_kind"])
     assert all(entry["type"] for entry in parsed["excluded_volatile"])
+
+
+def test_a_private_user_variable_is_recorded_rather_than_dropped(tmp_path):
+    """§4.4's rule applied to the one exclusion that used to bypass it.
+
+    Dropping underscore names is right -- IPython's history lives in the same
+    namespace and is not user state. Dropping them *silently* is not: the name
+    was then absent from the dump and absent from every record of the dump,
+    which is exactly the outcome the two reported channels exist to prevent.
+    """
+    namespace = {
+        "adata": [1, 2, 3],
+        "_adata_raw": [4, 5, 6],
+        "_i1": "print(1)",
+        "_ii": "print(0)",
+        "_3": "an Out value",
+        "__": "second-to-last output",
+        "_oh": {},
+        "_dh": [],
+    }
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        exec(
+            compile(_build_save_code(_save_context(tmp_path)), "<save_code>", "exec"),
+            dict(namespace),
+        )
+
+    parsed = _parse_coverage_markers(stream.getvalue())
+    assert parsed["saved_names"] == ["adata"]
+
+    private = {entry["name"] for entry in parsed["excluded_private"]}
+    assert "_adata_raw" in private, "a user's private value must be recorded"
+    assert all(entry["type"] for entry in parsed["excluded_private"])
+
+    # The shell's own history is noise in a record meant for names a user might
+    # go looking for, and `__builtins__` is the interpreter's, not theirs.
+    assert not (private & {"_i1", "_ii", "_3", "__", "_oh", "_dh", "__builtins__"}), (
+        f"shell history leaked into the coverage record: {sorted(private)}"
+    )
+
+
+def test_a_private_name_reaches_the_manifest_with_its_own_reason():
+    """`build_runtime_manifest` is the gate; an unknown reason must not pass."""
+    from backend.utils.runtime_manifest import SKIP_REASONS, build_runtime_manifest
+
+    assert "excluded_private" in SKIP_REASONS
+
+    manifest = build_runtime_manifest(
+        revision=3,
+        state_revision=7,
+        pkl_digest="a" * 64,
+        saved_names=["adata"],
+        skipped_names=[
+            {"name": "_adata_raw", "type": "AnnData", "reason": "excluded_private"},
+        ],
+        serializer_version="dill-zstd-1",
+    )
+    entry = manifest["skipped_names"][0]
+    assert entry == {
+        "name": "_adata_raw", "type": "AnnData", "reason": "excluded_private",
+    }
 
 
 def test_a_skipped_main_closure_is_not_claimed_as_carried(tmp_path):
