@@ -451,3 +451,115 @@ async def test_an_authorized_recompute_still_runs_on_the_empty_namespace():
         )
     finally:
         live_sessions.pop(session_id, None)
+
+
+def _mutating_sandbox(tmp_path, *, success: bool):
+    """A sandbox whose next execution mutated the namespace and reached the kernel."""
+    from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
+
+    sb = LocalJupyterSandbox(
+        session_id=f"dirty-mark-{uuid.uuid4().hex[:8]}",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
+    sb.runtime_revision = 4
+    sb.saved_runtime_revision = 4
+    sb._execute_unlocked = AsyncMock(
+        return_value=CodeExecutionResult(
+            success=success, error=None if success else "boom"
+        )
+    )
+    sb._last_execution_reached_kernel = True
+    return sb
+
+
+def _assert_record_moved_with_the_counter(sb):
+    assert sb.runtime_revision == 5
+    record = sb.notebook_state.runtime_persistence
+    assert int(record.get("current_revision") or 0) == 5, record
+
+
+@pytest.mark.asyncio
+async def test_a_failed_mutating_cell_moves_the_persisted_revision(tmp_path):
+    """The kernel does not roll a cell back.
+
+    A statement that mutated `adata` before raising leaves it mutated, and the
+    live counter says so -- but while the persisted record still read
+    current == committed, a crash there came back as "current": the dump would
+    have been restored, and reported coherent, without that mutation.
+    """
+    sb = _mutating_sandbox(tmp_path, success=False)
+
+    await sb.execute("adata.X = adata.X * 2", skip_safety_check=True)
+
+    _assert_record_moved_with_the_counter(sb)
+
+
+@pytest.mark.asyncio
+async def test_a_successful_cell_outside_the_notebook_moves_it_too(tmp_path):
+    """`records_history=False` is about the notebook, not about effect.
+
+    Several mutating internal cells stay out of it -- `adata_val = adata.copy()`
+    among them -- so gating the record on it lost real, successful work.
+    """
+    sb = _mutating_sandbox(tmp_path, success=True)
+
+    await sb.execute(
+        "adata_val = adata.copy()", records_history=False, skip_safety_check=True,
+    )
+
+    _assert_record_moved_with_the_counter(sb)
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_probe_still_leaves_the_record_alone(tmp_path):
+    """The counterpart: nothing changed, so nothing is claimed."""
+    from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
+
+    sb = LocalJupyterSandbox(
+        session_id=f"probe-{uuid.uuid4().hex[:8]}",
+        state_dir=str(tmp_path / "states"),
+        working_dir=str(tmp_path / "workspace"),
+    )
+    sb.runtime_revision = 4
+    sb.saved_runtime_revision = 4
+    sb._execute_unlocked = AsyncMock(return_value=CodeExecutionResult(success=False, error="boom"))
+    sb._last_execution_reached_kernel = True
+
+    await sb.execute(
+        "print(adata.shape)",
+        records_history=False,
+        skip_safety_check=True,
+        mutates_namespace=False,
+    )
+
+    assert sb.runtime_revision == 4
+    assert not sb.notebook_state.runtime_persistence.get("current_revision")
+
+
+def test_a_first_round_that_never_saved_still_has_something_to_lose():
+    """Round 1, cells have run, the save floor has not come round yet.
+
+    `current_round > 1`, `round_results` and a committed generation all read
+    False here, and that session has the most to lose, not the least: none of
+    its work is on disk. Without this the guard let the graph carry on over an
+    empty kernel.
+    """
+    from types import SimpleNamespace
+
+    from backend.utils.runtime_pairing import has_completed_runtime_work
+
+    fresh = SimpleNamespace(current_round=1, round_results=[], runtime_persistence={})
+    assert has_completed_runtime_work(fresh) is False
+
+    worked = SimpleNamespace(
+        current_round=1, round_results=[],
+        runtime_persistence={"current_revision": 3},
+    )
+    assert has_completed_runtime_work(worked) is True
+
+    degraded = SimpleNamespace(
+        current_round=1, round_results=[],
+        runtime_persistence={"current_revision": 0, "degraded_from_revision": 2},
+    )
+    assert has_completed_runtime_work(degraded) is True

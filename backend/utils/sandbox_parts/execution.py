@@ -170,8 +170,12 @@ class ExecutionMixin:
 
     def _note_execution_effect(
         self, *, mutates_namespace: bool, reached_kernel: bool
-    ) -> None:
+    ) -> bool:
         """Advance the runtime revision for anything that could change globals.
+
+        Returns whether the revision moved, because the persisted record has to
+        move with it: the counter this bumps lives in memory, and a crash
+        between here and the next save leaves only what was written to disk.
 
         Tying this to success made a failed cell's side effects invisible to
         persistence: the kernel does not roll a cell back, so a statement that
@@ -187,17 +191,18 @@ class ExecutionMixin:
         implied "changed nothing".
         """
         if not mutates_namespace:
-            return
+            return False
         if not reached_kernel:
             # Blocked by the safety check, the kernel was dead, or the send
             # itself raised: no statement ran, so nothing changed. Passed in
             # rather than read from the instance, because the probes between
             # the execution and this call use the same field.
-            return
+            return False
         # Bookkeeping, not correctness: a sandbox still being constructed has no
         # revision yet, and refusing to execute over a missing counter would be
         # a worse failure than starting it here.
         self.runtime_revision = int(getattr(self, "runtime_revision", 0) or 0) + 1
+        return True
 
     async def execute(
         self,
@@ -294,10 +299,18 @@ class ExecutionMixin:
                         f"{result.error}\n{contract_error}"
                         if result.error else contract_error
                     )
-            self._note_execution_effect(
+            advanced = self._note_execution_effect(
                 mutates_namespace=mutates_namespace, reached_kernel=reached_kernel
             )
-            if result.success and records_history:
+            # Whatever advanced the revision has to reach the record, or the
+            # two disagree exactly where it matters. A cell that mutated
+            # `adata` and then raised, and a successful mutating cell kept out
+            # of the notebook, both moved the live namespace past the committed
+            # generation -- and both left the persisted record saying
+            # current == committed. A crash there reads back as "current": the
+            # dump would be restored, and reported coherent, without the work
+            # that came after it.
+            if advanced or (result.success and records_history):
                 self.notebook_state.update_runtime_persistence(
                     "live_dirty",
                     current_revision=self.runtime_revision,

@@ -133,20 +133,32 @@ def has_completed_runtime_work(state) -> bool:
     `> 1` is the same signal read correctly -- reaching round 2 means round 1
     finished. `round_results` says the same thing more directly, and a
     generation that committed mid-round is evidence even when no round has
-    finished. Any of the three is enough; the absence of all three means there
-    is nothing yet to have lost.
+    finished.
+
+    So is a revision that moved without ever committing, which is the case the
+    other three all miss: round 1, the kernel has executed cells that changed
+    the namespace, and the save floor has not come round yet. That session has
+    the most to lose, not the least -- none of its work is on disk -- and
+    without this the guard let the graph carry on over an empty kernel.
+
+    Any of the four is enough; the absence of all four means there is nothing
+    yet to have lost.
     """
     if int(getattr(state, "current_round", 0) or 0) > 1:
         return True
     if list(getattr(state, "round_results", None) or []):
         return True
     persistence = getattr(state, "runtime_persistence", None) or {}
-    if isinstance(persistence, dict):
-        return bool(
-            persistence.get("committed_source")
-            and persistence.get("committed_digest")
-        )
-    return False
+    if not isinstance(persistence, dict):
+        return False
+    if persistence.get("committed_source") and persistence.get("committed_digest"):
+        return True
+    # Mirrors `runtime_coherence`'s reading of the same record: a degraded save
+    # leaves the revision it could not write behind in `degraded_from_revision`.
+    return max(
+        int(persistence.get("current_revision") or 0),
+        int(persistence.get("degraded_from_revision") or 0),
+    ) > 0
 
 
 def refresh_runtime_availability(state) -> None:

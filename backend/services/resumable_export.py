@@ -95,6 +95,28 @@ async def _flush_locked(sandbox, state) -> None:
         raise _refuse("flush_failed", "The current runtime and notebook could not be saved.") from exc
 
 
+async def _captured_off_the_loop(session_id: str, state) -> dict:
+    """Hash the dump in a worker, and do not unwind until that worker is done.
+
+    A cancelled `asyncio.to_thread` abandons the thread; it does not stop it.
+    Letting the cancellation through would release the lifecycle claim and the
+    execution lock while two full passes over a multi-gigabyte dump are still
+    running -- so a save could commit a new generation under the reader, and a
+    session deletion could finish while a thread still holds the file open and
+    the bytes on disk. The caller's cancellation is preserved and re-raised
+    once the worker is terminal.
+    """
+    import asyncio
+
+    from backend.utils.asyncio_tasks import await_with_deferred_cancellation
+
+    return await await_with_deferred_cancellation(
+        asyncio.create_task(
+            asyncio.to_thread(_capture_descriptor, session_id, state)
+        )
+    )
+
+
 @asynccontextmanager
 async def frozen_resumable_export(session_id: str, state):
     """Hold execution/save/shutdown exclusion until archive capture has drained.
@@ -121,7 +143,7 @@ async def frozen_resumable_export(session_id: str, state):
             token = claim_initializing_session(session_id)
     try:
         if sandbox is None:
-            yield await asyncio.to_thread(_capture_descriptor, session_id, state)
+            yield await _captured_off_the_loop(session_id, state)
         else:
             async with sandbox._exec_lock:
                 if (live_sandbox(session_id) is not sandbox
@@ -132,7 +154,7 @@ async def frozen_resumable_export(session_id: str, state):
                         or getattr(sandbox, "_session_restore_failed", False)):
                     raise _refuse("runtime_busy", "The live runtime changed before capture.")
                 await _flush_locked(sandbox, state)
-                yield await asyncio.to_thread(_capture_descriptor, session_id, state)
+                yield await _captured_off_the_loop(session_id, state)
     finally:
         if token is not None:
             async def release():
