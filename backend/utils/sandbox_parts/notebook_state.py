@@ -422,6 +422,7 @@ class NotebookState:
         top_offenders: Optional[List[Dict[str, Any]]] = None,
         recommended_action: Optional[str] = None,
         committed_pairing: Optional[Dict[str, Any]] = None,
+        save_seconds: Optional[float] = None,
         persist: bool = True,
     ) -> Dict[str, Any]:
         """Persist the live runtime lifecycle without exposing raw tracebacks."""
@@ -570,6 +571,15 @@ class NotebookState:
                 # would accumulate into the permanent warning 0.55.4 removed.
                 "pair_restore": None,
             })
+            if save_seconds is not None:
+                # Spec B3-2. How long the generation that just reached disk
+                # took to write. It is the number the decision to keep N at 30
+                # turns on -- one save is six to nine minutes at the end of a
+                # long run, with the execution lock held -- and it existed only
+                # in container logs, which do not survive a restart. Written
+                # only on success, beside the other committed_* facts, so it
+                # always describes the last generation that actually landed.
+                self.runtime_persistence["last_save_seconds"] = float(save_seconds)
         elif status == "failed":
             self.runtime_persistence.update({
                 "last_failed_at": now,

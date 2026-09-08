@@ -63,6 +63,28 @@ _PAIRED_COMPONENTS = {
 }
 
 
+def paired_generation_sources(sandbox) -> Dict[str, Path]:
+    """The live files a generation has to be captured beside. Spec B2-1.
+
+    Three, not two: §3.11 -- the executor's own step checkpoint holds its
+    position and its account of what it has already done, and is bound to the
+    generation by nothing else. It is absent at a round boundary reached after
+    the executor finished, and absent is not an error.
+
+    Here rather than in `runtime_save` because it names the same three things
+    `_PAIRED_COMPONENTS` above does, and the two drifting apart is the whole
+    failure mode this pairing exists to prevent.
+    """
+    from backend.utils.checkpoint_paths import checkpoint_sqlite_path
+
+    states = Path(sandbox.notebook_state.state_dir)
+    return {
+        "state": Path(sandbox.notebook_state.state_path),
+        "checkpoint": checkpoint_sqlite_path(states),
+        "executor_checkpoint": states / f"{sandbox.session_id}_bioinfo_checkpoint.json",
+    }
+
+
 def _copy_sqlite_durable(src: Path, dst: Path) -> None:
     """Copy a live SQLite database through its own backup API.
 

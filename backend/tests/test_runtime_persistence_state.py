@@ -1319,3 +1319,52 @@ def test_restore_of_older_committed_generation_is_explicitly_degraded(
     assert persistence["degraded_to_revision"] == 7
     assert persistence["last_attempt_status"] == "failed"
     assert persistence["requires_recompute"] is True
+
+
+def test_a_committed_generation_records_how_long_it_took(tmp_path):
+    """Spec B3-2 ships this with the decision to keep N at 30.
+
+    The duration of one save is the constraint that decision turns on -- six to
+    nine minutes at the end of a long run, with the execution lock held -- and
+    it existed only in container logs, which vanish on restart. Evaluating N
+    had to extrapolate it from two other sessions for exactly that reason.
+    """
+    from backend.utils.sandbox import NotebookState
+
+    state = NotebookState("timed", str(tmp_path))
+    state.update_runtime_persistence(
+        "current", current_revision=7, saved_revision=7,
+        commit_source="regular_save", runtime_digest="c" * 64,
+        save_seconds=124.5,
+    )
+    assert state.runtime_persistence["last_save_seconds"] == 124.5
+
+
+def test_a_failed_attempt_leaves_the_last_good_duration_alone(tmp_path):
+    """It describes the last generation that reached disk, like every other
+    committed_* field beside it."""
+    from backend.utils.sandbox import NotebookState
+
+    state = NotebookState("timed-failure", str(tmp_path))
+    state.update_runtime_persistence(
+        "current", current_revision=7, saved_revision=7,
+        commit_source="regular_save", runtime_digest="c" * 64,
+        save_seconds=124.5,
+    )
+    state.update_runtime_persistence(
+        "failed", current_revision=8, saved_revision=7,
+        error_summary="no space left on device",
+    )
+    assert state.runtime_persistence["last_save_seconds"] == 124.5
+
+
+def test_the_save_path_measures_what_it_records():
+    """A field nothing populates is documentation, not a measurement."""
+    import pathlib as _pathlib
+
+    repo = _pathlib.Path(__file__).resolve().parents[2]
+    source = (
+        repo / "backend" / "utils" / "sandbox_parts" / "runtime_save.py"
+    ).read_text()
+    assert "save_seconds=" in source
+    assert "monotonic()" in source

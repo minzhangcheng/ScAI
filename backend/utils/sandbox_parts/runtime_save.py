@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 import json
+import time
 from typing import Any, Dict
 
 from backend.utils.runtime_names import PRIVATE_EXCLUSION_SCRIPT
@@ -719,24 +720,6 @@ print("__SCAI_EXCLUDED_PRIVATE__:" + _scai_json.dumps(
     return save_code
 
 
-def _paired_sources(sandbox, *, bindings) -> dict:
-    """The live files this generation has to be captured beside. Spec B2-1.
-
-    Three, not two: §3.11 -- the executor's own step checkpoint holds its
-    position and its account of what it has already done, and is bound to the
-    generation by nothing else. It is absent at a round boundary reached after
-    the executor finished, and absent is not an error.
-    """
-    from backend.utils.checkpoint_paths import checkpoint_sqlite_path
-
-    states = bindings.Path(sandbox.notebook_state.state_dir)
-    return {
-        "state": bindings.Path(sandbox.notebook_state.state_path),
-        "checkpoint": checkpoint_sqlite_path(states),
-        "executor_checkpoint": states / f"{sandbox.session_id}_bioinfo_checkpoint.json",
-    }
-
-
 def _reject_incomplete_runtime(context, skipped, result, *, bindings) -> None:
     """Record a failed generation and raise. Always raises.
 
@@ -769,6 +752,7 @@ async def _execute_save(
     *,
     bindings,
 ) -> bool:
+    started = time.monotonic()
     sandbox = context.sandbox
     result = await sandbox._execute_unlocked(
         save_code,
@@ -918,6 +902,7 @@ async def _execute_save(
                     commit_source="regular_save",
                     runtime_digest=target_digest,
                     committed_pairing=context.pairing,
+                    save_seconds=round(time.monotonic() - started, 3),
                 )
 
         commit_outcome: Dict[str, Any] = {
@@ -953,7 +938,7 @@ async def _execute_save(
                                 generation_root=bindings.Path(
                                     sandbox.notebook_state.state_dir
                                 ) / bindings.GENERATION_PAIR_DIRNAME,
-                                paired_sources=_paired_sources(sandbox, bindings=bindings),
+                                paired_sources=bindings.paired_generation_sources(sandbox),
                                 authoritative_pkl_names=saved_names,
                                 fault_hook=getattr(
                                     sandbox, "_regular_save_fault_hook", None
