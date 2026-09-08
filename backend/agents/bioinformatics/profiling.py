@@ -279,7 +279,7 @@ class ProfilingMixin:
         return (getattr(result, "output", "") or "")[:8000] or "(no output)"
 
 
-def _upload_reference(file_path: str) -> str:
+def _upload_reference(file_path: str, session_id: str) -> str:
     """Name an input the way a replayable cell must reference it.
 
     The absolute path is what `file_path` holds, and handing it to the model is
@@ -293,15 +293,22 @@ def _upload_reference(file_path: str) -> str:
     the uploads root is reported as-is: mislabelling it would be worse than
     naming it.
     """
-    from pathlib import PurePosixPath
+    from pathlib import Path
+
+    from backend.config import get_session_uploads
 
     text = str(file_path or "")
-    marker = "/uploads/"
-    index = text.find(marker)
-    if index == -1:
+    if not text or not session_id:
         return text
-    relative = PurePosixPath(text[index + len(marker):])
-    return f"_UPLOADS_DIR / {str(relative)!r}"
+    # Against this session's actual uploads root, not the first "/uploads/" in
+    # the string: a data directory that itself contains one -- /mnt/uploads/scai
+    # -- split the path at the wrong component and produced a reference to a
+    # file that does not exist.
+    try:
+        relative = Path(text).relative_to(get_session_uploads(session_id))
+    except ValueError:
+        return text
+    return f"_UPLOADS_DIR / {relative.as_posix()!r}"
 
 
 def _file_listing(state: Any) -> str:
@@ -316,7 +323,7 @@ def _file_listing(state: Any) -> str:
         lines.append(
             f"  - {data_file.filename} | type={data_file.data_type} | "
             f"group={getattr(group, 'name', '(ungrouped)')} | "
-            f"path={_upload_reference(data_file.file_path)}"
+            f"path={_upload_reference(data_file.file_path, getattr(state, 'id', ''))}"
         )
     if len(lines) == 1:
         lines.append("  (none)")

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.2 · **Last updated**: 2026-09-08
+**Version**: 0.55.3 · **Last updated**: 2026-09-08
 
 ## 1. Runtime Architecture
 
@@ -10,7 +10,7 @@ ScAI is a React/Vite frontend backed by FastAPI, LangGraph, and local Jupyter ex
 
 The workflow implementation is split across mixins under `backend/workflow/`. `SingleCellAnalysisWorkflow` in `core.py` composes routing, context, messaging, callbacks, annotation, planning, agent nodes, post-execution review, synthesis, initialization, graph construction, reporting, and integration behavior. The LangGraph internal entry node is `restore_entry`; ordinary runs route from it to `initialize_round`. It is an implementation detail used to select the correct continuation path, not a user-facing workflow phase.
 
-`WORKFLOW_GRAPH_NODES` in `backend/constants.py` is the authoritative registry for the 16 graph nodes: `restore_entry`, `initialize_round`, `pi_planning`, `planning_dialogue`, `user_review_gate`, `biochemistry_analysis`, `pathology_analysis`, `bioinformatics_analysis`, `literature_research`, `pi_synthesis`, `wait_for_user_input`, `check_convergence`, `integration_synthesis`, `generate_final_report`, `generate_graphic_abstract`, and `generate_detailed_report`. The principal route is planning, optional modality analyses, Bioinformatics Stage 1/2, literature grounding, PI synthesis, user feedback, and convergence routing. Conditional edges can return a plan for revision, begin another round, enter integration, or proceed to reporting. Planning failure can terminate directly at `END`; a blocked final report can also terminate before graphic-abstract and detailed-report generation.
+`WORKFLOW_GRAPH_NODES` in `backend/constants.py` is the authoritative registry for the 17 graph nodes: `restore_entry`, `initialize_round`, `data_profiling`, `pi_planning`, `planning_dialogue`, `user_review_gate`, `biochemistry_analysis`, `pathology_analysis`, `bioinformatics_analysis`, `literature_research`, `pi_synthesis`, `wait_for_user_input`, `check_convergence`, `integration_synthesis`, `generate_final_report`, `generate_graphic_abstract`, and `generate_detailed_report`. The principal route is planning, optional modality analyses, Bioinformatics Stage 1/2, literature grounding, PI synthesis, user feedback, and convergence routing. Conditional edges can return a plan for revision, begin another round, enter integration, or proceed to reporting. Planning failure can terminate directly at `END`; a blocked final report can also terminate before graphic-abstract and detailed-report generation.
 
 ## 2. Repository Layout
 
@@ -32,7 +32,7 @@ scai/
 
 | Path | Purpose |
 |------|---------|
-| `main.py` | FastAPI app setup, middleware, lifespan tasks, and registration of 19 mounted routers. |
+| `main.py` | FastAPI app setup, middleware, lifespan tasks, and registration of 18 mounted routers. |
 | `constants.py` | Application version, graph-node registry, node-to-agent mappings, workflow signals, and shared enums. |
 | `workflow/` | LangGraph orchestration split into the 13 mixins composed by `core.py`; `graph.py` declares nodes and edges. |
 | `agents/` | PI, Bioinformatics, Pathology, Biochemistry, Literature, Painter, Supervisor, and Technique implementations, with large agents split behind stable facades. |
@@ -90,7 +90,7 @@ Bioinformatics execution uses Stage 1 for broad QC, clustering, and annotation, 
 
 | Where                                   | What                                                                                                           |
 |-----------------------------------------|----------------------------------------------------------------------------------------------------------------|
-| `backend/state.py` (in-process)         | Process-local registries for sessions, workflows, analysis/chat/report tasks, WebSockets, exports/imports, locks, access times, and internal checkpoint jobs.              |
+| `backend/state.py` (in-process)         | Process-local registries for sessions, workflows, analysis/chat/report tasks, WebSockets, exports/imports, locks, and access times.              |
 | Per-session disk directory | `session.json`, workspace files, uploads, state/checkpoint data, reports, and logs. |
 | SQLite | Users/auth, encrypted user LLM configuration, and application metadata. |
 | Frontend `localStorage` | Versioned Zustand UI persistence and JWT storage; server state is reloaded after migration. |
@@ -161,8 +161,9 @@ that the kernel has always performed.
 
 At each persistence boundary the sandbox dumps the kernel's supported top-level
 values to `<session>/states/<id>_session.pkl`, with an HMAC signature under
-`<data>/integrity/<id>/` and a `runtime_manifest.json` recording the revision,
-the saved and skipped names, and the serializer version. The write goes through
+`<data>/integrity/<id>/` and a signed generation manifest beside the dump at
+`<session>/states/<id>_session.runtime.json`, recording the revision, the saved
+and skipped names, and the serializer version. The write goes through
 `_commit_pkl_transaction`, a journalled multi-component transaction whose
 components (pkl, signature, metadata, runtime manifest, manifest signature)
 commit together or not at all; `recover_regular_save_transaction` drives an
@@ -258,10 +259,13 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 **`analysis.round_wait_seconds` also governs unattended recovery.** Every HITL
 gate reads this one setting, including the LLM-failure gate that a recoverable
 upstream failure parks on — not just the between-round checkpoints its name
-suggests. `0` returns immediately and the gate auto-retries (up to three times,
-then skips the node); a positive value waits that many seconds plus a 60-second
-delivery buffer before doing the same; `-1` means manual and blocks
-**indefinitely** waiting for a human. An unattended run configured with `-1`
+suggests. `0` returns immediately and the gate auto-retries (up to three times);
+a positive value waits that many seconds plus a 60-second delivery buffer before
+doing the same; `-1` means manual and blocks **indefinitely** waiting for a
+human. What happens once the retries are spent depends on the node: most skip,
+but `bioinformatics_analysis` requires explicit resolution and parks with its
+round, stage and approved plan intact rather than abandoning them, so an
+unattended run can still stop there. An unattended run configured with `-1`
 therefore stops for good on the first transient LLM failure, and the failure
 rate is not negligible — a stream that ends without a terminal response was
 observed roughly 0.3% of calls. Submit `0` for headless work. The client
@@ -275,6 +279,37 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.55.x — (2026-09-08 onward)**
+
+- `0.55.3` — Four more defects from a second review of the same release, all
+  of them the persisted record disagreeing with what actually happened.
+  Any execution that advances the runtime revision now advances the record on
+  disk with it. Two kinds did not: a cell that mutated a variable and then
+  raised — the kernel does not roll a cell back — and a successful mutating
+  cell kept out of the notebook. Both moved the live namespace past the
+  committed generation while the record still said the two matched, so a crash
+  there read back as coherent and the older dump would have been restored, and
+  reported current, without the work that followed it.
+  A first round that has run cells but never saved now counts as work a loss
+  would destroy. Only completed rounds and a committed generation did, so a
+  kernel death before the first save left the graph running over an empty
+  kernel — the exact outcome that guard exists to prevent, and the case with
+  the most to lose rather than the least, because none of its work is on disk.
+  A cancelled export capture is drained instead of abandoned. Cancelling
+  `asyncio.to_thread` abandons the thread rather than stopping it, so the
+  freeze unwound — releasing the lifecycle claim and the execution lock — while
+  two full passes over a multi-gigabyte dump were still running, and a session
+  deletion could finish while a thread still held the file open.
+  An input path is named against the session's own uploads directory rather
+  than the first `/uploads/` in the string. An installation whose data
+  directory contains one, `/mnt/uploads/scai`, had the path cut at the wrong
+  component, and the model was handed a file that does not exist.
+  Each fix ships a regression test proven to fail on the tree without it.
+  `backend-full` passed `5682` with `32` skipped and the same `41` known
+  failures, with the evidence differ reporting nothing introduced and nothing
+  fixed against the `0.55.2` release run; the `kernel` profile passed `161`,
+  and all eight version-consistency checks passed. The frontend is unchanged
+  and was not re-run. No image build, push, deployment, or historical-session
+  repair was performed.
 
 - `0.55.2` — Closes six defects a review of `0.55.1` found, five of them
   places where the Snapshot V2 removal left a guard reading the wrong thing.
