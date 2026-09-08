@@ -472,6 +472,5 @@ except Exception as e:
         raise RuntimeError(
             f"Sandbox restore failed for session {sandbox.session_id}: {detail}. "
             f"Previous kernel variable state is unavailable. Re-run the analysis "
-            f"from your data to rebuild kernel state; snapshot restore is only "
-            f"available where Snapshot V2 is enabled."
+            f"from your data to rebuild kernel state."
         )

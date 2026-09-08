@@ -78,6 +78,15 @@ def build_kernel_launch_environment(sandbox, *, bindings) -> Dict[str, str]:
     _expose_celltypist_cache(isolated_dirs["CELLTYPIST_FOLDER"])
 
     env = os.environ.copy()
+    # SCAI_REPLAY_* is how `scripts/scai-notebook-replay` tells the bootstrap to
+    # relocate the workspace, state directory and uploads root, and how it
+    # declares itself to the fail-closed guards. A kernel inherits this
+    # process's environment, so one of these leaking into the server would
+    # silently redirect every session's kernel and turn every guard below into
+    # a degrade. The launcher owns these paths; nothing outside may propose
+    # them.
+    for replay_var in [name for name in env if name.startswith("SCAI_REPLAY_")]:
+        del env[replay_var]
     env.update({name: str(path) for name, path in isolated_dirs.items()})
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(startup_dir) + (
@@ -395,18 +404,29 @@ def _capturing_show(*args, **kwargs):
 
 plt.show = _capturing_show  # Baseline capturing_show; referenced by defensive restore in _TPL_NOOP_INSTALL
 
+# A replay declares itself by setting SCAI_REPLAY_WORKSPACE -- the same variable
+# this cell reads above for the workspace root. Two guards use it to accept
+# outside a ScAI installation what has to stay fail-closed inside one.
+_scai_is_replay = bool(os.environ.get('SCAI_REPLAY_WORKSPACE'))
+
 # Keep publication-finalization capabilities outside IPython's mutable user_ns.
 # The startup module accepts this tuple once and exposes no mutation API.
 #
 # Optional so this cell -- which is cell 0 of the notebook -- can also run when
 # replayed outside ScAI, where the launcher has not put `kernel_startup` on the
-# path. Inside ScAI the module is always there and this is exactly the code that
-# always ran; the guard changes nothing here. Outside, the capability holder has
-# nothing to hold: it exists so publication finalisation cannot be reached
-# through the user namespace, which is a production concern, not a replay one.
+# path. Outside, the capability holder has nothing to hold: it exists so
+# publication finalisation cannot be reached through the user namespace, which
+# is a production concern, not a replay one.
+#
+# Inside ScAI the module is always there, so its absence is a broken
+# installation and not a condition to degrade through: without it nothing
+# captures figures or holds the finalisation capability, and the run would look
+# healthy while producing none. Fail closed, like the adapters below.
 try:
     import scai_kernel_trust as _scai_kernel_trust
 except ImportError:
+    if not _scai_is_replay:
+        raise
     _scai_kernel_trust = None
 _scai_kernel_shell = get_ipython()
 if _scai_kernel_trust is not None:
@@ -443,12 +463,10 @@ except ImportError:
 # numbers rather than an error. Installation is therefore FAIL-CLOSED: a missing
 # adapter aborts the bootstrap.
 #
-# The single exception is a replay, which declares itself by setting
-# SCAI_REPLAY_WORKSPACE -- the same variable this cell reads above for the
-# workspace root. There the adapters may legitimately be absent, the alternative
-# is not running at all, and the harness reports the replay as degraded. Every
-# other kernel, production included, still raises.
-_scai_is_replay = bool(os.environ.get('SCAI_REPLAY_WORKSPACE'))
+# The single exception is a replay (`_scai_is_replay`, set above): there the
+# adapters may legitimately be absent, the alternative is not running at all,
+# and the harness reports the replay as degraded. Every other kernel,
+# production included, still raises.
 for _scai_compat_name in (
     "scai_pydeseq2_compat", "scai_scanpy_compat", "scai_arboreto_compat",
 ):

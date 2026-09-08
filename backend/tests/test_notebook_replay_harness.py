@@ -363,3 +363,35 @@ def test_replay_report_does_not_pass_when_extraction_is_missing(harness, tmp_pat
 def test_extraction_helpers_are_not_counted_as_user_outputs(harness):
     payload = _extract(harness, outputs=["_scai_replay_fingerprint", "_scai_declared_outputs"])
     assert payload["persistent_outputs"] == []
+
+
+def test_the_replay_workspace_is_absolute_before_it_becomes_a_cwd(harness, tmp_path, monkeypatch):
+    """A relative --workspace would nest once per read.
+
+    The workspace is handed to the kernel twice: as its cwd, and as
+    SCAI_REPLAY_WORKSPACE, which the bootstrap resolves from inside that cwd.
+    Relative, the second read lands one level down, and `_UPLOADS_DIR`, which
+    is the workspace's *parent*, lands somewhere else entirely.
+    """
+    import json
+    from types import SimpleNamespace
+
+    fingerprint = tmp_path / "fingerprint.json"
+    fingerprint.write_text(json.dumps(_extract(harness, outputs=[])))
+    seen = {}
+
+    def capture(cells, workspace, declared_outputs=None):
+        seen["workspace"] = workspace
+        return [], {}
+
+    monkeypatch.setattr(harness, "read_cells", lambda _: [])
+    monkeypatch.setattr(harness, "run_in_kernel", capture)
+    monkeypatch.chdir(tmp_path)
+
+    harness.cmd_replay(SimpleNamespace(
+        session_dir=str(tmp_path), fingerprint=str(fingerprint),
+        workspace="relative-workspace", report=str(tmp_path / "report.json"),
+    ))
+
+    assert seen["workspace"].is_absolute(), seen["workspace"]
+    assert seen["workspace"] == tmp_path / "relative-workspace"

@@ -136,6 +136,22 @@ def is_sandbox_pickle(name: str) -> bool:
     base = name.rsplit("/", 1)[-1]
     return bool(re.match(r".*_session\.pkl(\.zst)?$", base) or base == "session.pkl")
 
+_QUARANTINE_SUFFIX = re.compile(r"\.quarantine(\.\d+)?$")
+
+def _live_generation_basename(name: str) -> str:
+    """The basename a retired generation file had before it was set aside.
+
+    ``retire_live_runtime`` renames a generation to ``<name>.quarantine`` (then
+    ``.quarantine.1``, ``.2``) rather than deleting it, because the bytes are
+    the only copy. The retired file is still a dill dump and still the same
+    generation's manifest, so every predicate that governs where those may
+    travel has to see through the suffix. Matching the live name only meant a
+    results-only export shipped a whole retired dump, and an untrusted import
+    wrote one to disk -- past the X-Trust grant that exists to stop exactly
+    that.
+    """
+    return _QUARANTINE_SUFFIX.sub("", name.rsplit("/", 1)[-1])
+
 def is_runtime_generation_name(name: str) -> bool:
     """True for any file that belongs to the committed runtime generation.
 
@@ -145,8 +161,10 @@ def is_runtime_generation_name(name: str) -> bool:
     reports "inconsistent" -- for a session whose actual condition is that it
     carries no runtime at all. Export and import share this predicate so the
     parts cannot separate.
+
+    Retired generations count too; see ``_live_generation_basename``.
     """
-    base = name.rsplit("/", 1)[-1]
+    base = _live_generation_basename(name)
     if is_sandbox_pickle(base):
         return True
     return bool(re.match(r".*_session\.runtime\.json(\.sig)?$", base))
@@ -163,9 +181,10 @@ def is_runtime_h5ad_name(name: str) -> bool:
     "h5ad sidecar missing", which is a brick rather than a degrade.
 
     Case-folded for the same reason as the checkpoint filter: the readers spell
-    these names in lower case.
+    these names in lower case. Retired sidecars count too; see
+    ``_live_generation_basename``.
     """
-    base = name.rsplit("/", 1)[-1]
+    base = _live_generation_basename(name)
     return base == RUNTIME_H5AD_MANIFEST_FILENAME or base.casefold().endswith(".h5ad")
 
 _RETIRED_SNAPSHOT_SESSION_ROOTS = frozenset({

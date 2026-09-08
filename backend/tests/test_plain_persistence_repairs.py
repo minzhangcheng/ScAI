@@ -377,3 +377,77 @@ async def test_cold_resume_refusal_persists_rerun_projection(monkeypatch):
     assert state.runtime_restore_status == "unavailable"
     save.assert_awaited_once_with(state.id, state, force=True)
     owner.signal_resume.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_start_time_unavailable_verdict_reaches_the_graphs_own_state():
+    """The mark and the guard must not read two different objects.
+
+    `_mark_runtime_unavailable_if_work_exists` runs inside `sandbox.start()`
+    and can only reach the cached AnalysisState in `backend.state.sessions`.
+    The graph carries its own -- `_restore_entry` deep-copies one -- and the two
+    coincide only from the next state sync onward. Reading the graph's object
+    alone let the run continue over a namespace that does not exist.
+    """
+    from backend.agents.bioinformatics import executor_runtime
+    from backend.models.schemas import AnalysisState
+    from backend.services.runtime_recompute import RuntimeUnavailable
+    from backend.state import sessions as live_sessions
+
+    session_id = f"identity-probe-{uuid.uuid4().hex[:8]}"
+    cached = AnalysisState(id=session_id, user_id="u")
+    cached.runtime_restore_status = "unavailable"
+    graph_state = AnalysisState(id=session_id, user_id="u")
+    assert graph_state is not cached
+    assert graph_state.runtime_restore_status == "complete"
+
+    agent = MagicMock()
+    agent.sandbox.km = object()
+    agent.sandbox.session_id = session_id
+    agent.sandbox.sync_runtime_persistence_state.return_value = {}
+    agent._notify = AsyncMock()
+
+    live_sessions[session_id] = cached
+    try:
+        with pytest.raises(RuntimeUnavailable):
+            await executor_runtime.prepare_sandbox(
+                agent, graph_state,
+                bindings=SimpleNamespace(
+                    logger=logging.getLogger(__name__),
+                    CodeExecution=MagicMock(),
+                ),
+            )
+    finally:
+        live_sessions.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_an_authorized_recompute_still_runs_on_the_empty_namespace():
+    """The re-run the user asked for is the one way past that guard."""
+    from backend.agents.bioinformatics import executor_runtime
+    from backend.models.schemas import AnalysisState
+    from backend.state import sessions as live_sessions
+
+    session_id = f"identity-probe-{uuid.uuid4().hex[:8]}"
+    cached = AnalysisState(id=session_id, user_id="u")
+    cached.runtime_restore_status = "unavailable"
+    graph_state = AnalysisState(id=session_id, user_id="u")
+    graph_state.runtime_recompute_pending = True
+
+    agent = MagicMock()
+    agent.sandbox.km = object()
+    agent.sandbox.session_id = session_id
+    agent.sandbox.sync_runtime_persistence_state.return_value = {}
+    agent._notify = AsyncMock()
+
+    live_sessions[session_id] = cached
+    try:
+        await executor_runtime.prepare_sandbox(
+            agent, graph_state,
+            bindings=SimpleNamespace(
+                logger=logging.getLogger(__name__),
+                CodeExecution=MagicMock(),
+            ),
+        )
+    finally:
+        live_sessions.pop(session_id, None)

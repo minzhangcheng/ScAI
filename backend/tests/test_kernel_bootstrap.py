@@ -94,7 +94,7 @@ async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
         repr(str(sandbox.notebook_state.state_dir)), repr("<state-dir>")
     )
     assert hashlib.sha256(normalized_common.encode()).hexdigest() == (
-        "0ebf1f31fd3b4e94a82ee2135113045a96a69bda720cc1f95d957ab39900c392"
+        "e4c59cf90d24b18b37a6aa7403488d92548a6fe83134b614b791bf173e6501b2"
     )
     assert hashlib.sha256(normalized_path.encode()).hexdigest() == (
         "03701773662b9ac96077db49e3ee5e37558053c21601e64d5ed94a571cde9e86"
@@ -184,6 +184,79 @@ async def test_bootstrap_adapter_installation_is_fail_closed(tmp_path):
             "the re-raise is not conditioned on a declared replay, so either "
             "production degrades silently or a replay cannot run"
         )
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_trust_module_is_fail_closed(tmp_path):
+    """A missing `scai_kernel_trust` must abort the bootstrap too.
+
+    It holds the publication-finalization capability and installs the figure
+    capture, so a kernel that comes up without it looks healthy and produces
+    nothing -- the same invisible failure mode as a missing compat adapter, and
+    it gets the same treatment. A replay, which declares itself, still degrades.
+    """
+    sandbox = _sandbox(tmp_path)
+    sandbox._execute_unlocked = AsyncMock(
+        side_effect=[
+            CodeExecutionResult(success=True),
+            CodeExecutionResult(success=True),
+        ]
+    )
+    await sandbox._initialize_kernel()
+    tree = ast.parse(sandbox._execute_unlocked.await_args_list[0].args[0])
+
+    handlers = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        imports_trust = any(
+            isinstance(inner, ast.Import)
+            and any(alias.name == "scai_kernel_trust" for alias in inner.names)
+            for inner in ast.walk(node)
+        )
+        if not imports_trust:
+            continue
+        handlers.extend(
+            handler for handler in node.handlers
+            if isinstance(handler.type, ast.Name)
+            and handler.type.id in ("ImportError", "ModuleNotFoundError")
+        )
+
+    assert handlers, "the trust import is not guarded at all"
+    for handler in handlers:
+        assert [n for n in ast.walk(handler) if isinstance(n, ast.Raise)], (
+            "the trust module's absence is swallowed without re-raising"
+        )
+        assert [
+            n for n in ast.walk(handler)
+            if isinstance(n, ast.If)
+            and any(
+                isinstance(sub, ast.Name) and sub.id == "_scai_is_replay"
+                for sub in ast.walk(n.test)
+            )
+        ], (
+            "the re-raise is not conditioned on a declared replay, so either "
+            "production degrades silently or a replay cannot run"
+        )
+
+
+def test_launch_environment_drops_replay_redirection(tmp_path, monkeypatch):
+    """A production kernel must not inherit the replay harness's variables.
+
+    The bootstrap reads SCAI_REPLAY_* for the workspace, state directory and
+    uploads root, and treats SCAI_REPLAY_WORKSPACE as the declaration that
+    turns every fail-closed guard into a degrade. The kernel inherits this
+    process's environment, so one of them set on the server would redirect
+    every session at once.
+    """
+    monkeypatch.setenv("SCAI_REPLAY_WORKSPACE", "/tmp/somewhere-else")
+    monkeypatch.setenv("SCAI_REPLAY_STATE_DIR", "/tmp/other-states")
+    monkeypatch.setenv("SCAI_REPLAY_UPLOADS_DIR", "/tmp/other-uploads")
+
+    sandbox = _sandbox(tmp_path)
+    env = sandbox._kernel_launch_environment()
+
+    assert [name for name in env if name.startswith("SCAI_REPLAY_")] == []
 
 
 def test_the_replay_flag_is_the_only_way_past_fail_closed(tmp_path):

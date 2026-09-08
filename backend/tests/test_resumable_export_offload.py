@@ -28,12 +28,17 @@ def test_both_capture_points_hand_the_hashing_to_a_thread():
 
 
 @pytest.mark.asyncio
-async def test_the_loop_keeps_running_while_the_descriptor_is_captured():
-    """Behavioural, not just structural.
+async def test_the_loop_keeps_running_while_the_descriptor_is_captured(monkeypatch):
+    """Behavioural, and through the production call site.
 
-    A source guard cannot tell a thread hop from a comment about one, so this
-    runs a slow capture and checks the loop serviced another task meanwhile.
+    A source guard cannot tell a thread hop from a comment about one. Driving
+    `asyncio.to_thread` directly cannot either -- that only proves the standard
+    library works, and stays green with the offload removed. So this enters the
+    real freeze on its cold path with a slow stand-in bound where the capture
+    is looked up, and checks the loop serviced another task meanwhile.
     """
+    from backend.services import resumable_export as export
+
     ticks = 0
 
     async def heartbeat():
@@ -49,14 +54,20 @@ async def test_the_loop_keeps_running_while_the_descriptor_is_captured():
         time.sleep(0.3)
         return {"pairing": None, "manifest": {}, "notebooks": {}}
 
+    monkeypatch.setattr(export, "_capture_descriptor", slow_capture)
+
     beat = asyncio.create_task(heartbeat())
     try:
         await asyncio.sleep(0.02)
         before = ticks
-        await asyncio.to_thread(slow_capture, "s", None)
-        after = ticks
+        async with export.frozen_resumable_export(
+            "offload-probe-session", None
+        ) as descriptor:
+            after = ticks
     finally:
         beat.cancel()
+
+    assert descriptor == {"pairing": None, "manifest": {}, "notebooks": {}}
 
     assert after - before >= 5, (
         f"the loop only advanced {after - before} ticks during a 0.3 s capture; "

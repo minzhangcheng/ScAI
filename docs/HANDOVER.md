@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.1 · **Last updated**: 2026-09-08
+**Version**: 0.55.2 · **Last updated**: 2026-09-08
 
 ## 1. Runtime Architecture
 
@@ -275,6 +275,40 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.55.x — (2026-09-08 onward)**
+
+- `0.55.2` — Closes six defects a review of `0.55.1` found, five of them
+  places where the Snapshot V2 removal left a guard reading the wrong thing.
+  A retired runtime generation is still that generation: `retire_live_runtime`
+  renames a dump to `.quarantine` rather than deleting it, and the export and
+  import filters matched only the live spelling, so a results-only archive
+  shipped a whole retired dump and an untrusted import wrote one to disk past
+  the `X-Trust` grant that exists to stop exactly that. The kernel's trust
+  module is now fail-closed like the compatibility adapters beside it: its
+  absence aborts the bootstrap unless the kernel has declared itself a replay,
+  where before a broken installation produced a kernel that looked healthy,
+  captured no figures and held no finalization capability. A production kernel
+  no longer inherits `SCAI_REPLAY_*` from the server process, so a stray
+  variable can no longer redirect every session's workspace, state directory
+  and uploads root, nor turn those fail-closed guards into degrades. The replay
+  harness resolves its workspace before handing it to the kernel as both a
+  working directory and an environment variable, which a relative `--workspace`
+  made nest. A start-time "no runtime could be restored" verdict is now seen
+  through the graph's own `AnalysisState` as well as the cached one, which are
+  distinct objects between state syncs; reading only the graph's let a run
+  continue over a namespace that does not exist. A restore failure no longer
+  tells the user to reach for a subsystem this build removed.
+  Also removed: ten request/response models for routes that no longer exist,
+  two process-wide snapshot job registries nothing writes, and the session
+  deletion sweep over one of them. The export freeze's behavioural test now
+  drives the real capture point instead of `asyncio.to_thread` itself, which
+  stayed green with the offload removed.
+  Each of the five behaviour fixes ships a regression test proven to fail on
+  the tree without it. `backend-full` passed `5676` with `32` skipped and the
+  same `41` known failures, with the evidence differ reporting nothing
+  introduced and nothing fixed against the `0.55.1` release run; the `kernel`
+  profile passed `161`, and all eight version-consistency checks passed. The
+  frontend is unchanged and was not re-run. No image build, push, deployment,
+  or historical-session repair was performed.
 
 - `0.55.1` — Replaces Snapshot V2 with plain runtime persistence, and merges
   `main` at `0.54.1`. A session now keeps one signed runtime dump instead of a

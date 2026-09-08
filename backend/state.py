@@ -149,13 +149,6 @@ detailed_reports: Dict[str, Any] = {}
 # before removing a session tree or permitting same-ID reuse.
 detailed_report_tasks: Dict[str, asyncio.Task] = {}
 
-# Snapshot V2 capture jobs: job_id -> status dict
-snapshot_jobs: Dict[str, Any] = {}
-
-# Snapshot V2 restore jobs: transaction_id -> RestoreJobHandle
-# Shared process-wide so cancel/status work across independent HTTP requests.
-snapshot_restore_jobs: Dict[str, Any] = {}
-
 
 def has_live_session_task(session_id: str) -> bool:
     """Whether any registry holds an unfinished task for this session.
