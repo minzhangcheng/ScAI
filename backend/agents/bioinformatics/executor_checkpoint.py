@@ -10,14 +10,27 @@ def validate_checkpoint(
     current_round: int,
     planning_stage: str,
     committed_revision: int | None = None,
+    exact_revision: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     recorded_revision = checkpoint.get("runtime_revision")
-    if (
+    behind_or_mismatched = (
         committed_revision is not None
         and recorded_revision is not None
-        and int(recorded_revision) < int(committed_revision)
-    ):
+        and (
+            int(recorded_revision) < int(committed_revision)
+            or (
+                # The namespace was just moved back onto this generation
+                # (B2-2), so "ahead" no longer means a live kernel that has
+                # carried on -- it means a position from work the restore
+                # discarded, and resuming there would skip the steps that
+                # rebuilt it.
+                exact_revision
+                and int(recorded_revision) != int(committed_revision)
+            )
+        )
+    )
+    if behind_or_mismatched:
         # Behind the committed generation means the namespace moved past this
         # position: something restored or replaced the runtime after the
         # checkpoint was written, and resuming would replay against variables
@@ -30,7 +43,7 @@ def validate_checkpoint(
         # resume. Absent is not an error either: every checkpoint written before
         # this field existed has none, and absence is not evidence of mismatch.
         errors.append(
-            f"runtime_revision behind the committed generation: "
+            f"runtime_revision does not belong to the committed generation: "
             f"checkpoint={recorded_revision}, committed={committed_revision}"
         )
     step_number = checkpoint.get("step_number")
@@ -125,6 +138,10 @@ async def load_checkpoint(
                     committed_revision=(
                         getattr(state, "runtime_persistence", None) or {}
                     ).get("committed_revision"),
+                    exact_revision=(
+                        getattr(state, "runtime_pair_restored_revision", None)
+                        is not None
+                    ),
                 )
 
                 if not validation_errors:

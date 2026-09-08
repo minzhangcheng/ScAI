@@ -235,6 +235,12 @@ class AnalysisState(BaseModel):
     # bioinformatics data context so the agent reloads its inputs instead of
     # referencing variables from a session it can no longer see.
     runtime_recompute_pending: bool = False
+    #: Set when a run was resumed onto a captured generation pair (B2-2),
+    #: carrying the revision restored. The executor uses it to refuse a step
+    #: checkpoint that is not that generation's -- ordinarily a checkpoint
+    #: ahead of the committed revision is normal, but not when the namespace
+    #: was just moved back to it. One-shot; the bioinformatics node clears it.
+    runtime_pair_restored_revision: Optional[int] = None
 
     # Audit reason when a session is terminated (e.g. snapshot_failure).
     termination_reason: Optional[str] = None

@@ -129,6 +129,107 @@ async def test_send_failure_no_longer_marks_dirty():
     assert sb.runtime_revision == 0
 
 
+def _committed_pair(sid, revision):
+    """A generation pair as B2-1's commit leaves it."""
+    import json as _json
+    import sqlite3
+
+    from backend.config import get_session_states
+
+    states = get_session_states(sid)
+    pair = states / "generation" / str(revision)
+    pair.mkdir(parents=True, exist_ok=True)
+    (pair / "state.json").write_text(_json.dumps({"session_id": sid}))
+    with sqlite3.connect(pair / "checkpoints.sqlite") as conn:
+        conn.execute("CREATE TABLE checkpoints (thread_id TEXT, blob TEXT)")
+        conn.execute("INSERT INTO checkpoints VALUES (?, 'paired')", (sid,))
+    (pair / "executor_checkpoint.json").write_text(
+        _json.dumps({"step_number": 20, "runtime_revision": revision})
+    )
+    return states
+
+
+def _stale_persistence(committed, current):
+    return {
+        "status": "live_dirty",
+        "current_revision": current,
+        "saved_revision": committed,
+        "committed_revision": committed,
+        "committed_source": "regular_save",
+        "committed_digest": "a" * 64,
+        "last_attempt_status": "succeeded",
+        "last_attempt_revision": committed,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_stale_generation_with_a_pair_is_restored_not_retired(monkeypatch):
+    """Spec B2-2: the committed generation is healthy after a crash.
+
+    What made it unusable is that the state and both positions moved past it,
+    which after any interruption is always true (§3.1). Retiring it there is
+    what turned "at most one round or N minutes at risk" into "re-run from the
+    input files".
+    """
+    from backend.models.schemas import AnalysisState
+    from backend.routes import lifecycle
+    from backend.utils.runtime_apply import _live_pkl
+
+    sid = str(uuid.uuid4())
+    states = _committed_pair(sid, 44)
+    live_checkpoint = states / "checkpoints.sqlite"
+    live_checkpoint.write_bytes(b"position the crash left behind")
+    _live_pkl(sid).write_bytes(b"the committed generation")
+
+    state = AnalysisState(
+        id=sid, user_id="u1", current_round=2, status="paused",
+        runtime_persistence=_stale_persistence(44, 61),
+    )
+    monkeypatch.setattr(lifecycle, "require_session_ownership", AsyncMock(return_value=state))
+    monkeypatch.setattr(lifecycle, "async_save_session", AsyncMock())
+    monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
+
+    await lifecycle.run_analysis(sid, SimpleNamespace(state=SimpleNamespace(user_id="u1")))
+
+    assert _live_pkl(sid).exists(), "a healthy generation must not be retired"
+    assert not state.runtime_recompute_pending
+    assert state.runtime_pair_restored_revision == 44
+
+    import sqlite3
+
+    with sqlite3.connect(live_checkpoint) as conn:
+        assert conn.execute("SELECT blob FROM checkpoints").fetchone()[0] == "paired"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_generation_without_a_pair_still_retires(monkeypatch):
+    """Retirement is the fallback, not the default, and must stay reachable."""
+    from backend.config import get_session_states
+    from backend.models.schemas import AnalysisState
+    from backend.routes import lifecycle
+    from backend.utils.runtime_apply import _live_pkl
+
+    sid = str(uuid.uuid4())
+    states = get_session_states(sid)
+    states.mkdir(parents=True, exist_ok=True)
+    (states / "checkpoints.sqlite").write_bytes(b"checkpoint")
+    _live_pkl(sid).write_bytes(b"generation")
+
+    state = AnalysisState(
+        id=sid, user_id="u1", current_round=2, status="paused",
+        runtime_persistence=_stale_persistence(44, 61),
+    )
+    monkeypatch.setattr(lifecycle, "require_session_ownership", AsyncMock(return_value=state))
+    monkeypatch.setattr(lifecycle, "async_save_session", AsyncMock())
+    monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
+
+    await lifecycle.run_analysis(sid, SimpleNamespace(state=SimpleNamespace(user_id="u1")))
+
+    assert not _live_pkl(sid).exists()
+    assert state.runtime_recompute_pending
+    assert state.runtime_pair_restored_revision is None
+
+
 @pytest.mark.asyncio
 async def test_rerun_now_retires_checkpoint_before_choosing_intent(monkeypatch):
     from backend.config import get_session_states

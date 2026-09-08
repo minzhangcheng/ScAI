@@ -21,6 +21,13 @@ _EXCLUDED_FIELDS = {
     # the bioinformatics node; the client already learns the situation from
     # runtime_restore_status / runtime_restore_warning.
     "runtime_recompute_pending",
+    # The same shape, for the opposite outcome (B2-2): set by POST /run when it
+    # resumed onto a captured generation pair instead of retiring it, read only
+    # by the executor's checkpoint validation, and cleared by the same node. A
+    # client that needs to know what the restore cost reads runtime_persistence,
+    # which carries the committed revision and its timestamp; a one-shot
+    # revision number on the state would be stale by the time it rendered.
+    "runtime_pair_restored_revision",
     # Backend-internal artifact-invalidation bookkeeping (expression_contract,
     # graphic_abstract, report generator). No frontend consumer — verified by
     # grepping frontend/src — so it stays off the API surface.

@@ -285,6 +285,86 @@ def runtime_h5ad_manifest_path(
 
 
 
+def restore_generation_pair(session_id: str, *, revision: int) -> bool:
+    """Put a committed generation's captured positions back beside its dump.
+
+    The generation itself is healthy -- it passed its HMAC, its manifest
+    verifies, its digest matches. What made it unusable is that the state, the
+    graph position and the executor position all moved on before the crash was
+    noticed, so nothing on disk agreed with it any more. B2-1 captured those
+    three at commit time; this puts them back, and the run continues from the
+    step the dump was taken at rather than from the input files.
+
+    Returns False when the pair is absent or incomplete, which leaves
+    retirement as the fallback exactly as before. Half a restore point is not
+    a restore point: a state without its graph position would resume a
+    position that no longer exists.
+
+    Copies are staged beside their targets and published by rename, so a
+    failure while reading the pair leaves the live files untouched.
+    """
+    from backend.utils.checkpoint_paths import checkpoint_sqlite_path
+    from backend.utils.files import fsync_directory
+    from backend.utils.sandbox_parts.regular_save import (
+        GENERATION_PAIR_DIRNAME,
+        _copy_durable,
+    )
+
+    states_dir = _states_dir(session_id)
+    pair = states_dir / GENERATION_PAIR_DIRNAME / str(int(revision))
+    paired_state = pair / "state.json"
+    paired_checkpoint = pair / "checkpoints.sqlite"
+    if not (paired_state.is_file() and paired_checkpoint.is_file()):
+        return False
+
+    live_state = states_dir / f"{session_id}_state.json"
+    live_checkpoint = checkpoint_sqlite_path(states_dir)
+    live_executor = states_dir / f"{session_id}_bioinfo_checkpoint.json"
+    paired_executor = pair / "executor_checkpoint.json"
+
+    sources = [(paired_state, live_state), (paired_checkpoint, live_checkpoint)]
+    if paired_executor.is_file():
+        sources.append((paired_executor, live_executor))
+
+    incoming: list[tuple[Path, Path]] = []
+    try:
+        for source, target in sources:
+            staged = target.with_name(target.name + ".incoming")
+            _copy_durable(source, staged)
+            incoming.append((staged, target))
+    except BaseException:
+        for staged, _target in incoming:
+            staged.unlink(missing_ok=True)
+        raise
+
+    for staged, target in incoming:
+        os.replace(staged, target)
+    fsync_directory(states_dir)
+
+    # The write-ahead log and shared-memory file belong to the database that
+    # was just replaced. SQLite would replay them over the restored one, which
+    # would put the graph back where the crash left it.
+    for companion in (
+        live_checkpoint.with_name(live_checkpoint.name + "-wal"),
+        live_checkpoint.with_name(live_checkpoint.name + "-shm"),
+    ):
+        companion.unlink(missing_ok=True)
+
+    if not paired_executor.is_file():
+        # This generation has no executor position: a round boundary reached
+        # after the executor finished clears its checkpoint. A live one is then
+        # newer than the namespace being restored -- the §3.11 mismatch in a
+        # new place, and the one place a resume would not catch it, since
+        # `validate_checkpoint` would see a checkpoint *ahead* of the committed
+        # revision and treat it as ordinary.
+        _quarantine_path(live_executor)
+
+    logger.info(
+        "[%s] Restored the generation pair for revision %d", session_id, revision,
+    )
+    return True
+
+
 def retire_live_runtime(session_id: str, *, include_checkpoint: bool = False) -> bool:
     """Move the live runtime aside so the next kernel starts empty.
 

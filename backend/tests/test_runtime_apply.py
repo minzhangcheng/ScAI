@@ -276,3 +276,102 @@ def test_a_runtime_only_retirement_leaves_the_executor_checkpoint_alone():
     runtime_apply.retire_live_runtime(sid)
 
     assert json.loads(executor_checkpoint.read_text())["step_number"] == 7
+
+
+def _generation_pair(sid, revision, *, with_executor=True):
+    """A committed generation's captured partner, as B2-1 writes it."""
+    import sqlite3
+
+    states = get_session_states(sid)
+    pair = states / "generation" / str(revision)
+    pair.mkdir(parents=True, exist_ok=True)
+    (pair / "state.json").write_text(
+        json.dumps({"session_id": sid, "state_version": 12, "marker": "paired"})
+    )
+    with sqlite3.connect(pair / "checkpoints.sqlite") as conn:
+        conn.execute("CREATE TABLE checkpoints (thread_id TEXT, blob TEXT)")
+        conn.execute("INSERT INTO checkpoints VALUES (?, 'paired-position')", (sid,))
+    if with_executor:
+        (pair / "executor_checkpoint.json").write_text(
+            json.dumps({"step_number": 20, "runtime_revision": revision})
+        )
+    return states, pair
+
+
+def test_restoring_a_pair_puts_the_positions_back_beside_the_dump():
+    """Spec B2-2: the generation is healthy; what moved on is everything else.
+
+    After a crash the state, the graph position and the executor position have
+    all advanced past the newest committed dump. Restoring the pair is what
+    makes that dump continuable instead of something to be retired.
+    """
+    sid = "sess-pair-restore"
+    states, _pair = _generation_pair(sid, 44)
+
+    live_state = states / f"{sid}_state.json"
+    live_state.write_text(json.dumps({"session_id": sid, "marker": "live-newer"}))
+    live_checkpoint = states / "checkpoints.sqlite"
+    live_checkpoint.write_bytes(b"newer-and-unusable")
+    (states / "checkpoints.sqlite-wal").write_bytes(b"wal-of-the-newer-db")
+    (states / "checkpoints.sqlite-shm").write_bytes(b"shm-of-the-newer-db")
+    live_executor = states / f"{sid}_bioinfo_checkpoint.json"
+    live_executor.write_text(json.dumps({"step_number": 61}))
+
+    assert runtime_apply.restore_generation_pair(sid, revision=44) is True
+
+    assert json.loads(live_state.read_text())["marker"] == "paired"
+    assert json.loads(live_executor.read_text())["step_number"] == 20
+
+    import sqlite3
+
+    with sqlite3.connect(live_checkpoint) as conn:
+        assert conn.execute("SELECT blob FROM checkpoints").fetchone()[0] == "paired-position"
+
+    # The write-ahead log belonged to the database that was just replaced.
+    assert not (states / "checkpoints.sqlite-wal").exists()
+    assert not (states / "checkpoints.sqlite-shm").exists()
+
+
+def test_a_pair_without_an_executor_position_clears_the_live_one():
+    """A round boundary reached after the executor finished has no step
+    checkpoint, and the live one is then newer than the generation.
+
+    Leaving it is the §3.11 failure in a new place: an executor position with
+    no namespace to match it.
+    """
+    sid = "sess-pair-restore-no-executor"
+    states, _pair = _generation_pair(sid, 12, with_executor=False)
+    (states / f"{sid}_state.json").write_text(json.dumps({"session_id": sid}))
+    live_executor = states / f"{sid}_bioinfo_checkpoint.json"
+    live_executor.write_text(json.dumps({"step_number": 61}))
+
+    assert runtime_apply.restore_generation_pair(sid, revision=12) is True
+
+    assert not live_executor.exists()
+    assert json.loads(
+        (states / f"{sid}_bioinfo_checkpoint.json.quarantine").read_text()
+    )["step_number"] == 61
+
+
+def test_a_missing_pair_changes_nothing():
+    """Retirement is still the fallback, and it has to be reachable."""
+    sid = "sess-pair-absent"
+    states = get_session_states(sid)
+    states.mkdir(parents=True, exist_ok=True)
+    live_state = states / f"{sid}_state.json"
+    live_state.write_text(json.dumps({"marker": "live"}))
+
+    assert runtime_apply.restore_generation_pair(sid, revision=99) is False
+    assert json.loads(live_state.read_text())["marker"] == "live"
+
+
+def test_an_incomplete_pair_is_refused_rather_than_half_applied():
+    """Half a restore point is not a restore point."""
+    sid = "sess-pair-incomplete"
+    states, pair = _generation_pair(sid, 7)
+    (pair / "checkpoints.sqlite").unlink()
+    live_state = states / f"{sid}_state.json"
+    live_state.write_text(json.dumps({"marker": "live"}))
+
+    assert runtime_apply.restore_generation_pair(sid, revision=7) is False
+    assert json.loads(live_state.read_text())["marker"] == "live"

@@ -12,6 +12,7 @@ async def teardown_running_workflow(
     *,
     discard_runtime: bool = False,
     retire_runtime: bool = False,
+    retain_restore_point: bool = False,
 ) -> bool:
     """Stop active workflow, cancel run/monitor tasks, and delete checkpoint.
 
@@ -84,6 +85,13 @@ async def teardown_running_workflow(
         monitor = _monitor_tasks.pop(session_id, None)
     if monitor and not monitor.done():
         monitor.cancel()
+
+    if retain_restore_point:
+        # Closing the owner is all that was asked for. Both branches below
+        # destroy part of a restore point -- retirement takes the generation,
+        # and the default takes the graph position -- and the caller is about
+        # to put that position back from the generation's captured pair.
+        return True
 
     if retire_runtime:
         from backend.services.session_lifecycle import (
