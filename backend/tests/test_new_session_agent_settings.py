@@ -15,6 +15,18 @@ def _state() -> AnalysisState:
     )
 
 
+def test_new_session_freezes_default_without_creating_manual_override():
+    from backend.config import SystemConfig
+    from backend.utils.settings_provider import AgentSettingsProvider
+    state = _state()
+    config = SystemConfig(context_windows={"pi": 160000})
+    _new_session_agent_settings(state, None, {}, config)
+    assert state.agent_server_configs["pi"]["default_context_window"] == 160000
+    assert "context_window" not in state.agent_server_configs["pi"]
+    restored = AnalysisState.model_validate_json(state.model_dump_json())
+    assert AgentSettingsProvider(restored, SystemConfig(), None).get_context_window("pi") == 160000
+
+
 def test_new_session_copies_nonsecret_defaults_and_injects_saved_secrets():
     state = _state()
     settings = AgentSettingsSnapshotRequest.model_validate({

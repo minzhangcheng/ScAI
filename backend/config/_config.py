@@ -357,7 +357,31 @@ class AgentTemperatures(BaseModel):
 
 
 MINIMUM_CONTEXT_WINDOW: int = 8_192
-DEFAULT_AGENT_CONTEXT_WINDOW: int = 200_000
+_DEFAULT_AGENT_CONTEXT_WINDOW_FALLBACK: int = 200_000
+
+
+def _resolve_default_agent_context_window() -> int:
+    """Resolve the process default for new agent context-window budgets."""
+    raw = os.environ.get("SCAI_CONTEXT_WINDOW_DEFAULT", "").strip()
+    if not raw:
+        return _DEFAULT_AGENT_CONTEXT_WINDOW_FALLBACK
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            "SCAI_CONTEXT_WINDOW_DEFAULT must be an integer greater than or "
+            f"equal to {MINIMUM_CONTEXT_WINDOW}; got {raw!r}"
+        ) from exc
+    if value < MINIMUM_CONTEXT_WINDOW:
+        raise ValueError(
+            "SCAI_CONTEXT_WINDOW_DEFAULT must be greater than or equal to "
+            f"{MINIMUM_CONTEXT_WINDOW}; got {value}"
+        )
+    return value
+
+
+DEFAULT_AGENT_CONTEXT_WINDOW: int = _resolve_default_agent_context_window()
+_CONTEXT_WINDOW_ENV_SET = bool(os.environ.get("SCAI_CONTEXT_WINDOW_DEFAULT", "").strip())
 
 
 class AgentContextWindows(BaseModel):
@@ -478,6 +502,18 @@ class SystemConfig(BaseModel):
     # Kept for serialization compatibility only.
     state_dir: str = str(STATE_DIR)
     workspace_dir: str = str(WORKSPACE_DIR)
+
+
+def resolve_agent_context_window_default(config: SystemConfig, agent: str) -> int:
+    """Resolve the default used for a new or explicitly reset agent budget.
+
+    An explicit process setting overrides persisted global defaults. Session
+    overrides and previously frozen session defaults are resolved separately.
+    """
+    if _CONTEXT_WINDOW_ENV_SET:
+        return DEFAULT_AGENT_CONTEXT_WINDOW
+    return config.context_windows.get(agent)
+
 
 # Default configuration instance
 default_config = SystemConfig()

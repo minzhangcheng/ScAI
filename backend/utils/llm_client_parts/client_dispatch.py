@@ -205,7 +205,9 @@ class ClientDispatchMixin:
         start_time = time.time()
         model_key = _extract_model_name(model)
         retry_kwargs = self._build_retry_kwargs(
-            model, request_timeout=request_timeout, max_retries_override=max_retries_override)
+            model, request_timeout=request_timeout, max_retries_override=max_retries_override,
+            messages=log_messages if interaction_type in {"chat", "chat_with_tools"} else None,
+            tools=tools, max_tokens=max_tokens)
         if non_retryable_predicate is not None:
             retry_kwargs["non_retryable_predicate"] = non_retryable_predicate
         try:
@@ -426,6 +428,7 @@ class ClientDispatchMixin:
         call_for,
         model: str,
         modality: str = TEXT_MODALITY,
+        on_context_overflow=None,
     ):
         """Try protocols in `order`. Per protocol: up to len(PROBE_RETRY_DELAYS)
         single-shot attempts on TRANSIENT errors (sleeping PROBE_RETRY_DELAYS
@@ -467,6 +470,24 @@ class ClientDispatchMixin:
                         return result
                     except Exception as e:
                         last_error = e
+                        from ..context_overflow import is_context_overflow
+                        overflow_error = e.__cause__ if isinstance(e, UpstreamExhaustedError) else e
+                        if on_context_overflow is not None and is_context_overflow(overflow_error):
+                            # The probe owns the attempts; never give its
+                            # single-shot transport a second retry budget.
+                            if attempt + 1 >= len(PROBE_RETRY_DELAYS):
+                                raise
+                            before_retry = getattr(self, "before_retry", None)
+                            if before_retry is not None:
+                                await before_retry()
+                            try:
+                                recovered = await on_context_overflow()
+                            except Exception:
+                                logger.warning("Context-overflow probe recovery failed", exc_info=True)
+                                recovered = False
+                            if not recovered:
+                                raise
+                            continue
                         # The provider already emitted an event. Replaying via
                         # this or another protocol could duplicate generation or
                         # tool execution, so leave protocol discovery immediately.
@@ -581,7 +602,15 @@ class ClientDispatchMixin:
         try:
             if len(order) == 1:
                 return await self._call_decided_protocol(order[0], call_for, model, modality)
-            return await self._probe_in_order(order, call_for, model, modality)
+            if interaction_type not in {"chat", "chat_with_tools"}:
+                return await self._probe_in_order(order, call_for, model, modality)
+            recovery = self._build_retry_kwargs(
+                model, messages=log_messages,
+                tools=tools, max_tokens=max_tokens,
+            ).get("on_context_overflow")
+            return await self._probe_in_order(
+                order, call_for, model, modality, on_context_overflow=recovery
+            )
         except StreamInterruptedError as error:
             # Stream completion is observed outside the transport retry
             # boundary, so an interrupted generation reaches callers as a bare

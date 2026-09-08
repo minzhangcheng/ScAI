@@ -4,7 +4,12 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from backend.config import AgentTemperatures, PI_AGENT_NAME, SystemConfig
+from backend.config import (
+    AgentTemperatures,
+    PI_AGENT_NAME,
+    SystemConfig,
+    resolve_agent_context_window_default,
+)
 from backend.models.api_requests import (
     PromptUpdateRequest, ModelUpdateRequest, TemperatureUpdateRequest,
     VisionSettingUpdateRequest, LiteratureConfigRequest, AgentServerConfigRequest,
@@ -43,6 +48,39 @@ _AGENT_NAMES = (
     "literature", "painter", "supervisor", "technique",
 )
 
+_ADAPTIVE_CONTEXT_KEYS = (
+    "adaptive_context_window",
+    "adaptive_context_model",
+    "adaptive_context_endpoint",
+)
+_CONTEXT_SIDECAR_KEYS = ("default_context_window", *_ADAPTIVE_CONTEXT_KEYS)
+
+
+def _clear_adaptive_context(entry: dict) -> None:
+    for key in _ADAPTIVE_CONTEXT_KEYS:
+        entry.pop(key, None)
+
+
+def _copy_context_sidecar(source: dict, target: dict) -> None:
+    for key in _CONTEXT_SIDECAR_KEYS:
+        if key in source:
+            target[key] = source[key]
+
+
+def _has_context_state(entry: dict) -> bool:
+    return bool(set(entry).intersection(("context_window", *_CONTEXT_SIDECAR_KEYS)))
+
+
+def _effective_agent_model(state: AnalysisState, config: SystemConfig, agent: str) -> str:
+    custom_models = state.custom_models or {}
+    if agent in custom_models:
+        return str(custom_models[agent] or "").strip()
+    return str(getattr(config.models, f"{agent}_model", "") or "").strip()
+
+
+def _effective_agent_endpoint(server: dict, config: SystemConfig) -> str:
+    return server.get("llm_base_url") or config.api.llm_base_url
+
 
 def _validated_optional_url(value: str, field_name: str) -> str:
     try:
@@ -75,6 +113,8 @@ def _masked_agent_server_configs(state, config: SystemConfig | None = None) -> d
     masked = {}
     for agent, server_config in (state.agent_server_configs or {}).items():
         value = dict(server_config) if server_config else {}
+        for key in _CONTEXT_SIDECAR_KEYS:
+            value.pop(key, None)
         if value.get("api_key"):
             value["api_key"] = mask_api_key(value["api_key"])
         raw_window = value.get("context_window")
@@ -90,6 +130,7 @@ def _masked_agent_server_configs(state, config: SystemConfig | None = None) -> d
                 state.agent_server_configs,
                 config,
                 agent,
+                model=_effective_agent_model(state, config, agent),
             )
         masked[agent] = value
     return masked
@@ -121,7 +162,9 @@ def _agent_settings_payload(state, config: SystemConfig) -> dict:
                 "llm_base_url": "",
                 "api_key": "",
                 "context_window": None,
-                "effective_context_window": config.context_windows.get(agent),
+                "effective_context_window": resolve_agent_context_window_default(
+                    config, agent
+                ),
             })
             for agent in _AGENT_NAMES
         },
@@ -204,7 +247,21 @@ async def update_models(session_id: str, request: Request, body: ModelUpdateRequ
     user_id = getattr(request.state, "user_id", "")
     async with get_session_lock(session_id):
         state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        config = await resolve_config_for_user(user_id) or SystemConfig()
+        model_changed = _effective_agent_model(state, config, body.agent) != (
+            body.model or ""
+        ).strip()
         state.custom_models[body.agent] = body.model
+        if model_changed:
+            existing = (state.agent_server_configs or {}).get(body.agent, {}) or {}
+            if _has_context_state(existing):
+                new_server = dict(existing)
+                new_server.pop("context_window", None)
+                _clear_adaptive_context(new_server)
+                new_server["default_context_window"] = resolve_agent_context_window_default(
+                    config, body.agent
+                )
+                state.agent_server_configs[body.agent] = new_server
         await update_session_cache(session_id, state)
         await async_save_session(session_id, state)
     _invalidate_active_agent_config(session_id, body.agent)
@@ -396,18 +453,29 @@ async def update_agent_server_config(session_id: str, request: Request, body: Ag
     async with get_session_lock(session_id):
         state = await require_session_ownership(session_id=session_id, user_id=user_id)
         existing = (state.agent_server_configs or {}).get(body.agent, {}) or {}
+        new_url = _validated_optional_url(body.llm_base_url, "llm_base_url")
+        old_url = existing.get("llm_base_url") or existing.get("base_url") or ""
+        endpoint_changed = new_url != old_url
         incoming_key = body.api_key
         if incoming_key and incoming_key == mask_api_key(existing.get("api_key", "")):
             incoming_key = existing.get("api_key", "")
         new_config = {
-            "llm_base_url": _validated_optional_url(body.llm_base_url, "llm_base_url"),
+            "llm_base_url": new_url,
             "api_key": incoming_key,
         }
+        _copy_context_sidecar(existing, new_config)
         if "context_window" not in body.model_fields_set:
             if "context_window" in existing:
                 new_config["context_window"] = existing["context_window"]
         elif body.context_window is not None:
             new_config["context_window"] = body.context_window
+        if endpoint_changed or "context_window" in body.model_fields_set:
+            _clear_adaptive_context(new_config)
+        if "context_window" in body.model_fields_set and body.context_window is None:
+            config = await resolve_config_for_user(user_id) or SystemConfig()
+            new_config["default_context_window"] = resolve_agent_context_window_default(
+                config, body.agent
+            )
         state.agent_server_configs[body.agent] = new_config
         await update_session_cache(session_id, state)
         await async_save_session(session_id, state)
@@ -447,7 +515,16 @@ async def update_agent_settings(
     user_id = getattr(request.state, "user_id", "")
     async with get_session_lock(session_id):
         state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        config = await resolve_config_for_user(user_id) or SystemConfig()
         existing_server = (state.agent_server_configs or {}).get(body.agent, {}) or {}
+        validated_url = _validated_optional_url(body.llm_base_url, "llm_base_url")
+        model_changed = _effective_agent_model(state, config, body.agent) != (
+            body.model or ""
+        ).strip()
+        endpoint_changed = _effective_agent_endpoint(existing_server, config) != (
+            validated_url or config.api.llm_base_url
+        )
+        context_window_explicit = "context_window" in body.model_fields_set
         incoming_key = body.api_key
         if incoming_key and incoming_key == mask_api_key(existing_server.get("api_key", "")):
             incoming_key = existing_server.get("api_key", "")
@@ -456,14 +533,27 @@ async def update_agent_settings(
         state.custom_models[body.agent] = body.model
         state.custom_temperatures[body.agent] = body.temperature
         new_server = {
-            "llm_base_url": _validated_optional_url(body.llm_base_url, "llm_base_url"),
+            "llm_base_url": validated_url,
             "api_key": incoming_key,
         }
-        if "context_window" not in body.model_fields_set:
+        if not model_changed and not endpoint_changed:
+            _copy_context_sidecar(existing_server, new_server)
+        elif _has_context_state(existing_server):
+            new_server["default_context_window"] = resolve_agent_context_window_default(
+                config, body.agent
+            )
+
+        if not context_window_explicit and not model_changed and not endpoint_changed:
             if "context_window" in existing_server:
                 new_server["context_window"] = existing_server["context_window"]
-        elif body.context_window is not None:
+        elif context_window_explicit and body.context_window is not None:
             new_server["context_window"] = body.context_window
+        if model_changed or endpoint_changed or context_window_explicit:
+            _clear_adaptive_context(new_server)
+        if context_window_explicit and body.context_window is None:
+            new_server["default_context_window"] = resolve_agent_context_window_default(
+                config, body.agent
+            )
         state.agent_server_configs[body.agent] = new_server
         state.agent_vision_settings[body.agent] = body.vision_enabled
 

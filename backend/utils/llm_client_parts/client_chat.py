@@ -290,6 +290,7 @@ class ClientChatMixin:
         retry_kwargs = self._build_retry_kwargs(
             model, request_timeout=timeout, max_retries_override=effective_max_retries,
             non_retryable_predicate=non_retryable_predicate,
+            messages=messages, max_tokens=max_tokens,
         )
 
         try:
@@ -727,6 +728,7 @@ class ClientChatMixin:
         retry_kwargs = self._build_retry_kwargs(
             model, max_retries_override=effective_max_retries,
             non_retryable_predicate=non_retryable_predicate,
+            messages=messages, tools=tools, max_tokens=max_tokens,
         )
 
         try:

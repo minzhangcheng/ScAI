@@ -290,12 +290,29 @@ class ClientParamsMixin:
         request_timeout: Optional[float] = None,
         max_retries_override: Optional[int] = None,
         non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
+        messages=None,
+        tools=None,
+        max_tokens=None,
     ) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {
             "agent_name": self.agent_name,
             "model_name": model,
             "llm_server": self.base_url,
         }
+        if messages is not None:
+            from functools import partial
+            from ..context_overflow import recover_context_overflow, context_settings
+            from backend.state import sessions
+            state = sessions.get(self.session_id)
+            expected_context = context_settings(
+                (state.agent_server_configs or {}).get(self.agent_name) or {}
+            ) if state is not None else None
+            kwargs["on_context_overflow"] = partial(
+                recover_context_overflow,
+                session_id=self.session_id, agent_name=self.agent_name,
+                model=model, endpoint=self.base_url, messages=messages,
+                tools=tools, max_tokens=max_tokens, expected_context=expected_context,
+            )
         if request_timeout is not None:
             kwargs["request_timeout"] = request_timeout
         if max_retries_override is not None:

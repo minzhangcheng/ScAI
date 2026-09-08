@@ -89,6 +89,43 @@ describe('WebSocket async response ownership', () => {
     expect(useAppStore.getState().chatMessages).toEqual([])
   })
 
+  it.each(['none', 'session', 'manual', 'newer'])(
+    'refreshes the effective budget with %s concurrent change', async change => {
+      const pending: Array<(response: Response) => void> = []
+      vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => pending.push(resolve))))
+      useAppStore.setState({ agentServerConfigs: {
+        pi: { llmBaseUrl: '', apiKey: '', contextWindow: 200000, effectiveContextWindow: 200000 },
+      } })
+      const { result } = renderHook(() => useWebSocket())
+      act(() => result.current.connect())
+      const socket = SocketMock.instances[0]
+      const notify = () => socket.onmessage?.({ data: JSON.stringify({
+        type: 'agent_context_updated', session_id: 'old', agent: 'pi',
+      }) } as MessageEvent)
+      act(() => { notify() })
+      if (change === 'session') {
+        act(() => useAppStore.getState().setCurrentSession(session('new')))
+      } else if (change === 'manual') {
+        act(() => useAppStore.getState().setAgentServerConfig('pi', {
+          llmBaseUrl: '', apiKey: '', effectiveContextWindow: 200000,
+        }))
+      } else if (change === 'newer') {
+        act(() => { notify() })
+        await act(async () => {
+          pending[1](jsonResponse({ pi: { effective_context_window: 128000 } }))
+        })
+      }
+      await act(async () => {
+        pending[0](jsonResponse({ pi: { effective_context_window: 160000 } }))
+      })
+      const config = useAppStore.getState().agentServerConfigs.pi
+      expect(config?.effectiveContextWindow).toBe(
+        change === 'none' ? 160000 : change === 'newer' ? 128000 : 200000,
+      )
+      expect(config?.contextWindow).toBe(change === 'manual' ? undefined : 200000)
+    },
+  )
+
   it('drops old-session chat terminal events before the new socket connects', () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)

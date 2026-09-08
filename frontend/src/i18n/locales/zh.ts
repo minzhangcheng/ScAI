@@ -240,6 +240,8 @@ export const zh = {
     agentLlmServer: 'LLM 服务器',
     agentApiKey: 'API Key',
     agentContextWindow: '上下文窗口（Token）',
+    agentContextEffective: '当前有效预算',
+    agentContextAdaptiveHint: '上游明确报告上下文超长时，本分析的预算自动降低 20%。手动设置预算或切换模型会重置自动缩减值。',
     agentContextWindowHint: '文本上下文窗口大小（最小 8,192）。重置后使用当前系统默认值。',
     agentServerHint: '当前使用默认 LLM 服务器设置，如需为此 Agent 使用不同平台请修改',
     agentModelHint: '注意：不同平台的模型名格式可能不同（如 OpenRouter 使用 provider/model 格式）',
