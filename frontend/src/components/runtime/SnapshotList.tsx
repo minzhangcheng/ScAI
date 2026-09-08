@@ -143,6 +143,15 @@ export function SnapshotList({ sessionId, isZh = false, onOpenSession }: Snapsho
             ? '恢复会新建一个会话，当前会话保持不变'
             : 'Restoring opens a new session and leaves this one untouched'}
         </span>
+        {listing.bytes_total > 0 && (
+          <span className="ml-auto text-xs text-slate-500">
+            {/* Counted once where two snapshots share a dump, so this is what
+                deleting all of them would actually free. */}
+            {isZh
+              ? `共占用 ${formatBytes(listing.bytes_total)}`
+              : `${formatBytes(listing.bytes_total)} on disk`}
+          </span>
+        )}
       </header>
 
       <ul className="divide-y divide-slate-100 dark:divide-slate-800">

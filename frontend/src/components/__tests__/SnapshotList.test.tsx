@@ -50,6 +50,7 @@ function listing(overrides: Record<string, unknown> = {}) {
     snapshots: [ROW],
     failed: [],
     restored_sessions: {},
+    bytes_total: 2_147_483_648,
     ...overrides,
   }
 }
@@ -87,7 +88,21 @@ describe('SnapshotList', () => {
     expect(screen.getByText('Round 1')).toBeInTheDocument()
     // What a restore would cost, and what it would not carry.
     expect(screen.getByText(/1 value not saved/)).toBeInTheDocument()
-    expect(screen.getByText(/2\.0 GB/)).toBeInTheDocument()
+    // Exactly the row's own size. The header carries a session total that
+    // reads the same at this scale, and matching both would not say which one
+    // the row shows.
+    expect(screen.getByText('2.0 GB')).toBeInTheDocument()
+  })
+
+  it('reports what the snapshots occupy, counting a shared dump once', async () => {
+    listSnapshots.mockResolvedValue(listing({
+      snapshots: [ROW, { ...ROW, snapshot_id: 'r003-round-g99', round: 3 }],
+      // Two rows declaring 2 GB each, occupying 2 GB between them: the dump is
+      // one file, shared by a hardlink.
+      bytes_total: 2_147_483_648,
+    }))
+    render(<SnapshotList sessionId="s1" />)
+    expect(await screen.findByText('2.0 GB on disk')).toBeInTheDocument()
   })
 
   it('says which snapshot is given up first when space runs short', async () => {

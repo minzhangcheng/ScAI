@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -82,9 +83,9 @@ def read_session_listing(session_id: str) -> dict[str, Any]:
     try:
         root = snapshots_root(session_id)
     except SnapshotsDisabled:
-        return {"snapshots": [], "failed": []}
+        return {"snapshots": [], "failed": [], "bytes_total": 0}
     if not root.is_dir():
-        return {"snapshots": [], "failed": []}
+        return {"snapshots": [], "failed": [], "bytes_total": 0}
 
     rows: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
@@ -114,4 +115,32 @@ def read_session_listing(session_id: str) -> dict[str, Any]:
     rows = with_deletion_order(mark_superseded(rows))
     rows.sort(key=lambda row: (row["round"], row["retention_rank"], row["runtime_revision"]))
     failed.sort(key=lambda row: (row["round"], row["snapshot_id"]))
-    return {"snapshots": rows, "failed": failed}
+    return {
+        "snapshots": rows,
+        "failed": failed,
+        "bytes_total": _occupied_bytes(root),
+    }
+
+
+def _occupied_bytes(root: Path) -> int:
+    """What this session's snapshots actually cost, counting shares once.
+
+    Summing each manifest's ``bytes_total`` would double-count a dump two
+    snapshots share, and the sharing is a hardlink -- so the filesystem is the
+    only thing that knows, and an inode seen twice is counted once.
+    """
+    seen: set[tuple[int, int]] = set()
+    total = 0
+    for path in root.rglob("*"):
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        key = (info.st_dev, info.st_ino)
+        if key in seen:
+            continue
+        seen.add(key)
+        total += info.st_size
+    return total

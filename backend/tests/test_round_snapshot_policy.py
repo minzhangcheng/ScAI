@@ -354,12 +354,12 @@ def _write_bundle(root, session, snapshot, *, gate, round_number, revision, crea
 
 def test_an_installation_with_snapshots_off_lists_nothing(monkeypatch):
     monkeypatch.setattr(_config, "SNAPSHOT_DIR", None)
-    assert read_session_listing(SESSION) == {"snapshots": [], "failed": []}
+    assert read_session_listing(SESSION) == {"snapshots": [], "failed": [], "bytes_total": 0}
 
 
 def test_an_enabled_installation_with_no_captures_lists_nothing(monkeypatch, tmp_path):
     monkeypatch.setattr(_config, "SNAPSHOT_DIR", tmp_path)
-    assert read_session_listing(SESSION) == {"snapshots": [], "failed": []}
+    assert read_session_listing(SESSION) == {"snapshots": [], "failed": [], "bytes_total": 0}
 
 
 def test_a_bundle_on_disk_is_listed_with_its_rank_and_deletion_order(monkeypatch, tmp_path):
@@ -429,7 +429,7 @@ def test_a_directory_that_is_not_a_snapshot_is_ignored(monkeypatch, tmp_path):
     monkeypatch.setattr(_config, "SNAPSHOT_DIR", tmp_path)
     root = tmp_path / SESSION / "snapshots"
     (root / ".deleting-r001-round-g4").mkdir(parents=True)
-    assert read_session_listing(SESSION) == {"snapshots": [], "failed": []}
+    assert read_session_listing(SESSION) == {"snapshots": [], "failed": [], "bytes_total": 0}
 
 
 # ------------------------------------------------------------------ the route

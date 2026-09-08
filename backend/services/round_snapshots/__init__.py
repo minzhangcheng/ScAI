@@ -46,6 +46,7 @@ from .restore import (
     restore_snapshot_into_new_session,
     restored_session_name,
 )
+from .prune import prune_for_free_space
 from .writer import (
     SnapshotAbandoned,
     SnapshotPrecondition,
@@ -84,6 +85,7 @@ __all__ = [
     "mark_superseded",
     "next_node_for",
     "parse_snapshot_id",
+    "prune_for_free_space",
     "read_session_listing",
     "reclaim_abandoned_capture_work",
     "restore_snapshot_into_new_session",

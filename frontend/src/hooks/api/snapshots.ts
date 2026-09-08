@@ -43,6 +43,10 @@ export interface SnapshotListing {
   enabled: boolean
   snapshots: SnapshotRow[]
   failed: FailedCaptureRow[]
+  /** What this session's snapshots occupy, counting a dump two of them share
+      once. Not the sum of the rows: sharing is a hardlink, so the filesystem
+      is the only thing that knows. */
+  bytes_total: number
   /** snapshot id -> the sessions it was forked into. */
   restored_sessions?: Record<string, string[]>
 }

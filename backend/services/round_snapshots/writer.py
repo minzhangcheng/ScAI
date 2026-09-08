@@ -847,4 +847,14 @@ async def _capture(
         "[%s] captured decision snapshot %s (%d bytes, %.1fs)",
         session_id, snapshot, manifest["bytes_total"], manifest["capture_seconds"],
     )
+    # After publication, and never before it: a capture that failed must not
+    # cost an existing restore point, and the one just written is the caller's.
+    from .prune import prune_for_free_space
+
+    try:
+        prune_for_free_space(keep_session=session_id, keep=snapshot)
+    except Exception:
+        logger.warning(
+            "[%s] could not reclaim space after a capture", session_id, exc_info=True,
+        )
     return snapshot
