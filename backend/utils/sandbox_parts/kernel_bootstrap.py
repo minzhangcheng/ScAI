@@ -577,6 +577,15 @@ _WORKSPACE_DIR = Path(_SCAI_WORKSPACE)
 _WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 os.chdir(_WORKSPACE_DIR)
 
+# The inputs, named the same way as the outputs. Derived from the workspace --
+# uploads and workspace are siblings under the session -- so a replay that
+# overrides one root moves both, and a cell that reads its input through this
+# name replays wherever the notebook is opened. Cells that hard-code
+# /data/sessions/<id>/uploads/... do not.
+_UPLOADS_DIR = Path(
+    os.environ.get('SCAI_REPLAY_UPLOADS_DIR') or (_WORKSPACE_DIR.parent / 'uploads')
+)
+
 # Create standard subdirectories
 (_WORKSPACE_DIR / 'figures').mkdir(exist_ok=True)
 (_WORKSPACE_DIR / 'tables').mkdir(exist_ok=True)

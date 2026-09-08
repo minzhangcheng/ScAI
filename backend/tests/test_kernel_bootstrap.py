@@ -97,7 +97,7 @@ async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
         "0ebf1f31fd3b4e94a82ee2135113045a96a69bda720cc1f95d957ab39900c392"
     )
     assert hashlib.sha256(normalized_path.encode()).hexdigest() == (
-        "6e84f77024aa6415accff410b0ff85dc122650b08d8515bd5b10d175a9f99e74"
+        "03701773662b9ac96077db49e3ee5e37558053c21601e64d5ed94a571cde9e86"
     )
 
 
