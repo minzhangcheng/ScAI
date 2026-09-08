@@ -44,7 +44,6 @@ function loadResponse(id: string, marker: number): SessionLoadResponse {
     biochemistry_indicators: [],
     round_results: [],
     state_version: marker,
-    snapshot_count: marker,
     messages: [{ id: `message-${id}`, type: 'message', content: id }],
     agent_errors: [{
       id: `error-${id}`,
@@ -108,7 +107,6 @@ describe('loadSession response ownership', () => {
         resolved: false,
       }],
       stateVersion: 7,
-      snapshotCount: 7,
       sessionLoading: false,
     })
   })
@@ -157,7 +155,6 @@ describe('loadSession response ownership', () => {
     expect(useAppStore.getState().messages.map(message => message.id)).toEqual(['initial-message'])
     expect(useAppStore.getState().agentErrors.map(error => error.id)).toEqual(['initial-error'])
     expect(useAppStore.getState().stateVersion).toBe(7)
-    expect(useAppStore.getState().snapshotCount).toBe(7)
 
     await act(async () => {
       pending[1].resolve(jsonResponse(loadResponse('B', 2)))
@@ -172,7 +169,6 @@ describe('loadSession response ownership', () => {
     expect(useAppStore.getState().messages.map(message => message.id)).toEqual(['message-B'])
     expect(useAppStore.getState().agentErrors.map(error => error.id)).toEqual(['error-B'])
     expect(useAppStore.getState().stateVersion).toBe(2)
-    expect(useAppStore.getState().snapshotCount).toBe(2)
   })
 
   it('does not let a stale same-session lifecycle error clear the newer load', async () => {

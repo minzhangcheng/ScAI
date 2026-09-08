@@ -38,16 +38,12 @@ _EXCLUDED_FIELDS = {
     "exploration_report_html_path",
     "annotation_report_html_path",
     "integration_report_html_path",
-    "snapshots",
     "last_restored_snapshot_id",
     "restore_provenance_snapshot_id",
     "last_snapshot_id",
-    # One-shot marker armed and consumed server-side by the snapshot failure
-    # gate (services/snapshot_v2/failure_gate.py); the client never reads it.
+    # Left behind by the retired snapshot subsystem; cleared on load by
+    # sanitize_legacy_state and never read by a client.
     "skip_required_snapshot_phase",
-    # Likewise one-shot: armed by the Proceed action on a memory-preflight gate
-    # and consumed by the next runtime capture. Server-side only.
-    "force_snapshot_memory_override",
     "code_history",
     "analysis_log",
     "literature_reports",
@@ -128,7 +124,6 @@ _COMPUTED_FIELDS = {
     "exploration_report_url",
     "annotation_report_url",
     "integration_report_url",
-    "snapshot_count",
     "messages",
 }
 

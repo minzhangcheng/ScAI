@@ -68,7 +68,24 @@ export function useSessionAnalysis(store: SessionAnalysisStore) {
     const session = useAppStore.getState().currentSession
     if (!session) throw new Error('No active session')
     const response = await apiFetch<any>(`/session/${session.id}/resume`, { method: 'POST' })
-    if (response?.success === false || response?.data?.runtime_unavailable) return
+    // A delayed response must not project the previous session's runtime
+    // refusal onto a session selected while the request was in flight.
+    const activeSession = useAppStore.getState().currentSession
+    if (!activeSession || activeSession.id !== session.id) return
+    if (response?.data?.runtime_unavailable) {
+      // The backend deliberately answers this refusal without reconnecting.
+      // Hydrate the durable warning immediately so the existing banner and
+      // Re-run action remain visible even when the user does not reload.
+      const data = response.data
+      useAppStore.getState().hydrateRuntimeRestoreFromSession({
+        runtime_restore_status: data.runtime_restore_status ?? 'unavailable',
+        runtime_restore_warning: data.runtime_restore_warning
+          ?? (response.message
+            || 'The saved runtime is unavailable. Re-run the analysis from the input data.'),
+      })
+      return
+    }
+    if (response?.success === false) return
     useAppStore.getState().updateSession({ status: 'running' })
     if (response?.data?.needs_reconnect) {
       const { wsConnect } = useAppStore.getState()

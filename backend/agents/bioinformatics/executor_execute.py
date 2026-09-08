@@ -337,7 +337,6 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
         if preinstall_expression_runtime:
             runtime_setup_result = await self.sandbox.execute(
                 build_expression_runtime_code(),
-                save_to_history=False,
                 skip_safety_check=True,
             )
         if (
@@ -387,8 +386,7 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
         "    if isinstance(_obj, _ad.AnnData):\n"
         "        _obj.obs_names_make_unique()\n"
         "        _obj.var_names_make_unique()\n"
-        "del _ad\n",
-        save_to_history=False, skip_safety_check=True
+        "del _ad\n", skip_safety_check=True
     )
     try:
         cohort_after = await probe_canonical_cohort(self.sandbox)
@@ -449,23 +447,14 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
                 self._current_analysis_state.species_genes_validated = True
         if self._current_analysis_state:
             sandbox_state = self._current_analysis_state.sandbox_state or {}
-            tracker = getattr(self.sandbox, "runtime_dependency_tracker", None)
-            if tracker is not None:
-                sandbox_state["runtime_dependencies_v2"] = sorted(
-                    tracker.required_outputs
-                )
-                sandbox_state["runtime_dependency_tracker_v2"] = tracker.to_state_dict()
-            else:
-                # No tracker (should not happen with track_globals): fall
-                # back to append-only explicit declarations.
-                deps = sandbox_state.setdefault("runtime_dependencies_v2", [])
-                for var_name in (persistent_outputs or []):
-                    _var_name = str(var_name).strip()
-                    if (
-                        _var_name.isidentifier()
-                        and _var_name not in deps
-                    ):
-                        deps.append(_var_name)
+            # Advisory provenance only (spec 4.7): the append-only record of
+            # what each cell said it produced. Nothing reads it to decide what
+            # to persist.
+            deps = sandbox_state.setdefault("runtime_dependencies_v2", [])
+            for var_name in (persistent_outputs or []):
+                _var_name = str(var_name).strip()
+                if _var_name.isidentifier() and _var_name not in deps:
+                    deps.append(_var_name)
             sandbox_state["runtime_revision"] = getattr(
                 self.sandbox, "runtime_revision", 0
             )

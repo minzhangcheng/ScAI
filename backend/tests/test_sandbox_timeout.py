@@ -110,7 +110,7 @@ async def test_execution_timeout_overrides_default_without_changing_default(
     override = await execution_module.ExecutionMixin._execute_unlocked(
         _Sandbox(),
         "pass",
-        save_to_history=False,
+        records_history=False,
         skip_safety_check=True,
         execution_timeout=0.25,
     )
@@ -121,7 +121,7 @@ async def test_execution_timeout_overrides_default_without_changing_default(
     default = await execution_module.ExecutionMixin._execute_unlocked(
         _Sandbox(),
         "pass",
-        save_to_history=False,
+        records_history=False,
         skip_safety_check=True,
     )
     assert default.success is False

@@ -74,9 +74,6 @@ class _Harness(ReportingMixin):
             AnalysisState.model_validate(state.model_dump(mode="json"))
         )
 
-    async def _capture_post_report_if_enabled(self, state, _generation_id):
-        state.pending_required_snapshot = None
-
 
 def _patch_report_paths(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"

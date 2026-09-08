@@ -1,4 +1,4 @@
-// WebSocket connection, message dispatch, and snapshot reminders.
+// WebSocket connection and message dispatch.
 
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAppStore } from '../../stores/appStore'
@@ -13,15 +13,11 @@ export function useWebSocket() {
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectCountRef = useRef<number>(0)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const restoreCommitRefreshesRef = useRef<{ keys: Set<string>; order: string[] }>({
-    keys: new Set(),
-    order: [],
-  })
   const [connected, setConnected] = useState(false)
 
   const refs: ConnectionRefs = {
     wsRef, connectionAttemptRef, connectTimeoutRef, reconnectCountRef,
-    reconnectTimerRef, restoreCommitRefreshesRef, stateSyncEpochRef,
+    reconnectTimerRef, stateSyncEpochRef,
   }
 
   const connect = useCallback(() => {

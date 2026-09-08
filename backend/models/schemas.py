@@ -49,7 +49,6 @@ from .schema_parts.enums import (  # noqa: F401
     MessageRole,
     TaskStatus,
     AnalysisPhase,
-    SnapshotPhase,
     AnalysisPhaseType,
     PlanStage,
     PlanStatus,
@@ -82,7 +81,6 @@ from .schema_parts.session import (  # noqa: F401
     AnnotationRecord,
     AgentRoundCache,
     DetailedReportSegment,
-    Snapshot,
     FigureRequirement,
     PlanStep,
     AnalysisPlan,
@@ -211,8 +209,6 @@ class AnalysisState(BaseModel):
     detailed_report_segments: List[DetailedReportSegment] = Field(default_factory=list)
     detailed_report_html_path: Optional[str] = None
 
-    # Snapshots for debugging rollback
-    snapshots: List[Snapshot] = Field(default_factory=list)
     last_restored_snapshot_id: Optional[str] = None  # Tracks which snapshot was last restored (for parent chain)
     # Durable first-round restore provenance; survives routing consume until
     # the canonical RoundResult records it (then consume_restore_provenance).
@@ -243,28 +239,20 @@ class AnalysisState(BaseModel):
     # Audit reason when a session is terminated (e.g. snapshot_failure).
     termination_reason: Optional[str] = None
 
-    # Snapshot V2: failure and transaction tracking
+    # Retired-subsystem blockers. Nothing writes these any more; they are
+    # declared so a session persisted by an older build still parses and
+    # `sanitize_legacy_state` can clear them on load. Dropping the fields
+    # instead would leave such a session WAITING_INPUT on a reason no dialog
+    # answers. Spec 4.6.
     snapshot_failure: Optional[Dict[str, Any]] = None
     snapshot_transaction: Optional[Dict[str, Any]] = None
-
-    # One-shot "skip snapshot & continue" marker. Set when the user chooses Skip
-    # on a snapshot-failure gate; consumed by the next required workflow-boundary
-    # capture for the matching phase ("*" matches any) so the workflow proceeds
-    # without capturing at that boundary. See failure_gate.consume_snapshot_skip.
     skip_required_snapshot_phase: Optional[str] = None
-
-    # One-shot "capture anyway" marker. Set when the user chooses Proceed on a
-    # memory-preflight gate, accepting the OOM risk; consumed by the next runtime
-    # capture, which then skips the preflight. Cleared on consumption so a later
-    # capture is judged on its own measurements.
-    # See runtime_parts.capture._consume_memory_preflight_override.
-    force_snapshot_memory_override: bool = False
 
     # Recovery failure marker: set when journal recovery fails, blocks mutations
     recovery_blocked: bool = False
 
-    # Post-report snapshot idempotency (Task 6)
     report_generation_id: Optional[str] = None
+    # Also a retired-subsystem blocker; see snapshot_failure above.
     pending_required_snapshot: Optional[Dict[str, Any]] = None
     # Durable handoff from a bounded detailed-report LLM intervention. Once
     # armed, a restarted workflow must bypass the failed upstream and finish
@@ -834,8 +822,6 @@ class AnalysisState(BaseModel):
             f"/api/session/{self.id}/detailed-report/html"
             if getattr(self, 'detailed_report_html_path', None) else None
         )
-        result["snapshot_count"] = len(self.snapshots)
-
         return result
 
     @staticmethod

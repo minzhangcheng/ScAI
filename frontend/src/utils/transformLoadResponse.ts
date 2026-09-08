@@ -1,4 +1,3 @@
-import { parseSnapshotFailure, type ParsedSnapshotFailure } from './snapshotV2'
 import { buildAnnotationDataFromState, type AnnotationData } from './annotationGate'
 import type {
   SessionLoadResponse,
@@ -23,7 +22,6 @@ import type {
   AgentType,
   AgentVisionSettings,
 } from '../stores/appStore'
-import type { SnapshotTransactionRecord } from '../types/snapshotV2'
 import { resultIdentityKey } from './roundKey'
 import { normalizeImageBase64 } from './image'
 
@@ -207,7 +205,6 @@ export interface LiteratureConfigStoreUpdates {
 
 export type StoreUpdates = {
   stateVersion?: number
-  snapshotCount?: number
   roundWaitSeconds?: number
   /** Rebuilt from the authoritative annotation_state; null when no gate pending. */
   annotationGateData?: AnnotationData | null
@@ -215,8 +212,6 @@ export type StoreUpdates = {
   llmFailureInfo?: LlmFailureInfo | null
   runtimeRestoreStatus?: 'complete' | 'unavailable' | 'intentionally_kept'
   runtimeRestoreWarning?: string | null
-  snapshotFailure?: ParsedSnapshotFailure | null
-  snapshotTransaction?: SnapshotTransactionRecord | null
   prompts?: AgentPrompts
   models?: AgentModels
   temperatures?: AgentTemperatures
@@ -343,7 +338,6 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
 
   const storeUpdates: TransformedLoadResponse['storeUpdates'] = {
     ...opt('stateVersion', data.state_version),
-    ...opt('snapshotCount', data.snapshot_count),
     ...opt('roundWaitSeconds', typeof data.round_wait_seconds === 'number' ? data.round_wait_seconds : undefined),
     annotationGateData: buildAnnotationDataFromState(data.annotation_state, {
       ...opt('annotation_report_url', data.annotation_report_url),
@@ -396,15 +390,6 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
     storeUpdates.runtimeRestoreWarning = data.runtime_restore_warning
   } else if (data.runtime_restore_status) {
     storeUpdates.runtimeRestoreWarning = null
-  }
-
-  const parsed = parseSnapshotFailure(data.snapshot_failure)
-  if (parsed) {
-    storeUpdates.snapshotFailure = parsed
-  }
-
-  if ('snapshot_transaction' in data) {
-    storeUpdates.snapshotTransaction = data.snapshot_transaction ?? null
   }
 
   if (data.literature_config && typeof data.literature_config === 'object') {

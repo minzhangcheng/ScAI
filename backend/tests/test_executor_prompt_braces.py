@@ -8,7 +8,9 @@ from backend.agents.bioinformatics.executor_prompt import build_static_executor_
 
 
 def _prompt() -> str:
-    return build_static_executor_prompt("system prompt", "single-cell", "/tmp/workspace")
+    # No workspace argument: A2-9 removed it so the prompt cannot emit the
+    # literal session directory, and it was never part of the prompt cache key.
+    return build_static_executor_prompt("system prompt", "single-cell")
 
 
 def test_no_escaped_braces_survive_into_the_rendered_prompt():

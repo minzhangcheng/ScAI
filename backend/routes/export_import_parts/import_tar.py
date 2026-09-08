@@ -26,15 +26,11 @@ from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
 from backend.services.report.output_generation import (
     validate_and_rebind_imported_reports,
 )
-from backend.services.snapshot_v2.checkpoint_paths import (
+from backend.utils.checkpoint_paths import (
     CHECKPOINT_SQLITE_FILENAME,
     checkpoint_sqlite_path,
 )
-from backend.services.snapshot_v2.feature_gate import (
-    is_snapshot_v2_enabled,
-    normalize_disabled_snapshot_state,
-    require_snapshot_v2_enabled,
-)
+from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -57,15 +53,48 @@ from .core import (
     ImportCancelled,
     MIN_FREE_DISK_BYTES,
     _IMPORT_PROGRESS_UPDATE_INTERVAL_S,
-    _is_disabled_snapshot_v2_member,
+    _is_retired_snapshot_member,
     free_disk_bytes,
     import_job_record,
     is_runtime_h5ad_name,
+    is_runtime_generation_name,
     is_sandbox_pickle,
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+def _refuse_resumable_collision(manifest_data: dict, context) -> None:
+    """Refuse an archive that claims to be resumable onto a taken session id.
+
+    The LangGraph checkpoint is keyed by session id and cannot be renamed into
+    place (spec 3.6), so the reallocation `_allocate_import_session_id` performs
+    on a collision drops it. The runtime pkl still lands and the import still
+    reports success, which is precisely why this has to be refused rather than
+    warned about: the user would learn about it only when Resume restarted the
+    round.
+
+    Only a *claimed* resumable archive is refused. An archive built before this
+    field existed carries no claim and keeps the old behaviour, which is correct
+    for it -- it has no checkpoint to lose.
+    """
+    if not manifest_data.get("resumable"):
+        return
+    if context.session_id == context.archive_session_id:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"Session {context.archive_session_id} already exists on this "
+            "installation. This archive carries a runtime and a workflow "
+            "checkpoint, and the checkpoint is bound to that session ID -- "
+            "importing under a new ID would drop it, and the session would "
+            "restart the round instead of continuing. Delete or rename the "
+            "existing session first, or re-export without runtime to import "
+            "the results only."
+        ),
+    )
 
 from dataclasses import dataclass, field
 
@@ -91,11 +120,12 @@ class ImportTarContext:
     archive_session_id: Optional[str] = None
     session_id: Optional[str] = None
     skipped: Dict[str, int] = field(default_factory=lambda: {
-        "snapshot_v2": 0,
+        "retired_snapshot": 0,
         "unsafe_path": 0,
         "off_layout": 0,
         "untrusted_pickle": 0,
         "untrusted_runtime_h5ad": 0,
+        "untrusted_runtime_manifest": 0,
         "checkpoint_dropped": 0,
     })
     skipped_examples: list[str] = field(default_factory=list)
@@ -248,13 +278,11 @@ def import_tar_gz(
             if not member.isfile():
                 continue
 
-            if _is_disabled_snapshot_v2_member(member.name):
+            if _is_retired_snapshot_member(member.name):
                 logger.warning(
-                    "Skipping Snapshot V2 member from ordinary import while "
-                    "the subsystem is disabled: %s",
-                    member.name,
+                    "Skipping retired snapshot storage member: %s", member.name,
                 )
-                context.note_skip("snapshot_v2", member.name)
+                context.note_skip("retired_snapshot", member.name)
                 continue
 
             if _is_unsafe_member_name(member.name):
@@ -290,6 +318,7 @@ def import_tar_gz(
                                 f"directory {archive_session_id!r}"
                             ),
                         )
+                    _refuse_resumable_collision(manifest_data, context)
                     old_base_dir = manifest_data.get("data_base_dir", "")
                     manifest_version = str(manifest_data.get("version", ""))
                     if manifest_version and manifest_version not in _SUPPORTED_ARCHIVE_VERSIONS:
@@ -334,6 +363,17 @@ def import_tar_gz(
             validate_path_within(dest_path, get_session_dir(session_id))
             # SECURITY (S4): sandbox pickles can execute arbitrary code via dill.load.
             # Drop them unless the caller passed trust=true to take responsibility.
+            # A manifest without its dump describes a generation this
+            # archive did not bring. Dropped on the same authority as the pkl,
+            # so an older archive that still carries one cannot land it either.
+            if not trust and is_runtime_generation_name(dest_path.name):
+                if not is_sandbox_pickle(dest_path.name):
+                    logger.warning(
+                        "Skipping runtime generation manifest from imported "
+                        "archive (untrusted): %s", member.name,
+                    )
+                    context.note_skip("untrusted_runtime_manifest", member.name)
+                    continue
             is_pkl_member = is_sandbox_pickle(dest_path.name)
             if is_pkl_member:
                 if not trust:
@@ -399,28 +439,25 @@ def import_tar_gz(
     # tests for them below.
     imported_live_runtime = wrote_sandbox_pkl or wrote_runtime_h5ad_manifest
     if session_id:
+        if wrote_sandbox_pkl:
+            # Validation can retire both the dump and its h5ad fallback.
+            imported_live_runtime = _resign_imported_live_pkl(session_id)
         if not imported_live_runtime:
             _drop_kernelless_checkpoints(session_id, notify=context.note_skip)
         validate_and_rebind_imported_reports(get_session_reports(session_id))
-        if wrote_sandbox_pkl:
-            _resign_imported_live_pkl(session_id)
 
     if state_json_data is None:
-        if skipped["snapshot_v2"]:
-            # Every member a Snapshot V2 export emits is filtered above when the
-            # subsystem is off, so the archive is intact and this installation is
-            # the constraint. "State JSON not found" blamed the file for an
-            # operator setting. The env var deliberately stays out of the detail:
-            # this text reaches end users, and the operator-facing wording already
-            # lives in config/_config.py and main.py.
+        if skipped["retired_snapshot"]:
+            # Every member of a snapshot-only export is filtered above, so the
+            # archive is intact and this installation is the constraint. "State
+            # JSON not found" would blame the file for a removed feature.
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "This archive carries only Snapshot V2 snapshot data "
-                    f"({skipped['snapshot_v2']} member(s)) and no session state. "
-                    "Snapshot V2 is not enabled on this server, so the archive "
-                    "cannot be imported here; import it on a server with "
-                    "Snapshot V2 enabled."
+                    "This archive carries only snapshot data "
+                    f"({skipped['retired_snapshot']} member(s)) and no session "
+                    "state. Snapshots were removed from this server, so there "
+                    "is nothing here it can import."
                 ),
             )
         raise HTTPException(status_code=400, detail="Session state JSON not found in archive")
@@ -454,6 +491,9 @@ def import_tar_gz(
     )
     state = AnalysisState(**inlined)
     _finalize_imported_state(state, imported_runtime=imported_live_runtime)
+    if imported_live_runtime:
+        from .import_state import validate_imported_pairing
+        validate_imported_pairing(state)
 
     # Write the externalized JSON (with @scai-blob tokens intact) to disk.
     # This keeps session.json consistent with the extracted blob sidecars.

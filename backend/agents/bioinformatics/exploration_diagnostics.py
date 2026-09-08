@@ -339,7 +339,7 @@ async def ensure_exploration_diagnostic_figure(agent: Any, state: Any) -> Option
         return None
     try:
         probe_result = await sandbox.execute(
-            build_probe_code(), save_to_history=False, skip_safety_check=True
+            build_probe_code(), records_history=False, skip_safety_check=True, mutates_namespace=False
         )
     except Exception as err:  # pragma: no cover - defensive
         logger.warning("[Bioinformatics] QC diagnostic probe failed: %r", err)

@@ -34,7 +34,6 @@ class _Harness(IntegrationMixin):
 
     async def _send_message(self, t, c, agent=None): self.sent.append((t, c))
     async def _send_state_sync(self, state, change_type): self.sent.append(("state_sync", change_type))
-    async def _create_auto_snapshot(self, state, phase): self.snapshots.append(phase)
     async def _build_and_save_detailed_segment(self, state, phase, title, graph_state=None, round_result=None):
         self.segments.append(phase)
     def _set_status(self, state, status): state.status = status
@@ -78,7 +77,6 @@ def test_integration_with_candidates_opens_gate():
     assert s.integration_gate_candidates
     assert s.integration_reports[-1] == "INTEGRATION ANALYSIS TEXT"
     assert s.multi_direction_correlation == "INTEGRATION ANALYSIS TEXT"
-    assert "pre_integration_gate" in h.snapshots
     assert h._continue_event.cleared is True
     assert any(t == "integration_gate" for t, _ in h.sent)
     assert ("state_sync", "integration_gate") in h.sent
@@ -92,7 +90,6 @@ def test_integration_empty_candidates_short_circuits():
     assert out["should_continue"] is False
     assert s.pending_integration is False
     assert s.analysis_phase == AnalysisPhase.INTEGRATION
-    assert "pre_integration_gate" not in h.snapshots
 
 
 def test_integration_cap_short_circuits_even_with_candidates():

@@ -1,0 +1,586 @@
+#!/usr/bin/env python3
+"""Replay a session's notebook on a clean kernel and judge it against the
+declared contract in docs/coding/plain-persistence-replay-contract.md.
+
+Two modes, and the order between them is the whole point:
+
+    scai-notebook-replay fingerprint <session-dir> <out.json>
+    scai-notebook-replay replay <session-dir> <fingerprint.json> <report.json>
+
+`fingerprint` extracts the declared key variables from the original run. It has
+to happen before the replay touches anything, or the numbers it reads are the
+replay's. `replay` starts a clean kernel in a clean workspace, executes every
+notebook cell in order without stopping at a failure, extracts the same
+variables, and compares.
+
+The tolerances live in TOLERANCES below and are transcribed from the contract
+document, which was committed before this file existed. They are not arguments
+and there is no flag to relax them: a harness whose thresholds can be tuned
+after seeing a result measures nothing.
+
+Not claimed here, per the contract: byte-identical figures, stability of network
+reads, cross-installation replay. A cell that raised in the original run is
+expected to raise again -- a replay that "fixes" a failure has diverged as much
+as one that breaks a success.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import sys
+import time
+
+# Transcribed from docs/coding/plain-persistence-replay-contract.md section 4.
+# Exact wherever the quantity is combinatorial; a relative bound only where
+# floating-point accumulation order legitimately differs.
+TOLERANCES = {
+    "shape": None,
+    "obs_names_digest": None,
+    "var_names_digest": None,
+    "x_sum": 1e-6,
+    "x_nonzero": None,
+    "obs_categoricals": None,
+    "obsm_shapes": None,
+    "obsm_values": 1e-4,
+    "highly_variable": None,
+    "persistent_outputs": None,
+}
+
+# Runs inside the kernel. Kept as source text rather than an imported function
+# because the kernel is a separate process with its own namespace, and the
+# fingerprint has to be taken from *that* namespace.
+EXTRACT_FUNCTION = r'''
+def _scai_replay_fingerprint(declared_outputs=None, namespace_names=None):
+    import hashlib
+    import json
+
+    def digest(names):
+        joined = "\n".join(sorted(str(n) for n in names))
+        return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+    out = {"schema_version": 2, "extraction_status": "measured", "present": False}
+    if declared_outputs is None:
+        out["persistent_outputs_status"] = "unmeasured"
+    else:
+        out["persistent_outputs_status"] = "measured"
+        out["declared_persistent_outputs"] = sorted(set(declared_outputs))
+        out["persistent_outputs"] = sorted(
+            name for name in set(declared_outputs)
+            if name in (globals() if namespace_names is None else namespace_names)
+        )
+    adata = globals().get("adata")
+    if adata is None:
+        return out
+
+    out["present"] = True
+    out["shape"] = list(adata.shape)
+    out["obs_names_digest"] = digest(adata.obs_names)
+    out["var_names_digest"] = digest(adata.var_names)
+
+    X = adata.X
+    try:
+        out["x_sum"] = float(X.sum())
+        # .nnz for sparse, a boolean reduction otherwise. Both count the same
+        # thing; sparse matrices can carry explicit zeros, so nnz is checked
+        # against the dense definition where it is cheap to.
+        out["x_nonzero"] = int(X.nnz) if hasattr(X, "nnz") else int((X != 0).sum())
+    except Exception as exc:
+        out["x_error"] = repr(exc)
+        out["extraction_status"] = "unmeasured"
+
+    cats = {}
+    for column in adata.obs.columns:
+        series = adata.obs[column]
+        if str(series.dtype) not in ("category", "object", "bool"):
+            continue
+        counts = series.value_counts()
+        cats[str(column)] = sorted(
+            (str(label), int(count)) for label, count in counts.items()
+        )
+    out["obs_categoricals"] = cats
+    out["n_clusters"] = {k: len(v) for k, v in cats.items()}
+
+    shapes, values = {}, {}
+    for key in getattr(adata, "obsm", {}):
+        try:
+            arr = adata.obsm[key]
+            shapes[str(key)] = list(arr.shape)
+            import numpy as np
+            arr = np.asarray(arr, dtype=float)
+            values[str(key)] = {
+                "encoding": "flat-float-v1", "shape": list(arr.shape),
+                "values": [
+                    float(value) if np.isfinite(value) else
+                    ("nan" if np.isnan(value) else ("+inf" if value > 0 else "-inf"))
+                    for value in arr.ravel()
+                ],
+            }
+        except Exception as exc:
+            shapes[str(key)] = ["error", repr(exc)]
+            out["extraction_status"] = "unmeasured"
+    out["obsm_shapes"] = shapes
+    out["obsm_values"] = values
+
+    try:
+        if "highly_variable" in adata.var.columns:
+            selected = adata.var_names[adata.var["highly_variable"].astype(bool)]
+            out["highly_variable"] = digest(selected)
+            out["n_highly_variable"] = int(len(selected))
+    except Exception as exc:
+        out["highly_variable"] = "error: %r" % (exc,)
+        out["extraction_status"] = "unmeasured"
+
+    return out
+'''
+
+# The kernel returns the fingerprint over stdout, so the call has to serialise
+# it there. `json` is imported inside the function, so the caller imports its
+# own rather than relying on the function's locals leaking out.
+EXTRACT_SOURCE = EXTRACT_FUNCTION + (
+    "\nimport json as _scai_json\n"
+    "print('__SCAI_FINGERPRINT__' + _scai_json.dumps(_scai_replay_fingerprint(globals().get('_scai_declared_outputs'), globals().get('_scai_namespace_names'))))\n"
+)
+FINGERPRINT_PREFIX = "__SCAI_FINGERPRINT__"
+
+
+# --- comparison --------------------------------------------------------------
+
+
+def _close(new, old, rtol: float) -> bool:
+    """The contract's rule: abs(a-b) <= rtol * max(1, abs(b)); NaN == NaN."""
+    if new != new and old != old:  # both NaN
+        return True
+    if new != new or old != old:
+        return False
+    return abs(float(new) - float(old)) <= rtol * max(1.0, abs(float(old)))
+
+
+def _embedding_comparison(original, replayed, rtol):
+    """Pointwise MAD; non-finite kinds and positions must agree exactly."""
+    import math
+
+    if not isinstance(original, dict) or not isinstance(replayed, dict):
+        return {"variable": "obsm_values", "verdict": "unmeasured", "detail": "invalid embedding record"}
+    details = {}
+    unmeasured = False
+    for key in sorted(set(original) | set(replayed)):
+        if key not in original or key not in replayed:
+            details[key] = "present in one run only"
+            continue
+        a, b = original[key], replayed[key]
+        try:
+            for record in (a, b):
+                if record.get("encoding") != "flat-float-v1":
+                    raise ValueError("legacy aggregate fingerprint lacks embedding values")
+                shape, values = record["shape"], record["values"]
+                if not isinstance(shape, list) or any(type(n) is not int or n < 0 for n in shape):
+                    raise ValueError("invalid embedding shape")
+                if not isinstance(values, list) or len(values) != math.prod(shape):
+                    raise ValueError("incomplete embedding values")
+                for value in values:
+                    if isinstance(value, str) and value in {"nan", "+inf", "-inf"}:
+                        continue
+                    if type(value) not in (float, int) or not math.isfinite(value):
+                        raise ValueError("invalid embedding value encoding")
+            if a["shape"] != b["shape"]:
+                details[key] = "embedding shape differs"
+                continue
+            differences, original_abs = [], []
+            for old, new in zip(a["values"], b["values"]):
+                if isinstance(old, str) or isinstance(new, str):
+                    if old != new:
+                        details[key] = "finite/non-finite identity differs"
+                        break
+                else:
+                    differences.append(abs(new - old))
+                    original_abs.append(abs(old))
+            else:
+                mad = math.fsum(differences) / len(differences) if differences else 0.0
+                scale = max(1.0, math.fsum(original_abs) / len(original_abs)) if original_abs else 1.0
+                if mad > rtol * scale:
+                    details[key] = {"mean_absolute_difference": mad, "bound": rtol * scale}
+        except (KeyError, TypeError, ValueError, OverflowError, AttributeError) as exc:
+            unmeasured = True
+            details[key] = str(exc)
+    return {
+        "variable": "obsm_values",
+        "verdict": "unmeasured" if unmeasured else ("diverged" if details else "match"),
+        **({"detail": details} if details else {}),
+    }
+
+
+def compare(original: dict, replayed: dict) -> list[dict]:
+    """One entry per declared variable. Absent from both is skipped, not passed."""
+    results = []
+    if any(not isinstance(fp, dict) or fp.get("schema_version") != 2
+           or fp.get("extraction_status") != "measured" for fp in (original, replayed)):
+        results.append({"variable": "fingerprint", "verdict": "unmeasured",
+                        "detail": "missing, failed, or legacy extraction evidence"})
+    original = original if isinstance(original, dict) else {}
+    replayed = replayed if isinstance(replayed, dict) else {}
+    for name, rtol in TOLERANCES.items():
+        if name == "persistent_outputs" and any(
+            fp.get("persistent_outputs_status") != "measured"
+            or not isinstance(fp.get(name), list)
+            or not isinstance(fp.get("declared_persistent_outputs"), list)
+            for fp in (original, replayed)
+        ):
+            results.append({"variable": name, "verdict": "unmeasured",
+                            "detail": "declared output namespace presence was not measured"})
+            continue
+        a, b = original.get(name), replayed.get(name)
+        if a is None and b is None:
+            results.append({"variable": name, "verdict": "absent"})
+            continue
+        if a is None or b is None:
+            results.append({
+                "variable": name, "verdict": "diverged",
+                "detail": "present in one run only",
+            })
+            continue
+
+        if rtol is None:
+            if name == "persistent_outputs":
+                same = (set(a) == set(b) and set(original["declared_persistent_outputs"])
+                        == set(replayed["declared_persistent_outputs"]))
+            else:
+                same = a == b
+            verdict = "match" if same else "diverged"
+            entry = {"variable": name, "verdict": verdict}
+            if verdict == "diverged":
+                entry["original"], entry["replayed"] = a, b
+            results.append(entry)
+            continue
+
+        if name == "obsm_values":
+            results.append(_embedding_comparison(a, b, rtol))
+            continue
+
+        ok = _close(b, a, rtol)
+        entry = {"variable": name, "verdict": "match" if ok else "diverged",
+                 "rtol": rtol}
+        if not ok:
+            entry["original"], entry["replayed"] = a, b
+        results.append(entry)
+    return results
+
+
+# --- notebook ----------------------------------------------------------------
+
+
+def read_cells(session_dir: pathlib.Path) -> list[dict]:
+    import nbformat
+
+    candidates = sorted(session_dir.rglob("*.ipynb"))
+    if not candidates:
+        raise SystemExit("no .ipynb under %s" % session_dir)
+    if len(candidates) > 1:
+        raise SystemExit(
+            "%d notebooks under %s; name the session directory precisely"
+            % (len(candidates), session_dir)
+        )
+    nb = nbformat.read(candidates[0].open(encoding="utf-8"), as_version=4)
+    cells = []
+    for index, cell in enumerate(nb.cells):
+        if cell.cell_type != "code":
+            continue
+        raised = any(o.output_type == "error" for o in cell.outputs)
+        cells.append({
+            "index": index,
+            "id": cell.get("id"),
+            "code": cell.source,
+            "bootstrap": bool(cell.get("metadata", {}).get("scai_bootstrap")),
+            "original_outcome": "raised" if raised else "ok",
+            "original_ename": next(
+                (o.ename for o in cell.outputs if o.output_type == "error"), None
+            ),
+        })
+    return cells
+
+
+# --- kernel ------------------------------------------------------------------
+
+
+def run_in_kernel(cells: list[dict], workspace: pathlib.Path, declared_outputs=None) -> tuple[list[dict], dict]:
+    """Execute every cell in order. Does not stop at a failure: the original run
+    did not, and a harness that stopped could not report the second divergence."""
+    from jupyter_client.manager import start_new_kernel
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    session_tmp = workspace / "tmp"
+    session_tmp.mkdir(parents=True, exist_ok=True)
+
+    # The bootstrap cell records the absolute roots of the run it came from and
+    # chdirs to them. Without these the replay would leave the clean workspace
+    # on cell 1 and write into the original session's directory -- which is not
+    # a clean workspace, and would also mean two replays of one session fought
+    # over the same files. The bootstrap prefers these when set and falls back
+    # to its recorded literals when they are not, so production is unaffected.
+    environment = dict(os.environ)
+    environment["SCAI_REPLAY_WORKSPACE"] = str(workspace)
+    environment["SCAI_REPLAY_SESSION_TMP"] = str(session_tmp)
+    environment["SCAI_REPLAY_STATE_DIR"] = str(workspace)
+
+    # "Within the same installation" includes ScAI's kernel-startup modules.
+    # The bootstrap tolerates their absence, but the compat shims patch library
+    # defects, so a replay without them can produce different numbers -- the
+    # difference between "the notebook runs" and "the notebook reproduces". The
+    # launcher puts this directory on a production kernel's path; the replay
+    # does the same, so the two agree.
+    startup = REPO / "backend" / "utils" / "kernel_startup"
+    if startup.is_dir():
+        existing = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = (
+            f"{startup}{os.pathsep}{existing}" if existing else str(startup)
+        )
+    else:
+        print(
+            "warning: %s not found, so the replay runs without ScAI's "
+            "compatibility patches and is a weaker claim than the contract "
+            "describes" % startup,
+            file=sys.stderr,
+        )
+
+    manager, client = start_new_kernel(
+        kernel_name="python3", cwd=str(workspace), env=environment,
+    )
+    outcomes, fingerprint = [], {}
+    try:
+        for cell in cells:
+            started = time.time()
+            reply = client.execute_interactive(
+                cell["code"], timeout=None, store_history=True,
+                output_hook=lambda _msg: None,
+            )
+            status = reply["content"]["status"]
+            outcomes.append({
+                "index": cell["index"],
+                "id": cell["id"],
+                "bootstrap": cell["bootstrap"],
+                "original": cell["original_outcome"],
+                "original_ename": cell["original_ename"],
+                "replayed": "ok" if status == "ok" else "raised",
+                "replayed_ename": reply["content"].get("ename"),
+                "seconds": round(time.time() - started, 3),
+            })
+
+        captured = []
+        reply = client.execute_interactive(
+            "_scai_namespace_names = set(globals())\n_scai_declared_outputs = "
+            + repr(declared_outputs) + "\n" + EXTRACT_SOURCE,
+            timeout=None, store_history=False,
+            output_hook=lambda msg: captured.append(msg),
+        )
+        fingerprint = parse_extraction(reply, captured)
+    finally:
+        client.stop_channels()
+        manager.shutdown_kernel(now=True)
+    return outcomes, fingerprint
+
+
+def parse_extraction(reply, messages):
+    """A missing or malformed stdout marker is unmeasured, never an empty pass."""
+    failure = {"schema_version": 2, "extraction_status": "unmeasured"}
+    if reply.get("content", {}).get("status") != "ok":
+        return {**failure, "extraction_error": "fingerprint execution failed"}
+    candidates = []
+    text = "".join(msg.get("content", {}).get("text", "") for msg in messages)
+    for line in text.splitlines():
+        if line.startswith(FINGERPRINT_PREFIX):
+            try:
+                value = json.loads(line[len(FINGERPRINT_PREFIX):])
+            except (ValueError, TypeError):
+                return {**failure, "extraction_error": "malformed fingerprint marker"}
+            candidates.append(value)
+    if len(candidates) != 1 or not isinstance(candidates[0], dict):
+        return {**failure, "extraction_error": "missing or ambiguous fingerprint marker"}
+    return candidates[0]
+
+
+def outcome_divergences(outcomes: list[dict]) -> list[dict]:
+    """Both directions. A cell that succeeded where it used to fail has diverged
+    as much as one that failed where it used to succeed."""
+    out = []
+    for row in outcomes:
+        if row["original"] != row["replayed"]:
+            out.append({**row, "kind": "outcome"})
+        elif row["original"] == "raised" and row["original_ename"] != row["replayed_ename"]:
+            out.append({**row, "kind": "exception-type"})
+    return out
+
+
+# --- entry points ------------------------------------------------------------
+
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
+DUMP_MAGIC = b"SCAI_ZSTD_DILL_V1\n"
+
+
+def load_committed_namespace(path: pathlib.Path) -> dict:
+    """Read the committed runtime dump back into a namespace.
+
+    The format is a zstd stream of dill frames behind a magic header, written by
+    `runtime_save`'s in-kernel script -- not a pickled dict. Alias frames name a
+    variable that is the same object as an earlier one, and are resolved here
+    the way restore resolves them, or the fingerprint would miss whichever name
+    the run happened to bind second.
+    """
+    import dill
+    import zstandard as zstd
+
+    namespace: dict = {}
+
+    def read_frames(stream) -> None:
+        while True:
+            try:
+                frame = dill.load(stream)
+            except EOFError:
+                break
+            if isinstance(frame, tuple) and len(frame) == 3 and frame[0] == "__SCAI_ALIAS__":
+                _, alias, target = frame
+                if target in namespace:
+                    namespace[alias] = namespace[target]
+                continue
+            name, obj = frame
+            namespace[name] = obj
+
+    with open(path, "rb") as raw:
+        if raw.read(len(DUMP_MAGIC)) == DUMP_MAGIC:
+            with zstd.ZstdDecompressor().stream_reader(raw) as stream:
+                read_frames(stream)
+        else:
+            raw.seek(0)
+            read_frames(raw)
+    return namespace
+
+
+def read_declared_outputs(session):
+    """Read declaration receipts from the one persisted AnalysisState."""
+    candidates = [session / "session.json"]
+    if session.name == "states":
+        candidates.append(session.parent / "session.json")
+    candidates.append(session / "sessions" / (session.name + ".json"))
+    present = [path for path in candidates if path.is_file()]
+    if len(present) != 1:
+        return None, "one session state JSON is required for output declarations"
+    try:
+        state = json.loads(present[0].read_text())
+        history = state["code_history"]
+        if not isinstance(history, list):
+            raise ValueError("code_history is not a list")
+        declared = set()
+        for receipt in history:
+            names = receipt["declared_persistent_outputs"]
+            if not isinstance(names, list) or any(
+                not isinstance(name, str) or not name.isidentifier() for name in names
+            ):
+                raise ValueError("invalid output declarations")
+            declared.update(names)
+        return sorted(declared), None
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return None, "output declarations could not be measured: " + str(exc)
+
+
+def cmd_fingerprint(args) -> int:
+    """Extract the declared variables from the original run's committed runtime.
+
+    Reads the committed dump rather than a live kernel: by the time a session is
+    worth replaying its kernel is usually gone, and the dump is what the
+    persistence layer says the run ended with.
+    """
+    session = pathlib.Path(args.session_dir)
+    dumps = sorted(session.rglob("*.pkl"))
+    if not dumps:
+        raise SystemExit("no runtime dump under %s" % session)
+    if len(dumps) > 1:
+        raise SystemExit(
+            "%d runtime dumps under %s; name the session directory precisely"
+            % (len(dumps), session)
+        )
+
+    scope = load_committed_namespace(dumps[0])
+    namespace_names = set(scope)
+    exec(compile(EXTRACT_FUNCTION, "<extract>", "exec"), scope)
+    declared, declaration_error = read_declared_outputs(session)
+    try:
+        payload = scope["_scai_replay_fingerprint"](declared, namespace_names)
+    except Exception as exc:
+        payload = {"schema_version": 2, "extraction_status": "unmeasured", "extraction_error": str(exc)}
+    if declaration_error:
+        payload["persistent_outputs_error"] = declaration_error
+    payload["source"] = str(dumps[0])
+    pathlib.Path(args.out).write_text(json.dumps(payload, indent=2))
+    print("fingerprint: %s (adata present: %s)" % (args.out, payload.get("present")))
+    return 0
+
+
+def cmd_replay(args) -> int:
+    session = pathlib.Path(args.session_dir)
+    original = json.loads(pathlib.Path(args.fingerprint).read_text())
+    cells = read_cells(session)
+    if not any(c["bootstrap"] for c in cells):
+        print(
+            "warning: this notebook has no bootstrap cell, so the replay runs in "
+            "whatever environment this process has, and SCAI_REPLAY_* have "
+            "nothing to override. Sessions written before A2-9 are in that "
+            "state; the result is not a contract verdict.",
+            file=sys.stderr,
+        )
+
+    workspace = pathlib.Path(args.workspace or (session / "_replay_workspace"))
+    declarations = (original.get("declared_persistent_outputs")
+                    if original.get("persistent_outputs_status") == "measured" else None)
+    outcomes, replayed = run_in_kernel(cells, workspace, declarations)
+    divergences = outcome_divergences(outcomes)
+    variables = compare(original, replayed)
+
+    report = {
+        "session_dir": str(session),
+        "cells": len(cells),
+        "outcome_divergences": divergences,
+        "variables": variables,
+        "passed": not divergences and not any(
+            v["verdict"] in {"diverged", "unmeasured"} for v in variables
+        ),
+        "original_fingerprint": original,
+        "replayed_fingerprint": replayed,
+        "cell_outcomes": outcomes,
+    }
+    pathlib.Path(args.report).write_text(json.dumps(report, indent=2))
+
+    print("cells: %d" % len(cells))
+    print("outcome divergences: %d" % len(divergences))
+    for row in divergences[:20]:
+        print("  cell %s: %s -> %s (%s)"
+              % (row["index"], row["original"], row["replayed"], row["kind"]))
+    for entry in variables:
+        print("  %-18s %s" % (entry["variable"], entry["verdict"]))
+    print("report: %s" % args.report)
+    print("PASSED" if report["passed"] else "FINDING -- record it in the baseline")
+    return 0 if report["passed"] else 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    fp = sub.add_parser("fingerprint")
+    fp.add_argument("session_dir")
+    fp.add_argument("out")
+    fp.set_defaults(func=cmd_fingerprint)
+
+    rp = sub.add_parser("replay")
+    rp.add_argument("session_dir")
+    rp.add_argument("fingerprint")
+    rp.add_argument("report")
+    rp.add_argument("--workspace", default=None)
+    rp.set_defaults(func=cmd_replay)
+
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

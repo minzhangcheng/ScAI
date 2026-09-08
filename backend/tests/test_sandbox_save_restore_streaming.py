@@ -153,40 +153,6 @@ def test_snapshot_round_trip_compress_decompress(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_save_targets_tracked_dependencies_without_anndata_sweep(tmp_path, monkeypatch):
-    from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
-    from backend.services.snapshot_v2.runtime_registry import RuntimeDependencyTracker
-
-    sb = LocalJupyterSandbox(
-        session_id="tracked-save",
-        state_dir=str(tmp_path / "states"),
-        working_dir=str(tmp_path / "workspace"),
-    )
-    tracker = RuntimeDependencyTracker()
-    tracker.merge_declared({"analysis_result"})
-    sb.runtime_dependency_tracker = tracker
-    captured = {}
-
-    async def _capture(code, **_kwargs):
-        captured["code"] = code
-        # Production kernel code leaves a staged file for the host-side
-        # authenticated commit.  Preserve that boundary in this code-capture
-        # test instead of exercising the legacy custom-kernel fallback.
-        Path(str(sb.notebook_state.session_path) + ".tmp").write_bytes(b"staged")
-        return CodeExecutionResult(success=True, output="Session saved: 1 variables")
-
-    monkeypatch.setattr(sb, "_execute_unlocked", _capture)
-    assert await sb.save_session()
-    assert "analysis_result" in captured["code"]
-    assert "isinstance(_obj, ad.AnnData)" not in captured["code"]
-    assert "__SCAI_ALIAS__" in captured["code"]
-    assert "SCAI_ZSTD_DILL_V1" in captured["code"]
-    assert "ZstdCompressor" in captured["code"]
-    assert "SpooledTemporaryFile" in captured["code"]
-    assert "_scai_stream_safe" not in captured["code"]
-
-
-@pytest.mark.asyncio
 async def test_optional_unpicklable_value_does_not_abort_later_frames(
     tmp_path, monkeypatch,
 ):
@@ -251,68 +217,6 @@ async def test_incomplete_required_runtime_save_raises(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="runtime save failed"):
         await sb.save_session()
     assert sb._last_save_skipped[0]["name"] == "needed"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("output", "error", "required", "expected"),
-    [
-        (
-            "__SCAI_SAVE_SKIPPED__\tds\tLoomConnection\tTypeError\tbad state",
-            (
-                "h5py objects could not be persisted; "
-                "required runtime variable could not be persisted: ds"
-            ),
-            {"col", "ds"},
-            ["ds"],
-        ),
-        (
-            "",
-            "required runtime variables are missing: first, second",
-            {"first", "second"},
-            ["first", "second"],
-        ),
-        (
-            "",
-            "backed AnnData could not be materialized for persistence: adata (OSError)",
-            {"adata"},
-            ["adata"],
-        ),
-    ],
-)
-async def test_failed_runtime_variable_attribution_uses_exact_names(
-    tmp_path,
-    monkeypatch,
-    output,
-    error,
-    required,
-    expected,
-):
-    from backend.utils.sandbox import CodeExecutionResult, LocalJupyterSandbox
-    from backend.services.snapshot_v2.runtime_registry import RuntimeDependencyTracker
-
-    sb = LocalJupyterSandbox(
-        session_id="failed-save-attribution",
-        state_dir=str(tmp_path / "states"),
-        working_dir=str(tmp_path / "workspace"),
-    )
-    tracker = RuntimeDependencyTracker()
-    tracker.merge_declared(required)
-    sb.runtime_dependency_tracker = tracker
-
-    async def _fail(_code, **_kwargs):
-        return CodeExecutionResult(
-            success=False,
-            output=output,
-            error=error,
-        )
-
-    monkeypatch.setattr(sb, "_execute_unlocked", _fail)
-
-    with pytest.raises(RuntimeError, match="runtime save failed"):
-        await sb.save_session()
-
-    assert sb.notebook_state.runtime_persistence["failed_variables"] == expected
 
 
 @pytest.mark.asyncio
@@ -433,10 +337,9 @@ async def test_real_kernel_backed_anndata_materializes_with_aliases_or_fails_clo
 
 
 @pytest.mark.asyncio
-async def test_real_kernel_snapshot_v2_disabled_save_restore_keeps_budgets(
+async def test_real_kernel_save_restore_keeps_budgets(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr("backend.config._config.SNAPSHOT_V2_ENABLED", False)
     from backend.utils.runtime_budget import RuntimeBudgetExceeded
     from backend.utils.sandbox import LocalJupyterSandbox, _sha256_file
 
@@ -497,3 +400,40 @@ async def test_real_kernel_snapshot_v2_disabled_save_restore_keeps_budgets(
         assert "42" in check.output
     finally:
         await restored.stop(save=False)
+
+
+@pytest.mark.asyncio
+async def test_real_kernel_unpicklable_main_closure_commits_other_values(tmp_path):
+    """An actual __main__ closure is skipped without invalidating the generation."""
+    from backend.utils.sandbox import LocalJupyterSandbox
+    from backend.utils.runtime_manifest import read_runtime_manifest, runtime_manifest_path
+
+    sid = "unpicklable-main-closure"
+    states = tmp_path / "states"
+    sb = LocalJupyterSandbox(session_id=sid, state_dir=str(states),
+                              working_dir=str(tmp_path / "workspace"), timeout=60)
+    await sb.start()
+    try:
+        result = await sb.execute("""
+adata = [1, 2, 3]
+def make_helper():
+    captured = (i for i in range(3))
+    def helper():
+        return next(captured)
+    return helper
+helper = make_helper()
+""")
+        assert result.success, result.error
+        assert await sb.save_session() is True
+        manifest = read_runtime_manifest(runtime_manifest_path(sid, states_dir=states))
+        assert "adata" in manifest["saved_names"]
+        assert "helper" not in manifest["saved_names"]
+        assert any(row["name"] == "helper" and row["reason"] == "serialization_failed"
+                   for row in manifest["skipped_names"])
+        assert all(row["name"] != "helper" for row in manifest["carried_definitions"])
+        await sb.stop(save=False)
+        await sb.start()
+        result = await sb.execute("assert adata == [1, 2, 3]; assert 'helper' not in globals()")
+        assert result.success, result.error
+    finally:
+        await sb.stop(save=False)

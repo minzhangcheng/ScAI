@@ -48,17 +48,6 @@ def v2_paths(tmp_path):
     return p
 
 
-@pytest.fixture
-def object_store(v2_paths):
-    from backend.services.snapshot_v2.object_store import ObjectStore
-    return ObjectStore(v2_paths)
-
-
-@pytest.fixture
-def manifest_store(v2_paths):
-    from backend.services.snapshot_v2.object_store import ManifestStore
-    return ManifestStore(v2_paths)
-
 
 @pytest_asyncio.fixture
 async def sandbox(tmp_path, session_id):
@@ -96,7 +85,7 @@ from pandas import CategoricalDtype
 adata.obs['cat'] = pd.Categorical(['a','b']*25)
 print("adata:", adata.shape)
 """
-    result = await sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+    result = await sandbox.execute(code, records_history=False, skip_safety_check=True)
     assert result.success, f"Failed to create adata: {result.error}"
     return sandbox
 
@@ -105,8 +94,8 @@ print("adata:", adata.shape)
 def analysis_state(session_id):
     """Minimal AnalysisState registered in the global sessions dict.
 
-    Required by SnapshotService.capture / _capture_analysis_state when tests
-    call capture without an explicit analysis_state= argument.
+    Registered so code that resolves a session from the global registry
+    finds one during an integration run.
     """
     from backend.models.schemas import AnalysisState
     from backend.state import sessions
@@ -120,9 +109,3 @@ def analysis_state(session_id):
     sessions[session_id] = state
     yield state
     sessions.pop(session_id, None)
-
-
-@pytest.fixture
-def service(session_id, v2_paths, analysis_state):
-    from backend.services.snapshot_v2.service import SnapshotService
-    return SnapshotService(session_id, v2_paths)

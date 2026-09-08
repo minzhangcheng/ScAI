@@ -199,7 +199,18 @@ def _extract_save_code(monkeypatch, live_names, tracker_required):
 
     async def _execute_unlocked(code, **_kwargs):
         captured["code"] = code
-        return types.SimpleNamespace(success=True, output="", error=None)
+        # A successful save always reports its coverage; a double that omits it
+        # is claiming a generation nothing can describe, which the host now
+        # refuses rather than recording as empty.
+        return types.SimpleNamespace(
+            success=True,
+            output=(
+                '__SCAI_SAVED_NAMES__:[]\n'
+                '__SCAI_EXCLUDED_KIND__:[]\n'
+                '__SCAI_EXCLUDED_VOLATILE__:[]'
+            ),
+            error=None,
+        )
 
     sandbox._snapshot_user_globals = _snapshot_user_globals
     sandbox._prune_legacy_unobserved_required = lambda _live: set()
@@ -218,24 +229,6 @@ def test_save_code_enumerates_the_namespace_rather_than_a_name_list(monkeypatch)
     # the agent invented a name for.
     assert "globals().keys()" in code
     assert "_scai_is_anndata" in code
-
-
-def test_save_code_requires_canonical_artifacts_that_are_live(monkeypatch):
-    code = _extract_save_code(monkeypatch, {"adata", "scratch"}, set())
-
-    assert "_required_names = set(['adata'])" in code
-
-
-def test_save_code_does_not_require_canonical_artifacts_that_are_absent(monkeypatch):
-    code = _extract_save_code(monkeypatch, {"scratch"}, set())
-
-    assert "_required_names = set([])" in code
-
-
-def test_save_code_keeps_tracker_declarations_required(monkeypatch):
-    code = _extract_save_code(monkeypatch, {"scratch"}, {"deg_table"})
-
-    assert "_required_names = set(['deg_table'])" in code
 
 
 def _run_save_code(code, namespace):
@@ -375,15 +368,6 @@ def test_modules_and_callables_are_excluded(monkeypatch):
     restored = _read_frames(target)
 
     assert set(restored) == {"keepme"}
-
-
-def test_missing_required_variable_still_fails_closed(monkeypatch):
-    """Relaxing the optional tier must not relax the required one."""
-    code = _extract_save_code(monkeypatch, set(), {"deg_table"})
-    namespace = {"__builtins__": __builtins__, "something_else": 1}
-
-    with pytest.raises(RuntimeError, match="required runtime variables are missing"):
-        _run_save_code(code, namespace)
 
 
 def test_aliased_objects_restore_to_one_object(monkeypatch):

@@ -54,7 +54,6 @@ def _token(client, username="boss", password="adminpass123"):
 def _populate(session_id, *, live_pkl: bool):
     """Give the session the artefacts a real mid-analysis run would have."""
     from backend.config import get_session_states, get_session_workspace, get_session_uploads
-    from backend.utils.runtime_apply import _live_pkl
 
     states = get_session_states(session_id)
     states.mkdir(parents=True, exist_ok=True)
@@ -67,7 +66,7 @@ def _populate(session_id, *, live_pkl: bool):
     )
     asyncio.run(_create_checkpoint_fixture(states / "checkpoints.sqlite"))
     if live_pkl:
-        _live_pkl(session_id).write_bytes(b"DILL-KERNEL-DUMP")
+        _write_committed_generation(session_id)
 
     ws = get_session_workspace(session_id)
     ws.mkdir(parents=True, exist_ok=True)
@@ -77,6 +76,79 @@ def _populate(session_id, *, live_pkl: bool):
     up.mkdir(parents=True, exist_ok=True)
     (up / "matrix.h5ad").write_bytes(b"H5AD-DATA")
 
+
+
+def _write_committed_generation(session_id):
+    """The pkl and its HMAC, as a real generation carries them.
+
+    Writing bare bytes made the session look resumable to an exporter that only
+    read the pairing and unresumable to one that verifies the generation --
+    which is the difference the resumable-export contract turns on.
+
+    The manifest is written separately by `_pair_committed_generation`, because
+    it has to record the state/checkpoint pairing as of the moment the save
+    commits, and the fixture advances the session after populating it.
+    """
+    from backend.utils.runtime_apply import _live_pkl
+    from backend.utils.sandbox_parts.regular_save import _write_pkl_signature
+    from backend.utils.sandbox_parts.shared import _integrity_dir
+
+    pkl = _live_pkl(session_id)
+    pkl.parent.mkdir(parents=True, exist_ok=True)
+    pkl.write_bytes(b"DILL-KERNEL-DUMP")
+    _write_pkl_signature(pkl, _integrity_dir(session_id))
+
+
+def _pair_committed_generation(session_id, *, revision: int = 1):
+    """Sign a manifest that pairs the dump to the session as it stands now.
+
+    A real save captures `state_version` and the checkpoint identity at commit
+    time, and resumable export refuses an archive whose manifest pairs to
+    anything else -- that refusal is the point of the contract, so the fixture
+    has to pair honestly rather than be exempted from the check.
+    """
+    from backend.state import sessions
+    from backend.utils.runtime_apply import _live_pkl
+    from backend.utils.runtime_manifest import (
+        build_runtime_manifest,
+        runtime_manifest_path,
+        write_runtime_manifest,
+    )
+    from backend.utils.runtime_pairing import capture_pairing
+    from backend.utils.sandbox_parts.regular_save import _sha256_file
+
+    pkl = _live_pkl(session_id)
+    digest = _sha256_file(pkl)
+    state = sessions[session_id]
+    write_runtime_manifest(
+        runtime_manifest_path(session_id),
+        build_runtime_manifest(
+            revision=revision,
+            state_revision=revision,
+            pkl_digest=digest,
+            saved_names=["adata"],
+            skipped_names=[],
+            serializer_version="dill-zstd-1",
+            pairing=capture_pairing(session_id, state),
+        ),
+    )
+
+    # A generation on disk is only half of it: `state_runtime_coherence` reads
+    # the session's own record, and with no `committed_source`/`committed_digest`
+    # it answers "unavailable" -- a session that never saved. A real save writes
+    # these through `sync_runtime_persistence_state`, so the fixture writes them
+    # too rather than the export being exempted from the coherence check.
+    persistence = dict(getattr(state, "runtime_persistence", None) or {})
+    persistence.update({
+        "committed_source": "regular_save",
+        "committed_digest": digest,
+        "committed_revision": revision,
+        "current_revision": revision,
+        "saved_revision": revision,
+        "last_attempt_revision": revision,
+        "last_attempt_status": "committed",
+    })
+    state.runtime_persistence = persistence
 
 async def _create_checkpoint_fixture(path):
     """Create the smallest saver-owned checkpoint database for E2E export."""
@@ -107,7 +179,13 @@ def _export_download(client, token, session_id, *, include_runtime):
     return dl.content
 
 
-def _import_archive(client, token, blob, *, trust):
+def _import_job(client, token, blob, *, trust):
+    """Run an import to a terminal state and return the job, whatever it says.
+
+    Separate from `_import_archive` because a refusal is now a designed outcome
+    (a resumable archive onto a live session id), and a helper that asserts
+    success cannot express it.
+    """
     headers = {
         **_auth(token),
         "X-Filename": "export_test.tar.gz",
@@ -126,32 +204,20 @@ def _import_archive(client, token, blob, *, trust):
         if job["status"] in ("completed", "failed", "cancelled"):
             break
         time.sleep(0.05)
+    return job
+
+
+def _import_archive(client, token, blob, *, trust):
+    job = _import_job(client, token, blob, trust=trust)
     assert job["status"] == "completed", f"import did not complete: {job}"
     return job["session_id"]
 
 
-@pytest.fixture
-def snapshot_v2(request, monkeypatch):
-    """Pin the Snapshot V2 operator gate for the duration of a round trip.
 
-    The gate is a process-scoped module global, and the repo conftest turns it
-    *on* for the whole suite. An ordinary deployment leaves it off, and both
-    ``/run`` and ``/resume`` call ``normalize_disabled_snapshot_state`` only on
-    that path — so the configuration this round trip is supposed to certify was
-    the one configuration it never ran under.
-    """
-    from backend.config import _config
-
-    monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", request.param)
-    return request.param
-
-
-@pytest.mark.parametrize("snapshot_v2", [False, True], indirect=True)
 @pytest.mark.parametrize(
     "include_runtime, trust, keep_source",
     [
         (True, True, False),    # cross-instance migration, runtime carried
-        (True, True, True),     # same instance: the id collides, a new one is allocated
         (False, False, False),  # the default export: no runtime at all
         (True, False, False),   # runtime exported, not trusted on the way in
         (False, True, False),   # trust is harmless without exported runtime
@@ -159,7 +225,7 @@ def snapshot_v2(request, monkeypatch):
     ],
 )
 def test_export_import_continue(
-    client, snapshot_v2, include_runtime, trust, keep_source
+    client, include_runtime, trust, keep_source
 ):
     from backend.config import get_session_dir, get_session_states
     from backend.models.schemas import TaskStatus
@@ -179,6 +245,8 @@ def test_export_import_continue(
     _populate(src_id, live_pkl=True)
     _advance(src_id)
     client.post(f"/api/session/{src_id}/save", headers=_auth(token))
+    if include_runtime:
+        _pair_committed_generation(src_id)
 
     blob = _export_download(client, token, src_id, include_runtime=include_runtime)
     assert blob[:2] == b"\x1f\x8b", "export is not gzip"
@@ -274,7 +342,7 @@ def test_export_import_continue(
     # wrote says nothing about whether anything would execute, so check the
     # branch that handler takes and where that branch enters the graph.
     from backend.routes.websockets import should_resume_workflow
-    from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+    from backend.workflow.restore_entry import build_restore_entry_plan
 
     assert should_resume_workflow(after) is True, (
         "a session that has already run must continue, not start over"
@@ -291,25 +359,64 @@ def test_export_import_continue(
         )
 
 
-@pytest.mark.parametrize("snapshot_v2", [False, True], indirect=True)
-def test_the_resume_button_moves_a_kernel_without_its_checkpoint(client, snapshot_v2):
-    """Re-import a runtime-carrying archive onto the instance that wrote it.
+def test_a_resumable_archive_is_refused_onto_a_live_session_id(client):
+    """Spec 3.6, spec 5.4. The old behaviour here was the failure.
 
-    The id collides, so a new one is allocated and the checkpoint is dropped —
-    it is keyed by the archive's thread id. The kernel survives, which leaves
-    ``runtime_restore_status`` at ``complete``, and the frontend only offers
-    Re-run while the runtime is *un*available. So Resume is the sole control
-    here, and it never sets a start intent of its own: unless the import armed
-    one, ``resume()`` finds no checkpoint and no continuation target and holds
-    without executing.
+    Re-importing a runtime-carrying archive onto the installation that wrote it
+    used to allocate a fresh id and drop the checkpoint with it -- the kernel
+    landed, ``runtime_restore_status`` stayed ``complete``, the UI offered
+    Resume, and Resume restarted the round. A session that looked resumable and
+    was not, with nothing anywhere saying so.
 
-    Every other case in this file continues through ``POST /run``, which arms
-    the intent itself and therefore cannot tell whether the import did.
+    The import refuses now, and says how to resolve it. The results-only path is
+    unaffected: it carries no checkpoint and still lands under a fresh id.
+    """
+    token = _token(client)
+    started = client.post(
+        "/api/session/start",
+        json={"instruction": "cluster the cells"},
+        headers=_auth(token),
+    )
+    assert started.status_code == 200, started.text
+    src_id = started.json()["session_id"]
+
+    _populate(src_id, live_pkl=True)
+    _advance(src_id)
+    client.post(f"/api/session/{src_id}/save", headers=_auth(token))
+    _pair_committed_generation(src_id)
+
+    blob = _export_download(client, token, src_id, include_runtime=True)
+    job = _import_job(client, token, blob, trust=True)
+
+    assert job["status"] == "failed", job
+    assert "already exists" in job["error"]
+    assert "checkpoint is bound to that session ID" in job["error"]
+    assert "without runtime" in job["error"]
+
+    # The results-only path is untouched: no checkpoint travels, so nothing is
+    # lost by landing under a fresh id.
+    results_only = _export_download(client, token, src_id, include_runtime=False)
+    reallocated = _import_archive(client, token, results_only, trust=False)
+    assert reallocated != src_id
+
+
+def test_the_resume_button_is_not_a_silent_no_op(client):
+    """Resume never arms a start intent of its own.
+
+    Unless the import armed one, ``resume()`` finds no checkpoint and no
+    continuation target and holds without executing. Every other case in this
+    file continues through ``POST /run``, which arms the intent itself and
+    therefore cannot tell whether the import did.
+
+    The source is deleted before the import so the archive lands on its own id
+    -- which is what a resumable archive now requires, and which also gives this
+    test the checkpoint it needs to be about Resume rather than about the
+    collision.
     """
     from backend.config import get_session_states
     from backend.models.schemas import TaskStatus
     from backend.routes.websockets import should_resume_workflow
-    from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+    from backend.workflow.restore_entry import build_restore_entry_plan
     from backend.state import sessions
     from backend.utils.runtime_apply import _live_pkl
 
@@ -325,15 +432,23 @@ def test_the_resume_button_moves_a_kernel_without_its_checkpoint(client, snapsho
     _populate(src_id, live_pkl=True)
     _advance(src_id)
     client.post(f"/api/session/{src_id}/save", headers=_auth(token))
+    _pair_committed_generation(src_id)
 
     blob = _export_download(client, token, src_id, include_runtime=True)
+
+    # Delete the source so the archive lands on its own id. A resumable archive
+    # requires that now, and it is also what lets the checkpoint travel -- which
+    # is what makes this a test about Resume rather than about the collision.
+    client.delete(f"/api/session/{src_id}", headers=_auth(token))
+    sessions.pop(src_id, None)
+
     new_id = _import_archive(client, token, blob, trust=True)
-    assert new_id != src_id, "a colliding id must not be reused"
+    assert new_id == src_id, "with the source deleted the archive keeps its id"
 
     state = sessions[new_id]
     assert _live_pkl(new_id).exists(), "the trusted kernel should have landed"
-    assert not (get_session_states(new_id) / "checkpoints.sqlite").exists(), (
-        "a checkpoint keyed by the archive's thread id must not be reused"
+    assert (get_session_states(new_id) / "checkpoints.sqlite").exists(), (
+        "the archive's checkpoint travels when its id is free"
     )
     assert state.runtime_restore_status == "complete", (
         "the kernel is here, so the UI will offer Resume and not Re-run"
@@ -345,17 +460,24 @@ def test_the_resume_button_moves_a_kernel_without_its_checkpoint(client, snapsho
 
     after = sessions[new_id]
     assert after.status == TaskStatus.RUNNING
-    assert should_resume_workflow(after) is True
-    plan = build_restore_entry_plan(after)
-    assert plan.target_node == "initialize_round", (
-        "Resume must re-enter the round loop; without an armed start intent "
-        "resume() holds and the button is a silent no-op"
+    assert should_resume_workflow(after) is True, (
+        "a session that has already run must continue, not start over"
     )
-    assert plan.preserve_round_on_initialize is True
+
+    # With the checkpoint present the entry plan is deliberately *empty*: there
+    # is a graph position to continue from, so `resume()` routes through the
+    # checkpoint rather than being seeded with a target node. An archive whose
+    # checkpoint was dropped takes the other branch, which is what the
+    # kernel-less cases in `test_export_import_continue` assert.
+    plan = build_restore_entry_plan(after)
+    assert plan.intent == "normal", plan
+    assert plan.target_node is None, plan
+    assert (get_session_states(new_id) / "checkpoints.sqlite").exists(), (
+        "the position resume() continues from has to still be there"
+    )
 
 
-@pytest.mark.parametrize("snapshot_v2", [False, True], indirect=True)
-def test_a_session_exported_before_its_first_round_still_starts(client, snapshot_v2):
+def test_a_session_exported_before_its_first_round_still_starts(client):
     """Export during the window between Start and the first round completing.
 
     ``current_round`` is only incremented once PI planning returns, but the

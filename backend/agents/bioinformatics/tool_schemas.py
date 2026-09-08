@@ -41,14 +41,15 @@ TOOLS = [
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "REQUIRED when this cell creates variables intended for later "
-                            "cells or snapshot restore (e.g., adata, results, markers, "
-                            "model). Variable names only -- never a filename or a path. "
-                            "List every user-global name that subsequent cells will read. "
-                            "Entries that are not valid Python identifiers are ignored. "
-                            "Empty array is allowed only when the cell creates no values "
-                            "for later reuse. Dynamic namespace reads depend on this "
-                            "declaration."
+                            "REQUIRED when this cell creates variables that later cells "
+                            "will read (e.g., adata, results, markers, model). Variable "
+                            "names only -- never a filename or a path. List every "
+                            "user-global name subsequent cells will use. Entries that "
+                            "are not valid Python identifiers are ignored. Empty array "
+                            "is allowed only when the cell creates no values for later "
+                            "reuse. Every name listed must exist when the cell finishes, "
+                            "or the cell fails. The declaration is a record of what this "
+                            "cell produced; it does not decide what is saved."
                         ),
                         "default": [],
                     },

@@ -33,7 +33,7 @@ def graph_recursion_limit(max_rounds: Optional[int]) -> int:
     return GRAPH_RECURSION_LIMIT + GRAPH_RECURSION_PER_ROUND * max(1, rounds)
 
 
-from .helpers import ack_restore_safe_point, wait_with_skip_time
+from .helpers import wait_with_skip_time
 from .retry import with_retry, MAX_NODE_RETRIES
 from .state import WorkflowState, make_initial_workflow_state
 from .routing import RoutingMixin
@@ -50,8 +50,7 @@ from .reporting import ReportingMixin
 from .integration import IntegrationMixin
 from .post_execution import PostExecutionReviewMixin
 
-from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
-from ..services.snapshot_v2.restore_entry import build_restore_entry_plan
+from .restore_entry import build_restore_entry_plan
 
 from ..models.schemas import (
     AnalysisState, AgentType, TaskStatus, RoundResult, AnalysisPhase,
@@ -75,7 +74,8 @@ from ..constants import (
 )
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.sandbox import LocalJupyterSandbox
-from ..utils.runtime_apply import is_forward_resume_blocked
+from ..utils.runtime_apply import is_forward_resume_blocked, state_runtime_coherence
+from ..utils.runtime_pairing import is_live_runtime_continuation_safe
 from ..utils.asyncio_tasks import consume_current_cancellation_request
 from ..utils.checkpoint import (
     DurableJsonPlusSerializer,
@@ -148,14 +148,6 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         core_interventions.bind_facade(sys.modules[__name__])
         return await core_interventions._wait_for_llm_intervention(self, error, node_name, analysis_state, wait_seconds=wait_seconds, auto_retry=auto_retry, require_explicit_resolution=require_explicit_resolution)
 
-    async def _publish_runtime_persistence_transition(self, analysis_state: AnalysisState, *, persist_state: bool, abort_on_close_discard: bool=False) -> bool:
-        core_interventions.bind_facade(sys.modules[__name__])
-        return await core_interventions._publish_runtime_persistence_transition(self, analysis_state, persist_state=persist_state, abort_on_close_discard=abort_on_close_discard)
-
-    async def _wait_for_runtime_persistence_intervention(self, analysis_state: AnalysisState, *, successful_status: Optional[TaskStatus]=TaskStatus.RUNNING, persist_transitions: bool=False, rotate_generation: bool=False) -> str:
-        core_interventions.bind_facade(sys.modules[__name__])
-        return await core_interventions._wait_for_runtime_persistence_intervention(self, analysis_state, successful_status=successful_status, persist_transitions=persist_transitions, rotate_generation=rotate_generation)
-
     async def _pathology_llm_intervention_callback(self, error: UpstreamExhaustedError, image_label: str) -> LlmFailureAction:
         core_interventions.bind_facade(sys.modules[__name__])
         return await core_interventions._pathology_llm_intervention_callback(self, error, image_label)
@@ -184,14 +176,6 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         core_interventions.bind_facade(sys.modules[__name__])
         return core_interventions.get_snapshot_workflow_state(self)
 
-    async def acknowledge_at_boundary(self) -> bool:
-        core_interventions.bind_facade(sys.modules[__name__])
-        return await core_interventions.acknowledge_at_boundary(self)
-
-    async def await_restore_safe_point(self) -> None:
-        core_interventions.bind_facade(sys.modules[__name__])
-        return await core_interventions.await_restore_safe_point(self)
-
     def signal_annotation_confirmed(self):
         core_interventions.bind_facade(sys.modules[__name__])
         return core_interventions.signal_annotation_confirmed(self)
@@ -207,10 +191,6 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
     def signal_llm_failure_action(self, node_name: str, action: str, generation: int) -> bool:
         core_interventions.bind_facade(sys.modules[__name__])
         return core_interventions.signal_llm_failure_action(self, node_name, action, generation)
-
-    def signal_runtime_persistence_action(self, action: str, gate_token: str | None=None, generation: int | None=None):
-        core_interventions.bind_facade(sys.modules[__name__])
-        return core_interventions.signal_runtime_persistence_action(self, action, gate_token, generation)
 
     def signal_supplementary_analysis(self, request_text: str, target: str):
         core_supplementary.bind_facade(sys.modules[__name__])
@@ -245,10 +225,6 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
     def _make_initial_workflow_state(analysis_state, current_round=0):
         core_initialization.bind_facade(sys.modules[__name__])
         return core_initialization._make_initial_workflow_state(analysis_state, current_round)
-
-    async def _create_auto_snapshot(self, state: AnalysisState, phase: str, *, workflow_state: Optional[dict[str, Any]]=None):
-        core_initialization.bind_facade(sys.modules[__name__])
-        return await core_initialization._create_auto_snapshot(self, state, phase, workflow_state=workflow_state)
 
     def _merge_supplementary_findings(self, agent_key: str, new_findings: List[str]):
         core_supplementary.bind_facade(sys.modules[__name__])
@@ -285,10 +261,6 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
     async def resume(self, thread_id: str, analysis_state: Optional[AnalysisState]=None) -> AnalysisState:
         core_execution.bind_facade(sys.modules[__name__])
         return await core_execution.resume(self, thread_id, analysis_state)
-
-    async def _recover_failed_pause_persistence(self, thread_id: str, analysis_state: AnalysisState) -> None:
-        core_execution.bind_facade(sys.modules[__name__])
-        return await core_execution._recover_failed_pause_persistence(self, thread_id, analysis_state)
 
     async def pause(self, thread_id: str, analysis_state: Optional[AnalysisState]=None) -> Dict[str, Any]:
         core_execution.bind_facade(sys.modules[__name__])

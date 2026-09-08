@@ -24,10 +24,6 @@ from backend.config import (
 )
 from backend.models.schemas import AnalysisState, APIResponse
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
-from backend.services.snapshot_v2.feature_gate import (
-    is_snapshot_v2_enabled,
-    require_snapshot_v2_enabled,
-)
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -99,30 +95,6 @@ def check_export_disk_space() -> None:
             ),
         )
 
-def count_v2_snapshot_records(state_payload) -> int:
-    """Number of format_version >= 2 snapshot records in a session.json payload.
-
-    An ordinary archive ships these records but none of the Snapshot V2 object
-    storage that backs them (_build_session_tar packs no v2/, objects/,
-    staging/, journals/, committed/ or integrity/ root), so the
-    manifest states the count rather than leaving the destination to discover
-    records it can neither restore nor delete.
-    """
-    if not isinstance(state_payload, dict):
-        return 0
-    records = state_payload.get("snapshots")
-    if not isinstance(records, list):
-        return 0
-    total = 0
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        try:
-            if int(record.get("format_version") or 0) >= 2:
-                total += 1
-        except (TypeError, ValueError):
-            continue
-    return total
 
 def import_job_record(
     status: str,
@@ -164,6 +136,22 @@ def is_sandbox_pickle(name: str) -> bool:
     base = name.rsplit("/", 1)[-1]
     return bool(re.match(r".*_session\.pkl(\.zst)?$", base) or base == "session.pkl")
 
+def is_runtime_generation_name(name: str) -> bool:
+    """True for any file that belongs to the committed runtime generation.
+
+    The dump, its signed manifest and that manifest's signature are one thing.
+    Shipping the manifest without the dump lands a foreign-signed file in the
+    destination, where `state_runtime_coherence` reads it, fails the HMAC and
+    reports "inconsistent" -- for a session whose actual condition is that it
+    carries no runtime at all. Export and import share this predicate so the
+    parts cannot separate.
+    """
+    base = name.rsplit("/", 1)[-1]
+    if is_sandbox_pickle(base):
+        return True
+    return bool(re.match(r".*_session\.runtime\.json(\.sig)?$", base))
+
+
 def is_runtime_h5ad_name(name: str) -> bool:
     """True if a filename belongs to the live-runtime h5ad sidecar set.
 
@@ -180,7 +168,7 @@ def is_runtime_h5ad_name(name: str) -> bool:
     base = name.rsplit("/", 1)[-1]
     return base == RUNTIME_H5AD_MANIFEST_FILENAME or base.casefold().endswith(".h5ad")
 
-_SNAPSHOT_V2_SESSION_ROOTS = frozenset({
+_RETIRED_SNAPSHOT_SESSION_ROOTS = frozenset({
     "v2",
     "objects",
     "staging",
@@ -189,19 +177,17 @@ _SNAPSHOT_V2_SESSION_ROOTS = frozenset({
     "integrity",
 })
 
-_SNAPSHOT_V2_OBJECT_MEMBER = re.compile(r"objects/[0-9a-f]{64}$")
+_RETIRED_SNAPSHOT_OBJECT_MEMBER = re.compile(r"objects/[0-9a-f]{64}$")
 
-def _is_disabled_snapshot_v2_member(name: str) -> bool:
-    """Return whether a tar member belongs to Snapshot V2 storage.
+def _is_retired_snapshot_member(name: str) -> bool:
+    """Return whether a tar member belongs to the retired snapshot storage.
 
-    Explicit V2 exports use flat ``objects/`` and ``manifests/`` roots, while
-    ordinary session archives may carry session-prefixed V2 storage roots.
-    Neither form may be materialized through the ordinary import path when the
-    subsystem is disabled.
+    Archives written by an older build carry it in two shapes: explicit
+    snapshot exports use flat ``objects/`` and ``manifests/`` roots, ordinary
+    session archives use session-prefixed storage roots. Nothing can
+    materialize either any more, so both are skipped rather than rejected --
+    an archive built before the removal must still import its session.
     """
-    if is_snapshot_v2_enabled():
-        return False
-
     # Empty and "." segments are dropped before anything is compared: a member
     # named "./<sid>/v2/..." or "<sid>//objects/..." names the same path as the
     # plain form, and matching on the raw string let both bypass the session-root
@@ -210,12 +196,12 @@ def _is_disabled_snapshot_v2_member(name: str) -> bool:
     normalized = "/".join(parts)
     if normalized == "snapshot-v2-export.json":
         return True
-    if _SNAPSHOT_V2_OBJECT_MEMBER.fullmatch(normalized):
+    if _RETIRED_SNAPSHOT_OBJECT_MEMBER.fullmatch(normalized):
         return True
     if normalized.startswith("manifests/"):
         return True
 
-    return len(parts) >= 2 and parts[1] in _SNAPSHOT_V2_SESSION_ROOTS
+    return len(parts) >= 2 and parts[1] in _RETIRED_SNAPSHOT_SESSION_ROOTS
 
 # P3-7: cap export filename's slug portion to keep total filename below
 # filesystem limits (most FS allow 255 *bytes*). When truncation is needed,

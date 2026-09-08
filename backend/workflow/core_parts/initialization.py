@@ -204,18 +204,6 @@ def __init__(
     self._llm_failure_actions: Dict[str, Optional[str]] = {}
     self._llm_failure_generations: Dict[str, int] = {}  # monotonic counter per node for idempotency
     self._unattended_gate_retries: Dict[str, int] = {}  # auto-retries spent per node at an unanswered gate
-
-    # Runtime persistence gate. Unlike an ordinary node exception this gate
-    # stays inside the running workflow so Retry still has the exact live
-    # kernel namespace that failed to persist.
-    self._runtime_persistence_event = asyncio.Event()
-    self._runtime_persistence_action: Optional[str] = None
-    self._runtime_persistence_gate_active = False
-    self._runtime_persistence_action_pending = False
-    self._runtime_persistence_gate_token = ""
-    self._runtime_persistence_gate_generation = 0
-    self._runtime_persistence_pause_task: Optional[asyncio.Task] = None
-
     # Supplementary analysis requests queue (set by API, consumed by HITL loop).
     # Each item is (request_text, target) where target is "annotation" | "direction" | "round".
     # Use a deque so consecutive rapid requests are preserved in order rather than overwritten.
@@ -391,6 +379,13 @@ async def initialize(self):
         timeout=self.config.sandbox_timeout,
         runtime_budgets=runtime_budgets,
     )
+    self._continuation_kernel_epoch = None
+
+    def latch_first_kernel_epoch(epoch):
+        if self._continuation_kernel_epoch is None:
+            self._continuation_kernel_epoch = epoch
+
+    self.sandbox.runtime_epoch_callback = latch_first_kernel_epoch
     self.sandbox.runtime_persistence_commit_callback = (
         self._runtime_persistence_commit_callback
     )
@@ -557,157 +552,3 @@ async def _build_and_save_detailed_segment(
 
 def _make_initial_workflow_state(analysis_state, current_round=0):
     return make_initial_workflow_state(analysis_state, current_round)
-
-async def _create_auto_snapshot(
-    self,
-    state: AnalysisState,
-    phase: str,
-    *,
-    workflow_state: Optional[dict[str, Any]] = None,
-):
-    """Create a required workflow snapshot via SnapshotService.
-
-    Fail-closed: on capture failure raises RequiredSnapshotBlocked after
-    persisting the snapshot_failure gate (retry/skip/manage/terminate).
-
-    One-shot skip: when the user chose "Skip snapshot & continue" on a prior
-    failure at this boundary, the marker is consumed here and the capture is a
-    no-op so the graph proceeds past the boundary that previously failed.
-    """
-    from ...config import is_snapshot_v2_enabled
-
-    if not is_snapshot_v2_enabled():
-        return None
-
-    from ...services.snapshot_v2.safe_point import (
-        get_snapshot_safe_point_manager,
-    )
-
-    # A restore job reserves the safe point and then waits for the workflow
-    # to acknowledge it at a boundary. This *is* that boundary, so hand the
-    # reservation over before capturing.
-    #
-    # Without this the capture below takes the normal acquire path, which
-    # refuses while any request is pending (safe_point._acquire_unlocked
-    # treats pending and held alike). The resulting SAFE_POINT_BUSY becomes
-    # RequiredSnapshotBlocked and aborts the whole graph invocation — so the
-    # workflow never reaches another acknowledgement site, the reservation is
-    # never honoured, and the restore waits out its full timeout while the
-    # session sits in the snapshot-failure gate. The user's restore request
-    # destroyed the running analysis and then failed.
-    #
-    # Only yield for a *pending* request. An already-acquired foreign hold
-    # must keep failing closed, so a leaked hold stays a visible gate rather
-    # than turning into an unbounded wait here.
-    if get_snapshot_safe_point_manager().has_pending_request(self.session_id):
-        await ack_restore_safe_point(self)
-
-    from ...services.snapshot_v2.failure_gate import consume_snapshot_skip
-
-    if consume_snapshot_skip(state, phase):
-        logger.warning(
-            f"[{self.session_id}] Skipping required snapshot at boundary "
-            f"'{phase}' (user chose Skip snapshot & continue)"
-        )
-        try:
-            await self._send_message(
-                "status",
-                f"Skipped snapshot at '{phase}'; continuing analysis "
-                "(this checkpoint will not be restorable).",
-            )
-        except Exception:
-            pass
-        return None
-
-    from ...config import get_session_workspace
-    from ...services.snapshot_v2.service import SnapshotService
-    from ...services.snapshot_v2.continuation import ContinuationRegistry
-    from ...services.snapshot_v2.models import SnapshotCaptureRequest
-    from ...services.snapshot_v2.lineage import capture_lineage_from_state
-    from ...services.snapshot_v2.paths import SnapshotV2Paths
-    from ...services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
-
-    # Prefer a long-lived service on the workflow when tests inject one.
-    service = getattr(self, "snapshot_service", None)
-    if service is None:
-        paths = SnapshotV2Paths.for_session(self.session_id)
-        service = SnapshotService(self.session_id, paths)
-        self.snapshot_service = service
-
-    capture_workflow_state = dict(
-        workflow_state
-        if workflow_state is not None
-        else self._current_graph_state or {}
-    )
-    # Enrich with kernel presence for runtime capture decisions.
-    if "kernel_present" not in capture_workflow_state:
-        sb = getattr(self, "sandbox", None)
-        capture_workflow_state["kernel_present"] = (
-            sb is not None and getattr(sb, "km", None) is not None
-        )
-
-    live_sp = get_snapshot_safe_point_manager().get_descriptor(self.session_id)
-    capsule = ContinuationRegistry(service.object_store).freeze(
-        phase,
-        state,
-        capture_workflow_state,
-        live_safe_point=live_sp,
-    )
-    request = SnapshotCaptureRequest(
-        session_id=self.session_id,
-        reason=phase,
-        phase=phase,
-        capsule=capsule,
-        round_number=getattr(state, "current_round", 0) or 0,
-        **capture_lineage_from_state(state),
-    )
-    workspace_root = str(get_session_workspace(self.session_id))
-    # capture_required_snapshot applies success/failure and raises on failure
-    #
-    # The pending-request yield above is a check-then-act: the only
-    # suspension point between it and the acquire inside `capture()` is the
-    # session lock, which a concurrent `_write_state_if_current` or mutating
-    # route holds across an `asyncio.to_thread` save. A restore reserving
-    # the safe point in that window makes `_acquire_unlocked` refuse (it
-    # treats pending and held alike), and SAFE_POINT_BUSY becomes a
-    # fail-closed gate that unwinds the whole graph invocation — so the
-    # workflow never reaches another acknowledgement site, and the restore
-    # that caused it waits out its full timeout and fails too. That is the
-    # exact double failure the pre-check exists to prevent.
-    #
-    # A *pending* request is a handover the workflow is entitled to
-    # complete, so do it once and re-attempt. An already-acquired foreign
-    # hold still fails closed: it never becomes pending, so the retry
-    # branch below cannot fire for it.
-    for attempt in (0, 1):
-        try:
-            return await service.capture_required_snapshot(
-                state,
-                request,
-                sandbox=getattr(self, "sandbox", None),
-                workflow_state=capture_workflow_state,
-                workspace_root=workspace_root,
-            )
-        except RequiredSnapshotBlocked as exc:
-            sp = get_snapshot_safe_point_manager()
-            if (
-                attempt == 0
-                and getattr(exc, "code", "") == "SAFE_POINT_BUSY"
-                and sp.has_pending_request(self.session_id)
-            ):
-                logger.info(
-                    f"[{self.session_id}] Boundary capture lost the safe "
-                    f"point to a restore reservation; handing over and "
-                    f"retrying once"
-                )
-                from ...services.snapshot_v2.failure_gate import (
-                    retry_workflow_boundary,
-                )
-
-                # The capture armed the fail-closed gate on its way out.
-                # Clear it: nothing about the snapshot failed, the capture
-                # lost a coordination race that this retry resolves.
-                retry_workflow_boundary(state)
-                await self.await_restore_safe_point()
-                continue
-            raise

@@ -168,66 +168,67 @@ class ExecutionMixin:
             str(self._session_tmp.resolve()),
         ]
 
-    @staticmethod
-    def _surface_unpersistable_outputs(result, declared, unpersistable) -> None:
-        """Report what this cell bound that cannot survive a kernel restart.
+    def _note_execution_effect(
+        self, *, mutates_namespace: bool, reached_kernel: bool
+    ) -> None:
+        """Advance the runtime revision for anything that could change globals.
 
-        The failure this replaces surfaced minutes later at a save boundary, in
-        a message addressed to the operator rather than to the agent, about a
-        cell that had long since scrolled away. Naming it here is the only point
-        where rewriting the code is still cheap.
+        Tying this to success made a failed cell's side effects invisible to
+        persistence: the kernel does not roll a cell back, so a statement that
+        mutated ``adata`` before raising leaves it mutated -- but the revision
+        stayed put, and a save whose revision equals the saved revision reuses
+        the previous generation instead of writing one. The mutation was then
+        in the live namespace and in no dump.
+
+        Read-only probes opt out explicitly rather than being inferred from
+        ``records_history``. Inferring was wrong even before that flag was
+        renamed: several mutating internal cells stayed out of the notebook
+        (``adata_val = adata.copy()`` among them), so "not recorded" never
+        implied "changed nothing".
         """
-        if not unpersistable:
+        if not mutates_namespace:
             return
-        described = {
-            name: f"{name} ({reason})" for name, reason in unpersistable.items()
-        }
-        # A declared output that cannot be serialized is a broken contract, not
-        # a note: the agent asked for that value to survive the round.
-        broken = sorted(set(declared) & set(unpersistable)) if result.success else []
-        if broken:
-            contract_error = (
-                "Declared persistent outputs cannot be serialized: "
-                + "; ".join(described[name] for name in broken)
-                + ". persistent_outputs names values that must survive a kernel "
-                "restart. Declare the data you need kept instead -- a DataFrame, "
-                "an array, plain Python values -- or drop the declaration and "
-                "rebuild this object in the step that uses it."
-            )
-            result.success = False
-            result.error = (
-                f"{result.error}\n{contract_error}"
-                if result.error else contract_error
-            )
-        noted = sorted(set(unpersistable) - set(broken))
-        if noted:
-            result.output = (result.output or "") + (
-                "\n[Kernel] Bound but not carried across a kernel restart: "
-                + "; ".join(described[name] for name in noted)
-                + ". They stay usable in this session and are not runtime state, "
-                "so a later step must rebuild them or keep what it needs as data."
-            )
+        if not reached_kernel:
+            # Blocked by the safety check, the kernel was dead, or the send
+            # itself raised: no statement ran, so nothing changed. Passed in
+            # rather than read from the instance, because the probes between
+            # the execution and this call use the same field.
+            return
+        # Bookkeeping, not correctness: a sandbox still being constructed has no
+        # revision yet, and refusing to execute over a missing counter would be
+        # a worse failure than starting it here.
+        self.runtime_revision = int(getattr(self, "runtime_revision", 0) or 0) + 1
 
     async def execute(
         self,
         code: str,
-        save_to_history: bool = True,
+        records_history: bool = True,
         skip_safety_check: bool = False,
         declared_outputs: Optional[List[str]] = None,
         track_globals: bool = False,
+        mutates_namespace: bool = True,
     ) -> CodeExecutionResult:
         """Execute code in the kernel.
 
         Args:
             code: Python code to execute
-            save_to_history: Whether to save successful execution to notebook history
+            records_history: Whether this execution belongs in the notebook.
+                Default True: the notebook is a record of what the kernel ran,
+                failures included. Read-only probes opt out explicitly. The same
+                execution boundary carries `mutates_namespace`; the two are
+                orthogonal, and one boundary with two flags is legible where two
+                boundaries drift.
             skip_safety_check: If True, skip dangerous-pattern validation.
                 Only set this for trusted internal code (e.g. kernel init, session restore).
             declared_outputs: Optional persistent_outputs declared by the agent
                 tool call. Every declared name must exist after successful code
                 execution before it is recorded as a required runtime output.
-            track_globals: When True (and save_to_history), record created/loaded
+            track_globals: When True (and records_history), record created/loaded
                 user-global diffs into the runtime dependency tracker.
+            mutates_namespace: Whether this execution could change user globals.
+                Read-only probes opt out; everything else defaults to True,
+                because a cell that raised part-way still changed what it had
+                already changed.
         """
         declared_raw = [
             str(name).strip()
@@ -238,14 +239,19 @@ class ExecutionMixin:
         declared_not_names = sorted(
             {name for name in declared_raw if not name.isidentifier()}
         )
-        confirmed_declared: set[str] = set()
         before: set[str] = set()
-        should_track = bool(track_globals or declared) and save_to_history
+        should_track = bool(track_globals or declared) and records_history
         async with self._exec_lock:
             if should_track:
                 before = await self._snapshot_user_globals()
             result = await self._execute_unlocked(
-                code, save_to_history=save_to_history, skip_safety_check=skip_safety_check
+                code, records_history=records_history, skip_safety_check=skip_safety_check
+            )
+            # Captured here, before the declared-output probes below run: they
+            # call _execute_unlocked too, and would otherwise overwrite this
+            # execution's verdict with their own.
+            reached_kernel = bool(
+                getattr(self, "_last_execution_reached_kernel", False)
             )
             if declared_not_names:
                 result.output = (result.output or "") + (
@@ -261,28 +267,19 @@ class ExecutionMixin:
                 )
             if should_track:
                 loaded_names = self._loaded_global_names_from_code(code)
-                # The same round trip that produces the diff also asks the
-                # kernel what it can serialize, so a value that cannot be
-                # continuation state is never promoted into the required set
-                # in the first place.
-                after, unpersistable, probed = (
-                    await self._snapshot_globals_with_persistability(
-                        before, loaded_names
-                    )
-                )
+                # Whether a value can be serialized is no longer asked here.
+                # Spec 3.11 shows unserialisable values arise on every run, and
+                # spec 4.4 makes the answer coverage rather than a verdict: the
+                # save records what it could not write, and spec section 10
+                # carries that to the agent.
+                after = await self._snapshot_user_globals()
                 # A failed cell can still create or delete globals before the
-                # exception. Always reconcile the tracker with the live
-                # namespace so removed outputs cannot poison later saves.
-                # Explicit outputs become required only after a successful
-                # execution actually produced them.
-                confirmed_declared = declared & after if result.success else set()
+                # exception, so the diff is reconciled either way.
                 self._record_globals_diff(
                     before,
                     after,
-                    declared=confirmed_declared,
+                    declared=declared & after if result.success else set(),
                     loaded=loaded_names,
-                    unpersistable=set(unpersistable),
-                    probed=probed,
                 )
                 missing_declared = declared - after if result.success else set()
                 if missing_declared:
@@ -297,33 +294,21 @@ class ExecutionMixin:
                         f"{result.error}\n{contract_error}"
                         if result.error else contract_error
                     )
-                self._surface_unpersistable_outputs(
-                    result, declared, unpersistable
-                )
-        if result.success and save_to_history:
-            self.runtime_revision += 1
-            if confirmed_declared:
-                self.record_declared_outputs(confirmed_declared)
-                tracker = getattr(self, "runtime_dependency_tracker", None)
-                if tracker is not None:
-                    tracker.confirm_recomputed(
-                        confirmed_declared,
-                        reason=(
-                            "Successful execution explicitly re-produced the "
-                            "declared persistent output."
-                        ),
-                    )
-            self.notebook_state.update_runtime_persistence(
-                "live_dirty",
-                current_revision=self.runtime_revision,
-                saved_revision=self.saved_runtime_revision,
+            self._note_execution_effect(
+                mutates_namespace=mutates_namespace, reached_kernel=reached_kernel
             )
+            if result.success and records_history:
+                self.notebook_state.update_runtime_persistence(
+                    "live_dirty",
+                    current_revision=self.runtime_revision,
+                    saved_revision=self.saved_runtime_revision,
+                )
         return result
 
     async def _execute_unlocked(
         self,
         code: str,
-        save_to_history: bool = True,
+        records_history: bool = True,
         skip_safety_check: bool = False,
         execution_timeout: Optional[float] = None,
     ) -> CodeExecutionResult:
@@ -331,13 +316,23 @@ class ExecutionMixin:
 
         Args:
             code: Python code to execute
-            save_to_history: Whether to save successful execution to notebook history
+            records_history: Whether this execution belongs in the notebook.
+                Default True: the notebook is a record of what the kernel ran,
+                failures included. Read-only probes opt out explicitly. The same
+                execution boundary carries `mutates_namespace`; the two are
+                orthogonal, and one boundary with two flags is legible where two
+                boundaries drift.
             skip_safety_check: If True, skip dangerous-pattern validation.
                 Only set this for trusted internal code (e.g. kernel init, session restore).
             execution_timeout: Optional wall-clock limit for this execution.
                 Internal operations such as runtime persistence use their own
                 stricter deadline instead of inheriting the general sandbox timeout.
         """
+        # Nothing has reached the kernel yet. Every early return below leaves
+        # this False, so a request the kernel never saw cannot mark the runtime
+        # dirty and force a multi-gigabyte save of an unchanged namespace.
+        self._last_execution_reached_kernel = False
+
         # Check if kernel is dead (failed restart)
         if self._kernel_dead:
             return CodeExecutionResult(
@@ -389,6 +384,9 @@ class ExecutionMixin:
         try:
             # Send execute request
             msg_id = self.kc.execute(code)
+            # Only after the request is accepted. Setting it beforehand counted
+            # a send that raised as code having run.
+            self._last_execution_reached_kernel = True
 
             # Collect outputs — only process messages belonging to THIS execution (matched by msg_id).
             # Timeout is wall-clock: the deadline is fixed before the loop so a task that
@@ -533,8 +531,13 @@ class ExecutionMixin:
                         "traceback": content.get('traceback', [])
                     })
             
-            # Save to history
-            if save_to_history and not error_msg:
+            # A cell that raised is part of what the kernel ran, so it is
+            # part of the record (spec 3.10). `save_notebook` already builds the
+            # `error` output type; the traceback was constructed above and then
+            # thrown away here. A cell the safety check rejected is *not*
+            # recorded -- it returned before reaching the kernel, so there is
+            # nothing to replay.
+            if records_history:
                 self.notebook_state.add_cell(code, outputs, execution_count)
                 self.notebook_state.save()
             

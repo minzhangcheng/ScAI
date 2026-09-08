@@ -13,4 +13,3 @@ export function useSession() {
 }
 export { useWebSocket } from './api/useWebSocket'
 export { useConfig, usePrompts, useUserConfig } from './api/useConfig'
-export { listSnapshotsV2, previewSnapshotV2, restoreSnapshotV2, cancelSnapshotTransaction, getSnapshotTransaction, deleteSnapshotV2, exportSnapshotsV2, importSnapshotsV2 } from './api/snapshots'

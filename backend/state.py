@@ -56,10 +56,6 @@ state_lock: asyncio.Lock = asyncio.Lock()
 # Per-session locks for finer-grained save/evict operations.
 session_locks: Dict[str, asyncio.Lock] = {}
 
-# Per-session locks for the snapshot-failure HITL actions (retry/skip/terminate).
-# Deliberately separate from session_locks - see get_snapshot_action_lock.
-snapshot_action_locks: Dict[str, asyncio.Lock] = {}
-
 # Last time each session was accessed, used by cache eviction.
 session_access_times: Dict[str, float] = {}
 
@@ -82,30 +78,6 @@ def get_session_lock(session_id: str) -> asyncio.Lock:
     return session_locks[session_id]
 
 
-def get_snapshot_action_lock(session_id: str) -> asyncio.Lock:
-    """Return the lock serializing a session's snapshot-failure HITL actions.
-
-    Retry / Skip / Terminate all read-modify-persist the *same* cached
-    AnalysisState. Retry re-runs the failed capture and can hold the request
-    open for minutes with the gate still armed, so an interleaved Terminate
-    passes its is_snapshot_failure_blocked() check, closes the kernel the
-    capture is still reading, and then has its STOPPED write overwritten by the
-    finishing Retry.
-
-    This is NOT get_session_lock: every Retry producer reaches
-    SnapshotService.capture(), which acquires that lock itself, and
-    asyncio.Lock is not reentrant - taking it at the route would deadlock the
-    handler against its own capture. Acquisition order is always
-    snapshot-action -> session and never the reverse, so the two cannot
-    deadlock against each other.
-
-    Safe under asyncio: the dict check + insert below contains no `await`,
-    so the operation is atomic w.r.t. other coroutines on the same loop.
-    """
-    if session_id not in snapshot_action_locks:
-        snapshot_action_locks[session_id] = asyncio.Lock()
-    return snapshot_action_locks[session_id]
-
 
 def release_session_lock_slot(session_id: str) -> None:
     """Drop a session's lock entry once the session is destroyed.
@@ -115,7 +87,6 @@ def release_session_lock_slot(session_id: str) -> None:
     silently ignored.
     """
     session_locks.pop(session_id, None)
-    snapshot_action_locks.pop(session_id, None)
 
 
 def touch_access_time(session_id: str) -> None:

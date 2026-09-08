@@ -163,39 +163,19 @@ async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> No
     reconnect path only replays message_history — which does not feed the
     state_sync handler. Without this resend the dialog never reopens.
 
-    Also re-emits snapshot_failure so the failure HITL gate survives reconnect.
     """
-    from backend.services.snapshot_v2.failure_gate import (
-        upgrade_legacy_snapshot_failure_gate,
-    )
-
-    upgraded_legacy_gate = upgrade_legacy_snapshot_failure_gate(state)
-    if upgraded_legacy_gate:
-        logger.info(
-            "[%s] Upgraded legacy snapshot-failure gate on reconnect",
-            session_id,
-        )
-
     reason = getattr(state, "wait_input_reason", None)
-    snapshot_failure = getattr(state, "snapshot_failure", None)
     _HITL_RESEND_REASONS = (
         "llm_failure",
         "agent_disabled",
         "marker_db_missing",
         "species_input",
         "gene_species_mismatch",
-        "snapshot_failure",
     )
-    if reason not in _HITL_RESEND_REASONS and not snapshot_failure:
+    if reason not in _HITL_RESEND_REASONS:
         return
-    # Prefer snapshot_failure payload when present even if reason drifted.
-    effective_reason = reason
-    if snapshot_failure and reason != "snapshot_failure":
-        effective_reason = "snapshot_failure"
     change_type = (
-        "snapshot_failure"
-        if effective_reason == "snapshot_failure" or snapshot_failure
-        else ("llm_failure" if effective_reason == "marker_db_missing" else effective_reason)
+        "llm_failure" if reason == "marker_db_missing" else reason
     )
     payload = {
         "change_type": change_type,
@@ -205,12 +185,10 @@ async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> No
         "analysis_phase": getattr(state, "analysis_phase", None),
         "timestamp": datetime.now().isoformat(),
         "unresolved_errors": len(state.get_unresolved_errors()) if hasattr(state, "get_unresolved_errors") else 0,
-        "wait_input_reason": effective_reason or ("snapshot_failure" if snapshot_failure else reason),
+        "wait_input_reason": reason,
         "llm_failure_info": getattr(state, "llm_failure_info", None),
         "agent_disabled_info": getattr(state, "agent_disabled_info", None),
         "species_input_info": getattr(state, "species_input_info", None),
-        "snapshot_failure": snapshot_failure,
-        "snapshot_transaction": getattr(state, "snapshot_transaction", None),
     }
     try:
         message = {
@@ -225,7 +203,7 @@ async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> No
             await websocket.send_json(message)
             sent = True
         if sent:
-            logger.info(f"[{session_id}] Re-sent state_sync for pending {effective_reason or change_type} on reconnect")
+            logger.info(f"[{session_id}] Re-sent state_sync for pending {reason or change_type} on reconnect")
     except Exception:
         logger.warning(f"[{session_id}] Failed to resend wait-input state_sync", exc_info=True)
 

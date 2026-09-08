@@ -26,15 +26,11 @@ from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
 from backend.services.report.output_generation import (
     validate_and_rebind_imported_reports,
 )
-from backend.services.snapshot_v2.checkpoint_paths import (
+from backend.utils.checkpoint_paths import (
     CHECKPOINT_SQLITE_FILENAME,
     checkpoint_sqlite_path,
 )
-from backend.services.snapshot_v2.feature_gate import (
-    is_snapshot_v2_enabled,
-    normalize_disabled_snapshot_state,
-    require_snapshot_v2_enabled,
-)
+from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -57,7 +53,7 @@ from .core import (
     ImportCancelled,
     MIN_FREE_DISK_BYTES,
     _IMPORT_PROGRESS_UPDATE_INTERVAL_S,
-    _is_disabled_snapshot_v2_member,
+    _is_retired_snapshot_member,
     free_disk_bytes,
     import_job_record,
     is_runtime_h5ad_name,
@@ -122,6 +118,15 @@ def _allocate_import_session_id(archive_session_id: str, user_id: str) -> str:
     silently transfers another user's session. Importing is therefore defined as
     "create a session", never "overwrite one": on any collision the archive is
     materialized under a fresh id and every embedded path is rebound to it.
+
+    One archive cannot accept that. A resumable archive carries a LangGraph
+    checkpoint, the checkpoint database is keyed by session id (spec 3.6) and
+    cannot be renamed into place, so a reallocated id drops it: the runtime pkl
+    still arrives and the session still imports, but it re-enters the graph at
+    the start of a new round instead of continuing where it stopped -- a session
+    that looks resumable and is not. ``_refuse_resumable_collision`` in
+    ``import_tar.py`` refuses that case, at the manifest, which is the first
+    point where the archive says what it claims to be.
     """
     if _claim_session_id(archive_session_id, user_id):
         return archive_session_id

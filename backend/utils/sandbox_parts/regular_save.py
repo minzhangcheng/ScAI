@@ -164,6 +164,7 @@ def _regular_component_paths(
     live_sig: Path,
     metadata_path: Path | None,
     manifest_path: Path | None,
+    runtime_manifest_path: Path | None = None,
 ) -> List[Tuple[Dict[str, Any], Path]]:
     """Resolve signed component descriptors to canonical trusted paths."""
     raw_components = payload.get("components")
@@ -189,15 +190,25 @@ def _regular_component_paths(
             }, path))
         return result
 
+    from backend.utils.runtime_manifest import runtime_manifest_sig_path
+
     known = {
         "pkl": live_pkl,
         "sig": live_sig,
         "metadata": metadata_path,
         "manifest": manifest_path,
+        # The generation manifest and its detached signature roll back together
+        # with the dump they describe: a manifest surviving a rollback would
+        # declare names the restored dump does not contain.
+        "runtime_manifest": runtime_manifest_path,
+        "runtime_manifest_sig": (
+            runtime_manifest_sig_path(runtime_manifest_path)
+            if runtime_manifest_path is not None
+            else None
+        ),
     }
     resolved: List[Tuple[Dict[str, Any], Path]] = []
     seen: set[Tuple[str, str]] = set()
-    states_root = live_pkl.parent.resolve()
     for raw in raw_components:
         if not isinstance(raw, dict):
             raise RuntimeError("regular runtime save component is not an object")
@@ -208,104 +219,24 @@ def _regular_component_paths(
         if key in seen:
             raise RuntimeError(f"duplicate regular runtime component: {kind}:{name}")
         seen.add(key)
-        if kind == "h5ad":
-            from backend.services.snapshot_v2.runtime_names import (
-                resolve_confined_runtime_h5ad_path,
+        if kind not in known:
+            # A journal written before the h5ad sidecar was removed can still
+            # list components of a kind this build no longer installs. Skipping
+            # one leaves the sidecar where it is; failing the resolution would
+            # abandon the whole recovery, including the pkl it is really about.
+            logger.warning(
+                "Ignoring unknown component kind %r in a runtime save journal",
+                kind,
             )
-
-            if not name.endswith(".h5ad"):
-                raise RuntimeError(f"invalid runtime h5ad component name: {name!r}")
-            variable = name[:-5]
-            try:
-                path = resolve_confined_runtime_h5ad_path(
-                    states_root, variable, name,
-                )
-            except ValueError as exc:
-                raise RuntimeError(
-                    f"invalid runtime h5ad component: {name!r}"
-                ) from exc
-        else:
-            path = known.get(kind)
-            if path is None or name != path.name:
-                raise RuntimeError(
-                    f"regular runtime component does not match canonical {kind} path"
-                )
+            continue
+        path = known.get(kind)
+        if path is None or name != path.name:
+            raise RuntimeError(
+                f"regular runtime component does not match canonical {kind} path"
+            )
         resolved.append((component, path))
     return resolved
 
-
-def _validate_runtime_h5ad_manifest(
-    manifest_path: Path,
-) -> Dict[str, Tuple[Path, str]]:
-    """Validate manifest schema and return canonical referenced sidecars."""
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError("runtime h5ad manifest is unreadable") from exc
-    if not isinstance(payload, dict) or payload.get("version") not in (1, 2):
-        raise RuntimeError("runtime h5ad manifest has an unsupported schema")
-    entries = payload.get("entries")
-    if not isinstance(entries, dict):
-        raise RuntimeError("runtime h5ad manifest entries are not an object")
-    if payload.get("version") == 2:
-        pkl_names = payload.get("authoritative_pkl_names")
-        if not isinstance(pkl_names, list):
-            raise RuntimeError(
-                "runtime h5ad manifest v2 lacks authoritative_pkl_names"
-            )
-        from backend.services.snapshot_v2.runtime_names import (
-            validate_runtime_global_name,
-        )
-
-        try:
-            validated = [validate_runtime_global_name(name) for name in pkl_names]
-        except ValueError as exc:
-            raise RuntimeError(
-                "runtime h5ad manifest has an invalid authoritative pkl name"
-            ) from exc
-        if len(validated) != len(set(validated)):
-            raise RuntimeError(
-                "runtime h5ad manifest repeats an authoritative pkl name"
-            )
-
-    from backend.services.snapshot_v2.runtime_names import (
-        resolve_confined_runtime_h5ad_path,
-        validate_runtime_global_name,
-    )
-
-    referenced: Dict[str, Tuple[Path, str]] = {}
-    for raw_name, raw_entry in entries.items():
-        try:
-            name = validate_runtime_global_name(raw_name)
-        except ValueError as exc:
-            raise RuntimeError("runtime h5ad manifest has an invalid name") from exc
-        if not isinstance(raw_entry, dict):
-            raise RuntimeError(f"runtime h5ad manifest entry {name!r} is invalid")
-        digest = raw_entry.get("sha256")
-        if (
-            not isinstance(digest, str)
-            or len(digest) != 64
-            or any(char not in "0123456789abcdef" for char in digest.lower())
-        ):
-            raise RuntimeError(
-                f"runtime h5ad manifest entry {name!r} has an invalid digest"
-            )
-        try:
-            sidecar = resolve_confined_runtime_h5ad_path(
-                manifest_path.parent,
-                name,
-                raw_entry.get("path"),
-            )
-        except ValueError as exc:
-            raise RuntimeError(
-                f"runtime h5ad manifest entry {name!r} has an unsafe path"
-            ) from exc
-        if not sidecar.is_file() or _sha256_file(sidecar) != digest.lower():
-            raise RuntimeError(
-                f"runtime h5ad sidecar {sidecar.name!r} failed digest verification"
-            )
-        referenced[name] = (sidecar, digest.lower())
-    return referenced
 
 
 def _preflight_regular_rollback(
@@ -354,36 +285,6 @@ def _restore_regular_components(
         raise RuntimeError("restored regular runtime pkl/signature pair is invalid")
 
 
-def _include_new_runtime_h5ads_in_rollback(
-    components: List[Tuple[Dict[str, Any], Path]],
-    states_dir: Path,
-) -> None:
-    """Add sidecars created after the APPLYING journal to the rollback set.
-
-    A manifest callback can create a brand-new sidecar before it returns.  A
-    process kill at that exact boundary leaves the initial signed journal
-    unaware of the filename.  Every sidecar that existed before APPLYING was
-    already recorded, so an unrecorded canonical ``*.h5ad`` is necessarily a
-    transaction product and the old-generation rollback must remove it.
-    """
-    known_names = {
-        path.name
-        for component, path in components
-        if component.get("kind") == "h5ad"
-    }
-    for path in sorted(states_dir.glob("*.h5ad")):
-        if not path.is_file() or path.name in known_names:
-            continue
-        components.append((
-            _regular_component(
-                "h5ad",
-                path,
-                previous_exists=False,
-                authoritative=False,
-            ),
-            path,
-        ))
-        known_names.add(path.name)
 
 
 def _regular_metadata_matches(
@@ -437,6 +338,7 @@ def recover_regular_save_transaction(
     *,
     metadata_path: Path | None = None,
     manifest_path: Path | None = None,
+    runtime_manifest_path: Path | None = None,
     session_id: str = "",
 ) -> str | None:
     """Recover a process crash in regular runtime persistence.
@@ -451,6 +353,7 @@ def recover_regular_save_transaction(
     live_sig = _sig_path(live_pkl, integrity_dir)
     resolved_components = _regular_component_paths(
         payload, live_pkl, live_sig, metadata_path, manifest_path,
+        runtime_manifest_path,
     )
     component_paths = [path for _component, path in resolved_components]
 
@@ -484,20 +387,6 @@ def recover_regular_save_transaction(
                 digest=target_digest,
             ):
                 raise RuntimeError("committed runtime metadata is inconsistent")
-            if manifest_path is not None:
-                referenced = _validate_runtime_h5ad_manifest(manifest_path)
-                target_h5ads = {
-                    path.name: component.get("target_sha256")
-                    for component, path in resolved_components
-                    if component.get("kind") == "h5ad"
-                    and component.get("authoritative")
-                }
-                if target_h5ads != {
-                    path.name: digest for path, digest in referenced.values()
-                }:
-                    raise RuntimeError(
-                        "committed runtime manifest sidecars do not match the journal"
-                    )
             target_valid = True
         except RuntimeError:
             logger.exception(
@@ -517,27 +406,10 @@ def recover_regular_save_transaction(
                 ) from exc
             status = "APPLYING"
         else:
-            if session_id:
-                from backend.utils.runtime_apply import (
-                    quarantine_unreferenced_runtime_h5ads,
-                )
-
-                quarantine_unreferenced_runtime_h5ads(
-                    session_id,
-                    set(payload.get("keep_h5ad_names") or []),
-                    states_dir=live_pkl.parent,
-                )
             _cleanup_regular_save_transaction(journal_path, component_paths)
             return "forward"
 
-    # PREPARED/APPLYING, or a committed target that failed verification. A
-    # manifest callback may have created a new sidecar before the journal could
-    # be extended with its descriptor; include that bounded states-dir product
-    # so rollback cannot leave an orphan from the rejected generation.
-    _include_new_runtime_h5ads_in_rollback(
-        resolved_components,
-        live_pkl.parent,
-    )
+    # PREPARED/APPLYING, or a committed target that failed verification.
     component_paths = [path for _component, path in resolved_components]
     _restore_regular_components(
         resolved_components,
@@ -554,14 +426,21 @@ def _commit_pkl_transaction(
     commit_metadata,
     *,
     metadata_path: Path | None = None,
-    manifest_path: Path | None = None,
-    commit_manifest=None,
-    retire_sidecars=None,
+    runtime_manifest_path: Path | None = None,
+    runtime_manifest: Dict[str, Any] | None = None,
     target_revision: int = 0,
     authoritative_pkl_names: set[str] | None = None,
     fault_hook=None,
 ) -> None:
-    """Install a runtime generation with crash-recoverable commit semantics."""
+    """Install a runtime generation with crash-recoverable commit semantics.
+
+    ``runtime_manifest`` is the generation's own declaration -- what it saved,
+    what it skipped, and which workflow state it belongs to. It is installed by
+    this transaction rather than beside it, because a manifest that can survive
+    a rollback of the dump it describes is worse than no manifest at all: it
+    would declare names the restored dump does not contain, and integrity would
+    then report corruption on a generation that is intact.
+    """
     from . import shared as shared_facade
 
     copy_durable = shared_facade._copy_durable
@@ -587,29 +466,21 @@ def _commit_pkl_transaction(
             ),
             metadata_path,
         ))
-    if manifest_path is not None:
-        component_records.append((
-            _regular_component(
-                "manifest", manifest_path,
-                previous_exists=manifest_path.is_file(), authoritative=True,
-            ),
-            manifest_path,
-        ))
+    if runtime_manifest_path is not None:
+        from backend.utils.runtime_manifest import runtime_manifest_sig_path
 
-    # The old generation may reference sidecars that the new generation
-    # retires. Back every live sidecar before publishing the APPLYING journal so
-    # a rollback can restore the complete prior generation. New referenced
-    # sidecars are discovered and added below before COMMITTED is published.
-    for h5ad_path in sorted(live_pkl.parent.glob("*.h5ad")):
-        if not h5ad_path.is_file():
-            continue
-        component_records.append((
-            _regular_component(
-                "h5ad", h5ad_path,
-                previous_exists=True, authoritative=False,
-            ),
-            h5ad_path,
-        ))
+        for kind, target in (
+            ("runtime_manifest", runtime_manifest_path),
+            ("runtime_manifest_sig", runtime_manifest_sig_path(runtime_manifest_path)),
+        ):
+            component_records.append((
+                _regular_component(
+                    kind, target,
+                    previous_exists=target.is_file(), authoritative=True,
+                ),
+                target,
+            ))
+
     journal_path = _regular_save_journal_path(live_pkl)
     target_digest = _sha256_file(staged_pkl)
 
@@ -640,7 +511,6 @@ def _commit_pkl_transaction(
             "status": "APPLYING",
             "target_digest": target_digest,
             "target_revision": int(target_revision),
-            "keep_h5ad_names": [],
             "components": [descriptor for descriptor, _path in component_records],
         }
         _write_regular_save_journal(journal_path, journal)
@@ -671,13 +541,35 @@ def _commit_pkl_transaction(
             fault_hook("sig_replaced")
         if not _verify_pkl_integrity(live_pkl, integrity_dir):
             raise RuntimeError("new runtime pkl failed HMAC verification")
-        if commit_manifest is not None:
-            commit_manifest()
-            if fault_hook is not None:
-                fault_hook("manifest_replaced")
         commit_metadata()
         if fault_hook is not None:
             fault_hook("metadata_replaced")
+        if runtime_manifest_path is not None and runtime_manifest is not None:
+            from backend.utils.runtime_manifest import (
+                build_runtime_manifest,
+                write_runtime_manifest,
+            )
+
+            # Subscripted rather than defaulted: a caller that omitted a field
+            # must fail the commit, not silently publish a manifest declaring
+            # less than the generation actually holds.
+            write_runtime_manifest(
+                runtime_manifest_path,
+                build_runtime_manifest(
+                    revision=int(target_revision),
+                    state_revision=int(runtime_manifest["state_revision"]),
+                    pkl_digest=target_digest,
+                    saved_names=runtime_manifest["saved_names"],
+                    skipped_names=runtime_manifest["skipped_names"],
+                    serializer_version=str(runtime_manifest["serializer_version"]),
+                    pairing=runtime_manifest.get("pairing"),
+                    # `.get`, like `pairing`: a producer that predates §5.5's
+                    # narrowing emits no such record and is not incomplete.
+                    carried_definitions=runtime_manifest.get("carried_definitions"),
+                ),
+            )
+            if fault_hook is not None:
+                fault_hook("runtime_manifest_replaced")
         if metadata_path is not None and not _regular_metadata_matches(
             metadata_path,
             revision=int(target_revision),
@@ -685,39 +577,21 @@ def _commit_pkl_transaction(
         ):
             raise RuntimeError("new runtime metadata failed generation verification")
 
-        # Authenticate every target component inside the same signed journal
-        # boundary. The manifest is schema-checked before its referenced h5ad
-        # files are admitted as authoritative transaction components.
-        referenced_h5ads: Dict[str, Tuple[Path, str]] = {}
-        if manifest_path is not None:
-            referenced_h5ads = _validate_runtime_h5ad_manifest(manifest_path)
-        known_h5ads = {
-            path.name: (descriptor, path)
-            for descriptor, path in component_records
-            if descriptor.get("kind") == "h5ad"
-        }
-        for variable, (h5ad_path, expected_digest) in referenced_h5ads.items():
-            record = known_h5ads.get(h5ad_path.name)
-            if record is None:
-                # A callback may have created a new sidecar. It did not exist at
-                # the transaction boundary, so rollback removes it.
-                descriptor = _regular_component(
-                    "h5ad", h5ad_path,
-                    previous_exists=False, authoritative=True,
-                )
-                component_records.append((descriptor, h5ad_path))
-                known_h5ads[h5ad_path.name] = (descriptor, h5ad_path)
-            else:
-                descriptor, _path = record
-                descriptor["authoritative"] = True
-            descriptor["target_exists"] = True
-            descriptor["target_sha256"] = expected_digest
+        # Components written inside the committed region are authenticated
+        # against what they now hold, not against the digest recorded when the
+        # transaction registered their previous copy.
+        from backend.utils.runtime_manifest import runtime_manifest_sig_path
 
         target_paths = {
             "pkl": live_pkl,
             "sig": live_sig,
             "metadata": metadata_path,
-            "manifest": manifest_path,
+            "runtime_manifest": runtime_manifest_path,
+            "runtime_manifest_sig": (
+                runtime_manifest_sig_path(runtime_manifest_path)
+                if runtime_manifest_path is not None
+                else None
+            ),
         }
         for descriptor, path in component_records:
             kind = descriptor.get("kind")
@@ -735,7 +609,6 @@ def _commit_pkl_transaction(
                     raise RuntimeError(
                         f"new runtime component failed digest verification: {path.name}"
                     )
-        journal["keep_h5ad_names"] = sorted(referenced_h5ads)
         journal["components"] = [
             descriptor for descriptor, _path in component_records
         ]
@@ -749,10 +622,6 @@ def _commit_pkl_transaction(
         if fault_hook is not None:
             fault_hook("commit_marker")
     except Exception:
-        _include_new_runtime_h5ads_in_rollback(
-            component_records,
-            live_pkl.parent,
-        )
         _restore_regular_components(
             component_records,
             integrity_dir=integrity_dir,
@@ -769,18 +638,6 @@ def _commit_pkl_transaction(
             staged_pkl.unlink(missing_ok=True)
             staged_sig.unlink(missing_ok=True)
 
-    if retire_sidecars is not None:
-        try:
-            retire_sidecars()
-            if fault_hook is not None:
-                fault_hook("sidecars_retired")
-        except Exception:
-            # COMMITTED is already durable, so this is maintenance rather than
-            # a reason to roll back the new pkl. Keep the signed journal and
-            # backups: startup recovery uses its keep_h5ad_names instruction to
-            # retry the bounded quarantine, then retires the transaction.
-            logger.exception("Committed runtime sidecar cleanup deferred to recovery")
-            return
     _cleanup_regular_save_transaction(
         journal_path,
         [path for _descriptor, path in component_records],

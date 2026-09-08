@@ -248,13 +248,11 @@ def validate_collection(payload: bytes) -> dict[str, Any]:
     expected_hash = _nodeids_hash(tuple(nodeids))
     if document["nodeids_sha256"] != expected_hash:
         _fail("collection node ID hash mismatch")
-    if document["effective_config"] != {
-        "SCAI_ENABLE_SNAPSHOT_V2": {
-            "value": "true",
-            "source": "root conftest.py setdefault",
-            "production_default": "disabled",
-        }
-    }:
+    effective = document["effective_config"]
+    # The build has one configuration, so the recorded set is empty and must be
+    # exactly empty: a key appearing here means a switch was reintroduced
+    # without extending this contract to say what it measured.
+    if effective != {}:
         _fail("collection effective configuration is not exact")
     candidate = document["candidate_tools"]
     required_tools = {"pytest", "pytest-asyncio", "pytest-benchmark", "plugins"}

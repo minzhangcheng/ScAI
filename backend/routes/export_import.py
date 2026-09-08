@@ -21,9 +21,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 # Kept verbatim from the pre-split module, as every other facade/parts split in
 # this repo does, so `backend.routes.export_import.<name>` stays a live attribute
-# for outside importers -- test_export_cleanup.py patches `asyncio.to_thread` and
-# test_snapshot_v2_feature_gate.py reads DATA_BASE_DIR through this module. The
-# second header below the re-exports is the rest of the same original block.
+# for outside importers -- test_export_cleanup.py patches `asyncio.to_thread`
+# through this module. The second header below the re-exports is the rest of
+# the same original block.
 
 # Implementations live in ./export_import_parts/; re-exported here so existing
 # importers and tests keep resolving them from this module.
@@ -37,12 +37,11 @@ from .export_import_parts.core import (  # noqa: F401
     MIN_FREE_DISK_BYTES,
     check_export_disk_space,
     check_inline_import_size,
-    count_v2_snapshot_records,
     free_disk_bytes,
     is_sandbox_pickle,
-    _SNAPSHOT_V2_SESSION_ROOTS,
-    _SNAPSHOT_V2_OBJECT_MEMBER,
-    _is_disabled_snapshot_v2_member,
+    _RETIRED_SNAPSHOT_SESSION_ROOTS,
+    _RETIRED_SNAPSHOT_OBJECT_MEMBER,
+    _is_retired_snapshot_member,
     MAX_EXPORT_NAME,
     ARCHIVE_FORMAT_VERSION,
     PREPARED_EXPORT_TTL,
@@ -53,7 +52,6 @@ from .export_import_parts.core import (  # noqa: F401
 from .export_import_parts.tar_builders import (  # noqa: F401
     _add_json_bytes,
     _add_portable_state_json,
-    _add_snapshots_to_tar,
     _add_states_to_tar,
     _add_session_blobs_to_tar,
     _add_session_logs_to_tar,
@@ -65,11 +63,9 @@ from .export_import_parts.export_routes import (  # noqa: F401
     export_state,
     export_prepare,
     export_download,
-    export_v2,
     _build_session_tar,
 )
 from .export_import_parts.import_routes import (  # noqa: F401
-    import_v2,
     import_state,
     get_import_status,
     cancel_import,
@@ -102,10 +98,6 @@ from backend.config import (
 )
 from backend.models.schemas import AnalysisState, APIResponse
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
-from backend.services.snapshot_v2.feature_gate import (
-    is_snapshot_v2_enabled,
-    require_snapshot_v2_enabled,
-)
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,

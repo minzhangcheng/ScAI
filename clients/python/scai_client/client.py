@@ -423,11 +423,11 @@ class Client:
             timeout: Per-request timeout in seconds. ``None`` disables the
                 read timeout for this call (recommended for large archives).
             chunk_size: Bytes per ``iter_bytes`` chunk.
-            include_runtime: When True, the server includes sandbox session
-                pickles (live kernel variable dumps + per-snapshot
-                ``session.pkl.zst``). These can be multi-GB and are only
-                loadable on re-import with ``trust=True`` on a trusted
-                instance. Default False produces smaller, portable archives.
+            include_runtime: When True, the server includes the sandbox
+                session pickle -- the live kernel's variable dump. It can be
+                multi-GB and is only loadable on re-import with ``trust=True``
+                on a trusted instance. Default False produces smaller,
+                portable archives.
 
         Returns:
             Resolved ``Path`` of the downloaded archive.

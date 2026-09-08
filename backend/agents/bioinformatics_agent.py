@@ -451,13 +451,20 @@ class BioinformaticsAgent(
     def _build_data_context(self, state: AnalysisState) -> str:
         """Build context about available data"""
         data_parts = ["=== Available Data ===\n"]
-        if getattr(state, "runtime_recompute_pending", False):
-            persistence = dict(getattr(state, "runtime_persistence", None) or {})
-            if (
-                persistence.get("degraded_recovery")
-                or persistence.get("recommended_action")
-                in {"reduce_runtime_footprint", "recompute_or_reduce_runtime"}
-            ):
+        # The record, not the authorization. A restore that fell back to a
+        # verified older generation records degraded_recovery on its own; before
+        # spec 5.1 removed the gate, its /recompute route was what set
+        # runtime_recompute_pending, so gating the warning on that flag now
+        # would let a degraded restore proceed in silence.
+        _persistence = dict(getattr(state, "runtime_persistence", None) or {})
+        _degraded = bool(
+            _persistence.get("degraded_recovery")
+            or _persistence.get("recommended_action")
+            in {"reduce_runtime_footprint", "recompute_or_reduce_runtime"}
+        )
+        if getattr(state, "runtime_recompute_pending", False) or _degraded:
+            persistence = _persistence
+            if _degraded:
                 data_parts.append(
                     "**RUNTIME RECOVERY REQUIRED.** The last verified runtime may be "
                     "older than the latest failed persistence attempt, or the live "
@@ -601,9 +608,7 @@ class BioinformaticsAgent(
         modality = self._infer_modality()
         cache_key = (sp, modality)
         if getattr(self, "_cached_static_sp_key", None) != cache_key:
-            result = build_static_executor_prompt(
-                sp, modality, str(self.sandbox.working_dir)
-            )
+            result = build_static_executor_prompt(sp, modality)
             self._cached_static_sp_key, self._cached_static_sp = cache_key, result
         return self._cached_static_sp
 

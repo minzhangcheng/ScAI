@@ -41,7 +41,7 @@ async def _compute_database_priors(
             f"cluster_markers=_provided_cluster_markers)\n"
             f"import json as __j; print(__j.dumps(_priors))\n"
         )
-        result = await agent.sandbox.execute(src + call, save_to_history=False,
+        result = await agent.sandbox.execute(src + call, records_history=False,
                                             skip_safety_check=True)
         if not getattr(result, "success", False):
             raw_error = (
@@ -108,7 +108,7 @@ async def _bind_gene_set(
     try:
         result = await agent.sandbox.execute(
             f"{var_name} = {genes!r}",
-            save_to_history=False, skip_safety_check=True,
+            records_history=False, skip_safety_check=True,
         )
         # A kernel that will not take the assignment says so in the result
         # -- dead kernel, restart, timeout, MemoryError on a large panel --
@@ -151,7 +151,7 @@ async def _bind_gene_set_collection(
     try:
         result = await agent.sandbox.execute(
             f"{var_name} = {str(path)!r}",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         if result.error:

@@ -71,30 +71,6 @@ def get_lifecycle_lock(session_id: str) -> asyncio.Lock:
         return lock
 
 
-def snapshot_operation_active(session_id: str) -> bool:
-    """Return whether capture/restore owns or is reserving the session.
-
-    Producer publication checks this while holding ``get_lifecycle_lock``;
-    every production safe-point establishment uses
-    ``establish_snapshot_operation`` and therefore takes the same barrier.
-    Neither side can observe a free slot and publish concurrently with the
-    other in this process.
-
-    The registry and lock are process-local. Deployments must keep one worker
-    authoritative for a session/data root; cross-process coordination would
-    require a shared lease service.
-    """
-    from backend.services.snapshot_v2.safe_point import (
-        get_snapshot_safe_point_manager,
-    )
-
-    safe_point = get_snapshot_safe_point_manager()
-    return bool(
-        safe_point.has_pending_request(session_id)
-        or safe_point.is_paused(session_id)
-    )
-
-
 async def establish_snapshot_operation(
     session_id: str,
     reserve: Callable[[], Awaitable[_T]],

@@ -41,19 +41,20 @@ platform overhead ≈ 1.6 GiB   (backend, frontend, OS headroom)
 
 The recommended figures include **30% safety margin** over the modelled peak.
 
-| Samples | Total cells | Kernel peak | **Recommended (no snapshots)** | **Recommended (snapshots on)** |
-|--------:|------------:|------------:|-------------------------------:|-------------------------------:|
-| 2  | 10,000  | 3.6 GiB   | **7 GiB**    | **9 GiB**    |
-| 2  | 20,000  | 6.8 GiB   | **11 GiB**   | **14 GiB**   |
-| 4  | 40,000  | 13.2 GiB  | **20 GiB**   | **26 GiB**   |
-| 6  | 60,000  | 19.6 GiB  | **28 GiB**   | **37 GiB**   |
-| 8  | 100,000 | 32.3 GiB  | **44 GiB**   | **59 GiB**   |
-| 12 | 200,000 | 63.9 GiB  | **86 GiB**   | **115 GiB**  |
-| 20 | 500,000 | 158.7 GiB | **209 GiB**  | **281 GiB**  |
-| 100 | 1,000,000 | 320.0 GiB | **418 GiB** | **564 GiB** |
+| Samples | Total cells | Kernel peak | **Recommended** |
+|--------:|------------:|------------:|----------------:|
+| 2  | 10,000  | 3.6 GiB   | **7 GiB**    |
+| 2  | 20,000  | 6.8 GiB   | **11 GiB**   |
+| 4  | 40,000  | 13.2 GiB  | **20 GiB**   |
+| 6  | 60,000  | 19.6 GiB  | **28 GiB**   |
+| 8  | 100,000 | 32.3 GiB  | **44 GiB**   |
+| 12 | 200,000 | 63.9 GiB  | **86 GiB**   |
+| 20 | 500,000 | 158.7 GiB | **209 GiB**  |
+| 100 | 1,000,000 | 320.0 GiB | **418 GiB** |
 
-Both recommended columns are **per concurrent analysis**. The snapshot column is
-explained in [section 8](#memory-impact-of-snapshots); if snapshots are disabled,
+The recommended column is **per concurrent analysis**. Earlier releases carried
+a second, higher column for instances running snapshots; snapshots are gone
+(section 8) and that margin is no longer needed. Meanwhile,
 use the middle column.
 
 **Assumptions and limits of this table.**
@@ -77,11 +78,41 @@ cost; sample count adds smaller per-sample QC and metadata overhead. Treat this
 row as capacity-planning guidance, not a claim that every analysis method is
 validated at one million cells.
 
+#### When the runtime is saved
+
+The kernel's runtime is persisted on a schedule, not continuously:
+
+| Boundary | Behaviour |
+|---|---|
+| **Round boundary** | Always. The graph reaches it once per round, after the round's work is complete and before the next one starts. |
+| **Step boundary** (an executor turn inside a round) | Only once `SCAI_RUNTIME_SAVE_FLOOR_MINUTES` (default **30**) have passed since the last **successful** save. The boundary is reached many times a round, so the floor is what keeps the cost down. |
+| **Closing** (the analysis ends) | Exactly one attempt. A failure keeps the previous committed generation, is recorded, and does not hold the shutdown. |
+
+So the work at risk from a crash is bounded by **one round, or the floor,
+whichever comes first** — and that bound **holds only while saves succeed**.
+
+Measured cost of one save, for sizing the floor: **13 s** for a 190 MiB dump and
+**56 s** for a 972 MiB one, at roughly 54 MiB/s. Against a 30-minute floor that
+is under 1% and about 3% of the interval respectively, so the default is
+conservative rather than expensive; lowering it trades wall clock for a smaller
+exposure window.
+After a failed save the window runs from the last successful commit, not from
+the failed attempt, and it keeps growing until one succeeds. The analysis page
+says so: a persistent, non-blocking banner appears whenever the committed
+generation is behind the session, and it shows the time of the last successful
+save rather than the last attempt.
+
+The 30-minute default is not a measurement. It is a starting value pending
+before/after save timings on real sessions; expect it to be confirmed or
+adjusted in a later release. Lower it on an instance where the kernel is small
+and crashes are the concern; raise it where saves are slow and the round
+boundary is protection enough.
+
 #### Runtime persistence budgets
 
-Regular runtime persistence has a separate resource gate from Snapshot V2. By
-default, its memory ceilings are **automatic**, derived from the Docker cgroup
-memory limit when one is present, otherwise from host memory:
+Runtime persistence has its own resource gate. By default, its memory
+ceilings are **automatic**, derived from the Docker cgroup memory limit when one
+is present, otherwise from host memory:
 
 | Budget | Automatic ceiling |
 |---|---:|
@@ -263,8 +294,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.54.1
-./build.sh --version 0.54.1 --push
+./build.sh --version 0.55.1
+./build.sh --version 0.55.1 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -305,170 +336,43 @@ Docker uses `/data`; direct startup normally uses the sibling `data` directory u
 
 Docker only needs `/dep/venv` persisted; the frontend assets are compiled into the image. Direct startup uses `<REPO>/../dep/venv` and `<REPO>/../dep/frontend/node_modules`. Dependencies are reproducible and may be rebuilt, but persistence reduces restart time.
 
-## 8. Snapshots (experimental — in development)
+## 8. Snapshots (removed)
 
-> **Status: in development, not stable, disabled by default.** Enable it only on
-> instances where you can afford to lose the snapshots. On-disk layout and API
-> shapes may change without a migration path, so a snapshot taken by one build is
-> not guaranteed to restore under a later one. The end-to-end behaviour has not
-> been accepted on a real deployment — automated coverage includes real-kernel
-> capture and restore, but no operator acceptance run has been recorded. The
-> feature is deliberately absent from the user guide; when it is enabled the
-> snapshot page carries an experimental marker. Do not announce it to end users
-> as a supported way to protect their work, and do not treat it as a backup
-> mechanism — for that, see sections 9 and 13.
+Snapshots have been removed. Earlier builds offered an experimental,
+off-by-default snapshot subsystem that could return a session to an earlier
+point of its analysis; it never reached operator acceptance and is gone —
+along with its HTTP API, its storage, its capture gates and the
+`SCAI_ENABLE_SNAPSHOT_V2` switch, which is now ignored.
 
-Snapshots let a session be returned to an earlier point of its analysis. A
-snapshot captures the session's analysis state, notebook, workspace files, the
-workflow checkpoint and — when an analysis kernel is live — the Jupyter runtime
-including loaded datasets. Restoring one rewinds the session and, where the
-snapshot recorded a resumable position, lets the analysis continue from there.
+**What this means for an instance you are upgrading:**
 
-### Enabling
+- **Existing snapshot data is inert, not migrated.** `sessions/<id>/v2/` and
+  `sessions/<id>/snapshots/` are no longer read or written. They still occupy
+  disk; deleting a session deletes them with it. You may delete those two
+  directories to reclaim space once you are satisfied you do not need the old
+  build. Nothing in this version can restore from them.
+- **A session interrupted mid-restore will refuse to start.** If the previous
+  build crashed while applying a restore, that session's files describe
+  different points in the same run, and no code here can finish or roll it
+  back. Startup logs the session IDs. The repair is to run the previous version
+  once and let its recovery complete, then upgrade again. Every other session
+  that was merely parked on a snapshot failure starts normally — the blocker is
+  cleared on load.
+- **Archives from an older build still import.** Their snapshot members are
+  skipped, and the session imports with its content. An archive that carries
+  *only* snapshot data and no session state is refused with an explanatory
+  error.
+- **Memory sizing gets simpler.** The "snapshots on" column in
+  [Memory sizing](#memory-sizing) no longer applies; use the other one.
 
-Snapshots are off unless the backend starts with a truthy
-`SCAI_ENABLE_SNAPSHOT_V2`:
-
-```bash
-docker run -d --name scai \
-  -e SCAI_ENABLE_SNAPSHOT_V2=true \
-  ...
-```
-
-It is read once at startup, so changing it requires a restart. With the flag
-unset, the snapshot API answers as disabled and no snapshot storage is written.
-`GET /api/config` reports the resolved value as `snapshot_v2_enabled`.
-
-### Where snapshots are stored
-
-Inside each session directory, under the data root:
-
-```
-sessions/<id>/v2/          Snapshot root
-├── objects/               Content-addressed data blobs
-├── committed/             One signed manifest per snapshot
-├── staging/               In-flight working area
-├── journals/              Transaction records used by crash recovery
-└── integrity/             Signature material
-```
-
-Blobs are content-addressed, so a dataset that has not changed is stored once and
-shared by every snapshot referencing it. Store growth tracks genuinely new data,
-not the number of snapshots — but a session whose kernel holds large datasets can
-still add tens of GB per capture once the data does change.
-
-Snapshots are part of the session directory, so an ordinary data-root backup
-(section 9) includes them, and deleting a session deletes its snapshots.
-Snapshot storage is signed with the installation's `SCAI_CONFIG_SECRET`-derived
-integrity key; restoring a data root under a different secret invalidates it.
-
-### Capacity and cleanup
-
-See [Snapshot capacity](#snapshot-capacity) in section 17 for the two ceilings,
-their environment variables and the advisory floor. Two operational points
-matter day to day:
-
-- **Garbage collection is event-driven, not scheduled.** Space held by objects no
-  longer referenced is reclaimed when a snapshot is deleted (also during import
-  and crash recovery) — never on a timer. A session that accumulates snapshots
-  does not shrink on its own.
-- **The quota is per session.** Worst-case total disk use is the per-session
-  quota multiplied by the number of sessions holding snapshots; the free-space
-  reserve is the only volume-wide bound. Size the data volume for the number of
-  concurrent analyses you expect.
-
-Users are warned in the snapshot panel once a session reaches 90% of its quota.
-Past the ceiling a required capture fails closed and pauses that analysis on a
-gate the user must resolve, so the practical failure mode is a stalled run rather
-than silent data loss.
-
-### Memory impact of snapshots
-
-Snapshots cost disk permanently and **memory transiently**. Capturing a live
-kernel raises that kernel's peak memory for the duration of the capture, because
-both serializers materialise a second copy of the data they are writing:
-
-- **AnnData objects (`h5ad` serializer).** The capture must not mutate the live
-  analysis object, so it sanitizes a full `.copy()` before writing. While that
-  object is being captured, its expression matrices, layers and `.raw` exist
-  twice in the kernel.
-- **Everything else (`dill` serializer).** After writing, the capture reads the
-  file back and deserializes it to verify the payload round-trips. The readback
-  is a second, independent copy of the value being verified.
-
-Two properties bound the cost. Objects are captured **one at a time**, so the
-extra peak is driven by the single largest captured object, not by the sum of all
-of them. And capture targets only AnnData objects plus a fixed set of canonical
-result names, not the whole namespace.
-
-For planning, budget **an extra 35% of the kernel's resident memory** during
-capture. On the reference deployment (6.4 GiB kernel) the main `adata` — counts
-layer, lognorm layer, `.raw`, neighbours graph and embeddings — accounts for
-roughly 1.3 GiB, so its copy adds about 20%; the 35% figure leaves room for the
-dill readback and for sessions whose largest object is a bigger share of the
-total. This is the difference between the two recommended columns in
-[Memory sizing](#memory-sizing).
-
-Operationally this matters because **capture happens at workflow-determined
-points, not when the host is idle**. A run that fits in memory with no margin
-will fail specifically during a capture, and a required capture that fails parks
-the session on a gate. If an instance is memory-constrained, leaving snapshots
-disabled is the cheaper choice; enabling them on a host sized without this margin
-converts a disk-capacity feature into a memory-capacity problem.
-
-#### The capture memory preflight
-
-Because the cost above is predictable, the capture measures it before paying it.
-Immediately before copying anything, the kernel reports the true byte size of
-each AnnData it is about to capture, its own resident size, and the memory
-headroom it can actually allocate against (host `MemAvailable` and the cgroup
-limit, whichever is tighter). If the largest object's copy would not fit, the
-capture is refused **before it allocates**, and the session stops on a gate
-offering three choices:
-
-| Choice | Effect |
-|---|---|
-| **Capture anyway** | Runs the capture with the preflight bypassed, accepting the risk that the copy exhausts memory and the kernel is killed. The override is one-shot: a later capture is judged afresh. |
-| **Skip snapshot & continue** | Proceeds without capturing, forfeiting only the restore point at that boundary. Not offered before a restore, whose snapshot is the only safety point. |
-| **Terminate** | Stops the analysis. |
-
-Retry is deliberately absent from this gate. The preflight is deterministic, so
-retrying would measure the same objects against the same headroom and refuse
-again — the gate could never clear.
-
-Two scoping rules matter:
-
-- **With snapshots disabled, this snapshot-copy preflight does not run.** The
-  separate regular runtime-persistence gate still checks live AnnData total and
-  kernel RSS at its persistence boundaries using the automatic/operator budgets
-  above.
-- **Ordinary analysis allocations are not pre-authorised.** A step may allocate
-  memory before the next persistence boundary; the container memory limit remains
-  the hard backstop for that interval.
-
-The margin is tunable with `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO` (default `0.8`,
-see section 17). Missing evidence never refuses a capture: if the probe cannot
-be read, or headroom cannot be determined, the capture proceeds as it would
-have before.
-
-### Recovery behaviour
-
-A restore is transactional: a `pre_restore` snapshot is taken first, so the
-restore itself can be rolled back, and every step is journalled. If the process
-dies mid-operation, the next startup (and the next load of that session) drives
-each unfinished journal to a terminal state — rolling back where it can, and
-otherwise marking the session recovery-blocked rather than serving a half-applied
-state. A recovery-blocked session refuses to run until the block clears; the
-condition and its cause are reported in the session's snapshot status.
-
-### Monitoring
-
-- Snapshot activity is logged under the session's log directory (section 10).
-- Store usage per session is visible in the snapshot panel, and in the
-  `store_status` field of `GET /api/session/{id}/snapshots-v2`.
-- Capture failures surface to the user as a gate rather than a silent error, so a
-  stalled analysis with `snapshot_failure` in its state is the signal to check
-  disk capacity first.
+**What protects work now.** The kernel's runtime is saved at each persistence
+boundary to `sessions/<id>/states/<id>_session.pkl` under a crash-recoverable
+transaction, signed with this installation's integrity key, and reloaded when
+the session's kernel next starts. That is a resume mechanism, not history: it
+holds the current generation only, and there is no way to return a session to
+an earlier point. For history and for moving a session between installations,
+use portable export/import (sections 9 and 13); for protecting the service, use
+a data-root backup (section 9).
 
 ## 9. Backup, upgrade, recovery, and rollback
 
@@ -640,9 +544,33 @@ Portable export includes selected session metadata, uploads, workspace files (in
 Whether the imported session can *continue* analysing depends on one choice at export time — and, for the runtime option, on the import trusting the archive:
 
 - **Default (`include_runtime=false`)** — no kernel pkl, no LangGraph checkpoint, and no h5ad runtime sidecars. Data, code, figures, reports and conversation history all survive and are viewable, but the session cannot resume: import marks its runtime `unavailable`, deletes the per-round bioinformatics checkpoint that an ordinary export does still carry, and resume tells the user to re-run from the imported data — which is what the session then does, restarting the current round instead of restoring a conversation whose kernel is gone. Use this to hand a session to someone else, or when only the results matter.
-- **With runtime (`include_runtime=true`)** — adds the live kernel pkl (in-memory values such as `adata`), the LangGraph checkpoint, and the h5ad runtime sidecars a Snapshot V2 restore may have written in the pkl's place, so the analysis picks up where it left off. Import must pass `X-Trust: true` to accept the pkl and the h5ad sidecars, because loading a pkl executes code from the archive. Without that header the archive still imports, but no live kernel lands and both checkpoint families — the LangGraph checkpoint and the per-round bioinformatics checkpoint — are dropped, leaving exactly the default outcome above. The archive can be gigabytes larger.
+- **With runtime (`include_runtime=true`)** — adds the live kernel pkl (in-memory values such as `adata`), the LangGraph checkpoint, and any h5ad runtime sidecars a pre-upgrade build left in the pkl's place, so the analysis picks up where it left off. Import must pass `X-Trust: true` to accept the pkl and the h5ad sidecars, because loading a pkl executes code from the archive. Without that header the archive still imports, but no live kernel lands and both checkpoint families — the LangGraph checkpoint and the per-round bioinformatics checkpoint — are dropped, leaving exactly the default outcome above. The archive can be gigabytes larger.
 
-Exact continuation needs three things together: `include_runtime=true` at export, `X-Trust: true` at import, and the archive's session ID still free on the destination. A runtime export resumes on a *different* installation as well as the original one, but that last condition is the one that quietly decides how precisely it resumes. Import never overwrites an existing session: when that ID is already taken it allocates a fresh one, and the LangGraph checkpoint — keyed by the archive's session ID and impossible to rename into place — is dropped along with it. The kernel pkl still arrives, so the imported session keeps its in-memory values, but Resume re-enters the graph at the start of a new round instead of continuing at the node the session was paused on. Re-importing a runtime archive onto the installation that produced it therefore gives exact continuation only if the original session was deleted first. Two installation-scoped mechanisms are handled at import: the pkl's HMAC sidecar is regenerated under the destination's key (it is never shipped in the archive), and credentials sealed with the source installation's key are dropped rather than treated as corruption — reconfigure the API key after import. Snapshot V2 does not need to be enabled for any of this.
+Exact continuation needs three things together: `include_runtime=true` at export, `X-Trust: true` at import, and the archive's session ID still free on the destination. A runtime export resumes on a *different* installation as well as the original one, but that last condition is the one that quietly decides how precisely it resumes. Import never overwrites an existing session: when that ID is already taken it allocates a fresh one, and the LangGraph checkpoint — keyed by the archive's session ID and impossible to rename into place — is dropped along with it. The kernel pkl still arrives, so the imported session keeps its in-memory values, but Resume re-enters the graph at the start of a new round instead of continuing at the node the session was paused on. Re-importing a runtime archive onto the installation that produced it therefore gives exact continuation only if the original session was deleted first. Two installation-scoped mechanisms are handled at import: the pkl's HMAC sidecar is regenerated under the destination's key (it is never shipped in the archive), and credentials sealed with the source installation's key are dropped rather than treated as corruption — reconfigure the API key after import.
+
+**A resumable export flushes the kernel first, and is refused rather than
+approximated.** `include_runtime=true` writes the live kernel to disk, verifies
+that generation, and only then builds the archive — so the runtime, the session
+state and the workflow checkpoint inside it describe one moment. If the flush
+fails, or the analysis advances while the archive is being built, the export
+answers **409** with a reason instead of producing an archive that imports
+cleanly and cannot continue. A results-only export is unaffected and never
+interrupts the analysis.
+
+The archive says what it is. Its `manifest.json` records `resumable`, the
+committed generation's revision and digest, its coherence state, and which
+variable names that generation holds and which it could not — so an archive
+read months later is self-describing.
+
+**Importing a resumable archive onto a session ID that already exists is
+refused.** The workflow checkpoint is keyed by session ID and cannot be renamed
+into place, so importing under a fresh ID would drop it: the runtime would
+arrive, the import would report success, and Resume would restart the round.
+Delete or rename the existing session first, or re-export without runtime.
+A results-only archive still lands under a fresh ID as before — it has no
+checkpoint to lose, and reallocating is what keeps a re-import from overwriting
+the live session.
+
 
 Resuming needs a session that was exported while paused or waiting for input. A session exported after it completed has a checkpoint sitting at the end of the graph, so there is nothing to continue; re-analysis starts a fresh round instead.
 
@@ -734,8 +662,7 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_JWT_SECRET` | Generated and stored as `.jwt_secret` | HS256 JWT signing |
 | `SCAI_CONFIG_SECRET` | Generated local encryption material | Encrypts stored user/model secrets |
 | `SCAI_ENABLE_REPRODUCIBILITY` | Disabled | Truthy `1`, `true`, or `yes` enables reproducibility bundles |
-| `SCAI_ENABLE_SNAPSHOT_V2` | Disabled | Truthy `1`, `true`, or `yes` opts the instance into Snapshot V2 |
-| `SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO` | `0.8` | Fraction of measured kernel memory headroom a capture may plan against — see [Memory impact of snapshots](#memory-impact-of-snapshots). Values outside `(0, 1]` are ignored with a warning |
+| `SCAI_RUNTIME_SAVE_FLOOR_MINUTES` | `30` | Minutes that must pass since the last **successful** runtime save before a step boundary saves again. Round and closing boundaries ignore it. Unset, non-integer or non-positive values log and fall back |
 | `SCAI_RUNTIME_MAX_RSS_GB` | `auto` | Per-session kernel RSS ceiling for regular runtime persistence; numeric values are GiB administrator caps |
 | `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB` | `auto` | Total estimated size of live AnnData objects; numeric values are GiB administrator caps |
 | `SCAI_MODE` | `prod` | Docker entrypoint mode; the production image rejects `dev` |
@@ -746,11 +673,9 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_BACKPORT` | Set internally | Vite proxy backend port; scripts set it from startup context |
 
 
-### Snapshot capacity
+### Session storage capacity
 
-ScAI does not impose a per-session disk quota or a free-space reserve on
-Snapshot V2 storage. The content-addressed store still deduplicates unchanged
-objects, and garbage collection runs when snapshots are deleted. Operators are
+ScAI imposes no per-session disk quota and no free-space reserve. Operators are
 responsible for sizing and monitoring the data volume, including free space and
 inode capacity. Archive member-count and metadata-size checks remain because
 they protect import parsing and memory use rather than limiting persistent disk

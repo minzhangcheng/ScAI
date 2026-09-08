@@ -84,7 +84,7 @@ async def execute_revision_candidate(
     if candidate_preinstall_runtime:
         try:
             runtime_setup = await agent.sandbox.execute(
-                runtime_code(), save_to_history=False, skip_safety_check=True
+                runtime_code(), skip_safety_check=True
             )
         except BaseException:
             deps.get("_discard_render_attempt")(candidate_dir)

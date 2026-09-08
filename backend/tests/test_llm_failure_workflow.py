@@ -55,7 +55,6 @@ def _gate_self():
     mock._send_state_sync = AsyncMock()
     mock._set_status = MagicMock()
     mock._settings_provider = MagicMock()
-    mock.await_restore_safe_point = None
     for name in (
         "_wait_for_llm_intervention",
         "_wait_for_disabled_agent_intervention",
@@ -84,6 +83,29 @@ def _no_backoff(monkeypatch):
         monkeypatch, "backend.workflow.core", "_unattended_gate_backoff", _record
     )
     return slept
+
+
+def _park_probe(monkeypatch):
+    """Signal the moment the gate reaches the terminal indefinite wait.
+
+    Nothing suspends between the probe and ``event.wait()``, so a test that
+    observes the flag is looking at an already-parked gate: the event has been
+    cleared and the signal it sends next cannot be lost.
+    """
+    from backend.tests.split_facade import setattr_facade
+    from backend.workflow.helpers import wait_with_skip_time as real_wait
+
+    parked = asyncio.Event()
+
+    async def _probe(event, wait_seconds, session_id, gate_name):
+        if wait_seconds == -1:
+            parked.set()
+        return await real_wait(event, wait_seconds, session_id, gate_name)
+
+    setattr_facade(
+        monkeypatch, "backend.workflow.core", "wait_with_skip_time", _probe
+    )
+    return parked
 
 
 def _exhausted(cause=None):
@@ -263,14 +285,13 @@ async def test_bioinformatics_unattended_exhaustion_retains_gate_and_retry_conte
     monkeypatch,
 ):
     """Core Bioinformatics failures remain actionable after auto-retries."""
-    from backend.services.snapshot_v2.continuation import ContinuationRegistry
     from backend.workflow import with_retry
 
     _no_backoff(monkeypatch)
+    parked = _park_probe(monkeypatch)
     wf = _gate_self()
     wf._pause_event = None
     wf._set_status = lambda state, status: setattr(state, "status", status)
-    wf.await_restore_safe_point = AsyncMock()
 
     plan = AnalysisPlan(
         id="approved-stage2-plan",
@@ -314,17 +335,8 @@ async def test_bioinformatics_unattended_exhaustion_retains_gate_and_retry_conte
     assert analysis_state.current_plan is plan
     assert wf._llm_failure_events["bioinformatics_analysis"]
 
-    # The terminal branch uses the existing safe-point-aware indefinite wait.
-    await asyncio.wait_for(
-        _wait_for_hook(wf.await_restore_safe_point), timeout=2.5
-    )
-    capsule = ContinuationRegistry(MagicMock()).freeze_dynamic(
-        {"kernel_present": True, "current_round": 1},
-        analysis_state=analysis_state,
-        workflow_state=workflow_state,
-    )
-    assert capsule.kind == "idle"
-
+    # The terminal branch parks in the indefinite wait rather than skipping.
+    await asyncio.wait_for(parked.wait(), timeout=2.5)
     assert wf.signal_llm_failure_action(
         "bioinformatics_analysis", LlmFailureAction.RETRY.value, 4
     ) is True
@@ -337,10 +349,6 @@ async def test_bioinformatics_unattended_exhaustion_retains_gate_and_retry_conte
     assert analysis_state.current_plan.stage == "stage2"
     assert analysis_state.current_plan.status == "approved"
 
-
-async def _wait_for_hook(hook):
-    while hook.await_count == 0:
-        await asyncio.sleep(0.01)
 
 
 # ── Test 1: @with_retry decorator LLM failure handling ────────────────
@@ -803,27 +811,3 @@ class TestBioinformaticsNodeUpstreamPropagation:
         bioinfo_result = result.get("bioinformatics_result", {})
         assert bioinfo_result.get("status") == "failed"
         assert bioinfo_result.get("status") != "max_steps_reached"
-
-    @pytest.mark.asyncio
-    async def test_runtime_discard_unwinds_superseded_bioinformatics_node(
-        self, mock_workflow, bioinfo_state,
-    ):
-        from backend.services.runtime_persistence_gate import (
-            RuntimePersistenceBlocked,
-        )
-        from backend.workflow.helpers import WorkflowSupersededError
-
-        mock_workflow.bioinformatics_agent.run_autonomous_analysis = AsyncMock(
-            side_effect=RuntimePersistenceBlocked("runtime save failed")
-        )
-        mock_workflow._wait_for_runtime_persistence_intervention = AsyncMock(
-            return_value="discard"
-        )
-
-        with pytest.raises(WorkflowSupersededError):
-            await mock_workflow._bioinformatics_analysis(bioinfo_state)
-
-        assert (
-            mock_workflow.bioinformatics_agent.run_autonomous_analysis.await_count
-            == 1
-        )

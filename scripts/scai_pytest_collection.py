@@ -102,15 +102,12 @@ def _collection_payload(session: pytest.Session) -> dict[str, Any]:
     benchmark_loaded = "benchmark" in plugin_names or "pytest_benchmark" in plugin_names or "benchmark" in plugin_repr
     if not asyncio_loaded or not benchmark_loaded:
         raise RuntimeError("required asyncio and benchmark plugins are not loaded")
-    effective_config = {
-        "SCAI_ENABLE_SNAPSHOT_V2": {
-            "value": os.environ.get("SCAI_ENABLE_SNAPSHOT_V2"),
-            "source": "root conftest.py setdefault",
-            "production_default": "disabled",
-        }
-    }
-    if effective_config["SCAI_ENABLE_SNAPSHOT_V2"]["value"] != "true":
-        raise RuntimeError("SCAI_ENABLE_SNAPSHOT_V2 is not enabled by the test conftest")
+    # The evidence must state which configuration was measured. There is one
+    # left: the snapshot subsystem is gone, so no environment variable can put
+    # the suite into a second configuration. The key stays, empty, so a future
+    # switch has a declared home and so evidence written before and after this
+    # change stays distinguishable.
+    effective_config: dict[str, Any] = {}
     return {
         "schema": SCHEMA,
         "complete": session.testsfailed == 0,

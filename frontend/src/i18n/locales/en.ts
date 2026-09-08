@@ -37,7 +37,7 @@ export const en = {
     // Members the import worker dropped instead of restoring; kinds come from
     // `_note_skip` in backend/routes/export_import_parts/import_impl.py.
     importSkippedSummary: '{count} item(s) were not restored: {items}',
-    importSkippedSnapshotV2: 'Snapshot V2 data',
+    importSkippedRetiredSnapshot: 'snapshot data from an older build',
     importSkippedUnsafePath: 'unsafe paths',
     importSkippedOffLayout: 'files outside the session layout',
     importSkippedUntrustedPickle: 'kernel runtime state (not trusted)',
@@ -331,10 +331,6 @@ export const en = {
     saveFailed: 'Save failed',
     
 
-
-
-
-
     // Round Feedback Dialog
     roundComplete: 'Round {round} Complete',
     roundSummaryTitle: 'Round Summary',
@@ -387,54 +383,6 @@ export const en = {
 
     // Detailed Report
     viewDetailedReport: 'View Detailed Report',
-
-    // Snapshots
-    snapshots: 'Snapshots (Experimental)',
-    createSnapshot: 'Create Snapshot',
-    restoreSnapshot: 'Restore',
-    deleteSnapshot: 'Delete',
-    confirmDelete: 'Confirm Delete',
-    discardCurrent: 'Discard Current',
-    confirmDiscard: 'Confirm Discard',
-    restoreProgress: 'Restore Progress',
-    snapshotCreated: 'Snapshot created',
-    snapshotRestored: 'Restored to snapshot',
-    confirmRestore: 'Restore to this snapshot? Current analysis progress will be replaced.',
-    manualSnapshot: 'Manual snapshot',
-    noSnapshots: 'No snapshots',
-    snapshotName: 'Snapshot name (optional)',
-    phasePreAnnotation: 'Pre-Annotation',
-    phasePostAnnotation: 'Post-Annotation',
-    phasePreDirection: 'Pre-Direction',
-    phasePostDirection: 'Post-Direction',
-    phaseManual: 'Manual',
-    analysisSnapshots: 'Analysis Snapshots (Experimental)',
-    creating: 'Creating...',
-
-    // Snapshot failure dialog
-    snapshotFailureAria: 'Snapshot failure',
-    snapshotFailureTitle: 'Snapshot Failure',
-    snapshotFailureRuntimeTitle: 'Runtime State Requires Action',
-    snapshotFailureClose: 'Close',
-    snapshotFailureCode: 'Code',
-    snapshotFailureTechnicalDetails: 'Technical details',
-    snapshotFailureRequiredVariables: 'Required variable diagnostics',
-    snapshotFailurePreRestore: 'Pre-restore capture failed. The current workflow remains resumable; no live mutation occurred.',
-    snapshotFailurePostReportRetry: 'Retry re-enters capture only and does not regenerate completed reports.',
-    snapshotFailureRetryCaptureOnly: 'Retry re-enters capture only.',
-    snapshotFailureMemoryRefusal: 'A snapshot copies the in-memory dataset before writing it, and the available memory is not enough for that copy. The analysis itself was not interrupted — only the snapshot was refused. Retrying would not help: the same check would reach the same result.',
-    snapshotFailureDegradedRecovery: 'The last verified runtime revision ({committed}) was restored, but newer revision {attempted} failed to persist. Newer work is not considered recovered.',
-    snapshotFailureResourceLimits: 'Effective resource limits',
-    snapshotFailureLargestObjects: 'Largest runtime objects',
-    snapshotFailureRetryPersistence: 'Retry persistence',
-    snapshotFailureRetry: 'Retry',
-    snapshotFailureCaptureRiskTitle: 'Ignore the memory preflight and capture anyway. If memory runs out the kernel may be killed and the live analysis state lost.',
-    snapshotFailureCaptureRisk: 'Capture anyway (risky)',
-    snapshotFailureSkipTitle: 'Skip creating this snapshot and continue the analysis (this checkpoint will not be restorable)',
-    snapshotFailureSkip: 'Skip snapshot & continue',
-    snapshotFailureRecomputeRuntime: 'Recompute or reduce runtime',
-    snapshotFailureManage: 'Manage Snapshots',
-    snapshotFailureTerminate: 'Terminate',
 
     // Plan Review Dialog
     planReviewTitle: 'Analysis Plan Review',

@@ -105,19 +105,6 @@ async def close(self, *, save_runtime: bool = True) -> bool:
             discard_event = asyncio.Event()
             self._close_discard_event = discard_event
         discard_event.set()
-    discard_requested = bool(
-        getattr(self, "_discard_runtime_on_close", False)
-        or getattr(self, "_restore_superseded", False)
-    )
-    if discard_requested and getattr(
-        self, "_runtime_persistence_gate_active", False
-    ):
-        # Wake an owned close task that is already awaiting a user action.
-        # Restore/delete authority supersedes that action without cancelling
-        # the task and leaving a durable gate with no consumer.
-        self._runtime_persistence_action_pending = True
-        self._runtime_persistence_action = "discard"
-        self._runtime_persistence_event.set()
     if getattr(self, "_close_complete", False):
         return True
 
@@ -271,26 +258,19 @@ async def _close_owned_resources(self) -> bool:
         # and notebook apply() just installed and _verify_live_restore verified —
         # the same hazard the restore path avoids by tearing down before apply.
         # Shut the kernel down, but do not let it persist itself.
-        from ...services.snapshot_v2.safe_point import (
-            get_snapshot_safe_point_manager as _sp_manager,
-        )
-
         def _is_superseded() -> bool:
             return (
                 bool(getattr(self, "_discard_runtime_on_close", False))
-                or _sp_manager().is_superseded(self.session_id)
                 or bool(getattr(self, "_restore_superseded", False))
             )
 
         sandbox = getattr(self, "sandbox", None)
         if sandbox and not close_status.get("sandbox", False):
-            from ...services.runtime_persistence_gate import (
-                RuntimePersistenceShutdownBlocked,
-            )
-
-            prior_status: Optional[TaskStatus] = None
-            persistence_failures = 0
-            while not close_status.get("sandbox", False):
+            # One attempt at the closing save, inside stop() (spec 5.1).
+            # A failure keeps the previous committed generation, is recorded by
+            # the persistence layer and no longer holds the shutdown, so the
+            # retry-around-an-intervention-gate loop this replaced is gone.
+            if not close_status.get("sandbox", False):
                 try:
                     if _is_superseded():
                         await sandbox.stop(save=False)
@@ -298,7 +278,6 @@ async def _close_owned_resources(self) -> bool:
                         await sandbox.stop(save=True)
                     close_status["sandbox"] = True
                     logger.info(f"[{self.session_id}] Sandbox stopped")
-                    break
                 except asyncio.CancelledError as exc:
                     cancellation = cancellation or exc
                     consume_current_cancellation_request()
@@ -307,130 +286,10 @@ async def _close_owned_resources(self) -> bool:
                         "the live kernel remains registered for cleanup retry",
                         self.session_id,
                     )
-                    break
-                except RuntimePersistenceShutdownBlocked:
-                    # A restore/delete may have superseded the workflow while
-                    # the final save was in flight. Its installed generation is
-                    # authoritative, so retry as an explicit no-save shutdown.
-                    if _is_superseded():
-                        continue
-
-                    analysis_state = getattr(
-                        self, "_current_analysis_state", None
-                    )
-                    if analysis_state is None:
-                        from backend.state import sessions
-
-                        analysis_state = sessions.get(self.session_id)
-                    if analysis_state is None:
-                        logger.exception(
-                            "[%s] Final runtime save failed but no analysis "
-                            "state exists to host the intervention gate",
-                            self.session_id,
-                        )
-                        break
-
-                    reachable, _registered_here = (
-                        await self._register_close_persistence_gate(
-                            analysis_state
-                        )
-                    )
-                    if not reachable:
-                        # A replacement state/workflow owns the session. This
-                        # object is stale and must not write over it.
-                        self._restore_superseded = True
-                        continue
-
-                    if prior_status is None:
-                        prior_status = getattr(
-                            analysis_state, "status", TaskStatus.RUNNING
-                        )
-                    persistence_failures += 1
-                    try:
-                        action = await _await_close_critical(
-                            self._wait_for_runtime_persistence_intervention(
-                                analysis_state,
-                                successful_status=prior_status,
-                                persist_transitions=True,
-                                rotate_generation=persistence_failures > 1,
-                            ),
-                            label="waiting for final-save intervention",
-                        )
-                    except WorkflowSupersededError:
-                        # The safe-point hook can raise from inside this
-                        # persistence-handler block. Convert it into the
-                        # same explicit no-save shutdown used by the normal
-                        # supersession check, then continue cleanup.
-                        self._restore_superseded = True
-                        continue
-                    except asyncio.CancelledError as exc:
-                        cancellation = cancellation or exc
-                        consume_current_cancellation_request()
-                        logger.warning(
-                            "[%s] Runtime-persistence close gate was cancelled; "
-                            "preserving the live kernel for cleanup retry",
-                            self.session_id,
-                        )
-                        break
-                    except Exception:
-                        logger.exception(
-                            "[%s] Runtime-persistence close gate failed; "
-                            "preserving the live kernel for cleanup retry",
-                            self.session_id,
-                        )
-                        break
-                    if action == "retry":
-                        # Retry already committed the namespace. Re-enter
-                        # stop() so it verifies/reuses that generation and
-                        # saves notebook metadata before shutdown.
-                        continue
-
-                    if action == "terminate":
-                        self._set_status(analysis_state, TaskStatus.STOPPED)
-                        analysis_state.termination_reason = (
-                            "runtime_persistence_failure"
-                        )
-                        delay = 0.1
-                        while not _is_superseded():
-                            persisted = await _await_close_critical(
-                                self._publish_runtime_persistence_transition(
-                                    analysis_state,
-                                    persist_state=True,
-                                    abort_on_close_discard=True,
-                                ),
-                                label=(
-                                    "persisting final-save termination"
-                                ),
-                            )
-                            if persisted:
-                                break
-                            await _await_close_critical(
-                                asyncio.sleep(delay),
-                                label=(
-                                    "retrying final-save termination "
-                                    "persistence"
-                                ),
-                            )
-                            delay = min(delay * 2.0, 1.0)
-                    # Recompute/manage and terminate are both explicit
-                    # authorization to discard this unsaved live generation.
-                    await _await_close_critical(
-                        sandbox.stop(save=False),
-                        label="discarding an explicitly released runtime",
-                    )
-                    close_status["sandbox"] = True
-                    logger.info(
-                        "[%s] Sandbox stopped after explicit runtime "
-                        "persistence action %s",
-                        self.session_id,
-                        action,
-                    )
-                    break
                 except Exception:
                     logger.exception(
                         "[%s] Error stopping sandbox", self.session_id
                     )
-                    break
         else:
             if not sandbox:
                 close_status["sandbox"] = True

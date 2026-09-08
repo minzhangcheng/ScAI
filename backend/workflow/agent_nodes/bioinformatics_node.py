@@ -84,10 +84,6 @@ async def prepare_bioinformatics_instruction(self, state, analysis_state):
     if state.get("human_guidance"):
         human_guidance = f"\n\nHuman researcher guidance: {state['human_guidance']}"
 
-    # Create snapshot before execution (skip on resume — it already exists)
-    if not resuming:
-        await self._create_auto_snapshot(analysis_state, f"pre_execution_{planning_stage}")
-
     # Step 1: PI provides analysis goals
     if not resuming:
         await self._send_message("status", "PI is defining analysis goals...", AgentType.PI)
@@ -269,42 +265,17 @@ async def execute_bioinformatics_analysis(self, ctx):
     planning_stage = ctx["planning_stage"]
     instruction = ctx["instruction"]
     max_steps = ctx["max_steps"]
-    while True:
-        try:
-            result = await self.bioinformatics_agent.run_autonomous_analysis(
-                analysis_state,
-                instruction,
-                max_steps=max_steps,
-                figure_review_callback=self._figure_review_callback,
-                supervisor_callback=self._supervisor_callback,
-                planning_stage=planning_stage,  # Pass stage context to agent
-            )
-            break
-        except Exception as exc:
-            from backend.services.runtime_persistence_gate import (
-                RuntimePersistenceBlocked,
-            )
-
-            if not isinstance(exc, RuntimePersistenceBlocked):
-                raise
-            action = await self._wait_for_runtime_persistence_intervention(
-                analysis_state
-            )
-            if action == "terminate":
-                from backend.workflow.helpers import WorkflowTerminatedError
-
-                raise WorkflowTerminatedError(
-                    "User terminated after runtime persistence failure"
-                )
-            if action == "discard":
-                raise WorkflowSupersededError(
-                    "runtime owner was superseded while persistence was blocked"
-                )
-            # Retry re-enters from the executor checkpoint after the exact
-            # live namespace is committed. Recompute/reduce likewise
-            # re-enters, with runtime_recompute_pending adding the recovery
-            # instruction to the agent's data context.
-            continue
+    # No retry loop: a failed runtime save no longer raises for a person to
+    # answer (spec 5.1). RuntimeUnavailable still propagates -- there is nothing
+    # to retry when nothing was ever saved, and the route offers the re-run.
+    result = await self.bioinformatics_agent.run_autonomous_analysis(
+        analysis_state,
+        instruction,
+        max_steps=max_steps,
+        figure_review_callback=self._figure_review_callback,
+        supervisor_callback=self._supervisor_callback,
+        planning_stage=planning_stage,  # Pass stage context to agent
+    )
 
     return result
 
@@ -668,17 +639,10 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
             f"[{self.session_id}] Execution revision triggered in stage "
             f"'{planning_stage}' ({action}); staying in stage, bioinfo cache invalidated"
         )
-        # Required boundary: plan_revision semantic gate (pre_major_revision).
-        # Fail closed via capture_required_snapshot → RequiredSnapshotBlocked.
         # This revision signal exists only on the node output. LangGraph has
         # not installed that output yet, so the workflow-level pointer still
-        # names the input and cannot be the capture source.
+        # names the input; move it forward for everything that reads it.
         self._current_graph_state = result_state
-        await self._create_auto_snapshot(
-            analysis_state,
-            "pre_major_revision",
-            workflow_state=result_state,
-        )
     elif action == "stage1_complete":
         # Stage transition: stage1 genuinely completed → set up for stage2.
         # Don't cache the stage1 result — stage2 re-enters this node and must

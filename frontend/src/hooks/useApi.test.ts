@@ -64,18 +64,4 @@ describe('applyStoreUpdates', () => {
     })
   })
 
-  it('applies snapshot transaction hydration', () => {
-    const transaction = {
-      transaction_id: 'restore-job-reload',
-      session_id: 'session-1',
-      snapshot_id: 'snapshot-1',
-      status: 'queued' as const,
-      recovery_mode: 'rollback' as const,
-      failure: null,
-    }
-    applyStoreUpdates({ snapshotTransaction: transaction })
-    expect(useAppStore.getState().snapshotTransaction).toEqual(transaction)
-    applyStoreUpdates({ snapshotTransaction: null })
-    expect(useAppStore.getState().snapshotTransaction).toBeNull()
-  })
 })

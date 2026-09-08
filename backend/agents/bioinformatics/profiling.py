@@ -263,7 +263,7 @@ class ProfilingMixin:
         await self._notify("status", description[:200])
         try:
             result = await self.sandbox.execute(
-                code, save_to_history=True,
+                code, records_history=True,
                 declared_outputs=declared, track_globals=True,
             )
         except Exception as exc:                          # noqa: BLE001
@@ -279,8 +279,36 @@ class ProfilingMixin:
         return (getattr(result, "output", "") or "")[:8000] or "(no output)"
 
 
+def _upload_reference(file_path: str) -> str:
+    """Name an input the way a replayable cell must reference it.
+
+    The absolute path is what `file_path` holds, and handing it to the model is
+    how ten of them reached one run's LLM traffic and one of them reached a
+    notebook cell. A cell that hard-codes `/data/sessions/<id>/uploads/...`
+    cannot run anywhere but the machine that produced it, which is exactly what
+    the replay contract is about.
+
+    `_UPLOADS_DIR` is bound by the kernel bootstrap, which A2-9 made cell 1 of
+    the notebook, so a cell written against it travels. A path that is not under
+    the uploads root is reported as-is: mislabelling it would be worse than
+    naming it.
+    """
+    from pathlib import PurePosixPath
+
+    text = str(file_path or "")
+    marker = "/uploads/"
+    index = text.find(marker)
+    if index == -1:
+        return text
+    relative = PurePosixPath(text[index + len(marker):])
+    return f"_UPLOADS_DIR / {str(relative)!r}"
+
+
 def _file_listing(state: Any) -> str:
-    lines = ["Sequencing inputs:"]
+    lines = [
+        "Sequencing inputs (reference them through `_UPLOADS_DIR`, which the "
+        "notebook's first cells define; do not hard-code an absolute path):"
+    ]
     for data_file in (state.data_files or []):
         if getattr(data_file, "section", "") != "sequencing":
             continue
@@ -288,7 +316,7 @@ def _file_listing(state: Any) -> str:
         lines.append(
             f"  - {data_file.filename} | type={data_file.data_type} | "
             f"group={getattr(group, 'name', '(ungrouped)')} | "
-            f"path={data_file.file_path}"
+            f"path={_upload_reference(data_file.file_path)}"
         )
     if len(lines) == 1:
         lines.append("  (none)")

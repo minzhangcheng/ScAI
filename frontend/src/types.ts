@@ -6,7 +6,6 @@
 
 import type { AgentType, TaskStatus, Session, TreatmentGroup, DataFile, BiochemistryIndicator, PublicationFigure, PublicationTable, RoundResult, GraphicAbstract, SpeciesInputInfo } from './stores/appStore'
 import type { TranslationKey } from './i18n/translations'
-import type { SnapshotFailureAction, SnapshotTransactionRecord } from './types/snapshotV2'
 
 // Re-export for convenience
 export type { AgentType, TaskStatus, Session, TreatmentGroup, DataFile, BiochemistryIndicator, PublicationFigure, PublicationTable, RoundResult, GraphicAbstract, SpeciesInputInfo, TranslationKey }
@@ -37,8 +36,8 @@ export interface RawClusterAnnotation {
 /**
  * Authoritative cell-annotation gate state, as persisted server-side.
  * The `annotation_confirmation` realtime message carries the same payload but
- * is lossy (replay window, stream cap, snapshot restore), so the dialog is
- * rebuilt from this on reload.
+ * is lossy (replay window, stream cap), so the dialog is rebuilt from this on
+ * reload.
  */
 export interface RawAnnotationState {
   cluster_annotations?: RawClusterAnnotation[]
@@ -95,7 +94,6 @@ export interface SessionLoadResponse {
   round_wait_seconds?: number
   waiting_input_started_at?: string
   agent_errors?: RawAgentError[]
-  snapshot_count?: number
   messages?: RawMessage[]
   species?: string
   species_resolved?: boolean
@@ -127,16 +125,6 @@ export interface SessionLoadResponse {
   }
   runtime_restore_status?: 'complete' | 'unavailable' | 'intentionally_kept'
   runtime_restore_warning?: string | null
-  snapshot_failure?: {
-    snapshot_id?: string
-    session_id?: string
-    failed_at?: string
-    code?: string
-    message?: string
-    details?: Record<string, unknown>
-    allowed_actions?: SnapshotFailureAction[]
-  } | null
-  snapshot_transaction?: SnapshotTransactionRecord | null
 }
 
 /** Authoritative per-session configuration displayed by the Agents page. */

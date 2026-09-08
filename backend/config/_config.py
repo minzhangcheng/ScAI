@@ -30,12 +30,46 @@ _ENABLE_REPRODUCIBILITY = os.environ.get("SCAI_ENABLE_REPRODUCIBILITY", "").lowe
     "yes",
 )
 
-_ENABLE_SNAPSHOT_V2 = os.environ.get("SCAI_ENABLE_SNAPSHOT_V2", "").lower() in (
-    "1",
-    "true",
-    "yes",
-)
-SNAPSHOT_V2_ENABLED = _ENABLE_SNAPSHOT_V2
+#: Wall-clock floor between step-boundary runtime saves, in minutes. Spec 5.1
+#: states the exposure bound in terms of it: at most one round, or this many
+#: minutes, of work is at risk -- and only while saves succeed.
+#:
+#: 30 is a default, not a measurement. Spec 12 lists it as open, to be confirmed
+#: from A2-10's before/after save timings; that confirmation changes this one
+#: line. Round and closing boundaries ignore it entirely.
+RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT = 30
+
+
+def _resolve_save_floor_minutes() -> int:
+    """Read the floor, ignoring anything that is not a positive whole number.
+
+    Import time: a typo in a deployment environment must not turn into a
+    backend that cannot start, so an unusable value logs and falls back.
+    """
+    raw = os.environ.get("SCAI_RUNTIME_SAVE_FLOOR_MINUTES", "").strip()
+    if not raw:
+        return RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "SCAI_RUNTIME_SAVE_FLOOR_MINUTES=%r is not a whole number of "
+            "minutes; using %d",
+            raw, RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT,
+        )
+        return RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT
+    if value <= 0:
+        logging.getLogger(__name__).warning(
+            "SCAI_RUNTIME_SAVE_FLOOR_MINUTES=%s is not positive; using %d. A "
+            "floor of zero would save after every step, which costs minutes "
+            "each time -- set the boundary itself if that is what you want.",
+            raw, RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT,
+        )
+        return RUNTIME_SAVE_FLOOR_MINUTES_DEFAULT
+    return value
+
+
+RUNTIME_SAVE_FLOOR_MINUTES = _resolve_save_floor_minutes()
 
 _ENABLE_METHOD_DECISION_GUIDANCE = os.environ.get(
     "SCAI_ENABLE_METHOD_DECISION_GUIDANCE", ""
@@ -45,48 +79,6 @@ _ENABLE_METHOD_DECISION_GUIDANCE = os.environ.get(
     "yes",
 )
 
-
-#: Retained for lower-level callers that explicitly inject a quota. Production
-#: Snapshot V2 storage is unbounded and reports a zero quota/warning ratio.
-SNAPSHOT_QUOTA_WARNING_RATIO = 0.9
-
-#: Fraction of measured kernel headroom the runtime capture is allowed to plan
-#: against. Capturing an AnnData copies it, so the capture needs roughly the
-#: size of the largest captured object on top of what the kernel already holds;
-#: this ratio is the margin left for allocator overhead and for whatever else on
-#: the host claims memory between the measurement and the copy. Operators on
-#: dedicated hosts can raise it; those sharing a host should lower it.
-SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT = 0.8
-
-
-def _resolve_memory_safety_ratio() -> float:
-    """Read the capture memory margin, ignoring values outside (0, 1]."""
-    raw = os.environ.get("SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO", "").strip()
-    if not raw:
-        return SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT
-    try:
-        value = float(raw)
-    except ValueError:
-        logging.getLogger(__name__).warning(
-            "SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO=%r is not a number; using %.2f",
-            raw, SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT,
-        )
-        return SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT
-    if not 0 < value <= 1:
-        logging.getLogger(__name__).warning(
-            "SCAI_SNAPSHOT_MEMORY_SAFETY_RATIO=%s is outside (0, 1]; using %.2f",
-            raw, SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT,
-        )
-        return SNAPSHOT_MEMORY_SAFETY_RATIO_DEFAULT
-    return value
-
-
-SNAPSHOT_MEMORY_SAFETY_RATIO = _resolve_memory_safety_ratio()
-
-
-def is_snapshot_v2_enabled() -> bool:
-    """Return the process-scoped Snapshot V2 operator feature gate."""
-    return SNAPSHOT_V2_ENABLED
 
 # Legacy top-level directories (kept for backward compatibility / migration fallback)
 UPLOAD_DIR = DATA_BASE_DIR / "uploads"
@@ -134,8 +126,13 @@ PREPARED_EXPORT_TTL = 6 * 3600  # Delete prepared-but-undownloaded export archiv
 # own lifecycle, and the sweep must not widen past these prefixes.
 PREPARED_EXPORT_PREFIX = "prepared_export_"
 EXPORT_STREAM_PREFIX = "export_stream_"
-SNAPSHOT_EXPORT_PREFIX = "v2-export-"
-EXPORT_TEMP_PREFIXES = (PREPARED_EXPORT_PREFIX, EXPORT_STREAM_PREFIX, SNAPSHOT_EXPORT_PREFIX)
+#: No producer writes this any more -- the snapshot export route is gone. It
+#: stays in the sweep set because an installation upgraded mid-export can still
+#: hold a multi-gigabyte `v2-export-` temp that nothing else would ever reclaim.
+RETIRED_SNAPSHOT_EXPORT_PREFIX = "v2-export-"
+EXPORT_TEMP_PREFIXES = (
+    PREPARED_EXPORT_PREFIX, EXPORT_STREAM_PREFIX, RETIRED_SNAPSHOT_EXPORT_PREFIX,
+)
 CLEANUP_INTERVAL = 300  # Background cleanup task interval (seconds)
 WS_RECEIVE_TIMEOUT = 60.0  # WebSocket receive timeout (seconds) — increased from 30s
 CHAT_DELEGATION_TIMEOUT = 600  # Chat delegation global timeout (seconds)
@@ -183,13 +180,6 @@ def get_session_reports(session_id: str) -> Path:
 def get_session_logs(session_id: str) -> Path:
     """Logs directory for a session (LLM interaction logs)."""
     return get_session_dir(session_id) / "logs"
-
-
-def get_integrity_dir(session_id: str) -> Path:
-    """Host-scoped integrity root (not sandbox-writable). HMAC files live here."""
-    path = INTEGRITY_DIR / session_id / "snapshot-v2"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def ensure_session_dirs(session_id: str) -> Path:
@@ -310,12 +300,6 @@ def setup_logging(log_level: int = logging.INFO) -> None:
     # Log startup message
     logging.info(f"Logging initialized. Log directory: {LOG_DIR}")
     logging.info(f"Log files: app.log, error.log, debug.log")
-
-# Snapshot size policy
-MAX_SNAPSHOT_KERNEL_PKL_BYTES = 2 * 1024 * 1024 * 1024
-MAX_SESSION_SNAPSHOT_BYTES = 20 * 1024 * 1024 * 1024
-SNAPSHOT_EXCLUDED_WORKSPACE_PATTERNS = ("core.*", "*.tmp", "*.lock")
-
 
 class APIConfig(BaseModel):
     """API configuration for various services"""
@@ -489,29 +473,6 @@ class SystemConfig(BaseModel):
         ge=0,
         description="Wall-clock ceiling (seconds) for the whole supplementary pass. 0 (default) derives it as the sum of the per-step budgets, i.e. it never becomes the thing that cuts a step off and only backstops a pass that never converges. Lower it to cap the worst case (all steps running to their limit); it is always raised to at least one step's budget.",
     )
-
-    # Snapshot V2 settings (V2 is the authoritative lifecycle; V1 restore cut over)
-    snapshot_v2_enabled: bool = Field(
-        default=_ENABLE_SNAPSHOT_V2,
-        description=(
-            "Enable Snapshot V2. Disabled by default; set "
-            "SCAI_ENABLE_SNAPSHOT_V2=true before backend startup to opt in."
-        ),
-    )
-    snapshot_safe_point_timeout_seconds: int | None = None
-    snapshot_v2_pre_restore_quota_grace_bytes: int = 64 * 1024 ** 2
-    snapshot_v1_restore_cutover: bool = True
-    snapshot_v2_import_compressed_bytes: int = 20 * 1024 ** 3
-    snapshot_v2_import_uncompressed_bytes: int = 100 * 1024 ** 3
-    snapshot_v2_import_single_member_bytes: int = 80 * 1024 ** 3
-    snapshot_v2_import_member_count: int = 200000
-    snapshot_v2_import_manifest_count: int = 10000
-    snapshot_v2_import_snapshot_count: int = 10000
-
-    def get_snapshot_safe_point_timeout_seconds(self) -> int:
-        if self.snapshot_safe_point_timeout_seconds is not None and self.snapshot_safe_point_timeout_seconds > 0:
-            return self.snapshot_safe_point_timeout_seconds
-        return self.sandbox_timeout + 120
 
     # State persistence (deprecated: use get_session_states/get_session_workspace instead)
     # Kept for serialization compatibility only.

@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.54.1"
+VERSION = "0.55.1"
 
 
 # ── Authoritative graph node registry — single source of truth ─────
@@ -79,7 +79,6 @@ class WaitInputReason(str, Enum):
     MARKER_DB_MISSING = "marker_db_missing"
     SPECIES_INPUT = "species_input"
     GENE_SPECIES_MISMATCH = "gene_species_mismatch"
-    SNAPSHOT_FAILURE = "snapshot_failure"
     RUNTIME_PERSISTENCE_FAILURE = "runtime_persistence_failure"
 
 
@@ -92,7 +91,6 @@ class StateSyncChangeType(str, Enum):
     GENE_SPECIES_MISMATCH = "gene_species_mismatch"
     SPECIES_RESOLVED = "species_resolved"
     SPECIES_AUTO_SKIPPED = "species_auto_skipped"
-    SNAPSHOT_FAILURE = "snapshot_failure"
     RUNTIME_PERSISTENCE_FAILURE = "runtime_persistence_failure"
     RUNTIME_PERSISTENCE_COMMITTED = "runtime_persistence_committed"
 

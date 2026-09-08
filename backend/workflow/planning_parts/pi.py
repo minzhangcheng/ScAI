@@ -68,7 +68,6 @@ async def start_pi_planning(self, state):
                         analysis_state.round_wait_seconds,
                         self.session_id,
                         "species_input",
-                        safe_point_hook=getattr(self, "await_restore_safe_point", None),
                     )
 
                     if not signaled:

@@ -81,7 +81,6 @@ export function applyStoreUpdates(updates: StoreUpdates): void {
     }
   }
   if (updates.stateVersion != null) store.setStateVersion(updates.stateVersion)
-  if (updates.snapshotCount != null) store.setSnapshotCount(updates.snapshotCount)
   if (updates.roundWaitSeconds != null) store.setRoundWaitSeconds(updates.roundWaitSeconds)
   // Presence check, not a null check: an absent gate must clear a stale one.
   if ('annotationGateData' in updates) store.setAnnotationGateData(updates.annotationGateData ?? null)
@@ -104,16 +103,11 @@ export function applyStoreUpdates(updates: StoreUpdates): void {
   }
   if (updates.pubmedEmail != null) store.setPubmedEmail(updates.pubmedEmail)
   if (updates.literatureMaxSearchRounds != null) store.setLiteratureMaxSearchRounds(updates.literatureMaxSearchRounds)
-  if (updates.runtimeRestoreStatus != null || updates.runtimeRestoreWarning !== undefined || updates.snapshotFailure !== undefined) {
+  if (updates.runtimeRestoreStatus != null || updates.runtimeRestoreWarning !== undefined) {
     store.hydrateRuntimeRestoreFromSession({
       runtime_restore_status: updates.runtimeRestoreStatus,
       runtime_restore_warning: updates.runtimeRestoreWarning,
-      snapshot_failure: updates.snapshotFailure?.failure ?? (updates.snapshotFailure === null ? null : undefined),
-      snapshot_failure_allowed_actions: updates.snapshotFailure?.allowed_actions,
     })
-  }
-  if (updates.snapshotTransaction !== undefined) {
-    store.setSnapshotTransaction(updates.snapshotTransaction)
   }
 }
 

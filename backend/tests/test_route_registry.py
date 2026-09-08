@@ -74,10 +74,6 @@ def test_extracted_routes_keep_openapi_descriptions():
         ("/api/session/{session_id}/retry-node", "post"),
         ("/api/session/{session_id}/failed-node", "get"),
         ("/api/session/{session_id}/resume-bioinformatics", "post"),
-        ("/api/session/{session_id}/snapshot-failure/retry", "post"),
-        ("/api/session/{session_id}/snapshot-failure/proceed", "post"),
-        ("/api/session/{session_id}/snapshot-failure/skip", "post"),
-        ("/api/session/{session_id}/snapshot-failure/terminate", "post"),
     ]
     schema = app.openapi()
     missing = [

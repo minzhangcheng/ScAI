@@ -77,7 +77,7 @@ class TestAnalysisStateApiDictRoundTrip:
             "custom_models", "custom_temperatures", "deg_thresholds",
             "literature_config",
             "state_version",
-            "last_sync_timestamp", "snapshot_count", "current_plan",
+            "last_sync_timestamp", "current_plan",
             "plan_dialogue_history", "agent_errors",
             "publication_figures", "publication_tables", "graphic_abstract",
             "figure_revision_tasks",

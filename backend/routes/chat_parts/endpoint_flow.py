@@ -30,7 +30,6 @@ async def chat_with_pi(
 ):
     """Chat with PI Agent using analysis context. Supports file uploads with per-file agent targeting."""
     from backend.utils.agent_llm import get_agent_llm_client
-    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
 
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
@@ -39,15 +38,6 @@ async def chat_with_pi(
 
     if config is None:
         raise HTTPException(status_code=400, detail="No API key configured. Please configure your LLM API key in Settings before sending a message.")
-
-    # Reject chat while a snapshot/restore safe point is active
-    from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
-    _sp = get_snapshot_safe_point_manager()
-    if _sp.is_paused(session_id) or _sp.has_pending_request(session_id):
-        raise HTTPException(
-            status_code=409,
-            detail="Cannot chat while a snapshot or restore operation is in progress",
-        )
 
     # Resolve report handoffs against the live session lineage before uploads,
     # message append, or any other durable mutation.  A handoff never changes
@@ -319,35 +309,7 @@ async def chat_with_pi(
 
     result: Dict[str, Any] = dict(assistant_msg)
 
-    # Auto-snapshot after chat exchange (fail closed → coherent HITL)
-    from backend.models.schemas import TaskStatus as _TaskStatus
-
-    pre_snapshot_status = getattr(state, "status", _TaskStatus.COMPLETED)
-    if not isinstance(pre_snapshot_status, _TaskStatus):
-        try:
-            pre_snapshot_status = _TaskStatus(str(pre_snapshot_status))
-        except Exception:
-            pre_snapshot_status = _TaskStatus.COMPLETED
-    try:
-        await _create_chat_snapshot(session_id, state)
-        await async_save_session(session_id, state)
-    except RequiredSnapshotBlocked as e:
-        from backend.services.snapshot_v2.failure_gate import (
-            enter_chat_snapshot_failure_gate,
-        )
-
-        logger.warning(f"[{session_id}] Post-chat snapshot blocked: {e}")
-        # Always set chat retry_context (service may have written a bare failure).
-        enter_chat_snapshot_failure_gate(state, e, pre_snapshot_status)
-        if not await _persist_chat_terminal(session_id, state):
-            raise HTTPException(
-                status_code=409,
-                detail="Chat session generation changed before terminal save",
-            )
-        result["snapshot_failure"] = state.snapshot_failure
-        result["wait_input_reason"] = "snapshot_failure"
-        result["status"] = "snapshot_failure"
-        return result
+    await async_save_session(session_id, state)
 
     if not await _persist_chat_terminal(session_id, state):
         raise HTTPException(

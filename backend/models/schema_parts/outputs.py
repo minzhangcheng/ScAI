@@ -365,7 +365,6 @@ class WebSocketMessage(BaseModel):
         "chat_delegation", "chat_result", "chat_error",
         # Supervisor monitoring
         "supervisor_feedback", "supervisor_checkpoint", "supervisor_summary",
-        "snapshot_count",
         # Plan-vs-evidence audit and the bounded supplementary pass that follows it
         "post_execution_review",
         # Collaborative planning

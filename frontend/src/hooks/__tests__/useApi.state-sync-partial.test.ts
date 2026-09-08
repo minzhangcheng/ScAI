@@ -7,13 +7,13 @@ import { useAppStore } from '../../stores/appStore'
  * A `state_sync` producer that omits a field must not erase it.
  *
  * `updateSession` spreads its argument over the session, so a key present with
- * value `undefined` overwrites the real value. The restore job's transaction
- * sync (`RestoreJobManager._emit_state_sync`) sends only `change_type` and
- * `snapshot_transaction` — no `version`, no `status`, no `current_round` — so
- * every progress event during a restore used to blank `status`/`currentRound`.
- * `AnalysisPanel` derives every header control from `currentSession.status`, so
- * with it undefined none of the branches match and the control bar renders
- * empty until a manual page reload.
+ * value `undefined` overwrites the real value. The producer that first exposed
+ * this was the snapshot restore job, whose transaction sync carried only
+ * `change_type` — no `version`, no `status`, no `current_round` — and blanked
+ * `status`/`currentRound` on every progress event. That producer is gone; the
+ * rule is not. `AnalysisPanel` derives every header control from
+ * `currentSession.status`, so with it undefined none of the branches match and
+ * the control bar renders empty until a manual page reload.
  */
 describe('state_sync with a partial payload', () => {
   const wsInstances: Array<{ onmessage: ((event: MessageEvent) => void) | null }> = []
@@ -63,12 +63,10 @@ describe('state_sync with a partial payload', () => {
       messages: [],
       wsConnected: false,
       stateVersion: 7,
-      snapshotV2Enabled: true,
-      snapshotTransaction: null,
     })
   })
 
-  it('a snapshot_transaction sync leaves status, round and version intact', async () => {
+  it('a sync carrying only a change_type leaves status, round and version intact', async () => {
     const { result } = renderHook(() => useWebSocket())
 
     await act(async () => {
@@ -80,20 +78,12 @@ describe('state_sync with a partial payload', () => {
       ws.onmessage?.({
         data: JSON.stringify({
           type: 'state_sync',
-          change_type: 'snapshot_transaction',
-          snapshot_transaction: {
-            transaction_id: 'restore-job-abc',
-            session_id: 'session-restore',
-            snapshot_id: 'snap-1',
-            status: 'waiting_safe_point',
-            recovery_mode: 'rollback',
-          },
+          change_type: 'runtime_persistence_committed',
         }),
       } as MessageEvent)
     })
 
     const state = useAppStore.getState()
-    expect(state.snapshotTransaction?.status).toBe('waiting_safe_point')
     expect(state.currentSession?.status).toBe('running')
     expect(state.currentSession?.currentRound).toBe(3)
     expect(state.stateVersion).toBe(7)

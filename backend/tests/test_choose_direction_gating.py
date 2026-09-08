@@ -2,7 +2,6 @@
 import asyncio
 import re
 import backend.routes.interaction as ix_mod
-import pytest
 from backend.models.api_requests import DirectionChoice
 from backend.models.schemas import (
     AnalysisPhase,
@@ -84,39 +83,3 @@ def test_choose_direction_repairs_post_exploration_phase_drift(monkeypatch):
     assert response.success is True
     assert state.analysis_phase == AnalysisPhase.INNOVATION
     assert state.user_chosen_directions[0]["direction"] == "Direction A"
-
-
-def test_choose_direction_does_not_bypass_snapshot_failure(monkeypatch):
-    state = AnalysisState(
-        id="sess-direction-snapshot-failure",
-        name="T",
-        user_id="u1",
-        initial_instruction="analyze",
-        status=TaskStatus.WAITING_INPUT,
-        current_round=1,
-        analysis_phase=AnalysisPhase.EXPLORATION,
-        exploration_report=ExplorationReport(
-            research_direction_candidates=[{"direction": "Direction A"}],
-        ),
-        wait_input_reason="snapshot_failure",
-        snapshot_failure={
-            "code": "QUOTA_EXCEEDED",
-            "message": "Snapshot capture failed",
-        },
-    )
-
-    async def fake_owner(session_id, user_id):
-        return state
-
-    monkeypatch.setattr(ix_mod, "require_session_ownership", fake_owner)
-
-    with pytest.raises(ix_mod.HTTPException) as exc:
-        asyncio.run(ix_mod._choose_direction_locked(
-            state.id,
-            "u1",
-            DirectionChoice(direction="Direction A"),
-        ))
-
-    assert exc.value.status_code == 409
-    assert state.analysis_phase == AnalysisPhase.EXPLORATION
-    assert state.user_chosen_direction is None

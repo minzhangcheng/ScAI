@@ -57,17 +57,6 @@ async def test_invalid_branch_reference_is_rejected_before_upload_or_message_mut
         "_build_chat_context",
         lambda *_args: ("", []),
     )
-    from backend.services.snapshot_v2 import safe_point
-
-    monkeypatch.setattr(
-        safe_point,
-        "get_snapshot_safe_point_manager",
-        lambda: SimpleNamespace(
-            is_paused=lambda _session_id: False,
-            has_pending_request=lambda _session_id: False,
-        ),
-    )
-
     with pytest.raises(HTTPException) as caught:
         await chat_endpoints.chat_with_pi(
             _request(),
@@ -152,11 +141,6 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
-        delegation_flow,
-        "_create_chat_snapshot",
-        AsyncMock(return_value=None),
-    )
-    monkeypatch.setattr(
         "backend.utils.agent_llm.get_agent_llm_client",
         lambda *_args: client,
     )
@@ -184,7 +168,7 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         source_context=source_context,
     )
 
-    assert result is not None
+    assert result is not delegation_flow._DELEGATION_STOP
     assert source_context in delegate_instructions[0]
     assert source_context in client.last_kwargs["messages"][0]["content"]
     terminal = state.chat_messages[-1]

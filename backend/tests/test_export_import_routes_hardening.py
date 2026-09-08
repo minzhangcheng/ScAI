@@ -200,7 +200,6 @@ async def test_run_signals_explicit_start_when_there_is_no_checkpoint(monkeypatc
     monkeypatch.setattr(lifecycle, "require_session_ownership", _owner)
     monkeypatch.setattr(lifecycle, "async_save_session", _save)
     monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
-    monkeypatch.setattr(lifecycle, "is_snapshot_failure_blocked", lambda _s: False)
 
     class _Req:
         state = type("S", (), {"user_id": "u1"})()
@@ -255,7 +254,6 @@ async def test_a_checkpoint_without_its_kernel_does_not_count(
     monkeypatch.setattr(lifecycle, "require_session_ownership", _owner)
     monkeypatch.setattr(lifecycle, "async_save_session", _save)
     monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
-    monkeypatch.setattr(lifecycle, "is_snapshot_failure_blocked", lambda _s: False)
 
     class _Req:
         state = type("S", (), {"user_id": "u1"})()
@@ -289,7 +287,6 @@ async def test_completed_reanalysis_tells_the_agent_its_kernel_is_empty(monkeypa
     monkeypatch.setattr(lifecycle, "_update_session_cache", _noop)
     monkeypatch.setattr(lifecycle, "teardown_running_workflow", _noop)
     monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
-    monkeypatch.setattr(lifecycle, "is_snapshot_failure_blocked", lambda _s: False)
 
     await lifecycle._resume_analysis_locked(session_id, "u1")
 
@@ -301,7 +298,7 @@ async def test_completed_reanalysis_tells_the_agent_its_kernel_is_empty(monkeypa
 def test_explicit_start_routes_a_plain_session_into_the_round_loop():
     """The plan builder must not need Snapshot V2 metadata to honour the intent."""
     from backend.models.schemas import AnalysisState
-    from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+    from backend.workflow.restore_entry import build_restore_entry_plan
 
     state = AnalysisState(id="plain", user_id="u1", current_round=2)
 

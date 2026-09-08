@@ -142,6 +142,24 @@ async def _shutdown_kernel_manager(manager: KernelManager) -> None:
     manager.shutdown_kernel(now=True)
 
 
+
+def _bootstrap_notebook_cell(code: str, result) -> dict:
+    """One bootstrap execution, in the shape `set_bootstrap_cells` stores.
+
+    `CodeExecutionResult` carries the flattened stdout rather than the raw iopub
+    outputs, so the stream is reconstructed here. The bootstrap raises on
+    failure before this is reached, so there is no error branch to build.
+    """
+    outputs = []
+    if result.output:
+        outputs.append({"type": "stream", "name": "stdout", "text": result.output})
+    return {
+        "code": code,
+        "outputs": outputs,
+        "execution_count": result.execution_count or 0,
+    }
+
+
 class KernelMixin:
     """Jupyter kernel lifecycle: start, readiness, restart, stop."""
 
@@ -192,6 +210,7 @@ class KernelMixin:
         # Manager, process, channels, bootstrap, and restore are one resource-
         # acquisition unit. Any failure must tear down whatever this call has
         # acquired, including a process whose client/channel setup failed.
+        self._starting = True
         try:
             self.km = KernelManager(kernel_name='python3')
             self._install_isolated_kernel_launcher(self.km)
@@ -235,6 +254,9 @@ class KernelMixin:
             # a failed restore discards this generation below.
             self._kernel_dead = False
             self.kernel_epoch = getattr(self, "kernel_epoch", 0) + 1
+            epoch_callback = getattr(self, "runtime_epoch_callback", None)
+            if callable(epoch_callback):
+                epoch_callback(self.kernel_epoch)
 
             # `_restore_session` assigns into globals() frame by frame, so any
             # error or cancellation leaves a partial namespace. save=False is
@@ -243,13 +265,15 @@ class KernelMixin:
         except BaseException:
             self._kernel_dead = True
             try:
-                await self.stop(save=False)
+                await self._shutdown_kernel_unlocked()
             except Exception:
                 logger.exception(
                     "Failed to stop partially started kernel for %s",
                     self.session_id,
                 )
             raise
+        finally:
+            self._starting = False
 
         return {
             "started": True,
@@ -270,7 +294,7 @@ class KernelMixin:
 
         init_code = _bootstrap_owner.build_common_bootstrap_source(self)
         result = await self._execute_unlocked(
-            init_code, save_to_history=False, skip_safety_check=True
+            init_code, records_history=False, skip_safety_check=True
         )
         if result.output:
             logger.debug("Kernel init stdout: %s", result.output[:1000])
@@ -284,7 +308,7 @@ class KernelMixin:
 
         path_setup_code = _bootstrap_owner.build_path_setup_source(self)
         path_result = await self._execute_unlocked(
-            path_setup_code, save_to_history=False, skip_safety_check=True
+            path_setup_code, records_history=False, skip_safety_check=True
         )
         if path_result.output:
             logger.debug("Kernel path-setup stdout: %s", path_result.output[:1000])
@@ -295,6 +319,16 @@ class KernelMixin:
                 path_result.error or "unknown error",
             )
             raise RuntimeError("Kernel path/sandbox initialization failed")
+
+        # The environment every later cell assumes, recorded as the notebook's
+        # opening cells (spec 5.3.2). These two still opt out of the ordinary
+        # record gate: it saves, and this runs before restore has read the
+        # notebook off disk, so an append here would overwrite a resumed
+        # session's history with a two-cell file.
+        self.notebook_state.set_bootstrap_cells([
+            _bootstrap_notebook_cell(init_code, result),
+            _bootstrap_notebook_cell(path_setup_code, path_result),
+        ])
 
         self._initialized = True
         logger.info("Kernel initialized")
@@ -361,7 +395,7 @@ class KernelMixin:
                 logger.error(f"Failed to restart kernel: {restart_error}")
                 self._kernel_dead = True
                 try:
-                    await self.stop(save=False)
+                    await self._shutdown_kernel_unlocked()
                 except Exception:
                     logger.exception(
                         "Failed to stop partially restarted kernel for %s",
@@ -378,6 +412,9 @@ class KernelMixin:
             # than the one it already partially serialized.
             self._kernel_dead = False
             self.kernel_epoch = getattr(self, "kernel_epoch", 0) + 1
+            epoch_callback = getattr(self, "runtime_epoch_callback", None)
+            if callable(epoch_callback):
+                epoch_callback(self.kernel_epoch)
 
             # Restore mutates globals frame by frame.  A failed restore leaves a
             # partial namespace, so it must never be handed back as usable.
@@ -390,7 +427,7 @@ class KernelMixin:
                 )
                 self._kernel_dead = True
                 try:
-                    await self.stop(save=False)
+                    await self._shutdown_kernel_unlocked()
                 except Exception:
                     logger.exception(
                         "Failed to stop kernel after restore failure for %s",
@@ -411,37 +448,50 @@ class KernelMixin:
         snapshot restore has already installed the authoritative pkl/notebook for
         this session: saving would overwrite them with the pre-restore kernel.
 
-        With ``save=True`` a failed or explicitly refused runtime save keeps the
-        kernel alive and raises ``RuntimePersistenceShutdownBlocked``. The live
-        namespace may be the only copy of the newest work, so callers must route
-        the failure through the runtime-persistence intervention gate instead of
-        treating cleanup as successful.
+        With ``save=True`` the closing save is **one attempt** (spec 5.1). A
+        failure keeps the previous committed generation, is recorded by the
+        persistence layer, and does not stop the shutdown: holding the kernel
+        alive for a person to answer is the gate this replaced. The state is
+        then stale rather than current, and the UI says so.
         """
+        # Pending saves themselves need this lock. Drain before acquiring it.
         if save:
-            try:
-                await self.await_pending_saves()
-                saved = await self.save_session()
-                if saved is not True:
-                    raise RuntimeError(
-                        "runtime persistence did not commit a current generation"
+            await self.await_pending_saves()
+        async with self._exec_lock:
+            if save:
+                try:
+                    saved = await self._save_session_locked()
+                    if saved is not True:
+                        raise RuntimeError(
+                            "runtime persistence did not commit a current generation"
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # One attempt (spec 5.1). The previous committed generation is
+                    # intact and the failure is already recorded; shutting down
+                    # anyway is the point of removing the gate.
+                    logger.exception(
+                        "Final runtime persistence failed for %s; the previous "
+                        "committed generation is kept and the kernel is closed",
+                        self.session_id,
                     )
-                self.notebook_state.save()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                from backend.services.runtime_persistence_gate import (
-                    RuntimePersistenceShutdownBlocked,
-                )
+                # Independent of the dump, per spec 5.1: when the runtime could not
+                # be persisted the notebook is the only remaining record of what
+                # ran, which is exactly when losing it costs most.
+                try:
+                    self.notebook_state.save()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Notebook save failed during stop for %s", self.session_id,
+                    )
 
-                logger.exception(
-                    "Failed to save session during stop for %s; preserving live kernel",
-                    self.session_id,
-                )
-                raise RuntimePersistenceShutdownBlocked(
-                    f"Final runtime persistence failed for session {self.session_id}; "
-                    "the live kernel was preserved"
-                ) from exc
+            await self._shutdown_kernel_unlocked()
 
+    async def _shutdown_kernel_unlocked(self):
+        """Release resources; also used by failed startup inside execute's lock."""
         manager = self.km
 
         if self.kc is not None:

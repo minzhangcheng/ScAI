@@ -24,6 +24,11 @@ _NOTEBOOK_OUTPUT_OMISSION = "\n...[output omitted]...\n"
 _NOTEBOOK_HTML_OMISSION = "[HTML output omitted: exceeds limit]"
 _NOTEBOOK_TRACEBACK_OMISSION = "[... traceback omitted ...]"
 
+# Marks the environment-setup cells in the .ipynb so `load` can put them back
+# where they belong. Without it a resume reads the bootstrap in as an ordinary
+# cell and the next start prepends a second copy.
+BOOTSTRAP_CELL_METADATA_KEY = "scai_bootstrap"
+
 logger = logging.getLogger("backend.utils.sandbox_parts.shared")
 
 
@@ -78,6 +83,14 @@ class NotebookState:
         self.working_dir = self.state_dir.parent / "workspace"
 
         self.cells: List[Dict[str, Any]] = []  # List of {code, outputs, execution_count}
+        # The kernel bootstrap defines the environment every other cell assumes:
+        # the seed, the imports, the working directory. A notebook without it
+        # replays into a different environment than the one that produced it, so
+        # it is part of the record (spec 5.3.2). It is held apart from `cells`
+        # rather than prepended to them because the bootstrap runs before
+        # `load()` reads the notebook back -- appending it would mean writing a
+        # one-cell notebook over a resumed session's own history.
+        self.bootstrap_cells: List[Dict[str, Any]] = []
         self.execution_count: int = 0
         self.created_at: str = datetime.now().isoformat()
         self.updated_at: str = datetime.now().isoformat()
@@ -247,6 +260,25 @@ class NotebookState:
                 )
         return compacted
 
+    def set_bootstrap_cells(self, cells: List[Dict[str, Any]]) -> None:
+        """Record the environment setup the kernel ran before any user code.
+
+        Replaces rather than appends: a kernel restart re-runs the same
+        bootstrap, and the notebook records the environment once.
+
+        Deliberately does not save. The caller is mid-`start()`, before restore
+        has read the notebook off disk, and a write here would clobber it.
+        """
+        self.bootstrap_cells = [
+            {
+                "code": cell["code"],
+                "outputs": self._compact_outputs_for_state(cell.get("outputs") or []),
+                "execution_count": cell.get("execution_count", 0),
+                "executed_at": datetime.now().isoformat(),
+            }
+            for cell in cells
+        ]
+
     def add_cell(self, code: str, outputs: List[Dict], execution_count: int):
         """Add an executed cell to the history"""
         self.cells.append({
@@ -261,8 +293,15 @@ class NotebookState:
     def save_notebook(self):
         """Save as Jupyter notebook format"""
         nb = new_notebook()
-        for index, cell in enumerate(self.cells):
+        # Bootstrap first: it is what the kernel ran first. Cell ids derive from
+        # the index, so a session that gains a bootstrap has every subsequent id
+        # rewritten once -- see the A2-9 commit message.
+        ordered = [(True, cell) for cell in self.bootstrap_cells]
+        ordered += [(False, cell) for cell in self.cells]
+        for index, (is_bootstrap, cell) in enumerate(ordered):
             code_cell = new_code_cell(source=cell["code"])
+            if is_bootstrap:
+                code_cell.metadata[BOOTSTRAP_CELL_METADATA_KEY] = True
             # nbformat generates a random cell id when one is omitted.  A
             # repeated save must be byte-stable so exports and checkpoints do
             # not look changed merely because notebook metadata was rebuilt.
@@ -382,6 +421,7 @@ class NotebookState:
         budget_violations: Optional[List[Dict[str, Any]]] = None,
         top_offenders: Optional[List[Dict[str, Any]]] = None,
         recommended_action: Optional[str] = None,
+        committed_pairing: Optional[Dict[str, Any]] = None,
         persist: bool = True,
     ) -> Dict[str, Any]:
         """Persist the live runtime lifecycle without exposing raw tracebacks."""
@@ -508,6 +548,7 @@ class NotebookState:
                     else previous.get("committed_digest")
                 ),
                 "last_attempt_status": "succeeded",
+                "committed_pairing": copy.deepcopy(committed_pairing),
                 "last_attempt_at": now,
                 "last_attempt_revision": max(0, int(current_revision)),
                 "last_attempt_error": None,
@@ -584,15 +625,20 @@ class NotebookState:
         self._migrate_committed_runtime_metadata()
         persistence = dict(self.runtime_persistence)
         runtime_digest = persistence.get("committed_digest")
+        # Derived from the committed record, not by re-verifying the file. The
+        # verification form ran an HMAC pass and a SHA-256 pass over the whole
+        # dump every time metadata was written -- several gigabytes twice per
+        # save -- and still could not answer the question during a commit, when
+        # the recorded digest belongs to the generation being replaced.
+        # ``has_session_dump()`` keeps the expensive form for the one caller
+        # that needs proof: restore.
         has_current_session = bool(
             persistence.get("committed_source") in {
                 "regular_save", "snapshot_apply"
             }
             and self.session_path.exists()
-            and _verify_pkl_integrity(self.session_path, _integrity_dir(self.session_id))
             and isinstance(runtime_digest, str)
             and len(runtime_digest) == 64
-            and _sha256_file(self.session_path) == runtime_digest
         )
         return {
             "session_id": self.session_id,
@@ -652,6 +698,7 @@ class NotebookState:
                 nb = nbformat.read(f, as_version=4)
 
             self.cells = []
+            loaded_bootstrap: List[Dict[str, Any]] = []
             for cell in nb.cells:
                 if cell.cell_type == "code":
                     outputs = []
@@ -680,12 +727,22 @@ class NotebookState:
                                 "traceback": out.traceback
                             })
 
-                    self.cells.append({
+                    record = {
                         "code": cell.source,
                         "outputs": outputs,
                         "execution_count": cell.execution_count or 0,
                         "executed_at": None
-                    })
+                    }
+                    if cell.get("metadata", {}).get(BOOTSTRAP_CELL_METADATA_KEY):
+                        loaded_bootstrap.append(record)
+                    else:
+                        self.cells.append(record)
+
+            # Only when the file had one. A session written before the bootstrap
+            # was recorded keeps whatever this process's kernel start supplied,
+            # so an upgraded session gains its bootstrap rather than losing it.
+            if loaded_bootstrap:
+                self.bootstrap_cells = loaded_bootstrap
 
             # Load state metadata
             if self.state_path.exists():

@@ -3,8 +3,8 @@
  *
  * The dialog used to be built only by scanning the realtime message stream for
  * an `annotation_confirmation` message. That stream is server-authoritative but
- * lossy (bounded /load replay, capped stream, dropped on snapshot restore), and
- * it is never persisted to localStorage. Once the message was gone the gate was
+ * lossy (bounded /load replay, capped stream), and it is never persisted to
+ * localStorage. Once the message was gone the gate was
  * unreachable: the dialog never reopened, and the "Waiting for Annotation"
  * button only flipped a boolean while the payload stayed null.
  *

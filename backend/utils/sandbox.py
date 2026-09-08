@@ -178,12 +178,8 @@ class LocalJupyterSandbox(
             state_dir,
             lifecycle_generation=self._expected_lifecycle_generation,
         )
-        self._kernel_staging_root = (
-            self.notebook_state.state_dir / ".kernel-staging"
-        )
-        if self._kernel_staging_root.is_symlink():
-            raise RuntimeError("kernel staging root must not be a symlink")
         self._initialized = False
+        self._starting = False
         persistence = self.notebook_state.runtime_persistence
         self.runtime_revision: int = int(persistence.get("current_revision") or 0)
         self.saved_runtime_revision: int = int(persistence.get("saved_revision") or 0)
@@ -205,7 +201,6 @@ class LocalJupyterSandbox(
             "loaded": set(),
             "removed": set(),
         }
-        self.runtime_dependency_tracker = None  # set by agent / capture pipeline
         # Workflow-owned projection publisher. The sandbox remains the sole
         # runtime metadata authority and calls this only after a durable commit.
         self.runtime_persistence_commit_callback: Optional[Callable] = None
@@ -227,24 +222,28 @@ class LocalJupyterSandbox(
             self, bindings=sys.modules[__name__]
         )
     
+    async def _save_session_locked(self):
+        """Already-locked save for export and kernel shutdown."""
+        return await _runtime_save_owner.save_session_locked(
+            self, bindings=sys.modules[__name__],
+        )
+
     async def save_session(self):
         """Save the current session state by streaming dill per-variable.
 
         Each variable is an independent dill frame written through a streaming
         zstd writer. Compression therefore does not build a full in-memory pickle,
         while repetitive sparse/dataframe state no longer expands to multi-GB raw
-        files. Required-variable failure leaves the previous atomic file intact.
+        files. A failed save leaves the previous atomic file intact.
 
-        The whole user namespace is a candidate, not a fixed name list. Two tiers:
-
-        * **Required** — tracker-declared names, canonical artifacts that are
-          live, and *every* AnnData regardless of its variable name. These are
-          fail-closed: missing or unpersistable aborts the save and keeps the
-          previous pkl.
-        * **Everything else** — saved best-effort. Values that cannot be pickled
-          (open loom/h5py handles, sockets, locks) are skipped and reported via
-          ``_last_save_skipped`` instead of failing the save, since one stray
-          file handle must not cost the user their entire runtime state.
+        The whole user namespace is a candidate, not a fixed name list, and no
+        value is privileged. Every value serializes into a spooled file first,
+        so one that dill refuses (an open loom/h5py handle, a socket, a lock) is
+        skipped and reported via ``_last_save_skipped`` before a byte of it
+        reaches the compressed stream. The generation still commits, and what
+        was skipped travels with it as coverage — spec 4.4, where coverage warns
+        and only integrity blocks. One stray file handle must not cost the user
+        their entire runtime state, and it must not wedge the save either.
 
         Modules, functions, classes and methods are excluded — kernel init and
         notebook replay re-establish them, and by-reference frames are what most
@@ -301,7 +300,7 @@ class LocalJupyterSandbox(
             ")))\n"
         )
         result = await self._execute_unlocked(
-            code, save_to_history=False, skip_safety_check=True
+            code, records_history=False, skip_safety_check=True
         )
         if not result.success:
             return None

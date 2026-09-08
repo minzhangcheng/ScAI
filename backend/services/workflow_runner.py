@@ -28,7 +28,6 @@ from backend.services.session_lifecycle import (
     assert_generation_writable,
     adopt_persisted_generation,
     get_lifecycle_lock,
-    snapshot_operation_active,
 )
 from backend.utils.config_resolver import resolve_config_for_user
 
@@ -224,10 +223,6 @@ async def start_workflow_if_needed(
         )
 
     async with get_lifecycle_lock(session_id):
-        if snapshot_operation_active(session_id):
-            raise SessionWorkflowConflictError(
-                f"snapshot capture or restore is active for {session_id}"
-            )
         async with _state_lock:
             current_state = sessions.get(session_id)
             if current_state is None or (
@@ -335,10 +330,6 @@ async def start_report_generation(
     # task under both prevents a post-tombstone producer that deletion could no
     # longer discover, cancel, and await.
     async with get_lifecycle_lock(session_id):
-        if snapshot_operation_active(session_id):
-            raise SessionWorkflowConflictError(
-                f"snapshot capture or restore is active for {session_id}"
-            )
         async with _state_lock:
             current_state = sessions.get(session_id)
             if current_state is None or (
@@ -422,17 +413,6 @@ async def _run_report_generation(session_id: str):
             "Standalone report workflow superseded by restore for %s",
             session_id,
         )
-        try:
-            from backend.services.snapshot_v2.safe_point import (
-                get_snapshot_safe_point_manager,
-            )
-
-            get_snapshot_safe_point_manager().clear_superseded(session_id)
-        except Exception:
-            logger.exception(
-                "Failed to clear standalone report superseded flag for %s",
-                session_id,
-            )
     except Exception:
         logger.exception("Report generation failed for %s", session_id)
     finally:
@@ -528,19 +508,6 @@ async def _headless_workflow_runner(
             "Headless workflow superseded by a snapshot restore for session %s",
             session_id,
         )
-        # This run IS the superseded one, and it has now unwound — clear the
-        # session-scoped flag so the next run does not inherit it. Every other
-        # handler of this exception does the same; only this one did not.
-        try:
-            from backend.services.snapshot_v2.safe_point import (
-                get_snapshot_safe_point_manager,
-            )
-
-            get_snapshot_safe_point_manager().clear_superseded(session_id)
-        except Exception:
-            logger.exception(
-                "Failed to clear the superseded flag for session %s", session_id,
-            )
     except Exception:
         logger.exception(f"Headless workflow failed for session {session_id}")
         # A replaced/deleted workflow must not resurrect its old state as

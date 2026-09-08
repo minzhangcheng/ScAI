@@ -5,7 +5,6 @@ import type { AppState } from '../appState'
 import { normalizeBranchId } from '../../utils/chatOwnership'
 
 type SetState = StoreApi<AppState>['setState']
-type GetState = StoreApi<AppState>['getState']
 
 type CurrentSessionKeys = 'currentSession' | 'setCurrentSession' | 'updateSession'
   | 'pendingChatFollowup' | 'setPendingChatFollowup'
@@ -15,8 +14,6 @@ export function createCurrentSessionActions(set: SetState): Pick<AppState, Curre
     currentSession: null,
     setCurrentSession: currentSession => set(state => ({
       currentSession,
-      snapshotCount: 0,
-      showSnapshotCleanupReminder: false,
       llmFailureInfo: null,
       showLlmTimeoutDialog: false,
       llmModifyPending: false,
@@ -76,12 +73,9 @@ type RuntimeSessionKeys =
   | 'wsConnect' | 'wsDisconnect' | 'setWsCallbacks'
   | 'readMode' | 'setReadMode' | 'appVersion' | 'setAppVersion'
   | 'sessionLoading' | 'setSessionLoading'
-  | 'snapshotCount' | 'setSnapshotCount'
-  | 'showSnapshotCleanupReminder' | 'setShowSnapshotCleanupReminder'
 
 export function createRuntimeSessionActions(
   set: SetState,
-  get: GetState,
 ): Pick<AppState, RuntimeSessionKeys> {
   return {
     showConfigPanel: null,
@@ -95,16 +89,6 @@ export function createRuntimeSessionActions(
     setAppVersion: appVersion => set({ appVersion }),
     sessionLoading: false,
     setSessionLoading: sessionLoading => set({ sessionLoading }),
-    snapshotCount: 0,
-    setSnapshotCount: snapshotCount => {
-      if (get().snapshotCount !== snapshotCount) set({ snapshotCount })
-    },
-    showSnapshotCleanupReminder: false,
-    setShowSnapshotCleanupReminder: showSnapshotCleanupReminder => {
-      if (get().showSnapshotCleanupReminder !== showSnapshotCleanupReminder) {
-        set({ showSnapshotCleanupReminder })
-      }
-    },
   }
 }
 
@@ -115,7 +99,7 @@ type InterventionKeys =
   | 'clearLlmFailureState'
   | 'speciesInputInfo' | 'showSpeciesInputDialog' | 'setSpeciesInputInfo'
   | 'setShowSpeciesInputDialog' | 'clearSpeciesInputState'
-  | 'apiConfigured' | 'setApiConfigured' | 'snapshotV2Enabled' | 'setSnapshotV2Enabled'
+  | 'apiConfigured' | 'setApiConfigured'
   | 'explorationFailedInfo' | 'showExplorationFailedDialog' | 'setExplorationFailedInfo'
   | 'setShowExplorationFailedDialog' | 'clearExplorationFailedState'
 
@@ -144,8 +128,6 @@ export function createInterventionActions(set: SetState): Pick<AppState, Interve
     clearSpeciesInputState: () => set({ speciesInputInfo: null, showSpeciesInputDialog: false }),
     apiConfigured: false,
     setApiConfigured: apiConfigured => set({ apiConfigured }),
-    snapshotV2Enabled: false,
-    setSnapshotV2Enabled: snapshotV2Enabled => set({ snapshotV2Enabled }),
     explorationFailedInfo: null,
     showExplorationFailedDialog: false,
     setExplorationFailedInfo: explorationFailedInfo => set({ explorationFailedInfo }),

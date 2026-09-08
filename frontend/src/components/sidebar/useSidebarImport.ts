@@ -11,7 +11,7 @@ import type { SidebarProgressInfo } from './types'
 // an unknown kind falls back to its raw key so a newly added counter still
 // surfaces instead of being swallowed.
 const IMPORT_SKIP_LABELS: Record<string, TranslationKey> = {
-  snapshot_v2: 'importSkippedSnapshotV2',
+  retired_snapshot: 'importSkippedRetiredSnapshot',
   unsafe_path: 'importSkippedUnsafePath',
   off_layout: 'importSkippedOffLayout',
   untrusted_pickle: 'importSkippedUntrustedPickle',
@@ -166,8 +166,8 @@ async function runSidebarImport(
     // the archive's origin. No backend restriction; entirely user judgment.
     const trustArchive = window.confirm(
       language === 'zh'
-        ? '是否信任此归档并恢复内核运行时状态 (session.pkl)？\n\n⚠️ 风险提示：归档中的 session.pkl 在加载时会执行其中保存的 Python 对象代码 (dill.load = 任意代码执行)。仅在归档来自你完全信任的来源（例如你自己导出的备份）时勾选「确定」——归档来自哪台实例都可以，但必须是你信得过的。\n\n选择「取消」会丢弃 pkl，只恢复数据/历史/图表（安全默认）；该会话将无法继续分析，只能从数据重跑。'
-        : 'Trust this archive and restore kernel runtime state (session.pkl)?\n\n⚠️ Warning: loading session.pkl runs arbitrary Python code (dill.load = arbitrary code execution). Only click OK for archives you fully trust (e.g. your own export). It may come from any instance — but it must be one you vouch for.\n\nClick Cancel to drop the pkl and restore only data/history/figures (safe default). That session will not be able to resume and must be re-run from the data.'
+        ? '是否信任此归档并恢复内核运行时状态 (session.pkl)？\n\n⚠️ 风险提示：归档中的 session.pkl 在加载时会执行其中保存的 Python 对象代码 (dill.load = 任意代码执行)。仅在归档来自你完全信任的来源（例如你自己导出的备份）时勾选「确定」——归档来自哪台实例都可以，但必须是你信得过的。\n\n选择「取消」会丢弃 pkl，只恢复数据/历史/图表（安全默认）；该会话将无法继续分析，只能从数据重跑。\n\n另外：若该归档标记为可继续，而本实例上已存在同 ID 的会话，导入会被拒绝——工作流断点与会话 ID 绑定，换个 ID 导入会丢掉断点，得到一个看似可继续、实际不能继续的会话。请先删除或重命名已有会话。'
+        : 'Trust this archive and restore kernel runtime state (session.pkl)?\n\n⚠️ Warning: loading session.pkl runs arbitrary Python code (dill.load = arbitrary code execution). Only click OK for archives you fully trust (e.g. your own export). It may come from any instance — but it must be one you vouch for.\n\nClick Cancel to drop the pkl and restore only data/history/figures (safe default). That session will not be able to resume and must be re-run from the data.\n\nAlso: if the archive is marked resumable and a session with the same ID already exists here, the import is refused. The workflow checkpoint is bound to that ID, so importing under a new one would drop it and produce a session that looks resumable and is not. Delete or rename the existing session first.'
     )
 
     setImporting(true)

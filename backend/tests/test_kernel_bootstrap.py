@@ -69,11 +69,15 @@ async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
         "backend/utils/kernel_startup/sitecustomize.py"
     ).read_text(encoding="utf-8")
     assert "import scai_pydeseq2_compat" in trusted_startup
-    assert 'sys.modules["scai_pydeseq2_compat"].install()' in init_source
+    # Installed through one loop now rather than three literal calls; the
+    # fail-closed property is asserted structurally in
+    # test_bootstrap_adapter_installation_is_fail_closed.
+    assert '"scai_pydeseq2_compat"' in init_source
+    assert "_scai_compat.install()" in init_source
     assert "import scai_scanpy_compat" in trusted_startup
-    assert 'sys.modules["scai_scanpy_compat"].install()' in init_source
+    assert '"scai_scanpy_compat"' in init_source
     assert "import scai_arboreto_compat" in trusted_startup
-    assert 'sys.modules["scai_arboreto_compat"].install()' in init_source
+    assert '"scai_arboreto_compat"' in init_source
     assert "Set num_workers=0" in init_source
     assert "os.chdir(_WORKSPACE_DIR)" in path_source
     assert "_sandboxed_open" in path_source
@@ -90,15 +94,28 @@ async def test_bootstrap_injects_repr_safe_paths_before_workspace_use(tmp_path):
         repr(str(sandbox.notebook_state.state_dir)), repr("<state-dir>")
     )
     assert hashlib.sha256(normalized_common.encode()).hexdigest() == (
-        "fa78e6f3d675b3df84327de00efbef33473ed3808009258799f9c0b098a3d105"
+        "0ebf1f31fd3b4e94a82ee2135113045a96a69bda720cc1f95d957ab39900c392"
     )
     assert hashlib.sha256(normalized_path.encode()).hexdigest() == (
-        "3d244c95b341b84498e13e6a98381f76b1b1c62b00ff45e273514287d6c5113b"
+        "03701773662b9ac96077db49e3ee5e37558053c21601e64d5ed94a571cde9e86"
     )
 
 
 @pytest.mark.asyncio
 async def test_bootstrap_adapter_installation_is_fail_closed(tmp_path):
+    """A missing compat adapter must abort the bootstrap.
+
+    These three patch library defects, so a kernel that runs without them
+    returns wrong numbers rather than an error -- the failure mode a test cannot
+    see afterwards. The one exception is a replay, which declares itself by
+    setting SCAI_REPLAY_WORKSPACE and is reported as degraded; every other
+    kernel raises.
+
+    Asserted on the structure rather than on one spelling of the call. The
+    previous version matched `sys.modules["name"].install()` literally and
+    required no enclosing try -- a proxy that a rewrite could satisfy while
+    losing the property, or break while keeping it.
+    """
     sandbox = _sandbox(tmp_path)
     sandbox._execute_unlocked = AsyncMock(
         side_effect=[
@@ -110,46 +127,80 @@ async def test_bootstrap_adapter_installation_is_fail_closed(tmp_path):
     await sandbox._initialize_kernel()
     init_source = sandbox._execute_unlocked.await_args_list[0].args[0]
     tree = ast.parse(init_source)
-    parents = {
-        child: node
-        for node in ast.walk(tree)
-        for child in ast.iter_child_nodes(node)
-    }
+
     adapter_names = {
         "scai_pydeseq2_compat",
         "scai_scanpy_compat",
         "scai_arboreto_compat",
     }
-    found = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr != "install" or not isinstance(node.func.value, ast.Subscript):
-            continue
-        subscript = node.func.value
-        if not (
-            isinstance(subscript.value, ast.Attribute)
-            and isinstance(subscript.value.value, ast.Name)
-            and subscript.value.value.id == "sys"
-            and subscript.value.attr == "modules"
-            and isinstance(subscript.slice, ast.Constant)
-            and subscript.slice.value in adapter_names
-        ):
-            continue
-        adapter = subscript.slice.value
-        found.add(adapter)
-        ancestor = parents.get(node)
-        while ancestor is not None:
-            if isinstance(ancestor, ast.Try):
-                caught = {
-                    handler.type.id
-                    for handler in ancestor.handlers
-                    if isinstance(handler.type, ast.Name)
-                }
-                assert not caught.intersection({"ImportError", "ModuleNotFoundError"})
-            ancestor = parents.get(ancestor)
+    named = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and node.value in adapter_names
+    }
+    assert named == adapter_names, named
 
-    assert found == adapter_names
+    installs = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "install"
+    ]
+    assert installs, "no adapter is installed"
+
+    # Every ImportError handler that guards an adapter import must re-raise,
+    # and the only way past it must be the declared-replay flag.
+    adapter_handlers = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        imports_adapter = any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "__import__"
+            for inner in ast.walk(node)
+        )
+        if not imports_adapter:
+            continue
+        for handler in node.handlers:
+            if isinstance(handler.type, ast.Name) and handler.type.id in (
+                "ImportError", "ModuleNotFoundError"
+            ):
+                adapter_handlers.append(handler)
+
+    assert adapter_handlers, "the adapter import is not guarded at all"
+    for handler in adapter_handlers:
+        raises = [n for n in ast.walk(handler) if isinstance(n, ast.Raise)]
+        assert raises, "an adapter ImportError is swallowed without re-raising"
+        guards = [
+            n for n in ast.walk(handler)
+            if isinstance(n, ast.If)
+            and any(
+                isinstance(sub, ast.Name) and sub.id == "_scai_is_replay"
+                for sub in ast.walk(n.test)
+            )
+        ]
+        assert guards, (
+            "the re-raise is not conditioned on a declared replay, so either "
+            "production degrades silently or a replay cannot run"
+        )
+
+
+def test_the_replay_flag_is_the_only_way_past_fail_closed(tmp_path):
+    """Named explicitly, because it is the whole exception.
+
+    SCAI_REPLAY_WORKSPACE is set by `scripts/scai-notebook-replay` and by
+    nothing in the production path -- the same variable the cell above reads for
+    the workspace root, so a kernel that degrades is exactly a kernel that was
+    told it is a replay.
+    """
+    from backend.utils.sandbox_parts.kernel_bootstrap import (
+        _COMMON_BOOTSTRAP_TEMPLATE,
+    )
+
+    source = _COMMON_BOOTSTRAP_TEMPLATE
+    assert "_scai_is_replay = bool(os.environ.get('SCAI_REPLAY_WORKSPACE'))" in source
+    assert "if not _scai_is_replay:\n                raise" in source
 
 
 def test_kernel_launch_environment_is_session_scoped(tmp_path):
@@ -348,7 +399,7 @@ async def test_start_cleans_kernel_after_bootstrap_failure(
 
     sandbox = _sandbox(tmp_path)
     monkeypatch.setattr(kernel_module, "KernelManager", _FakeKernelManager)
-    sandbox.stop = AsyncMock()
+    sandbox._shutdown_kernel_unlocked = AsyncMock()
     sandbox._initialize_kernel = AsyncMock()
     if failure == "readiness":
         sandbox._wait_for_ready = AsyncMock(side_effect=asyncio.TimeoutError)
@@ -364,7 +415,7 @@ async def test_start_cleans_kernel_after_bootstrap_failure(
     with pytest.raises(RuntimeError, match=expected):
         await sandbox.start()
 
-    sandbox.stop.assert_awaited_once_with(save=False)
+    sandbox._shutdown_kernel_unlocked.assert_awaited_once_with()
     if failure == "readiness":
         sandbox._initialize_kernel.assert_not_awaited()
 
@@ -654,7 +705,7 @@ async def test_execute_reader_is_drained_before_kernel_teardown(tmp_path):
 
     task = asyncio.create_task(
         sandbox._execute_unlocked(
-            "pass", save_to_history=False, skip_safety_check=True
+            "pass", records_history=False, skip_safety_check=True
         )
     )
     assert await asyncio.to_thread(entered.wait, 1)
@@ -776,7 +827,7 @@ print('__SCAI_BOOTSTRAP__' + json.dumps({
     'scanpy_figdir': str(sc.settings.figdir) if 'sc' in globals() else None,
 }))
 """,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert probe.success, probe.error
@@ -807,7 +858,7 @@ plt.plot([0, 1], [1, 0])
 plt.show()
 print(f'open_figures={len(plt.get_fignums())}')
 """,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert show.success, show.error
@@ -827,7 +878,7 @@ except PermissionError:
 finally:
     plt.close('all')
 """,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert denied.success, denied.error
@@ -848,7 +899,7 @@ print('__SCAI_WRAPPERS__' + json.dumps({
     'show_noop': bool(getattr(plt.show, '_scai_noop', False)),
 }))
 """,
-                save_to_history=False,
+                records_history=False,
                 skip_safety_check=True,
             )
             assert identities.success, identities.error
@@ -878,7 +929,7 @@ print('__SCAI_WRAPPERS__' + json.dumps({
         await assert_wrappers_are_single_layer()
         restored = await sandbox.execute(
             "print(f\"restored_value={user_value['restored']}\")",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert restored.success, restored.error
@@ -890,7 +941,7 @@ print('__SCAI_WRAPPERS__' + json.dumps({
         await assert_wrappers_are_single_layer()
         restored_again = await sandbox.execute(
             "print(f\"restored_again={user_value['restored']}\")",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert restored_again.success, restored_again.error
@@ -919,7 +970,7 @@ async def test_live_kernel_trust_module_cannot_be_shadowed_by_workspace(tmp_path
 import scai_kernel_trust
 print('__SCAI_TRUST_ORIGIN__' + str(scai_kernel_trust.__file__))
 """,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert origin.success, origin.error
@@ -943,7 +994,7 @@ fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
         )
         rendered = await sandbox.execute(
             wrapper,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert rendered.success, rendered.error
@@ -978,7 +1029,7 @@ class UserStdout:
 
 sys.stdout = UserStdout()
 """,
-            save_to_history=False,
+            records_history=False,
         )
         assert polluted.success, polluted.error
 
@@ -995,7 +1046,7 @@ fig.text(0.5, 0.5, 'OVERLAP', fontsize=12)
         )
         rendered = await sandbox.execute(
             wrapper,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert rendered.success, rendered.error
@@ -1098,7 +1149,7 @@ print("__SCAI_THREAD_BACKENDS__" + json.dumps({
     "network_shape": list(network.shape),
 }))
 """,
-            save_to_history=False,
+            records_history=False,
         )
         assert probe.success, probe.error
         payload_line = next(
@@ -1151,7 +1202,7 @@ plt.savefig('shadowed_path.png')
 plt.close('all')
 print(f'shadowed={Path is not _probe_pathlib.Path}')
 """,
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert poisoned.success, poisoned.error

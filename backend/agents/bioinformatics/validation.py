@@ -215,7 +215,7 @@ class ValidationMixin:
             # main reason the bounded executor exhausted its wall-clock budget.
             init_result = await self.sandbox.execute(
                 f"adata_val = {var_name}.copy()",
-                save_to_history=False,
+                records_history=False,
                 skip_safety_check=True,
             )
             init_error = getattr(init_result, "error", None)
@@ -251,7 +251,7 @@ class ValidationMixin:
                         continue
 
                     exec_result = await self.sandbox.execute(
-                        code, save_to_history=False, skip_safety_check=True
+                        code, records_history=False, skip_safety_check=True
                     )
                     out = (getattr(exec_result, "output", "") or "")[:6000]
                     err = getattr(exec_result, "error", None)
@@ -272,7 +272,7 @@ class ValidationMixin:
                 # raising, so check .error like the init-copy call above.
                 release_result = await self.sandbox.execute(
                     "globals().pop('adata_val', None)",
-                    save_to_history=False,
+                    records_history=False,
                     skip_safety_check=True,
                 )
                 if getattr(release_result, "error", None):
@@ -372,7 +372,7 @@ Set requires_reclustering true ONLY for strong intra-cluster mixed/bimodal linea
         )
         import json as _json_mod
         try:
-            result = await self.sandbox.execute(sample_code, save_to_history=False, skip_safety_check=True)
+            result = await self.sandbox.execute(sample_code, records_history=False, skip_safety_check=True)
             if not result.output or result.error:
                 return False
             # Scan all lines, return the first one that parses as a JSON list.

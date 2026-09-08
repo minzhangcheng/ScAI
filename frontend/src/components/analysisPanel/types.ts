@@ -1,5 +1,3 @@
-import type { MutableRefObject } from 'react'
-
 import type { RoundSummary } from '../../types'
 import type { AnnotationData } from '../../utils/annotationGate'
 import type { AnalysisPlan } from '../PlanReviewDialog'
@@ -53,12 +51,3 @@ export interface AnalysisPanelDialogState {
   integrationGateData: any
   planReviewData: PlanReviewData | null
 }
-
-export interface SnapshotRetryPollState {
-  transactionId: string
-  cancelled: boolean
-  attempts: number
-  timer: ReturnType<typeof setTimeout> | null
-}
-
-export type SnapshotRetryPollRef = MutableRefObject<SnapshotRetryPollState | null>

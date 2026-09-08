@@ -553,12 +553,11 @@ class TestTheRuntimeTravelsOnlyWhenItIsTrusted:
 
 
 class TestImportDoesNotCarryBlockersItCannotAnswer:
-    """V2-only gates travelled in session.json and nothing on the import path cleared them.
+    """Retired-subsystem gates travelled in session.json; import must clear them.
 
-    With the subsystem off the first authenticated read repaired them, but only
-    there; with it ON no load path clears them at all, leaving ``/run`` at 409 and
-    ``/resume`` refused -- pointing the user at snapshot actions whose objects an
-    ordinary archive never carried.
+    The archive carries blockers whose answering machinery no longer exists, so
+    a session imported with them left would sit at ``/run`` 409 and ``/resume``
+    refused, pointing the user at snapshot actions that are gone.
     """
 
     def _blocked_payload(self, session_id):
@@ -578,12 +577,11 @@ class TestImportDoesNotCarryBlockersItCannotAnswer:
             recovery_blocked=True,
         )
 
-    def test_the_blockers_are_gone_before_the_session_is_listable(self, tmp_path, monkeypatch):
-        from backend.config import DATA_BASE_DIR, _config, get_session_metadata_path
+    def test_the_blockers_are_gone_before_the_session_is_listable(self, tmp_path):
+        from backend.config import DATA_BASE_DIR, get_session_metadata_path
         from backend.models.schemas import TaskStatus
         from backend.routes.export_import import _import_tar_gz
 
-        monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", False)
         session_id = str(uuid.uuid4())
         archive = _build_archive(
             tmp_path / "blocked.tar.gz",
@@ -609,24 +607,6 @@ class TestImportDoesNotCarryBlockersItCannotAnswer:
         assert on_disk["snapshot_failure"] is None
         assert on_disk["status"] != "running"
 
-    def test_an_enabled_installation_keeps_them(self, tmp_path, monkeypatch):
-        """Only the disabled path may clear a gate: with V2 on, the records mean something."""
-        from backend.config import DATA_BASE_DIR, _config
-        from backend.routes.export_import import _import_tar_gz
-
-        monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", True)
-        session_id = str(uuid.uuid4())
-        archive = _build_archive(
-            tmp_path / "blocked-on.tar.gz",
-            session_id,
-            {},
-            data_base_dir=str(DATA_BASE_DIR),
-            state_payload=self._blocked_payload(session_id),
-        )
-
-        state = _import_tar_gz(str(archive), user_id="importer")
-
-        assert state.snapshot_failure is not None
 
 
 class TestImportReportsWhatItDropped:
@@ -637,11 +617,10 @@ class TestImportReportsWhatItDropped:
 
         get_session_dir(session_id).mkdir(parents=True, exist_ok=True)
 
-    def test_the_summary_reaches_the_caller(self, tmp_path, monkeypatch):
-        from backend.config import DATA_BASE_DIR, _config
+    def test_the_summary_reaches_the_caller(self, tmp_path):
+        from backend.config import DATA_BASE_DIR
         from backend.routes.export_import import _import_tar_gz
 
-        monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", False)
         session_id = str(uuid.uuid4())
         self._occupy(session_id)  # force a new id, so the thread-id drop fires too
         archive = _build_archive(
@@ -661,7 +640,7 @@ class TestImportReportsWhatItDropped:
         _import_tar_gz(str(archive), user_id="importer", outcome=outcome)
 
         skipped = outcome["skipped"]
-        assert skipped["snapshot_v2"] == 1
+        assert skipped["retired_snapshot"] == 1
         assert skipped["untrusted_pickle"] == 1
         assert skipped["off_layout"] == 1
         assert skipped["checkpoint_dropped"] >= 1
@@ -688,18 +667,17 @@ class TestImportReportsWhatItDropped:
 
 
 class TestARefusalNamesTheRealConstraint:
-    def test_a_v2_only_archive_does_not_blame_the_file(self, tmp_path, monkeypatch):
-        """Every member of a V2 export is filtered when the subsystem is off.
+    def test_a_snapshot_only_archive_does_not_blame_the_file(self, tmp_path):
+        """Every member of a snapshot export is filtered; nothing can read them.
 
-        The archive is intact; the installation is the constraint. "Session state
-        JSON not found" read as corruption.
+        The archive is intact; this build is the constraint. "Session state JSON
+        not found" read as corruption.
         """
-        from backend.config import DATA_BASE_DIR, _config
+        from backend.config import DATA_BASE_DIR
         from backend.routes.export_import import _import_tar_gz
 
-        monkeypatch.setattr(_config, "SNAPSHOT_V2_ENABLED", False)
         session_id = str(uuid.uuid4())
-        # A V2 export archive: flat object storage, no session state member.
+        # A snapshot export archive: flat object storage, no session state member.
         archive = _build_archive(
             tmp_path / "v2only.tar.gz",
             session_id,
@@ -715,7 +693,7 @@ class TestARefusalNamesTheRealConstraint:
             _import_tar_gz(str(archive), user_id="importer")
 
         detail = str(getattr(excinfo.value, "detail", excinfo.value))
-        assert "Snapshot V2 is not enabled" in detail
+        assert "Snapshots were removed from this server" in detail
         assert "SCAI_ENABLE_SNAPSHOT_V2" not in detail, (
             "an end-user message must not carry operator env-var wording"
         )

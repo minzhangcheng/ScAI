@@ -34,7 +34,10 @@ class MessagingMixin:
     async def _send_state_sync(self, analysis_state: AnalysisState, change_type: str):
         """Send unified state synchronization message after state changes"""
         # Increment version for synchronization
-        await analysis_state.increment_version()
+        from backend.constants import StateSyncChangeType
+
+        if change_type != StateSyncChangeType.RUNTIME_PERSISTENCE_COMMITTED.value:
+            await analysis_state.increment_version()
 
         # Save state via callback first
         if self.state_callback:

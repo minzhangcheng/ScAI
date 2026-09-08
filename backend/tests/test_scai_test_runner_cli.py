@@ -124,13 +124,7 @@ def valid_collection_payload() -> dict:
         "count": 1,
         "nodeids": ["case"],
         "nodeids_sha256": hashlib.sha256(b"case\n").hexdigest(),
-        "effective_config": {
-            "SCAI_ENABLE_SNAPSHOT_V2": {
-                "value": "true",
-                "source": "root conftest.py setdefault",
-                "production_default": "disabled",
-            }
-        },
+        "effective_config": {},
         "candidate_tools": {
             "pytest": {"version": "9.1.1", "origin": "/opt/scai-test/venv/lib/python3.11/site-packages/pytest/__init__.py"},
             "pytest-asyncio": {"version": "1.3.0", "origin": "/opt/scai-test/venv/lib/python3.11/site-packages/pytest_asyncio/__init__.py"},
@@ -354,8 +348,38 @@ def test_profile_globs_expand_sorted_and_unmatched_glob_fails():
     assert "compgen -G" in RUNNER and "profile glob has no matches" in RUNNER
 
 
-def test_profile_roster_is_exactly_fast_client_kernel_backend_full():
-    assert set(__import__("tomllib").loads((ROOT / "test-profiles.toml").read_text())["profiles"]) == {"fast", "client", "kernel", "backend-full"}
+def test_profile_roster_is_exactly_the_four_supported_profiles():
+    """The roster is a contract: docs/test-strategy.md lists it verbatim."""
+    assert set(__import__("tomllib").loads((ROOT / "test-profiles.toml").read_text())["profiles"]) == {
+        "fast", "client", "kernel", "backend-full"
+    }
+
+
+def test_the_gate_off_profile_is_refused_rather_than_silently_served():
+    """The build has one configuration, so the second profile is not a synonym.
+
+    An operator or a plan that still names ``backend-full-gate-off`` has to be
+    told, not quietly handed the same suite under a name that claims to measure
+    something else.
+    """
+    assert "backend-full-gate-off" not in RUNNER
+    assert "SCAI_ENABLE_SNAPSHOT_V2" not in RUNNER
+    assert "backend-full-gate-off" not in (
+        ROOT / "test-profiles.toml"
+    ).read_text(encoding="utf-8")
+
+
+def test_no_conftest_or_ini_still_pins_the_snapshot_gate():
+    """The owner is the repo-root conftest.py and pytest.ini, not backend/tests.
+
+    An assertion aimed at backend/tests/conftest.py passes without proving
+    anything, because that file never held the gate.
+    """
+    for rel in ("conftest.py", "pytest.ini", "backend/tests/conftest.py"):
+        source = (ROOT / rel).read_text(encoding="utf-8")
+        assert "SCAI_ENABLE_SNAPSHOT_V2" not in source, rel
+        assert "requires_snapshot_v2" not in source, rel
+        assert "_pin_snapshot_v2_gate" not in source, rel
 
 
 def test_matching_pointer_executes_exact_name_at_digest():
@@ -1159,13 +1183,7 @@ def test_collection_validator_requires_complete_true_and_exact_plugins():
         "count": 1,
         "nodeids": ["case"],
         "nodeids_sha256": hashlib.sha256(b"case\n").hexdigest(),
-        "effective_config": {
-            "SCAI_ENABLE_SNAPSHOT_V2": {
-                "value": "true",
-                "source": "root conftest.py setdefault",
-                "production_default": "disabled",
-            }
-        },
+        "effective_config": {},
         "candidate_tools": {
             "pytest": {"version": "9.1.1", "origin": "/opt/scai-test/venv/lib/python3.11/site-packages/pytest/__init__.py"},
             "pytest-asyncio": {"version": "1.3.0", "origin": "/opt/scai-test/venv/lib/python3.11/site-packages/pytest_asyncio/__init__.py"},
@@ -1314,11 +1332,24 @@ def test_evidence_hashes_payloads_but_never_itself_or_its_detached_manifest():
     assert 'if path.name not in {"evidence.json", "artifact-manifest.json"}' in RUNNER
 
 
-def test_evidence_records_snapshot_v2_conftest_effective_configuration():
-    payload = valid_collection_payload()
-    payload["effective_config"]["SCAI_ENABLE_SNAPSHOT_V2"]["value"] = "false"
-    with pytest.raises(TREE.ContractError, match="effective configuration"):
-        TREE.validate_collection(json.dumps(payload).encode())
+def test_evidence_records_an_empty_effective_configuration():
+    """One configuration, so the recorded set is empty -- and must be exactly so.
+
+    The field existed because the suite had two configurations and a run had to
+    say which one it measured. The snapshot gate was the only switch, so a key
+    appearing here again means a switch was reintroduced without extending this
+    contract to say what it measures.
+    """
+    TREE.validate_collection(json.dumps(valid_collection_payload()).encode())
+
+    for broken in (
+        {"SCAI_ENABLE_SNAPSHOT_V2": {"value": "true"}},
+        {"anything": "at all"},
+    ):
+        payload = valid_collection_payload()
+        payload["effective_config"] = broken
+        with pytest.raises(TREE.ContractError, match="effective configuration"):
+            TREE.validate_collection(json.dumps(payload).encode())
     assert '"pytest_effective_config": collection["effective_config"]' in RUNNER
 
 

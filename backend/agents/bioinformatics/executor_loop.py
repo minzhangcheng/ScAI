@@ -16,15 +16,6 @@ def bind_facade(facade) -> None:
 
 
 async def start_turn(context) -> TurnStart:
-    if (context.analysis_state.runtime_persistence or {}).get("requires_recompute"):
-        from backend.services.runtime_persistence_gate import (
-            RuntimePersistenceBlocked,
-            enter_runtime_persistence_gate,
-        )
-        enter_runtime_persistence_gate(context.analysis_state, context.analysis_state.runtime_persistence)
-        raise RuntimePersistenceBlocked(
-            "Runtime dependencies require recomputation before continuing"
-        )
     if context.agent._pause_event is not None and not context.agent._pause_event.is_set():
         logger.info(
             f"[Bioinformatics] Pause requested at step {context.step_count}, "
@@ -40,50 +31,46 @@ async def start_turn(context) -> TurnStart:
             await context.agent._notify("status", "Analysis resumed")
         except Exception:
             pass
-    session_id = getattr(context.agent, "session_id", None) or getattr(context.analysis_state, "id", None)
-    if session_id:
-        from backend.services.snapshot_v2.safe_point import (
-            get_snapshot_safe_point_manager,
-        )
-        sp = get_snapshot_safe_point_manager()
-        if sp.has_pending_request(session_id):
-            gen = sp.get_pending_generation(session_id)
-            if gen is not None:
-                await sp.acknowledge_safe_point_request(
-                    session_id, gen, role="workflow",
-                )
-        if sp.is_paused(session_id):
-            logger.info(
-                f"[Bioinformatics] Restore safe-point active at step "
-                f"{context.step_count}; freezing until release"
-            )
-            await sp.wait_for(session_id)
-            if sp.is_superseded(session_id):
-                from backend.workflow.helpers import (
-                    WorkflowSupersededError,
-                )
-                logger.info(
-                    f"[Bioinformatics] Run superseded by a snapshot "
-                    f"restore at step {context.step_count}; unwinding"
-                )
-                raise WorkflowSupersededError(
-                    "snapshot restore replaced this run's checkpoint"
-                )
     context.step_count += 1
     context.force_break = False  # Reset per-iteration
-    if context.checkpoint_manager.should_checkpoint(context.step_count):
+    # Two independent reasons to checkpoint here. The periodic one is the
+    # five-step counter; the other is §5.1's runtime cadence, which had no
+    # trigger of its own -- `step_count` restarts at 0 on every executor
+    # invocation, so `step % 5` almost never came round and the floor governed a
+    # branch that never ran. Asking every turn is what makes the floor mean
+    # something; `runtime_save_due` returns False until it has elapsed, so this
+    # does not save more often than §5.1 says.
+    runtime_due = False
+    try:
+        from backend.services.save_cadence import runtime_save_due
+
+        sandbox = getattr(context.agent, "sandbox", None)
+        # `live_dirty` is set by the execution boundary after a cell that could
+        # have changed the namespace, and cleared by a commit. Without it the
+        # floor's "nothing has committed yet, so save" rule fires on turn one of
+        # every run and dumps a kernel that has executed nothing.
+        record = getattr(
+            getattr(sandbox, "notebook_state", None), "runtime_persistence", None,
+        )
+        dirty = isinstance(record, dict) and record.get("status") == "live_dirty"
+        runtime_due = (
+            sandbox is not None
+            and dirty
+            and runtime_save_due(sandbox, "step_boundary")
+        )
+    except Exception:
+        # The cadence is an optimisation over the round boundary, never a
+        # precondition for continuing the analysis.
+        logger.debug("[Bioinformatics] runtime cadence check failed", exc_info=True)
+    if context.checkpoint_manager.should_checkpoint(context.step_count) or runtime_due:
         try:
             await context.save_checkpoint(
                 f'step_{context.step_count}',
                 save_sandbox=True,
             )
         except Exception as e:
-            from backend.services.runtime_persistence_gate import (
-                RuntimePersistenceBlocked,
-                is_runtime_persistence_blocked,
-            )
-            if isinstance(e, RuntimePersistenceBlocked) or is_runtime_persistence_blocked(context.analysis_state):
-                raise RuntimePersistenceBlocked(str(e)) from e
+            # A checkpoint save that failed leaves the previous committed
+            # generation; the run continues and coherence reports it stale.
             logger.warning(f"[Bioinformatics] Checkpoint save failed at step {context.step_count}: {e}")
     context.agent._set_llm_context()
     MAX_MESSAGES = 80
@@ -463,7 +450,6 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
 
 async def finish_turn(context, effects) -> LoopExit:
     self = context.agent
-    state = context.analysis_state
     messages = context.messages
     analysis_log = context.analysis_log
     _supervisor_callback = context.supervisor_callback
@@ -597,12 +583,6 @@ async def finish_turn(context, effects) -> LoopExit:
                 save_sandbox=True,
             )
         except Exception as e:
-            from backend.services.runtime_persistence_gate import (
-                RuntimePersistenceBlocked,
-                is_runtime_persistence_blocked,
-            )
-            if isinstance(e, RuntimePersistenceBlocked) or is_runtime_persistence_blocked(state):
-                raise RuntimePersistenceBlocked(str(e)) from e
             logger.warning(
                 "[Bioinformatics] Plan-revision checkpoint save failed at "
                 "step %s: %s",
@@ -794,20 +774,24 @@ async def prepare_loop_context(
         )
         await checkpoint_mgr.save(checkpoint_data)
         if save_sandbox:
+            from backend.services.save_cadence import runtime_save_due
+
+            # Spec 5.1: a step boundary persists only once the wall-clock floor
+            # has passed. A save is minutes of work, and this boundary can fire
+            # several times a minute; the round boundary is what bounds the
+            # exposure. Skipping is not a failure and writes no record.
+            if not runtime_save_due(self.sandbox, "step_boundary"):
+                logger.debug(
+                    "[Bioinformatics] Step-boundary save skipped: inside the "
+                    "runtime save floor",
+                )
+                return
             try:
                 await self.sandbox.save_session()
             finally:
-                persistence = self.sandbox.sync_runtime_persistence_state(state)
-                if persistence.get("status") == "failed" or persistence.get("requires_recompute"):
-                    from backend.services.runtime_persistence_gate import (
-                        RuntimePersistenceBlocked,
-                        enter_runtime_persistence_gate,
-                    )
-
-                    enter_runtime_persistence_gate(state, persistence)
-                    raise RuntimePersistenceBlocked(
-                        "Runtime persistence failed; waiting for user action"
-                    )
+                # The record is published either way. A failed save keeps the
+                # previous committed generation and does not stop the run.
+                self.sandbox.sync_runtime_persistence_state(state)
 
     annotation_completed = False
     # Restore annotation_completed from analysis_log so the PI observation is

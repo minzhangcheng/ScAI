@@ -172,7 +172,11 @@ if (
 
 # Define the workspace Path before any matplotlib wrappers refer to it.  Do not
 # chdir, create directories, or install the I/O sandbox until path_setup_code.
-_WORKSPACE_DIR = Path(__SCAI_WORKSPACE_REPR__)
+# The recorded run's root, overridable so this notebook can be replayed
+# somewhere else. Nothing sets these in production, so the literal is what runs.
+_SCAI_WORKSPACE = os.environ.get('SCAI_REPLAY_WORKSPACE') or __SCAI_WORKSPACE_REPR__
+_SCAI_SESSION_TMP = os.environ.get('SCAI_REPLAY_SESSION_TMP') or __SCAI_SESSION_TMP_REPR__
+_WORKSPACE_DIR = Path(_SCAI_WORKSPACE)
 # ``-P`` keeps the workspace off Python's startup path so it cannot shadow the
 # trusted sitecustomize module. Restore ordinary notebook import semantics only
 # after the native boundary is already active.
@@ -182,7 +186,7 @@ if str(_WORKSPACE_DIR) not in sys.path:
 SEED = 42
 
 # === Isolate Numba cache per session to prevent concurrent cache corruption ===
-_numba_cache = Path(__SCAI_SESSION_TMP_REPR__) / 'numba_cache'
+_numba_cache = Path(_SCAI_SESSION_TMP) / 'numba_cache'
 _numba_cache.mkdir(parents=True, exist_ok=True)
 os.environ['NUMBA_CACHE_DIR'] = str(_numba_cache)
 # Prevent Numba from spawning extra threads that compete for cache locks
@@ -393,9 +397,20 @@ plt.show = _capturing_show  # Baseline capturing_show; referenced by defensive r
 
 # Keep publication-finalization capabilities outside IPython's mutable user_ns.
 # The startup module accepts this tuple once and exposes no mutation API.
-import scai_kernel_trust as _scai_kernel_trust
+#
+# Optional so this cell -- which is cell 0 of the notebook -- can also run when
+# replayed outside ScAI, where the launcher has not put `kernel_startup` on the
+# path. Inside ScAI the module is always there and this is exactly the code that
+# always ran; the guard changes nothing here. Outside, the capability holder has
+# nothing to hold: it exists so publication finalisation cannot be reached
+# through the user namespace, which is a production concern, not a replay one.
+try:
+    import scai_kernel_trust as _scai_kernel_trust
+except ImportError:
+    _scai_kernel_trust = None
 _scai_kernel_shell = get_ipython()
-_scai_kernel_trust.capture_runtime(
+if _scai_kernel_trust is not None:
+    _scai_kernel_trust.capture_runtime(
     builtins_map=_scai_bootstrap_builtins.dict(
         _scai_bootstrap_builtins.vars(_scai_bootstrap_builtins)
     ),
@@ -408,9 +423,9 @@ _scai_kernel_trust.capture_runtime(
     plt_show=_capturing_show,
     plt_get_fignums=plt.get_fignums,
     plt_gcf=plt.gcf,
-    figure_savefig=_original_savefig,
-    runtime_savefig=_combined_savefig,
-)
+        figure_savefig=_original_savefig,
+        runtime_savefig=_combined_savefig,
+    )
 del _scai_kernel_shell
 del _scai_kernel_trust
 
@@ -424,9 +439,38 @@ try:
 except ImportError:
     pass
 
-sys.modules["scai_pydeseq2_compat"].install()
-sys.modules["scai_scanpy_compat"].install()
-sys.modules["scai_arboreto_compat"].install()
+# These patch library defects, so a kernel running without them produces wrong
+# numbers rather than an error. Installation is therefore FAIL-CLOSED: a missing
+# adapter aborts the bootstrap.
+#
+# The single exception is a replay, which declares itself by setting
+# SCAI_REPLAY_WORKSPACE -- the same variable this cell reads above for the
+# workspace root. There the adapters may legitimately be absent, the alternative
+# is not running at all, and the harness reports the replay as degraded. Every
+# other kernel, production included, still raises.
+_scai_is_replay = bool(os.environ.get('SCAI_REPLAY_WORKSPACE'))
+for _scai_compat_name in (
+    "scai_pydeseq2_compat", "scai_scanpy_compat", "scai_arboreto_compat",
+):
+    _scai_compat = sys.modules.get(_scai_compat_name)
+    if _scai_compat is None:
+        try:
+            _scai_compat = __import__(_scai_compat_name)
+        except ImportError:
+            if not _scai_is_replay:
+                raise
+            print(
+                "[sandbox] %s unavailable; this replay runs without its "
+                "compatibility patches and its numbers are a weaker claim"
+                % _scai_compat_name
+            )
+            continue
+    _scai_compat.install()
+# Both names go: a bare leftover in the user namespace is how the save script
+# once destroyed user variables called `types`, `io` and `os`.
+del _scai_compat_name
+del _scai_compat
+del _scai_is_replay
 
 try:
     import anndata as ad
@@ -534,13 +578,32 @@ def build_path_setup_source(sandbox) -> str:
 import os
 from pathlib import Path
 
-# Redirect tempfile to per-session subdir
-os.environ['TMPDIR'] = {repr(str(sandbox._session_tmp))}
-os.environ['TEMP'] = {repr(str(sandbox._session_tmp))}
-os.environ['TMP'] = {repr(str(sandbox._session_tmp))}
+# Same three roots as the common bootstrap, resolved the same way: the
+# recorded literal unless a replay overrides it. Re-resolved rather than reused
+# because the two cells are independently replayable.
+_SCAI_WORKSPACE = os.environ.get('SCAI_REPLAY_WORKSPACE') or {repr(working_dir_abs)}
+_SCAI_SESSION_TMP = os.environ.get('SCAI_REPLAY_SESSION_TMP') or {repr(str(sandbox._session_tmp))}
+_SCAI_STATE_DIR = os.environ.get('SCAI_REPLAY_STATE_DIR') or {repr(state_dir_abs)}
 
-_WORKSPACE_DIR = Path({repr(working_dir_abs)})
+Path(_SCAI_SESSION_TMP).mkdir(parents=True, exist_ok=True)
+
+# Redirect tempfile to per-session subdir
+os.environ['TMPDIR'] = _SCAI_SESSION_TMP
+os.environ['TEMP'] = _SCAI_SESSION_TMP
+os.environ['TMP'] = _SCAI_SESSION_TMP
+
+_WORKSPACE_DIR = Path(_SCAI_WORKSPACE)
+_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 os.chdir(_WORKSPACE_DIR)
+
+# The inputs, named the same way as the outputs. Derived from the workspace --
+# uploads and workspace are siblings under the session -- so a replay that
+# overrides one root moves both, and a cell that reads its input through this
+# name replays wherever the notebook is opened. Cells that hard-code
+# /data/sessions/<id>/uploads/... do not.
+_UPLOADS_DIR = Path(
+    os.environ.get('SCAI_REPLAY_UPLOADS_DIR') or (_WORKSPACE_DIR.parent / 'uploads')
+)
 
 # Create standard subdirectories
 (_WORKSPACE_DIR / 'figures').mkdir(exist_ok=True)
@@ -569,10 +632,13 @@ _ORIGINAL_PATH_TOUCH = _pathlib.Path.touch
 
 # Leaf directories where write operations are allowed. Reads remain available
 # outside these roots so uploaded inputs and installed libraries still work.
+# Derived from the roots above, so an overridden workspace is the one the
+# guard permits. Hard-coding the literals here would let a replay chdir into a
+# clean workspace and then be refused permission to write in it.
 _ALLOWED_WRITE_ROOTS = [
-    {repr(working_dir_abs)},   # Analysis outputs and user-visible artifacts
-    {repr(state_dir_abs)},     # Trusted runtime persistence cells
-    {repr(str(sandbox._session_tmp))},   # Per-session temporary files
+    _SCAI_WORKSPACE,     # Analysis outputs and user-visible artifacts
+    _SCAI_STATE_DIR,     # Trusted runtime persistence cells
+    _SCAI_SESSION_TMP,   # Per-session temporary files
 ]
 
 # The guard shares its namespace with the analysis code it guards, so it
@@ -740,6 +806,29 @@ def _sandboxed_write_bytes(self, *args, **kwargs):
 _builtins.open = _sandboxed_open
 _sandbox_io.open = _sandboxed_open
 open = _sandboxed_open
+
+# Owned by the bootstrap, which recreates it on every start. Persisting it
+# would let a restore put the saved generation's write guard back over the
+# freshly installed one, so a later fix to the guard would never reach a
+# resumed session. The tag travels on the function, not on its name: a user is
+# free to define something called `open`, and that one IS theirs.
+# Looked up rather than named directly: `get_seed` and `check_and_fix_nan` come
+# from the common bootstrap cell, and this cell is executed on its own by the
+# write-guard tests (and, in a replay, by anyone running cells out of order).
+# Referring to them as bare names makes this cell depend on the other one.
+for _scai_owned_name in ('_sandboxed_open', 'get_seed', 'check_and_fix_nan'):
+    _scai_owned = globals().get(_scai_owned_name)
+    if _scai_owned is None:
+        continue
+    try:
+        _scai_owned._scai_bootstrap_owned = True
+    except (AttributeError, TypeError):
+        pass
+del _scai_owned_name
+try:
+    del _scai_owned
+except NameError:
+    pass
 os.open = _sandboxed_os_open
 os.mkdir = _sandboxed_os_mkdir
 _pathlib.Path.mkdir = _sandboxed_mkdir

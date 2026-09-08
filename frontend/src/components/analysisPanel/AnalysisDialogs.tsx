@@ -1,7 +1,4 @@
-import { Camera, Trash2 } from 'lucide-react'
-
 import { AnnotationConfirmationDialog } from '../AnnotationConfirmationDialog'
-import { ConfirmDialog } from '../ConfirmDialog'
 import ExplorationFailedDialog from '../ExplorationFailedDialog'
 import {
   ExplorationReportDialog,
@@ -12,8 +9,6 @@ import LlmModifySubDialog from '../LlmModifySubDialog'
 import LlmTimeoutDialog from '../LlmTimeoutDialog'
 import { PlanReviewDialog } from '../PlanReviewDialog'
 import { RoundFeedbackDialog } from '../RoundFeedbackDialog'
-import { SnapshotPanel } from '../SnapshotPanel'
-import { SnapshotFailureDialog } from '../snapshots/SnapshotFailureDialog'
 import { StopDialog } from '../StopDialog'
 import { TextInputDialog } from '../TextInputDialog'
 import type { AnalysisPanelController } from './useAnalysisPanelController'
@@ -32,18 +27,17 @@ export function AnalysisDialogs({ controller }: AnalysisDialogsProps) {
     handleExplorationFailedStop, handleLetPiDecide, handleLetPiDecideIntegration,
     handleLlmModifyAgent, handleLlmResumeAfterModify, handleLlmRetry,
     handleLlmReturnToSettings, handleLlmReturnToTimeout, handleLlmSkip, handleLlmTerminate,
-    handlePlanApprove, handlePlanModify, handlePlanSkip, handleSnapshotFailureManage,
-    handleSnapshotFailureProceed, handleSnapshotFailureRetry, handleSnapshotFailureSkip,
-    handleSnapshotFailureTerminate, handleSpeciesInput, handleStop, handleStopDialogCancel,
+    handlePlanApprove, handlePlanModify, handlePlanSkip,
+    handleSpeciesInput, handleStop, handleStopDialogCancel,
     handleSupplementaryAnalysis, integrationGateData, isCurrentIntegrationGate,
     isSupplementaryRunning, language, llmFailureInfo, llmModifySaved, maxRounds,
     planReviewData, roundWaitSeconds, setShowAnnotationDialog, setShowExplorationDialog,
-    setShowIntegrationGateDialog, setShowLlmTimeoutDialog, setShowSnapshotCleanupReminder,
-    setShowSnapshotPanel, showAnnotationDialog, showExplorationDialog,
+    setShowIntegrationGateDialog, setShowLlmTimeoutDialog,
+    showAnnotationDialog, showExplorationDialog,
     showExplorationFailedDialog, showFeedbackDialog, showIntegrationGateDialog,
-    showLlmTimeoutDialog, showPlanReviewDialog, showSnapshotCleanupReminder,
-    showSnapshotPanel, showSpeciesInputDialog, showStopDialog, snapshotCount,
-    snapshotFailure, snapshotV2Enabled, speciesInputInfo, stopping, submitIntegrationDirections,
+    showLlmTimeoutDialog, showPlanReviewDialog,
+    showSpeciesInputDialog, showStopDialog,
+    speciesInputInfo, stopping, submitIntegrationDirections,
     t, timeRemaining,
   } = controller
 
@@ -214,58 +208,6 @@ export function AnalysisDialogs({ controller }: AnalysisDialogsProps) {
         />
       )}
 
-      {/* Snapshot failure HITL — Retry re-enters capture only; Skip continues
-          without capturing at that boundary (skippable producers only) */}
-      {(snapshotV2Enabled || (snapshotFailure?.failure.code || '').startsWith('runtime_persistence_')) && snapshotFailure && !showSnapshotPanel && (
-        <SnapshotFailureDialog
-          failure={snapshotFailure}
-          isZh={language === 'zh'}
-          onRetry={() => {
-            void handleSnapshotFailureRetry()
-          }}
-          onProceed={() => {
-            void handleSnapshotFailureProceed()
-          }}
-          onSkip={() => {
-            void handleSnapshotFailureSkip()
-          }}
-          onManage={handleSnapshotFailureManage}
-          onTerminate={() => {
-            void handleSnapshotFailureTerminate()
-          }}
-        />
-      )}
-
-      {/* Snapshot Panel */}
-      {snapshotV2Enabled && showSnapshotPanel && currentSession && (
-        <SnapshotPanel
-          sessionId={currentSession.id}
-          language={language}
-          onClose={() => setShowSnapshotPanel(false)}
-          onRestore={() => {
-            setShowSnapshotPanel(false)
-            // Reload page to get restored state
-            window.location.reload()
-          }}
-        />
-      )}
-
-      {/* Snapshot Cleanup Reminder */}
-      {snapshotV2Enabled && <ConfirmDialog
-        open={showSnapshotCleanupReminder}
-        title={language === 'zh' ? '快照数量提醒' : 'Snapshot Count Reminder'}
-        message={language === 'zh'
-          ? `当前会话已有 ${snapshotCount} 个快照，建议清理不需要的快照以释放空间。`
-          : `This session has ${snapshotCount} snapshots. Consider cleaning up unused snapshots to free space.`}
-        confirmLabel={language === 'zh' ? '去清理' : 'Cleanup'}
-        titleIcon={<Camera className="w-5 h-5 text-accent-600" />}
-        confirmIcon={<Trash2 className="w-4 h-4" />}
-        onConfirm={() => {
-          setShowSnapshotCleanupReminder(false)
-          setShowSnapshotPanel(true)
-        }}
-        onCancel={() => setShowSnapshotCleanupReminder(false)}
-      />}
     </>
   )
 }

@@ -1,6 +1,138 @@
 """Runtime restore orchestration for LocalJupyterSandbox."""
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
+
+
+class RuntimeIntegrityError(RuntimeError):
+    """The dump does not contain what its own manifest declared."""
+
+
+@dataclass(frozen=True)
+class RestorePlan:
+    """What a generation promised, decided before the kernel loads anything."""
+
+    declared: set[str] | None
+    legacy: bool
+    pairing: dict | None = None
+
+
+def plan_restore(manifest_path, live_pkl) -> RestorePlan:
+    """Decide what to expect before asking the kernel to load a single frame.
+
+    A generation written before manifests existed declares nothing, and that is
+    age rather than corruption: it loads with coverage unknown and is upgraded
+    by the next successful save. A manifest that is present but unsigned,
+    malformed, or describing different bytes is the opposite -- something is
+    wrong with this generation, and it must not be quietly downgraded to the
+    legacy path.
+    """
+    from backend.utils.runtime_manifest import (
+        RuntimeManifestError,
+        read_runtime_manifest,
+        runtime_manifest_sig_path,
+    )
+    from backend.utils.sandbox_parts.regular_save import _sha256_file
+
+    manifest_path = Path(manifest_path)
+    signature_path = runtime_manifest_sig_path(manifest_path)
+    if not manifest_path.exists() and not signature_path.exists():
+        return RestorePlan(declared=None, legacy=True)
+
+    try:
+        manifest = read_runtime_manifest(manifest_path)
+    except RuntimeManifestError as exc:
+        raise RuntimeIntegrityError(str(exc)) from exc
+
+    # Chunked: real dumps reach several gigabytes, and read_bytes() would put
+    # all of it in the backend process at once.
+    digest = _sha256_file(Path(live_pkl))
+    if digest != manifest["pkl_sha256"]:
+        raise RuntimeIntegrityError(
+            "runtime dump digest does not match its manifest; refusing to load it"
+        )
+    return RestorePlan(declared=set(manifest["saved_names"]), legacy=False, pairing=manifest.get("pairing"))
+
+
+def verify_restored_generation(plan: RestorePlan, restored) -> None:
+    """Refuse a generation whose declared contents did not all come back.
+
+    Names the manifest recorded as skipped are expected to be absent; that is
+    coverage, and it warns elsewhere. Names it declared saved are a promise, and
+    a broken promise means the dump and the manifest disagree.
+    """
+    if plan.declared is None:
+        return
+    missing = sorted(plan.declared - set(restored))
+    if missing:
+        raise RuntimeIntegrityError(
+            "runtime generation is incomplete; declared but not restored: "
+            + ", ".join(missing)
+        )
+
+
+def _names_only_in_retired_sidecars(manifest_path) -> set[str]:
+    """Names a retired h5ad sidecar manifest claims, if any.
+
+    Written only by the snapshot restore, which routed AnnData to h5ad files
+    and everything else to the dill residual -- so a name listed here is a name
+    the pkl beside it does not carry. The ordinary save also wrote this file
+    for a while, always with an empty ``entries`` map; that form claims nothing
+    and must not refuse anything. An unreadable manifest is treated as empty:
+    it cannot name a variable, so it cannot be the reason a namespace is
+    incomplete.
+    """
+    import json
+
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    entries = payload.get("entries")
+    if not isinstance(entries, dict):
+        return set()
+    return {name for name in entries if isinstance(name, str) and name}
+
+
+def _mark_runtime_unavailable_if_work_exists(sandbox, *, bindings) -> None:
+    """Record that a session which has run has no namespace to continue from.
+
+    A fresh session restores nothing and that is correct. One that has completed
+    rounds and restores nothing has lost its runtime, and the difference matters:
+    the first should start, the second must be offered a re-run rather than
+    continue the graph over variables that no longer exist.
+
+    ``_mark_runtime_availability_after_import`` makes this call for an imported
+    session. Nothing made it for a local process restart, so the status stayed
+    "complete" and the run proceeded.
+    """
+    from backend.state import sessions as live_sessions
+
+    from backend.utils.runtime_pairing import has_completed_runtime_work
+
+    state = live_sessions.get(sandbox.session_id)
+    if getattr(state, "runtime_recompute_pending", False):
+        return
+    if state is None or not has_completed_runtime_work(state):
+        return
+    if getattr(state, "runtime_restore_status", "complete") != "complete":
+        return
+    state.runtime_restore_status = "unavailable"
+    state.runtime_restore_warning = (
+        "This session has completed rounds but no runtime state could be "
+        "restored, so in-memory values from the earlier run (adata and friends) "
+        "are gone. Re-run the analysis from the imported data to recompute them."
+    )
+    bindings.logger.warning(
+        "[%s] session has %s completed round(s) but nothing to restore; marked "
+        "runtime unavailable so the graph is not run over a missing namespace",
+        sandbox.session_id,
+        getattr(state, "current_round", 0),
+    )
+
 
 async def restore_session(sandbox, *, bindings):
     """Restore session from per-variable streaming dill dump if available.
@@ -24,21 +156,31 @@ async def restore_session(sandbox, *, bindings):
         lifecycle_file_lock,
     )
 
+    from backend.utils.runtime_manifest import runtime_manifest_path
+
     with lifecycle_file_lock(sandbox.session_id):
         assert_session_generation_active(sandbox.session_id)
         regular_recovery = bindings.recover_regular_save_transaction(
             bindings.Path(sandbox.notebook_state.session_path),
             bindings._integrity_dir(sandbox.session_id),
             metadata_path=bindings.Path(sandbox.notebook_state.state_path),
+            # A journal written before the sidecar was retired can still name it
+            # as a component; recovery has to resolve that path to roll such a
+            # transaction back.
             manifest_path=(
                 bindings.Path(sandbox.notebook_state.state_dir)
                 / RUNTIME_H5AD_MANIFEST_FILENAME
             ),
+            runtime_manifest_path=runtime_manifest_path(
+                sandbox.session_id,
+                states_dir=sandbox.notebook_state.state_dir,
+            ),
             session_id=sandbox.session_id,
         )
-        # Snapshot apply and regular save mutate the same live runtime
-        # files. Recover both journals while holding the same lifecycle
-        # transaction lock used by commit and deletion.
+        # A snapshot apply from the previous build and the ordinary save
+        # mutate the same live runtime files. Recover both journals while
+        # holding the same lifecycle transaction lock used by commit and
+        # deletion; nothing writes the first kind any more.
         recover_runtime_apply_journal(sandbox.session_id)
     if regular_recovery is not None:
         # NotebookState was constructed before recovery inspected the
@@ -49,15 +191,17 @@ async def restore_session(sandbox, *, bindings):
         sandbox.runtime_revision = int(persistence.get("current_revision") or 0)
         sandbox.saved_runtime_revision = int(persistence.get("saved_revision") or 0)
 
-    # Snapshot V2: unresolved APPLYING journals block kernel rehydrate
+    # An unresolved APPLYING restore journal from the previous build blocks
+    # kernel rehydrate: the session's files describe different points in the run.
     from backend.services.session_store import assert_recovery_clear
     assert_recovery_clear(session_id=sandbox.session_id)
 
     sandbox.notebook_state.load()
 
     states_dir = bindings.Path(sandbox.notebook_state.session_path).parent
-    h5ad_manifest = states_dir / RUNTIME_H5AD_MANIFEST_FILENAME
-    has_h5ad_manifest = h5ad_manifest.exists()
+    depends_on_retired_sidecars = _names_only_in_retired_sidecars(
+        states_dir / RUNTIME_H5AD_MANIFEST_FILENAME
+    )
     persistence = dict(sandbox.notebook_state.runtime_persistence)
     attempted_revision = int(
         persistence.get("last_attempt_revision")
@@ -76,9 +220,9 @@ async def restore_session(sandbox, *, bindings):
     )
     degraded_recovery = bool(
         committed_dump
-        and persistence.get("last_attempt_status") == "failed"
-        and attempted_revision > committed_revision
+        and max(attempted_revision, current_revision) > committed_revision
     )
+    attempted_revision = max(attempted_revision, current_revision)
     if committed_dump:
         # A failed newer attempt may have advanced current_revision without
         # publishing a pkl. Rehydrate the verified committed generation,
@@ -105,8 +249,23 @@ async def restore_session(sandbox, *, bindings):
         )
 
     has_session_dump = committed_dump
-    if not has_session_dump and not has_h5ad_manifest:
+    if depends_on_retired_sidecars:
+        # The previous build kept these names outside the pkl, in h5ad
+        # sidecars its snapshot restore installed. Nothing here can read them,
+        # and the pkl beside them does not carry them -- loading it alone would
+        # bring the kernel up quietly missing the session's main AnnData. Say
+        # so and offer the re-run instead.
+        bindings.logger.warning(
+            "[%s] runtime depends on retired h5ad sidecars (%s); refusing to "
+            "rehydrate a partial namespace",
+            sandbox.session_id,
+            ", ".join(sorted(depends_on_retired_sidecars)),
+        )
+        _mark_runtime_unavailable_if_work_exists(sandbox, bindings=bindings)
+        return
+    if not has_session_dump:
         bindings.logger.info("No session dump to restore")
+        _mark_runtime_unavailable_if_work_exists(sandbox, bindings=bindings)
         return
 
     # A present pkl with a missing/invalid HMAC is a hard error, not a silent
@@ -133,24 +292,55 @@ async def restore_session(sandbox, *, bindings):
             raise
 
     session_path = str(sandbox.notebook_state.session_path.absolute())
-    h5ad_manifest_path = str(h5ad_manifest.absolute())
     escaped_path = repr(session_path)
-    escaped_h5ad_manifest_path = repr(h5ad_manifest_path)
     bindings.logger.info(f"Restoring session from {session_path}")
 
+    # Decided here, on the host, before a single frame reaches the kernel: a
+    # dump whose digest disagrees with its manifest is never loaded at all.
+    try:
+        restore_plan = plan_restore(
+            runtime_manifest_path(
+                sandbox.session_id,
+                states_dir=sandbox.notebook_state.state_dir,
+            ),
+            sandbox.notebook_state.session_path,
+        ) if has_session_dump else RestorePlan(declared=None, legacy=True)
+    except RuntimeIntegrityError as integrity_error:
+        sandbox._session_restore_failed = True
+        sandbox.notebook_state.update_runtime_persistence(
+            "failed",
+            current_revision=current_revision,
+            saved_revision=saved_revision,
+            error_summary=f"Runtime generation integrity check failed: {integrity_error}",
+        )
+        bindings.logger.error(
+            "[%s] refusing to restore a generation that fails its own manifest: %s",
+            sandbox.session_id,
+            integrity_error,
+        )
+        raise
+
     restore_code = f"""
-import dill
-import hashlib
-import json
-from pathlib import Path
+import dill as _scai_dill
+import hashlib as _scai_hashlib
+import json as _scai_json
+from pathlib import Path as _scai_Path
+
+# Imported under private names: this runs in the kernel's own globals, so plain
+# names would rebind any user variable that happened to share one.
 
 _restored_names = []
+# Frames land here first and are published in one step. Assigning straight into
+# globals() left a partially rebuilt namespace behind whenever a later frame
+# raised -- and the integrity check that would have caught it cannot run until
+# every frame has been read.
+_scai_pending = {{}}
 _compression_magic = b"SCAI_ZSTD_DILL_V1\\n"
 
 def _restore_dill_frames(_stream):
     while True:
         try:
-            _frame = dill.load(_stream)
+            _frame = _scai_dill.load(_stream)
         except EOFError:
             break
         if (
@@ -159,14 +349,17 @@ def _restore_dill_frames(_stream):
             and _frame[0] == "__SCAI_ALIAS__"
         ):
             _, _name, _alias_target = _frame
-            if _alias_target not in globals():
+            if _alias_target in _scai_pending:
+                _obj = _scai_pending[_alias_target]
+            elif _alias_target in globals():
+                _obj = globals()[_alias_target]
+            else:
                 raise RuntimeError(
                     f"runtime alias target missing: {{_name}} -> {{_alias_target}}"
                 )
-            _obj = globals()[_alias_target]
         else:
             _name, _obj = _frame
-        globals()[_name] = _obj
+        _scai_pending[_name] = _obj
         _restored_names.append(_name)
 
 try:
@@ -181,70 +374,56 @@ try:
                 _raw.seek(0)
                 _restore_dill_frames(_raw)
 
-    _h5ad_manifest_path = Path({escaped_h5ad_manifest_path})
-    if _h5ad_manifest_path.exists():
-        try:
-            import anndata as _runtime_anndata
-        except Exception:
-            import scanpy as _runtime_scanpy
-            _runtime_read_h5ad = _runtime_scanpy.read_h5ad
-        else:
-            _runtime_read_h5ad = _runtime_anndata.read_h5ad
-        _payload = json.loads(_h5ad_manifest_path.read_text())
-        _states_root = _h5ad_manifest_path.parent.resolve()
-        import re as _re
-        _name_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]{{0,127}}$")
-        for _name, _entry in sorted((_payload.get("entries") or {{}}).items()):
-            if not isinstance(_name, str) or not _name_re.fullmatch(_name):
-                raise RuntimeError(f"invalid h5ad sidecar variable name: {{_name!r}}")
-            if not isinstance(_entry, dict):
-                raise RuntimeError(f"invalid h5ad sidecar entry for {{_name}}")
-            _expected_filename = f"{{_name}}.h5ad"
-            _raw_path = _entry.get("path")
-            if not isinstance(_raw_path, str) or _raw_path != _expected_filename:
-                raise RuntimeError(
-                    f"h5ad sidecar path must be exactly {{_expected_filename!r}}, got {{_raw_path!r}}"
-                )
-            # The live pkl wins whenever it provides the name. The sidecar set
-            # is written only by snapshot restore / recovery and is never
-            # retired: save_session() dumps every live AnnData into the pkl but
-            # leaves runtime_h5ad_manifest.json frozen at the restored
-            # snapshot's content, hashes and all. Overwriting unconditionally
-            # therefore rolled the namespace back to the restored snapshot on
-            # every later rehydrate (kernel OOM, session reopen), silently
-            # discarding every cell run since the restore -- and the sidecar
-            # hash still matched, so nothing flagged it. A restore's own pkl
-            # never carries the h5ad names (RuntimeCapture routes AnnData to
-            # h5ad and everything else to the dill residual), so the sidecar is
-            # still authoritative for the rehydrate that immediately follows it.
-            if _name in _restored_names:
-                continue
-            # Never join raw manifest path; only the validated basename.
-            _path = (_states_root / _expected_filename).resolve()
-            if _path.parent != _states_root:
-                raise RuntimeError(f"h5ad sidecar path escapes states dir: {{_path}}")
-            if not _path.is_file():
-                raise RuntimeError(f"h5ad sidecar missing for {{_name}}: {{_path}}")
-            _expected = _entry.get("sha256", "")
-            _actual = hashlib.sha256(_path.read_bytes()).hexdigest()
-            if _actual != _expected:
-                raise RuntimeError(f"h5ad sidecar hash mismatch for {{_name}}")
-            globals()[_name] = _runtime_read_h5ad(_path)
-            _restored_names.append(_name)
-
+    # Every frame read: publish the namespace in one step, then report what
+    # it holds in a form the host can parse.
+    globals().update(_scai_pending)
+    # Released immediately: this dict holds a strong reference to every restored
+    # object, so leaving it bound would keep a replaced AnnData alive for the
+    # rest of the session.
+    _scai_pending.clear()
     print(f"Session restored: {{len(_restored_names)}} variables")
-    print(f"Restored: {{_restored_names}}")
+    print("__SCAI_RESTORED_NAMES__:" + _scai_json.dumps(sorted(_restored_names)))
 except Exception as e:
     print(f"__SCAI_RESTORE_ERROR__: {{type(e).__name__}}: {{e}}")
     raise
 """
-    result = await sandbox._execute_unlocked(restore_code, save_to_history=False, skip_safety_check=True)
+    result = await sandbox._execute_unlocked(restore_code, records_history=False, skip_safety_check=True)
 
     if result.success and "Session restored:" in (result.output or ""):
+        restored_names: set[str] = set()
+        for line in (result.output or "").splitlines():
+            if line.startswith("__SCAI_RESTORED_NAMES__:"):
+                try:
+                    parsed = bindings.json.loads(
+                        line[len("__SCAI_RESTORED_NAMES__:"):]
+                    )
+                except (bindings.json.JSONDecodeError, TypeError):
+                    parsed = None
+                if isinstance(parsed, list):
+                    restored_names = {str(name) for name in parsed}
+        try:
+            verify_restored_generation(restore_plan, restored_names)
+        except RuntimeIntegrityError as integrity_error:
+            sandbox._session_restore_failed = True
+            sandbox.notebook_state.update_runtime_persistence(
+                "failed",
+                current_revision=current_revision,
+                saved_revision=saved_revision,
+                error_summary=(
+                    f"Runtime generation integrity check failed: {integrity_error}"
+                ),
+            )
+            bindings.logger.error(
+                "[%s] restored namespace does not match its manifest: %s",
+                sandbox.session_id,
+                integrity_error,
+            )
+            raise
         sandbox._session_restored = True
         sandbox._session_restore_failed = False
         sandbox.saved_runtime_revision = saved_revision
         sandbox.runtime_revision = current_revision
+        sandbox.notebook_state.runtime_persistence["committed_pairing"] = restore_plan.pairing
         sandbox.notebook_state.record_runtime_restored(
             current_revision=current_revision,
             saved_revision=saved_revision,
@@ -285,7 +464,6 @@ except Exception as e:
             "failed",
             current_revision=current_revision,
             saved_revision=saved_revision,
-            failed_variables=sorted(sandbox.get_runtime_dependency_names()),
             error_summary=detail,
         )
         bindings.logger.error(

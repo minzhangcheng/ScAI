@@ -264,7 +264,7 @@ class IntrospectionMixin:
             "print(_json.dumps(_result))\n"
         )
         try:
-            result = await self.sandbox.execute(discover_code, save_to_history=False, skip_safety_check=True)
+            result = await self.sandbox.execute(discover_code, records_history=False, skip_safety_check=True, mutates_namespace=False)
             if result.success and result.output and result.output.strip():
                 parsed = json.loads(result.output.strip())
                 var_name = parsed.get("var")
@@ -329,7 +329,7 @@ class IntrospectionMixin:
             "print(_json.dumps(_out))\n"
         )
         try:
-            result = await self.sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+            result = await self.sandbox.execute(code, records_history=False, skip_safety_check=True, mutates_namespace=False)
             out = (getattr(result, "output", "") or "").strip()
             line = next((ln for ln in out.splitlines()[::-1] if ln.strip().startswith("{")), None)
             parsed = json.loads(line) if line else {}
@@ -470,7 +470,7 @@ class IntrospectionMixin:
                 "print(_json.dumps(_out, ensure_ascii=False))\n"
             )
 
-            result = await self.sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+            result = await self.sandbox.execute(code, records_history=False, skip_safety_check=True, mutates_namespace=False)
             out = (getattr(result, "output", "") or "").strip()
             line = next((ln for ln in out.splitlines()[::-1] if ln.strip().startswith("{")), None)
             parsed = json.loads(line) if line else {}
@@ -524,7 +524,7 @@ class IntrospectionMixin:
             "print(_json.dumps(_sig))\n"
         )
         try:
-            result = await self.sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+            result = await self.sandbox.execute(code, records_history=False, skip_safety_check=True, mutates_namespace=False)
             out = (getattr(result, "output", "") or "").strip()
             line = next((ln for ln in out.splitlines()[::-1] if ln.strip().startswith("{")), None)
             parsed = json.loads(line) if line else {}

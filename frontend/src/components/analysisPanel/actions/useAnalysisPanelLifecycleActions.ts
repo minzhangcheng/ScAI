@@ -121,8 +121,8 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
       id: generateId(),
       type: 'error',
       content: options.language === 'zh'
-        ? '当前会话禁止继续分析（运行时不可用或快照失败）。请使用重新运行或快照失败处置操作。'
-        : 'Forward resume is blocked (runtime unavailable or snapshot failure). Use re-run or snapshot failure actions.',
+        ? '当前会话的运行时不可用，无法继续分析。请使用「重新运行」从已导入的数据重新计算。'
+        : 'Forward resume is blocked: the runtime is unavailable. Use re-run to recompute from the imported data.',
       timestamp: new Date().toISOString(),
     })
     return true

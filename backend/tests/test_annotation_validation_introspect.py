@@ -9,7 +9,9 @@ class _FakeSandbox:
         self._output = output
         self.last_code = None
 
-    async def execute(self, code, save_to_history=True, skip_safety_check=False):
+    async def execute(
+        self, code, records_history=True, skip_safety_check=False, **_kwargs
+    ):
         self.last_code = code
         return SimpleNamespace(success=True, output=self._output, error=None)
 
@@ -45,7 +47,9 @@ class _ExecSandbox:
     def __init__(self, adata):
         self._adata = adata
 
-    async def execute(self, code, save_to_history=True, skip_safety_check=False):
+    async def execute(
+        self, code, records_history=True, skip_safety_check=False, **_kwargs
+    ):
         import io
         import contextlib
         ns = {"adata": self._adata}

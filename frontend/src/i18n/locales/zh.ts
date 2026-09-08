@@ -37,7 +37,7 @@ export const zh = {
     // Members the import worker dropped instead of restoring; kinds come from
     // `_note_skip` in backend/routes/export_import_parts/import_impl.py.
     importSkippedSummary: '有 {count} 项未恢复：{items}',
-    importSkippedSnapshotV2: '快照 V2 数据',
+    importSkippedRetiredSnapshot: '旧版本的快照数据',
     importSkippedUnsafePath: '不安全路径',
     importSkippedOffLayout: '不符合会话目录结构的文件',
     importSkippedUntrustedPickle: '内核运行时状态（未信任）',
@@ -331,10 +331,6 @@ export const zh = {
     saveFailed: '保存失败',
     
 
-
-
-
-
     // Round Feedback Dialog
     roundComplete: '第 {round} 轮分析完成',
     roundSummaryTitle: '本轮总结',
@@ -387,54 +383,6 @@ export const zh = {
 
     // Detailed Report
     viewDetailedReport: '查看详细报告',
-
-    // Snapshots
-    snapshots: '快照 (实验性)',
-    createSnapshot: '创建快照',
-    restoreSnapshot: '恢复快照',
-    deleteSnapshot: '删除快照',
-    confirmDelete: '确认删除',
-    discardCurrent: '丢弃当前状态',
-    confirmDiscard: '确认丢弃',
-    restoreProgress: '恢复进度',
-    snapshotCreated: '快照已创建',
-    snapshotRestored: '已恢复到快照',
-    confirmRestore: '确认恢复到此快照？当前分析进度将被替换。',
-    manualSnapshot: '手动快照',
-    noSnapshots: '暂无快照',
-    snapshotName: '快照名称（可选）',
-    phasePreAnnotation: '注释前',
-    phasePostAnnotation: '注释后',
-    phasePreDirection: '选方向前',
-    phasePostDirection: '选方向后',
-    phaseManual: '手动',
-    analysisSnapshots: '分析快照 (实验性)',
-    creating: '创建中...',
-
-    // Snapshot failure dialog
-    snapshotFailureAria: '快照失败',
-    snapshotFailureTitle: '快照失败',
-    snapshotFailureRuntimeTitle: '运行时状态需要处理',
-    snapshotFailureClose: '关闭',
-    snapshotFailureCode: '错误码',
-    snapshotFailureTechnicalDetails: '技术细节',
-    snapshotFailureRequiredVariables: '必需变量诊断',
-    snapshotFailurePreRestore: '预恢复快照捕获失败。当前工作流保持可恢复状态，尚未对线上状态做任何变更。',
-    snapshotFailurePostReportRetry: '重试仅重新进入捕获流程，不会重新生成已完成的报告。',
-    snapshotFailureRetryCaptureOnly: '重试仅重新进入捕获流程。',
-    snapshotFailureMemoryRefusal: '快照会先复制内存中的数据集再写盘，当前可用内存不足以完成这次复制。分析本身未被中断，只有快照被拦下。重试没有意义——同样的检查会得到同样的结果。',
-    snapshotFailureDegradedRecovery: '已恢复最后一个验证通过的运行时代次（{committed}），但更新的代次（{attempted}）保存失败；较新的工作不能视为已恢复。',
-    snapshotFailureResourceLimits: '有效资源限制',
-    snapshotFailureLargestObjects: '占用最大的对象',
-    snapshotFailureRetryPersistence: '重试保存',
-    snapshotFailureRetry: '重试',
-    snapshotFailureCaptureRiskTitle: '忽略内存预检，仍然创建快照。内存不足时内核可能被终止，正在进行的分析状态将丢失。',
-    snapshotFailureCaptureRisk: '仍然创建快照（有风险）',
-    snapshotFailureSkipTitle: '跳过本次快照创建，继续分析（该检查点将无法用于恢复）',
-    snapshotFailureSkip: '跳过快照并继续',
-    snapshotFailureRecomputeRuntime: '重新计算或缩减运行时',
-    snapshotFailureManage: '管理快照',
-    snapshotFailureTerminate: '终止',
 
     // Plan Review Dialog
     planReviewTitle: '分析计划审核',

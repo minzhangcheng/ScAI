@@ -11,7 +11,6 @@ from backend.workflow import SingleCellAnalysisWorkflow
 async def test_resume_at_graph_end_preserves_failed_status():
     workflow = object.__new__(SingleCellAnalysisWorkflow)
     workflow.session_id = "failed-session"
-    workflow.await_restore_safe_point = AsyncMock()
     workflow._set_status = MagicMock()
 
     failed = AnalysisState(

@@ -22,7 +22,7 @@ from backend.models.schemas import (
     WebSocketMessage,
 )
 from backend.models.schemas import TaskStatus
-from backend.constants import STRIPPED_FIGURE_PLACEHOLDER, WaitInputReason
+from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
 from backend.state import last_save_times, sessions
 from backend.config import ensure_session_dirs, get_session_states, get_session_workspace
 from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
@@ -151,15 +151,16 @@ def test_runtime_projection_fails_closed_on_lifecycle_mismatch():
     assert projection["projection_status"] == "lifecycle_mismatch"
     assert "generation 4" in projection["projection_error"]
 
+    # The mismatch is recorded and disclosed, not held at a dialog: spec 5.1
+    # replaced the runtime-persistence HITL gate with a persistent
+    # non-blocking warning, and a commit belonging to another incarnation is
+    # not something a user action could resolve.
     loaded = load_session_from_disk(sid)
     assert loaded is not None
-    assert loaded.status == TaskStatus.WAITING_INPUT
-    assert (
-        loaded.wait_input_reason
-        == WaitInputReason.RUNTIME_PERSISTENCE_FAILURE.value
-    )
-    assert loaded.snapshot_failure is not None
-    assert loaded.snapshot_failure["code"] == "runtime_persistence_failure"
+    assert loaded.status != TaskStatus.WAITING_INPUT
+    assert loaded.runtime_persistence["projection_status"] == "lifecycle_mismatch"
+    assert loaded.runtime_persistence["status"] == "failed"
+    assert "generation 4" in loaded.runtime_persistence["projection_error"]
 
 
 def test_load_rejects_empty_user_id(tmp_path, monkeypatch):

@@ -14,10 +14,8 @@ import {
   useAnalysisPanelLifecycleActions,
   useAnalysisPanelStartActions,
 } from './actions/useAnalysisPanelLifecycleActions'
-import { useAnalysisPanelSnapshotFailureActions } from './actions/useAnalysisPanelSnapshotFailureActions'
 import type { ExplorationReportData, PlanReviewData, RoundSummaryContent } from './types'
 import { useAnalysisPanelEffects } from './useAnalysisPanelEffects'
-import { useSnapshotRetryMonitor } from './useSnapshotRetryMonitor'
 
 const MAX_EXPLORATION_ROUND = 1
 
@@ -154,31 +152,11 @@ export function useAnalysisPanelController() {
   const lastIntegrationMsgRef = useRef('')
   const [isSupplementaryRunning, setIsSupplementaryRunning] = useState(false)
   const roundSupplementaryPendingRef = useRef(false)
-  const [showSnapshotPanel, setShowSnapshotPanel] = useState(false)
-  const snapshotV2Enabled = useAppStore(state => state.snapshotV2Enabled)
-  const snapshotCount = useAppStore(state => state.snapshotCount)
-  const showSnapshotCleanupReminder = useAppStore(state => state.showSnapshotCleanupReminder)
-  const setShowSnapshotCleanupReminder = useAppStore(state => state.setShowSnapshotCleanupReminder)
-  const snapshotFailure = useAppStore(state => state.snapshotFailure)
-  const clearSnapshotFailure = useAppStore(state => state.clearSnapshotFailure)
   const runtimeRestoreStatus = useAppStore(state => state.runtimeRestoreStatus)
   const runtimeRestoreWarning = useAppStore(state => state.runtimeRestoreWarning)
   const isForwardResumeBlocked = useAppStore(state => state.isForwardResumeBlocked)
-  const snapshotTransaction = useAppStore(state => state.snapshotTransaction)
 
-  const snapshotMonitor = useSnapshotRetryMonitor({
-    currentSessionId: store.currentSession?.id ?? null,
-    snapshotV2Enabled,
-    snapshotTransaction,
-    setShowSnapshotPanel,
-  })
   useEffect(() => { void config.checkStatus() }, [config.checkStatus])
-  useEffect(() => {
-    if (snapshotV2Enabled) return
-    setShowSnapshotPanel(false)
-    snapshotMonitor.stopSnapshotRetryPolling()
-    useAppStore.getState().setShowSnapshotCleanupReminder(false)
-  }, [snapshotV2Enabled, snapshotMonitor.stopSnapshotRetryPolling])
   const isRerunEnabled = useAppStore(state => state.isRerunEnabled)
   useEffect(() => {
     lastAnnotationMsgRef.current = ''
@@ -233,13 +211,6 @@ export function useAnalysisPanelController() {
     pauseAnalysis, stopAnalysis, wsConnected: store.wsConnected, wsConnect: store.wsConnect,
     setShowFeedbackDialog, setStopping, setShowStopDialog,
   })
-  const snapshotActions = useAnalysisPanelSnapshotFailureActions({
-    currentSession: store.currentSession, snapshotFailure, clearSnapshotFailure,
-    monitorSnapshotRetry: snapshotMonitor.monitorSnapshotRetry,
-    snapshotAutoOpenedForRef: snapshotMonitor.snapshotAutoOpenedForRef,
-    setShowSnapshotPanel, wsConnected: store.wsConnected, wsConnect: store.wsConnect,
-    addMessage: store.addMessage, language: store.language,
-  })
   const interventionActions = useAnalysisPanelInterventionActions({
     currentSession: store.currentSession, clearExplorationFailedState, clearSpeciesInputState,
     setShowLlmTimeoutDialog, setShowStopDialog, handleStop: lifecycleActions.handleStop,
@@ -277,14 +248,12 @@ export function useAnalysisPanelController() {
     annotationData, showPlanReviewDialog, setShowPlanReviewDialog, planReviewData,
     showExplorationDialog, setShowExplorationDialog, explorationReportData,
     integrationGateData, showIntegrationGateDialog, setShowIntegrationGateDialog,
-    isSupplementaryRunning, showSnapshotPanel, setShowSnapshotPanel, snapshotV2Enabled,
-    snapshotCount, showSnapshotCleanupReminder, setShowSnapshotCleanupReminder,
-    snapshotFailure, runtimeRestoreStatus, runtimeRestoreWarning, isRerunEnabled,
+    isSupplementaryRunning, runtimeRestoreStatus, runtimeRestoreWarning, isRerunEnabled,
     showStopDialog, setShowStopDialog, stopping, validating, showValidationDialog,
     setShowValidationDialog, validationMessage, validationUncertain, agents,
     roundSummaries: derived.roundSummaries, getAgentStatus: derived.getAgentStatus,
     unresolvedErrors: derived.unresolvedErrors, timeRemaining, isCurrentIntegrationGate,
-    ...gateActions, ...startActions, ...lifecycleActions, ...snapshotActions, ...interventionActions,
+    ...gateActions, ...startActions, ...lifecycleActions, ...interventionActions,
   }
 }
 

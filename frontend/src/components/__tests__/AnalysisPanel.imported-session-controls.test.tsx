@@ -8,20 +8,6 @@ const resumeAnalysis = vi.fn()
 
 vi.mock('../../hooks/useApi', () => ({
   apiFetch: vi.fn(),
-  getSnapshotTransaction: vi.fn(),
-  listSnapshotsV2: vi.fn(async () => ({
-    snapshots: [],
-    store_status: {
-      logical_bytes: 0,
-      physical_bytes: 0,
-      dedup_savings: 0,
-      object_count: 0,
-      manifest_count: 0,
-    },
-  })),
-  deleteSnapshotV2: vi.fn(),
-  restoreSnapshotV2: vi.fn(),
-  cancelSnapshotTransaction: vi.fn(),
   generateId: () => 'test-id',
   useConfig: () => ({
     checkStatus: vi.fn(),
@@ -60,7 +46,7 @@ function makeImportedSession(): Session {
   }
 }
 
-// An import lands paused with Snapshot V2 off, and which control it gets is
+// An import lands paused, and which control it gets is
 // decided entirely by runtime_restore_status. Both arrangements below are
 // reachable from an ordinary export/import, and each leaves exactly one way
 // forward — so a session that renders neither control is stuck with no error
@@ -75,9 +61,6 @@ describe('controls offered to an imported session', () => {
       messages: [],
       language: 'en',
       wsConnected: true,
-      snapshotFailure: null,
-      snapshotV2Enabled: false,
-      snapshotTransaction: null,
       runtimeRestoreStatus: 'complete',
       runtimeRestoreWarning: null,
     })

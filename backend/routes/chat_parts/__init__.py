@@ -9,10 +9,6 @@ from .figures import (  # noqa: F401
     _generate_figures_in_chat,
     _collect_session_figures,
 )
-from .snapshots import (  # noqa: F401
-    capture_post_chat_snapshot,
-    _create_chat_snapshot,
-)
 from .delegation import (  # noqa: F401
     _send_chat_ws,
     _try_parse_delegation,

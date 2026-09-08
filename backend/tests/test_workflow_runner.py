@@ -154,7 +154,7 @@ async def test_headless_runner_runs_when_it_holds_the_reservation(monkeypatch):
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def _save(_session_id, _state):
+    async def _save(_session_id, _state, force=False):
         return None
 
     async def _update(session_id, current):
@@ -214,7 +214,7 @@ async def test_headless_runner_registers_before_first_state_sync(monkeypatch):
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def _save(_session_id, current):
+    async def _save(_session_id, current, force=False):
         saved.append(current)
 
     async def _update(session, current):
@@ -300,7 +300,7 @@ async def test_headless_state_callback_accepts_graph_state_swap(monkeypatch):
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=5)
 
-    async def _save(_session_id, current):
+    async def _save(_session_id, current, force=False):
         saved.append(current)
 
     async def _update(session, current):
@@ -349,7 +349,7 @@ async def test_headless_state_callback_rejects_superseded_workflow(monkeypatch):
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def _save(_session_id, current):
+    async def _save(_session_id, current, force=False):
         saved.append(current)
 
     async def _update(session, current):
@@ -384,7 +384,7 @@ async def _capture_headless_callbacks(
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def _save(_session_id, _state):
+    async def _save(_session_id, _state, force=False):
         return None
 
     async def _update(session_id, current):
@@ -424,7 +424,7 @@ async def test_headless_message_callback_delivers_live_and_persists_sanitized(mo
     async def resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def save(_session_id, current):
+    async def save(_session_id, current, force=False):
         saved.append(current)
 
     monkeypatch.setattr(workflow_module, "SingleCellAnalysisWorkflow", Workflow)
@@ -535,7 +535,7 @@ async def test_headless_state_swap_carries_and_persists_live_history(monkeypatch
     async def _resolve(_user_id):
         return SimpleNamespace(max_rounds=3)
 
-    async def _save(_session_id, current):
+    async def _save(_session_id, current, force=False):
         saved.append(current)
 
     async def _update(session, current):
@@ -664,52 +664,6 @@ async def test_detailed_report_owner_blocks_both_workflow_entrypoints():
         await detailed
         detailed_report_tasks.pop("s", None)
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("safe_point_state", ["pending", "acquired"])
-async def test_snapshot_safe_point_blocks_both_workflow_entrypoints(
-    safe_point_state,
-):
-    from backend.services import workflow_runner
-    from backend.services.snapshot_v2.safe_point import (
-        get_snapshot_safe_point_manager,
-    )
-
-    state = AnalysisState(id="s", user_id="u")
-    sessions["s"] = state
-    safe_point = get_snapshot_safe_point_manager()
-    owner_token = f"test:{safe_point_state}"
-    if safe_point_state == "pending":
-        assert await safe_point.request_safe_point("s", owner_token)
-    else:
-        assert await safe_point.acquire(
-            "s", {"status": "capture"}, owner_token=owner_token,
-        )
-
-    prepared = False
-
-    async def _prepare():
-        nonlocal prepared
-        prepared = True
-
-    try:
-        with pytest.raises(workflow_runner.SessionWorkflowConflictError):
-            await workflow_runner.start_report_generation("s")
-        with pytest.raises(workflow_runner.SessionWorkflowConflictError):
-            await workflow_runner.start_workflow_if_needed(
-                "s", expected_state=state, prepare=_prepare,
-            )
-        assert prepared is False
-        assert "s" not in initializing_sessions
-        assert "s" not in _run_tasks
-        assert "s" not in workflow_runner._report_tasks
-        assert "s" not in report_workflows
-        assert "s" not in workflows
-    finally:
-        if safe_point_state == "pending":
-            await safe_point.cancel_safe_point_request("s", owner_token)
-        else:
-            await safe_point.release("s", owner_token)
 
 
 @pytest.mark.asyncio

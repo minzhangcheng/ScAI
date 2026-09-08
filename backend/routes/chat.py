@@ -43,10 +43,6 @@ from .chat_parts.figures import (  # noqa: F401
     _generate_figures_in_chat,
     _collect_session_figures,
 )
-from .chat_parts.snapshots import (  # noqa: F401
-    capture_post_chat_snapshot,
-    _create_chat_snapshot,
-)
 from .chat_parts.delegation import (  # noqa: F401
     _send_chat_ws,
     _try_parse_delegation,

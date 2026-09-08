@@ -16,19 +16,21 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from backend.config import (
     DATA_BASE_DIR, REPORTS_DIR, SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR,
     UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR,
-    EXPORT_STREAM_PREFIX, PREPARED_EXPORT_PREFIX, SNAPSHOT_EXPORT_PREFIX,
+    EXPORT_STREAM_PREFIX, PREPARED_EXPORT_PREFIX,
     get_session_dir, get_session_metadata_path, get_session_reports,
     get_session_states, get_session_uploads, get_session_workspace, resolve_session_metadata_path,
 )
 from backend.models.schemas import AnalysisState, APIResponse
 from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
-from backend.services.snapshot_v2.feature_gate import (
-    is_snapshot_v2_enabled,
-    require_snapshot_v2_enabled,
+from backend.services.resumable_export import (
+    ResumableExportUnavailable,
+    assert_boundary_held,
+    frozen_resumable_export,
+    verify_captured_archive,
 )
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
@@ -68,7 +70,6 @@ from .core import (
     ARCHIVE_FORMAT_VERSION,
     _build_export_filename,
     check_export_disk_space,
-    count_v2_snapshot_records,
     new_export_token,
     router,
 )
@@ -79,7 +80,6 @@ from .tar_builders import (
     _add_session_blobs_to_tar,
     _add_session_logs_to_tar,
     _add_reports_to_tar,
-    _add_snapshots_to_tar,
     _add_states_to_tar,
     _add_tree_to_tar,
 )
@@ -87,7 +87,76 @@ from .tar_builders import (
 logger = logging.getLogger(__name__)
 
 
-def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = False) -> None:
+def _coverage_from_manifest(session_id: str, include_runtime: bool) -> dict:
+    """Spec §4.4's coverage record, read from the generation that holds it.
+
+    This used to read `runtime_persistence["saved_names"]`, which nothing ever
+    writes -- the key lives in `<sid>_session.runtime.json`, beside the dump. So
+    the field the docstring below promises a destination ("a destination that
+    rehydrates a dump missing `adata` should be able to learn that from the
+    archive") was always null.
+
+    A results-only archive reports nothing rather than some other generation's
+    numbers: there is no runtime here to describe.
+    """
+    absent = {"runtime_saved_names": None, "runtime_skipped_names": None}
+    if not include_runtime:
+        return absent
+    from backend.utils.runtime_manifest import (
+        RuntimeManifestError,
+        read_runtime_manifest,
+        runtime_manifest_path,
+    )
+
+    path = runtime_manifest_path(session_id)
+    if not path.exists():
+        return absent
+    try:
+        manifest = read_runtime_manifest(path)
+    except (RuntimeManifestError, OSError):
+        # An unreadable manifest is not a claim about coverage either way.
+        return absent
+    return {
+        "runtime_saved_names": manifest.get("saved_names"),
+        "runtime_skipped_names": manifest.get("skipped_names"),
+    }
+
+
+def _generation_facts(
+    session_id: str, state_payload, include_runtime: bool,
+) -> dict:
+    """What the archive can say about the runtime it does or does not carry.
+
+    Read from the state payload the packer is already holding rather than from
+    the live session, so the manifest describes the bytes in this archive.
+
+    A results-only archive still reports the source's coherence: it tells a
+    destination why there is no runtime here -- deliberately omitted, or
+    because the source had none to give.
+    """
+    persistence = {}
+    if isinstance(state_payload, dict):
+        raw = state_payload.get("runtime_persistence")
+        if isinstance(raw, dict):
+            persistence = raw
+
+    facts = {
+        "runtime_coherence": persistence.get("coherence"),
+        "runtime_committed_revision": persistence.get("committed_revision"),
+        "runtime_committed_digest": persistence.get("committed_digest"),
+        # Spec 4.4's coverage record: which names the generation holds and
+        # which it could not. A destination that rehydrates a dump missing
+        # `adata` should be able to learn that from the archive, not from the
+        # kernel coming up short.
+        **_coverage_from_manifest(session_id, include_runtime),
+    }
+    if not include_runtime:
+        facts["runtime_omitted_reason"] = "include_runtime=false"
+    return facts
+
+
+def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = False,
+                       state_payload=None) -> None:
     """Write the portable session archive for *session_id* to *tar_path*.
 
     Both export endpoints share this so their archives cannot drift apart; they
@@ -109,20 +178,20 @@ def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = F
         # manifest -- because the manifest states how many Snapshot V2 records
         # travel without their object storage, which only this payload knows.
         session_file = resolve_session_metadata_path(session_id)
-        state_payload = None
-        if session_file and session_file.exists():
+        if state_payload is None and session_file and session_file.exists():
             state_payload = json.loads(session_file.read_text(encoding="utf-8"))
 
         # Manifest first: the importer latches the session id from the first
         # member it sees and reconciles it against this file.
+        # An archive is read long after the HTTP response that produced it
+        # is gone, so it says for itself whether it can continue the analysis
+        # or only restore the results, and on what generation. Spec 5.4.
         manifest = json.dumps({
             "session_id": session_id,
             "version": ARCHIVE_FORMAT_VERSION,
             "data_base_dir": str(DATA_BASE_DIR),
-            # An ordinary archive packs no V2 object storage at all, so a
-            # destination could not otherwise tell "the source had no snapshots"
-            # from "the export dropped them". This is that difference, stated.
-            "snapshot_v2_records_without_payload": count_v2_snapshot_records(state_payload),
+            "resumable": bool(include_runtime),
+            **_generation_facts(session_id, state_payload, include_runtime),
         }, indent=2).encode("utf-8")
         _add_bytes(f"{session_id}/manifest.json", manifest)
 
@@ -161,7 +230,6 @@ def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = F
         _add_session_blobs_to_tar(tf, session_id)
 
         # 8. snapshots (JSON state files + session pkl backups)
-        _add_snapshots_to_tar(tf, session_id, include_runtime=include_runtime)
 
         # 9. LLM interaction logs (the detailed report's usage numbers)
         _add_session_logs_to_tar(tf, session_id)
@@ -194,6 +262,25 @@ async def _pack_session_archive(
     """
     check_export_disk_space()
 
+    if include_runtime:
+        async with frozen_resumable_export(session_id, state) as descriptor:
+            result = await _pack_frozen_session_archive(
+                session_id, state, include_runtime, prefix=prefix,
+                export_info=export_info, descriptor=descriptor,
+            )
+            assert_boundary_held(session_id, state, descriptor["pairing"])
+            return result
+    return await _pack_frozen_session_archive(
+        session_id, state, include_runtime, prefix=prefix, export_info=export_info,
+    )
+
+
+async def _pack_frozen_session_archive(
+    session_id, state, include_runtime, *, prefix, export_info, descriptor=None,
+):
+    # A workflow may project state during the archive worker. Pack this frozen
+    # value, then verify the live pairing, instead of re-reading mutable JSON.
+    state_payload = state.model_dump(mode="json") if include_runtime else None
     save_task = asyncio.create_task(
         async_save_session(session_id, state, force=True),
         name=f"export-state-save:{session_id}:{export_info['token']}",
@@ -222,12 +309,12 @@ async def _pack_session_archive(
     export_info["ownership_marker_owned"] = True
     await bind_export_path(export_info, tar_path)
 
-    await run_in_owned_thread(
-        _build_session_tar,
-        tar_path,
-        session_id,
-        include_runtime,
-    )
+    args = (tar_path, session_id, include_runtime)
+    if include_runtime:
+        args += (state_payload,)
+    await run_in_owned_thread(_build_session_tar, *args)
+    if include_runtime:
+        await run_in_owned_thread(verify_captured_archive, tar_path, session_id, descriptor)
 
     return tar_path, _build_export_filename(session_id, state.name)
 
@@ -308,6 +395,19 @@ async def export_state(session_id: str, request: Request, include_runtime: bool 
         claimed = await claim_export_stream(export_token, session_id)
         if claimed is None:
             raise HTTPException(status_code=410, detail="Export was retired")
+    except ResumableExportUnavailable as unavailable:
+        await _retire_failed_export(export_info)
+        # 409, not 500: nothing is broken. The session is intact, the previous
+        # generation is intact, and a results-only export still works -- the
+        # caller has an action, so give them one to take. Spec 5.4.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": unavailable.reason,
+                "message": unavailable.detail,
+                "results_only_export_available": True,
+            },
+        ) from unavailable
     except BaseException:
         await _retire_failed_export(export_info)
         raise
@@ -362,6 +462,19 @@ async def export_prepare(session_id: str, request: Request, include_runtime: boo
             filename=filename,
             size=size_bytes,
         )
+    except ResumableExportUnavailable as unavailable:
+        await _retire_failed_export(export_info)
+        # 409, not 500: nothing is broken. The session is intact, the previous
+        # generation is intact, and a results-only export still works -- the
+        # caller has an action, so give them one to take. Spec 5.4.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": unavailable.reason,
+                "message": unavailable.detail,
+                "results_only_export_available": True,
+            },
+        ) from unavailable
     except BaseException:
         await _retire_failed_export(export_info)
         raise
@@ -429,117 +542,3 @@ async def export_download(session_id: str, request: Request, token: str | None =
         filename=info["filename"],
         export_info=info,
     )
-
-@router.post(
-    "/api/session/{session_id}/export-v2",
-    dependencies=[Depends(require_snapshot_v2_enabled)],
-)
-async def export_v2(
-    session_id: str,
-    request: Request,
-    include_runtime: bool = True,
-    snapshot_ids: str | None = None,
-):
-    """Export verified V2 snapshot objects as a tar.gz archive.
-
-    Unlike the legacy ``/export`` endpoint, V2 export streams verified
-    snapshot objects (blobs) from the V2 object store into a portable
-    archive.  Base/workspace objects always export; runtime objects
-    (adata variables, dill residuals) only with ``include_runtime=true``.
-
-    Query params:
-        include_runtime: Include runtime snapshot objects (default True).
-        snapshot_ids: Comma-separated list of snapshot IDs to export
-            (default: all committed snapshots).
-    """
-    validate_session_id(session_id)
-    user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(
-        session_id=session_id, user_id=user_id,
-    )
-
-    from backend.services.snapshot_v2.paths import SnapshotV2Paths
-    from backend.services.snapshot_v2.service import SnapshotService
-    from backend.services.snapshot_v2.errors import (
-        SnapshotV2Error,
-        snapshot_error_detail,
-    )
-
-    paths = SnapshotV2Paths.for_session(session_id)
-
-    # Parse optional snapshot_ids
-    parsed_ids: list[str] | None = None
-    if snapshot_ids:
-        parsed_ids = [s.strip() for s in snapshot_ids.split(",") if s.strip()]
-
-    export_token = new_export_token()
-    export_info = await reserve_export_record(
-        export_token,
-        session_id=session_id,
-        user_id=user_id,
-        state=state,
-        kind="snapshot-v2",
-    )
-    export_dir = UPLOAD_TEMP_DIR
-    export_dir.mkdir(parents=True, exist_ok=True)
-    filename = (
-        f"{SNAPSHOT_EXPORT_PREFIX}{session_id}."
-        f"g{export_info['generation']}.{export_token[:12]}.tar.gz"
-    )
-    final_path = export_dir / filename
-    service = SnapshotService(session_id, paths)
-    try:
-        await bind_export_path(export_info, final_path, owned=False)
-
-        def _reserve_output() -> None:
-            fd = os.open(
-                final_path,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                0o600,
-            )
-            # Deletion waits for this route task before reading side surfaces;
-            # publishing ownership inside the worker also covers cancellation
-            # delivered after the exclusive create but before its await returns.
-            export_info["path_owned"] = True
-            os.close(fd)
-            create_export_ownership_marker(final_path)
-            export_info["ownership_marker_required"] = True
-            export_info["ownership_marker_owned"] = True
-
-        await run_in_owned_thread(_reserve_output)
-        export_path = await service.export_snapshots(
-            include_runtime=include_runtime,
-            snapshot_ids=parsed_ids,
-            staging_dir=UPLOAD_TEMP_DIR,
-            output_path=final_path,
-            output_preallocated=True,
-        )
-        if Path(export_path) != final_path:
-            raise RuntimeError("Snapshot exporter returned an unexpected path")
-        size_bytes = final_path.stat().st_size
-        await publish_export_ready(
-            export_info,
-            filename=filename,
-            size=size_bytes,
-        )
-    except SnapshotV2Error as exc:
-        await _retire_failed_export(export_info)
-        err = snapshot_error_detail(exc)
-        raise HTTPException(
-            status_code=err["status_code"],
-            detail={key: value for key, value in err.items() if key != "status_code"},
-        ) from exc
-    except asyncio.CancelledError:
-        await _retire_failed_export(export_info)
-        raise
-    except Exception as exc:
-        await _retire_failed_export(export_info)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    return {
-        "status": "ready",
-        "export_token": export_token,
-        "download_url": f"/api/session/{session_id}/export/download?token={export_token}",
-        "filename": filename,
-        "size_bytes": size_bytes,
-    }

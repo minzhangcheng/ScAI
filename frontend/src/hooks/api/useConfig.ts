@@ -6,7 +6,7 @@ import { useAppStore, AgentType } from '../../stores/appStore'
 import { apiFetch } from './client'
 
 export function useConfig() {
-  const { apiConfig, setApiConfig, setSnapshotV2Enabled } = useAppStore()
+  const { apiConfig, setApiConfig } = useAppStore()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   
@@ -52,23 +52,18 @@ export function useConfig() {
   
   const checkStatus = useCallback(async () => {
     try {
-      const status = await apiFetch<{
+      return await apiFetch<{
         configured: boolean
         has_api_key: boolean
-        snapshot_v2_enabled: boolean
       }>('/config/status')
-      setSnapshotV2Enabled(Boolean(status.snapshot_v2_enabled))
-      return status
     } catch (e) {
       console.warn('[ScAI] checkStatus failed:', e)
-      setSnapshotV2Enabled(false)
       return {
         configured: false,
         has_api_key: false,
-        snapshot_v2_enabled: false,
       }
     }
-  }, [setSnapshotV2Enabled])
+  }, [])
 
   const validateApiKey = useCallback(async () => {
     try {

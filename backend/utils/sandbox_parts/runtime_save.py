@@ -3,8 +3,145 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import inspect
-import re
+import json
 from typing import Any, Dict
+
+
+class RuntimeCoverageError(RuntimeError):
+    """The kernel did not report a usable coverage record for this generation."""
+
+
+_COVERAGE_MARKERS = {
+    "saved_names": "__SCAI_SAVED_NAMES__:",
+    "excluded_by_kind": "__SCAI_EXCLUDED_KIND__:",
+    "excluded_volatile": "__SCAI_EXCLUDED_VOLATILE__:",
+}
+
+# Spec 5.5's carried __main__ definitions. Deliberately NOT in the table above:
+# that table is the completeness contract, and a producer missing one of its
+# entries is treated as broken. A kernel script from a build before this change
+# emits three markers, and it is not broken -- it is older. Parsed when present,
+# absent without complaint.
+_OPTIONAL_MARKERS = {
+    "carried_definitions": "__SCAI_CARRIED_DEFINITIONS__:",
+}
+
+
+def _parse_coverage_markers(output: str) -> dict | None:
+    """Read the generation's coverage record, or say there is none.
+
+    Three outcomes, and the difference between the last two matters:
+
+    * every marker present and well formed -- the generation can describe
+      itself, and a manifest is written from this record;
+    * no marker at all -- this producer does not report coverage. That is a
+      pre-transaction custom kernel or a test double, not a claim of
+      completeness: the generation commits *without* a manifest and a later
+      restore treats it as legacy, coverage unknown. Returning an empty record
+      instead would be the real hazard, because an empty record asserts that
+      nothing was excluded;
+    * some markers, or malformed ones -- the producer is broken, and a
+      generation whose own account of itself is truncated must not commit.
+    """
+    found: dict = {}
+    optional: dict = {}
+    for line in (output or "").splitlines():
+        for key, prefix in _OPTIONAL_MARKERS.items():
+            if line.startswith(prefix):
+                try:
+                    value = json.loads(line[len(prefix):])
+                except json.JSONDecodeError:
+                    # An optional record that cannot be read is dropped, not
+                    # fatal. It describes what was brought in; the generation's
+                    # completeness does not rest on it.
+                    value = None
+                if isinstance(value, list):
+                    optional[key] = value
+        for key, prefix in _COVERAGE_MARKERS.items():
+            if not line.startswith(prefix):
+                continue
+            if key in found:
+                raise RuntimeCoverageError(f"coverage marker repeated: {prefix}")
+            try:
+                parsed = json.loads(line[len(prefix):])
+            except json.JSONDecodeError as exc:
+                raise RuntimeCoverageError(
+                    f"malformed coverage marker {prefix}: {exc}"
+                ) from exc
+            if not isinstance(parsed, list):
+                raise RuntimeCoverageError(
+                    f"malformed coverage marker {prefix}: expected a list"
+                )
+            found[key] = parsed
+    if not found:
+        return None
+    missing = sorted(set(_COVERAGE_MARKERS) - set(found))
+    if missing:
+        raise RuntimeCoverageError(
+            "coverage record is partial; markers absent: "
+            + ", ".join(_COVERAGE_MARKERS[key].strip(":") for key in missing)
+        )
+    found.update(optional)
+    return found
+
+
+def _classify_skipped(skipped, *, excluded_by_kind, excluded_volatile):
+    """One coverage record from the three channels the kernel reports.
+
+    A value dill refused, a value never offered because of its kind, and a
+    value excluded as a volatile handle are three different facts about the
+    same generation; collapsing them loses the only signal that says whether a
+    name is worth recomputing.
+    """
+    entries: dict = {}
+    for item in skipped or ():
+        name = str(item.get("name") or "")
+        if name:
+            entries[name] = {
+                "name": name,
+                "type": str(item.get("type") or "unknown"),
+                "reason": "serialization_failed",
+            }
+    for reason, source in (
+        ("excluded_by_kind", excluded_by_kind),
+        ("excluded_volatile", excluded_volatile),
+    ):
+        for item in source or ():
+            name = str(item.get("name") or "")
+            if name:
+                entries.setdefault(name, {
+                    "name": name,
+                    "type": str(item.get("type") or "unknown"),
+                    "reason": reason,
+                })
+    return [entries[name] for name in sorted(entries)]
+
+
+def _carried_definitions_for_saved_names(
+    coverage: dict | None,
+    saved_names: set[str],
+) -> list[dict] | None:
+    """Return only carried definitions present in this dump generation.
+
+    A ``__main__`` definition can be discovered by the kernel before dill
+    rejects it (for example, a closure over a generator).  The definition is
+    therefore present in the optional carried record even though its name is
+    absent from ``saved_names``.  Keep the manifest's strict validation for
+    malformed entries, but do not pass a valid, skipped name to it.
+    """
+    carried = (coverage or {}).get("carried_definitions") or None
+    if carried is None:
+        return None
+    filtered = [
+        entry
+        for entry in carried
+        if not (
+            isinstance(entry, dict)
+            and "name" in entry
+            and str(entry.get("name")) not in saved_names
+        )
+    ]
+    return filtered or None
 
 
 @dataclass
@@ -13,8 +150,6 @@ class SaveContext:
     restore_failed: bool
     revision: int
     expected_lifecycle_generation: int
-    required_names: set[str]
-    escaped_required: str
     escaped_path: str
     record_generation_failure: Any
     restore_previous_persistence: Any
@@ -25,63 +160,28 @@ class SaveContext:
     # Defaulted so a caller building a context by hand still produces valid
     # kernel code; _build_save_code substitutes the canonical tuple when empty.
     escaped_volatile_prefixes: str = ""
-
-
-class RequiredValueDemoted(Exception):
-    """A deterministically unpicklable required name was released mid-save.
-
-    Raised only after the name has left the tracker's required set, so the
-    retry that follows builds a different dump instead of repeating one that is
-    guaranteed to fail again. ``names`` travels with it because attribution
-    must survive the release: once a name is out of the required set, the
-    failure record can no longer rediscover it from the tracker.
-    """
-
-    def __init__(self, names) -> None:
-        self.names = set(names)
-        super().__init__(", ".join(sorted(self.names)))
-
-
-# Deterministic refusals from the pickler: the value's structure, not the
-# machine's state, is what failed. Everything else (OSError, MemoryError, a
-# lifecycle error) stays fail-closed, because there a retry could genuinely
-# reach a different outcome.
-_STRUCTURAL_PICKLE_ERRORS = frozenset({
-    "TypeError",
-    "PicklingError",
-    "NotImplementedError",
-    "AttributeError",
-})
-
-_MAX_DEMOTION_RETRIES = 1
+    pairing: dict | None = None
 
 
 async def save_session(sandbox, *, bindings):
+    # One pass. The demotion retry existed so a deterministically unpicklable
+    # *required* value could be released and the dump rebuilt without it; with
+    # no required set such a value is simply skipped and recorded as coverage,
+    # so the second pass would produce the identical dump.
     async with sandbox._exec_lock:
-        retries_left = _MAX_DEMOTION_RETRIES
-        demoted: set[str] = set()
-        while True:
-            context = await _prepare_save(sandbox, bindings=bindings)
-            if isinstance(context, bool):
-                if context:
-                    await _publish_committed_projection(
-                        sandbox, bindings=bindings
-                    )
-                return context
-            save_code = _build_save_code(context)
-            try:
-                return await _execute_save(
-                    context,
-                    save_code,
-                    bindings=bindings,
-                    allow_demotion=retries_left > 0,
-                    previously_demoted=demoted,
-                )
-            except RequiredValueDemoted as demotion:
-                # The offending name is gone from the required set, so the next
-                # pass is a different dump rather than the same one repeated.
-                demoted |= demotion.names
-                retries_left -= 1
+        return await save_session_locked(sandbox, bindings=bindings)
+
+
+async def save_session_locked(sandbox, *, bindings):
+    """Commit while the caller holds the execution lock through a larger capture."""
+    context = await _prepare_save(sandbox, bindings=bindings)
+    if isinstance(context, bool):
+        if context:
+            await _publish_committed_projection(sandbox, bindings=bindings)
+        return context
+    return await _execute_save(
+        context, _build_save_code(context), bindings=bindings,
+    )
 
 
 async def _publish_committed_projection(sandbox, *, bindings) -> None:
@@ -197,9 +297,21 @@ async def _prepare_save(sandbox, *, bindings):
             return False
         return True
 
+    from backend.state import sessions as live_sessions
+    from backend.utils.runtime_pairing import capture_pairing
+
+    try:
+        pairing = await bindings.asyncio.to_thread(
+            capture_pairing, sandbox.session_id, live_sessions.get(sandbox.session_id),
+            getattr(sandbox.notebook_state, "state_dir", None),
+        )
+    except Exception:
+        _record_generation_failure("Could not read the workflow checkpoint identity")
+        raise
     has_committed_dump = getattr(sandbox.notebook_state, "has_session_dump", None)
     if (
         not restore_failed
+        and previous_persistence.get("committed_pairing") == pairing
         and revision == saved_revision
         and (
             getattr(sandbox.notebook_state, "runtime_persistence", {}) or {}
@@ -224,7 +336,6 @@ async def _prepare_save(sandbox, *, bindings):
         )
         _record_generation_failure(
             "Runtime restore failed and no recomputation has completed.",
-            failed_variables=sorted(sandbox.get_runtime_dependency_names()),
         )
         return False
     session_path = str(sandbox.notebook_state.session_path.absolute())
@@ -244,7 +355,6 @@ async def _prepare_save(sandbox, *, bindings):
             _record_generation_failure(
                 "Runtime restore failed and the live namespace has not "
                 "rebuilt required continuation state.",
-                failed_variables=sorted(sandbox.get_runtime_dependency_names()),
             )
             return False
         bindings.logger.warning(
@@ -321,30 +431,7 @@ async def _prepare_save(sandbox, *, bindings):
     bindings.logger.info(f"Saving session to {session_path}")
 
     # Compatibility cleanup for dependency trackers written by older
-    # execute() code. That code could mark a declared output as required
-    # even when a swallowed exception meant the name never existed. Only
-    # prune missing names that were never observed as created; genuinely
-    # tracked cross-cell dependencies remain fail-closed below.
-    live_names = await sandbox._snapshot_user_globals()
-    stale_names = sandbox._prune_legacy_unobserved_required(live_names)
-    if stale_names:
-        bindings.logger.warning(
-            "[%s] Pruned legacy required outputs never observed in the "
-            "kernel: %s",
-            sandbox.session_id,
-            sorted(stale_names),
-        )
-
-    # Canonical names only matter when they actually exist; a canonical
-    # name that is simply absent is not an error. Tracker-declared names
-    # stay fail-closed whether or not they are live (see _missing_required).
-    from backend.services.snapshot_v2.runtime_registry import (
-        CANONICAL_RUNTIME_ARTIFACTS,
-    )
-    required_names = set(sandbox.get_runtime_dependency_names())
-    required_names |= set(CANONICAL_RUNTIME_ARTIFACTS) & set(live_names)
-    escaped_required = repr(sorted(required_names))
-    from backend.services.snapshot_v2.runtime_registry import (
+    from backend.utils.runtime_types import (
         VOLATILE_RUNTIME_TYPE_PREFIXES,
     )
     return SaveContext(
@@ -352,8 +439,6 @@ async def _prepare_save(sandbox, *, bindings):
         restore_failed=restore_failed,
         revision=revision,
         expected_lifecycle_generation=expected_lifecycle_generation,
-        required_names=required_names,
-        escaped_required=escaped_required,
         escaped_path=escaped_path,
         escaped_volatile_prefixes=repr(VOLATILE_RUNTIME_TYPE_PREFIXES),
         record_generation_failure=_record_generation_failure,
@@ -362,11 +447,13 @@ async def _prepare_save(sandbox, *, bindings):
         SessionGoneError=SessionGoneError,
         assert_session_generation_active=assert_session_generation_active,
         lifecycle_file_lock=lifecycle_file_lock,
+        pairing=pairing,
     )
 
 
 def _build_save_code(context: SaveContext) -> str:
-    from backend.services.snapshot_v2.runtime_registry import (
+    from backend.utils.runtime_types import (
+        STRUCTURAL_PICKLE_ERRORS,
         VOLATILE_RUNTIME_TYPE_PREFIXES,
     )
 
@@ -374,53 +461,26 @@ def _build_save_code(context: SaveContext) -> str:
         context.escaped_volatile_prefixes
         or repr(VOLATILE_RUNTIME_TYPE_PREFIXES)
     )
+    structural_errors = repr(sorted(STRUCTURAL_PICKLE_ERRORS))
     save_code = """\
-import dill
-import io
+import dill as _scai_dill
 import json as _scai_json
-import os
-import tempfile
-import types
-import zstandard as zstd
+# Captured, not resolved at use: the kernel namespace binds `open` to the
+# sandbox write guard, and an analysis cell is free to rebind it. A bare
+# `open` in this script therefore fails every save as soon as a user
+# defines one -- the same shadowing that once destroyed user variables
+# named types, io, os, dill, tempfile and zstd.
+import builtins as _scai_builtins
+_scai_open = _scai_builtins.open
+import os as _scai_os
+import tempfile as _scai_tempfile
+import types as _scai_types
+import zstandard as _scai_zstd
 
-_required_names = set(""" + context.escaped_required + """)
-# Names the host declared required, captured before the backed-AnnData pass
-# below adds to the set. Only these are eligible for the in-memory
-# persistability probe: an AnnData that cannot be pickled is authoritative
-# analysis state, and dropping it silently is exactly the loss the required
-# tier exists to prevent.
-_scai_host_required = set(_required_names)
-_scai_probe_budget = 64 * 1024 * 1024
-
-
-class _ScaiProbeTooLarge(Exception):
-    # The frame outgrew the in-memory persistability probe.
-    pass
-
-
-class _ScaiProbeSink(io.RawIOBase):
-    # Buffer a dill frame in memory, abandoning it past a byte budget.
-
-    def __init__(self, _budget):
-        io.RawIOBase.__init__(self)
-        self._chunks = []
-        self._size = 0
-        self._budget = _budget
-
-    def writable(self):
-        return True
-
-    def write(self, _payload):
-        _view = memoryview(_payload)
-        self._size += _view.nbytes
-        if self._size > self._budget:
-            raise _ScaiProbeTooLarge()
-        self._chunks.append(_view.tobytes())
-        return _view.nbytes
-
-    def frame_bytes(self):
-        return b''.join(self._chunks)
-
+# A refusal that is a property of the value is coverage (spec 4.4); a machine
+# failure is not, and must abort rather than commit a generation that reports
+# itself complete.
+_scai_structural_errors = frozenset(""" + structural_errors + """)
 
 def _scai_is_anndata(_o):
     try:
@@ -444,16 +504,45 @@ def _scai_is_volatile(_o):
     return _q.startswith(_scai_volatile_prefixes)
 
 
-# Modules, functions, classes and methods are re-established by kernel init and
-# notebook replay. They bloat the dump, and a by-reference frame is the single
-# most likely thing to fail on restore in a different environment.
+# Imported functions, classes and methods are re-established by kernel init and
+# notebook replay, they bloat the dump, and a by-reference frame is the single
+# most likely thing to fail on restore in a different environment. The user's
+# own definitions are none of those things: nothing re-establishes them, so a
+# helper defined in round two was simply gone in round three (spec 5.5).
+#
+# Modules stay excluded unconditionally. They are the bulk the exclusion was
+# aimed at, and a module is never the user's own state.
 _scai_skip_kinds = (
-    types.ModuleType,
-    types.FunctionType,
-    types.BuiltinFunctionType,
-    types.MethodType,
+    _scai_types.ModuleType,
+    _scai_types.FunctionType,
+    _scai_types.BuiltinFunctionType,
+    _scai_types.MethodType,
     type,
 )
+
+
+def _scai_is_own_definition(_o):
+    # A function or class defined in a cell, rather than imported. The kernel
+    # sets __module__ to "__main__" for those.
+    #
+    # Bootstrap-owned callables are excluded even though they satisfy that: the
+    # bootstrap recreates them on every start, and `open` is the write guard, so
+    # carrying it lets a restore reinstate the saved generation's guard over the
+    # fresh one.
+    if getattr(_o, "_scai_bootstrap_owned", False):
+        return False
+    #
+    # The kind test has to come first. An *instance* of a __main__ class also
+    # reports __module__ == "__main__", because the lookup falls through to its
+    # class -- so without it every user object would look like a definition.
+    if isinstance(_o, _scai_types.ModuleType):
+        return False
+    if not isinstance(_o, _scai_skip_kinds):
+        return False
+    try:
+        return getattr(_o, "__module__", None) == "__main__"
+    except Exception:
+        return False
 
 _live = {}
 for _scai_name in list(globals().keys()):
@@ -469,7 +558,7 @@ for _scai_name in list(globals().keys()):
 # remaining namespace made the metadata claim `current` while a real analysis
 # object had disappeared. Materialize one in-memory copy per object identity
 # for the dump, preserving aliases. If materialization fails, abort the whole
-# generation so the runtime-persistence gate remains armed on the live kernel.
+# generation rather than commit a dump that is missing analysis state.
 _scai_materialized_backed = {}
 for _scai_name, _scai_obj in list(_live.items()):
     if not _scai_is_anndata(_scai_obj):
@@ -489,27 +578,53 @@ for _scai_name, _scai_obj in list(_live.items()):
                 "backed AnnData could not be materialized for persistence: "
                 + _scai_name + " (" + type(_e).__name__ + ")"
             ) from _e
-    _required_names.add(_scai_name)
 
-_missing_required = sorted(_n for _n in _required_names if _n not in _live)
-if _missing_required:
-    raise RuntimeError(
-        "required runtime variables are missing: " + ", ".join(_missing_required)
-    )
-
-# Required values first so a failure aborts before any optional bytes are
-# written; the rest of the namespace follows on a best-effort basis.
+# Every value takes the same path: no value is privileged, and none can abort
+# the generation by failing to serialize. Spec 4.4 -- coverage warns, integrity
+# blocks, and a value dill refuses is coverage.
 _to_dump = []
-for _scai_name in sorted(_live):
-    if _scai_name in _required_names:
-        _to_dump.append((_scai_name, _live[_scai_name], True))
+_excluded_by_kind = []
+_excluded_volatile = []
+# Spec 5.5's carried definitions, reported so a restore can say what it brought
+# back and, for a class, what is still not true about it.
+_carried_definitions = []
 for _scai_name in sorted(_live):
     _scai_obj = _live[_scai_name]
-    if _scai_name in _required_names:
+    # These two exclusions used to be silent, so a name dropped here was absent
+    # from the dump and absent from every record of the dump. Reporting them
+    # separately is what lets a restore say why a name is missing rather than
+    # only that it is.
+    if isinstance(_scai_obj, _scai_skip_kinds) and not _scai_is_own_definition(_scai_obj):
+        _excluded_by_kind.append({
+            "name": _scai_name, "type": type(_scai_obj).__name__,
+        })
         continue
-    if isinstance(_scai_obj, _scai_skip_kinds) or _scai_is_volatile(_scai_obj):
+    if _scai_is_own_definition(_scai_obj):
+        # Carried, and for a class the caveat travels with it. Every instance
+        # was pickled in its own frame with its own memo, so dill embedded a
+        # copy of the class in each of them: the restored name is a *different*
+        # object from type(instance), and isinstance(old_instance, ThisClass)
+        # is False. Disclosed rather than hidden -- before this change the name
+        # was absent and the same code raised NameError, which is louder.
+        if isinstance(_scai_obj, type):
+            _carried_definitions.append({
+                "name": _scai_name,
+                "kind": "class",
+                "note": "restored class is not type(instance) for instances "
+                        "restored from other frames",
+            })
+        else:
+            _carried_definitions.append({
+                "name": _scai_name, "kind": "function",
+            })
+    if _scai_is_volatile(_scai_obj):
+        _scai_t = type(_scai_obj)
+        _excluded_volatile.append({
+            "name": _scai_name,
+            "type": (_scai_t.__module__ or "") + "." + _scai_t.__name__,
+        })
         continue
-    _to_dump.append((_scai_name, _scai_obj, False))
+    _to_dump.append((_scai_name, _scai_obj))
 
 _skipped_vars = []
 _saved_object_names = {}
@@ -521,10 +636,10 @@ _tmp_path = """ + context.escaped_path + """ + '.tmp'
 _saved_count = 0
 _compression_magic = b"SCAI_ZSTD_DILL_V1\\n"
 try:
-    with open(_tmp_path, 'wb') as _raw:
+    with _scai_open(_tmp_path, 'wb') as _raw:
         _raw.write(_compression_magic)
-        with zstd.ZstdCompressor(level=1).stream_writer(_raw, closefd=False) as _f:
-            for _var_name, _obj, _is_required in _to_dump:
+        with _scai_zstd.ZstdCompressor(level=1).stream_writer(_raw, closefd=False) as _f:
+            for _var_name, _obj in _to_dump:
                 _object_id = id(_obj)
                 if _object_id in _saved_object_names:
                     _frame = (
@@ -533,51 +648,25 @@ try:
                     )
                 else:
                     _frame = (_var_name, _obj)
-                # Required values may stream because any failure aborts the
-                # generation. Optional values first serialize into a spooled
-                # file, bounding memory without trusting a library's entire
-                # top-level namespace to be dill-safe.
-                # A required value proves it serializes before a byte of it
-                # reaches the output stream. One that raises here is
-                # deterministically unpicklable -- a retry is the identical
-                # computation -- so it is dropped like an optional value and
-                # the host releases it from the required set. Values past the
-                # budget are the large analysis objects; they stream as before
-                # and a failure there still aborts the generation.
-                _probe_first = (
-                    _is_required
-                    and _var_name in _scai_host_required
-                    and not _scai_is_anndata(_obj)
-                )
-                _streamed = _is_required and not _probe_first
+                # Every value serializes into a spooled file first, so a
+                # dill failure is discovered before a byte reaches the
+                # compressed stream and the value can simply be skipped. Only
+                # a failure after that point is unrecoverable: the zstd
+                # compressor's state has already advanced, so the dump would be
+                # desynced and the generation must abort.
+                _streamed = False
                 try:
-                    if _probe_first:
-                        _probe = _ScaiProbeSink(_scai_probe_budget)
-                        try:
-                            dill.dump(_frame, _probe)
-                        except _ScaiProbeTooLarge:
-                            _streamed = True
-                            dill.dump(_frame, _f)
-                        else:
-                            _streamed = True
-                            _f.write(_probe.frame_bytes())
-                    elif _is_required:
-                        dill.dump(_frame, _f)
-                    else:
-                        with tempfile.SpooledTemporaryFile(
-                            max_size=8 * 1024 * 1024, mode='w+b'
-                        ) as _frame_file:
-                            dill.dump(_frame, _frame_file)
-                            _frame_file.seek(0)
-                            # Serialization is complete. A failure from this
-                            # point may have partially modified the compressed
-                            # stream, so it must abort the generation.
-                            _streamed = True
-                            while True:
-                                _frame_chunk = _frame_file.read(1024 * 1024)
-                                if not _frame_chunk:
-                                    break
-                                _f.write(_frame_chunk)
+                    with _scai_tempfile.SpooledTemporaryFile(
+                        max_size=8 * 1024 * 1024, mode='w+b'
+                    ) as _frame_file:
+                        _scai_dill.dump(_frame, _frame_file)
+                        _frame_file.seek(0)
+                        _streamed = True
+                        while True:
+                            _frame_chunk = _frame_file.read(1024 * 1024)
+                            if not _frame_chunk:
+                                break
+                            _f.write(_frame_chunk)
                 except Exception as _e:
                     _skipped_vars.append((
                         _var_name,
@@ -589,10 +678,17 @@ try:
                     print(f"__SCAI_SAVE_SKIPPED__\\t{_sv[0]}\\t{_sv[1]}\\t{_sv[2]}\\t{_sv[3]}")
                     if _streamed:
                         raise RuntimeError(
-                            ("required runtime variable could not be persisted: "
-                             if _is_required else
-                             "streamed runtime variable failed mid-write, "
-                             "aborting to avoid a desynced dump: ") + _var_name
+                            "streamed runtime variable failed mid-write, "
+                            "aborting to avoid a desynced dump: " + _var_name
+                        ) from _e
+                    if type(_e).__name__ not in _scai_structural_errors:
+                        # The machine failed, not the value. A retry could
+                        # reach a different outcome, so this is not coverage
+                        # and the generation must not commit as complete.
+                        raise RuntimeError(
+                            "runtime persistence failed on the environment, "
+                            "not on the value: " + _var_name
+                            + " (" + type(_e).__name__ + ")"
                         ) from _e
                     continue
                 _saved_object_names.setdefault(_object_id, _var_name)
@@ -600,118 +696,42 @@ try:
                 _saved_count += 1
 except Exception:
     try:
-        os.remove(_tmp_path)
+        _scai_os.remove(_tmp_path)
     except OSError:
         pass
     raise
 
 print(f"Session saved: {_saved_count} variables")
 print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
+print("__SCAI_EXCLUDED_KIND__:" + _scai_json.dumps(
+    sorted(_excluded_by_kind, key=lambda _e: _e["name"])))
+print("__SCAI_EXCLUDED_VOLATILE__:" + _scai_json.dumps(
+    sorted(_excluded_volatile, key=lambda _e: _e["name"])))
+print("__SCAI_CARRIED_DEFINITIONS__:" + _scai_json.dumps(
+    sorted(_carried_definitions, key=lambda _e: _e["name"])))
 """
     return save_code
 
 
-def _release_structural_failures(sandbox, names) -> set[str]:
-    """Drop provably unpicklable names from the tracker's required set."""
-    tracker = getattr(sandbox, "runtime_dependency_tracker", None)
-    if tracker is None:
-        return set()
-    releasable = {name for name in names if name in tracker.required_outputs}
-    if not releasable:
-        return set()
-    tracker.release(
-        releasable,
-        lifecycle="superseded",
-        reason=(
-            "Value is structurally unpicklable; every retry repeats the same "
-            "serialization, so it cannot be continuation state."
-        ),
-    )
-    return releasable
+def _reject_incomplete_runtime(context, skipped, result, *, bindings) -> None:
+    """Record a failed generation and raise. Always raises.
 
-
-def _attribute_failed_names(context, skipped, result, previously_demoted) -> set[str]:
-    """Name the required values this attempt failed on, from every channel."""
-    # A name released earlier in this same save stays attributable: the tracker
-    # no longer holds it, so nothing else can name what failed.
-    attributable = set(context.required_names) | set(previously_demoted or ())
-    failed_names = {
-        sv["name"] for sv in skipped if sv.get("name") in attributable
-    }
-    error_text = str(result.error or "")
-    exact_failure_patterns = (
-        r"required runtime variable could not be persisted:\s*([A-Za-z_]\w*)",
-        r"backed AnnData could not be materialized for persistence:\s*([A-Za-z_]\w*)",
-    )
-    for pattern in exact_failure_patterns:
-        failed_names.update(
-            match.group(1)
-            for match in re.finditer(pattern, error_text)
-            if match.group(1) in attributable
-        )
-    missing_match = re.search(
-        r"required runtime variables are missing:\s*([^\n]+)", error_text,
-    )
-    if missing_match:
-        failed_names.update(
-            name.strip()
-            for name in missing_match.group(1).split(",")
-            if name.strip() in attributable
-        )
-    return failed_names
-
-
-def _reject_incomplete_runtime(
-    context,
-    skipped,
-    result,
-    *,
-    bindings,
-    allow_demotion: bool,
-    previously_demoted,
-) -> None:
-    """Always raises: either to demote and retry, or to arm the gate."""
+    A value that could not be serialized is coverage, not a rejection: the save
+    script skips it, reports it, and commits. This path is reached only when the
+    script itself failed -- a mid-write desync, an OSError, a lifecycle refusal
+    -- so there is nothing to attribute to a required set and nothing to retry.
+    """
     sandbox = context.sandbox
-    if skipped:
-        bindings.logger.error(
-            "[%s] save_session rejected incomplete runtime; required "
-            "variables not persisted: %s",
-            sandbox.session_id,
-            [sv["name"] for sv in skipped],
+    skipped_names = sorted({sv["name"] for sv in skipped if sv.get("name")})
+    if skipped_names:
+        bindings.logger.warning(
+            "[%s] runtime save failed; values skipped before the failure: %s",
+            sandbox.session_id, skipped_names,
         )
     bindings.logger.warning(f"Failed to save session: {result.error}")
-    failed_names = _attribute_failed_names(
-        context, skipped, result, previously_demoted
-    )
-    if allow_demotion:
-        # Only values too large for the in-kernel probe reach this branch, so
-        # the stream is already unusable and the staged file is gone. Releasing
-        # the name makes the retry a different dump rather than the same
-        # deterministic failure a second time.
-        released = _release_structural_failures(sandbox, {
-            sv["name"] for sv in skipped
-            if sv.get("name") in failed_names
-            and sv.get("exc") in _STRUCTURAL_PICKLE_ERRORS
-        })
-        if released:
-            bindings.logger.error(
-                "[%s] Required runtime variable(s) failed mid-stream and are "
-                "structurally unpicklable; released and retrying the save "
-                "without them: %s",
-                sandbox.session_id,
-                ", ".join(sorted(released)),
-            )
-            raise RequiredValueDemoted(released)
-
-    poisoned: set[str] = set()
-    tracker = getattr(sandbox, "runtime_dependency_tracker", None)
-    if tracker is not None and failed_names:
-        poisoned = tracker.record_persistence_failure(failed_names)
     context.record_generation_failure(
         result.error or "Runtime serialization failed.",
-        failed_variables=sorted(failed_names),
-        requires_recompute=bool(poisoned),
-        recompute_variables=sorted(poisoned),
+        failed_variables=skipped_names,
     )
     raise RuntimeError(
         f"Sandbox runtime save failed for session {sandbox.session_id}: "
@@ -724,13 +744,11 @@ async def _execute_save(
     save_code: str,
     *,
     bindings,
-    allow_demotion: bool = False,
-    previously_demoted: set[str] | None = None,
 ) -> bool:
     sandbox = context.sandbox
     result = await sandbox._execute_unlocked(
         save_code,
-        save_to_history=False,
+        records_history=False,
         skip_safety_check=True,
     )
 
@@ -747,16 +765,65 @@ async def _execute_save(
                 })
     sandbox._last_save_skipped = skipped
 
-    saved_names: set[str] = set()
-    for line in (result.output or "").splitlines():
-        if not line.startswith("__SCAI_SAVED_NAMES__:"):
-            continue
+    # A coverage record describes a dump, so it is required exactly when a dump
+    # was produced. The staged file is the same discriminator the commit below
+    # uses to tell a real save from the test doubles and pre-transaction custom
+    # kernels that never stage one: demanding a record from those would fail a
+    # save that had no generation to describe in the first place. When a dump
+    # does exist, missing or malformed markers fail the generation rather than
+    # degrading to an empty record.
+    _staged_probe = bindings.Path(
+        str(bindings.Path(sandbox.notebook_state.session_path)) + ".tmp"
+    )
+    try:
+        coverage = (
+            _parse_coverage_markers(result.output or "")
+            if result.success and _staged_probe.exists()
+            else None
+        )
+    except RuntimeCoverageError as coverage_error:
+        # The kernel may already have written a multi-gigabyte staged dump. It
+        # can never be committed now, and nothing else reclaims it.
         try:
-            parsed_names = bindings.json.loads(line.split(":", 1)[1])
-        except (bindings.json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(parsed_names, list):
-            saved_names = {str(name) for name in parsed_names}
+            _staged_probe.unlink(missing_ok=True)
+        except OSError:
+            bindings.logger.warning(
+                "[%s] could not remove the staged dump of a generation whose "
+                "coverage record was unusable",
+                sandbox.session_id,
+            )
+        # Route this through the same channel as any other failed save rather
+        # than letting it escape mid-function. An exception raised here unwinds
+        # past the generation-failure bookkeeping while the caller still holds
+        # the execution lock, and a later save waiting on that lock never
+        # returns -- observed as a hang, not as an error.
+        context.record_generation_failure(
+            f"Runtime coverage record unusable: {coverage_error}",
+        )
+        raise RuntimeError(
+            f"Sandbox runtime save failed for session {sandbox.session_id}: "
+            f"{coverage_error}"
+        ) from coverage_error
+    saved_names: set[str] = (
+        {str(name) for name in coverage["saved_names"]} if coverage else set()
+    )
+    skipped_record = (
+        _classify_skipped(
+            skipped,
+            excluded_by_kind=coverage["excluded_by_kind"],
+            excluded_volatile=coverage["excluded_volatile"],
+        )
+        if coverage
+        else []
+    )
+    # `.get`, not a subscript: the three completeness markers are required of
+    # every producer, this one is not. A kernel script from before §5.5's
+    # narrowing reports no carried definitions and is not thereby incomplete.
+    # None rather than [] so the manifest omits the key entirely, which keeps a
+    # pre-§5.5 generation's record byte-identical to what it is today.
+    carried_record = _carried_definitions_for_saved_names(
+        coverage, saved_names,
+    )
 
     if result.success:
         if skipped:
@@ -768,21 +835,9 @@ async def _execute_save(
                 len(skipped),
                 ", ".join(f"{sv['name']}({sv['type']})" for sv in skipped),
             )
-            # The in-kernel probe proved these before writing any of their
-            # bytes, so this dump is complete apart from them. Release them
-            # here or every later save re-runs the identical failing
-            # serialization and the analysis stalls on a scratch variable.
-            released = _release_structural_failures(sandbox, {
-                sv["name"] for sv in skipped
-                if sv.get("name") in context.required_names
-            })
-            if released:
-                bindings.logger.error(
-                    "[%s] Required runtime variable(s) are structurally "
-                    "unpicklable and were released from the required set: %s",
-                    sandbox.session_id,
-                    ", ".join(sorted(released)),
-                )
+            # Nothing is released, because nothing was required. Each name is
+            # already in the generation's coverage record with its reason, and
+            # the next save will skip it the same way at the same cost.
         pkl_path = bindings.Path(sandbox.notebook_state.session_path)
         staged_path = bindings.Path(str(pkl_path) + ".tmp")
         production_transaction = staged_path.exists()
@@ -797,12 +852,12 @@ async def _execute_save(
                 return
             staged_path.unlink(missing_ok=True)
 
-        manifest_path = None
+        runtime_manifest_file = None
         target_digest = None
         if production_transaction:
-            from backend.utils.runtime_apply import runtime_h5ad_manifest_path
+            from backend.utils.runtime_manifest import runtime_manifest_path
 
-            manifest_path = runtime_h5ad_manifest_path(
+            runtime_manifest_file = runtime_manifest_path(
                 sandbox.session_id,
                 states_dir=sandbox.notebook_state.state_dir,
             )
@@ -820,30 +875,9 @@ async def _execute_save(
                 )
                 raise
 
-        def _commit_generation_manifest():
-            if not production_transaction:
-                return
-            from backend.utils.runtime_apply import (
-                write_runtime_h5ad_manifest,
-            )
-
-            write_runtime_h5ad_manifest(
-                sandbox.session_id,
-                {},
-                authoritative_pkl_names=saved_names,
-                states_dir=sandbox.notebook_state.state_dir,
-            )
-
-        def _retire_generation_sidecars():
-            from backend.utils.runtime_apply import (
-                quarantine_unreferenced_runtime_h5ads,
-            )
-
-            quarantine_unreferenced_runtime_h5ads(
-                sandbox.session_id,
-                set(),
-                states_dir=sandbox.notebook_state.state_dir,
-            )
+        # The sidecar manifest recorded which names the pkl is authoritative
+        # for. A1's runtime_manifest.json carries exactly that in saved_names,
+        # so the older record is gone rather than kept in parallel.
 
         def _commit_generation_metadata():
             sandbox.saved_runtime_revision = context.revision
@@ -857,6 +891,7 @@ async def _execute_save(
                     saved_revision=context.revision,
                     commit_source="regular_save",
                     runtime_digest=target_digest,
+                    committed_pairing=context.pairing,
                 )
 
         commit_outcome: Dict[str, Any] = {
@@ -879,9 +914,15 @@ async def _execute_save(
                                 integrity_path,
                                 _commit_generation_metadata,
                                 metadata_path=bindings.Path(sandbox.notebook_state.state_path),
-                                manifest_path=manifest_path,
-                                commit_manifest=_commit_generation_manifest,
-                                retire_sidecars=_retire_generation_sidecars,
+                                runtime_manifest_path=runtime_manifest_file,
+                                runtime_manifest={
+                                    "state_revision": (context.pairing or {}).get("state_version", 0),
+                                    "pairing": context.pairing,
+                                    "saved_names": sorted(saved_names),
+                                    "skipped_names": skipped_record,
+                                    "carried_definitions": carried_record,
+                                    "serializer_version": "dill-zstd-1",
+                                },
                                 target_revision=context.revision,
                                 authoritative_pkl_names=saved_names,
                                 fault_hook=getattr(
@@ -945,14 +986,7 @@ async def _execute_save(
                 f"Sandbox runtime commit failed for session {sandbox.session_id}"
             ) from exc
     else:
-        _reject_incomplete_runtime(
-            context,
-            skipped,
-            result,
-            bindings=bindings,
-            allow_demotion=allow_demotion,
-            previously_demoted=previously_demoted,
-        )
+        _reject_incomplete_runtime(context, skipped, result, bindings=bindings)
 
     # A rebuilt namespace is now on disk, so the pkl the latch was
     # protecting no longer exists to protect. Clearing here rather than

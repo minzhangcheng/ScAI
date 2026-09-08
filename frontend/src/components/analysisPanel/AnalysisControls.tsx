@@ -1,7 +1,8 @@
-import { AlertCircle, Camera, CheckCircle2, Loader2, Pause, Play, Square } from 'lucide-react'
+import { AlertCircle, CheckCircle2, Loader2, Pause, Play, Square } from 'lucide-react'
 
 import { ValidationDialog } from '../ValidationDialog'
-import { RuntimeWarningBanner } from '../snapshots/RuntimeWarningBanner'
+import { RuntimePersistenceBanner } from '../runtime/RuntimePersistenceBanner'
+import { RuntimeWarningBanner } from '../runtime/RuntimeWarningBanner'
 import type { AnalysisPanelController } from './useAnalysisPanelController'
 
 interface AnalysisControlsProps {
@@ -13,8 +14,8 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
     currentSession, handleIgnoreValidationError, handlePause, handleReconfigureFromValidation,
     handleReopenDialog, handleRerun, handleResume, handleStart, isForwardResumeBlocked,
     isRerunEnabled, language, llmFailureInfo, readMode, runtimeRestoreStatus,
-    runtimeRestoreWarning, setShowLlmTimeoutDialog, setShowSnapshotPanel, setShowStopDialog,
-    showValidationDialog, snapshotV2Enabled, t, validating, validationMessage,
+    runtimeRestoreWarning, setShowLlmTimeoutDialog, setShowStopDialog,
+    showValidationDialog, t, validating, validationMessage,
     validationUncertain,
   } = controller
   if (!currentSession) return null
@@ -49,11 +50,10 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
         />
       )}
 
-      {/* Runtime restore safety banner (persists across reload).
-          Not gated on snapshotV2Enabled: an ordinary session *import* sets
-          runtime_restore_status='unavailable' with Snapshot V2 switched off, and
-          hiding the banner there left the Resume button disabled with the
-          explanation suppressed. */}
+      {/* Runtime safety banner (persists across reload). A session imported
+          without its runtime, or one whose runtime could not be rehydrated,
+          sets runtime_restore_status='unavailable'; hiding the banner would
+          leave the Resume button disabled with the explanation suppressed. */}
       {(runtimeRestoreStatus === 'unavailable' || runtimeRestoreStatus === 'intentionally_kept') && (
         <div className="mb-2">
           <RuntimeWarningBanner
@@ -63,6 +63,17 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
           />
         </div>
       )}
+
+      {/* What the last committed generation promises (spec 5.1). Persistent
+          and non-blocking: the capture gate that used to stop the analysis
+          here is gone, and there is nothing a dialog could offer — the
+          previous generation is intact and the run continues either way. */}
+      <div className="mb-2 empty:mb-0">
+        <RuntimePersistenceBanner
+          record={currentSession.runtimePersistence as never}
+          isZh={language === 'zh'}
+        />
+      </div>
 
       {/* Header - Compact */}
       <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-700">
@@ -82,7 +93,7 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
               }`}
               title={
                 isForwardResumeBlocked()
-                  ? (language === 'zh' ? '运行时不可用或快照失败，无法启动' : 'Blocked by runtime/snapshot failure')
+                  ? (language === 'zh' ? '运行时不可用，无法启动' : 'Blocked: the runtime is unavailable')
                   : readMode
                     ? t('readModeRestriction')
                     : undefined
@@ -129,27 +140,11 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
                 <Square className="w-3.5 h-3.5" />
                 {language === 'zh' ? '停止' : 'Stop'}
               </button>
-              {snapshotV2Enabled && <button
-                onClick={() => setShowSnapshotPanel(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
-                title={language === 'zh' ? '快照管理' : 'Snapshots'}
-              >
-                <Camera className="w-3.5 h-3.5" />
-                {language === 'zh' ? '快照' : 'Snapshot'}
-              </button>}
             </div>
           )}
 
           {isPaused && (
             <div className="flex items-center gap-2">
-              {snapshotV2Enabled && <button
-                onClick={() => setShowSnapshotPanel(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
-                title={language === 'zh' ? '快照管理' : 'Snapshots'}
-              >
-                <Camera className="w-3.5 h-3.5" />
-                {language === 'zh' ? '快照' : 'Snapshot'}
-              </button>}
               <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-lg">
                 <Pause className="w-4 h-4" />
                 <span className="font-medium">
@@ -178,14 +173,6 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
 
           {isWaitingInput && (
             <div className="flex items-center gap-2">
-              {snapshotV2Enabled && <button
-                onClick={() => setShowSnapshotPanel(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
-                title={language === 'zh' ? '快照管理' : 'Snapshots'}
-              >
-                <Camera className="w-3.5 h-3.5" />
-                {language === 'zh' ? '快照' : 'Snapshot'}
-              </button>}
               {llmFailureInfo ? (
                 <button
                   onClick={() => setShowLlmTimeoutDialog(true)}
@@ -229,14 +216,6 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
 
           {isCompleted && (
             <div className="flex items-center gap-2">
-              {snapshotV2Enabled && <button
-                onClick={() => setShowSnapshotPanel(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
-                title={language === 'zh' ? '快照管理' : 'Snapshots'}
-              >
-                <Camera className="w-3.5 h-3.5" />
-                {language === 'zh' ? '快照' : 'Snapshot'}
-              </button>}
               <div className="flex items-center gap-2 px-3 py-1 bg-green-100 dark:bg-green-900/60 text-green-700 dark:text-green-300 rounded-lg">
                 <CheckCircle2 className="w-4 h-4" />
                 <span className="font-medium">{t('analysisComplete')}</span>
@@ -246,14 +225,6 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
 
           {isFailed && (
             <div className="flex items-center gap-2">
-              {snapshotV2Enabled && <button
-                onClick={() => setShowSnapshotPanel(true)}
-                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
-                title={language === 'zh' ? '快照管理' : 'Snapshots'}
-              >
-                <Camera className="w-3.5 h-3.5" />
-                {language === 'zh' ? '快照' : 'Snapshot'}
-              </button>}
               <div className="flex items-center gap-2 px-3 py-1 bg-red-100 dark:bg-red-900/60 text-red-700 dark:text-red-300 rounded-lg">
                 <AlertCircle className="w-4 h-4" />
                 <span className="font-medium">{language === 'zh' ? '分析失败' : 'Analysis Failed'}</span>

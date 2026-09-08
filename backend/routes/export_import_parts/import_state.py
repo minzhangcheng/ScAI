@@ -26,15 +26,11 @@ from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
 from backend.services.report.output_generation import (
     validate_and_rebind_imported_reports,
 )
-from backend.services.snapshot_v2.checkpoint_paths import (
+from backend.utils.checkpoint_paths import (
     CHECKPOINT_SQLITE_FILENAME,
     checkpoint_sqlite_path,
 )
-from backend.services.snapshot_v2.feature_gate import (
-    is_snapshot_v2_enabled,
-    normalize_disabled_snapshot_state,
-    require_snapshot_v2_enabled,
-)
+from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -57,7 +53,7 @@ from .core import (
     ImportCancelled,
     MIN_FREE_DISK_BYTES,
     _IMPORT_PROGRESS_UPDATE_INTERVAL_S,
-    _is_disabled_snapshot_v2_member,
+    _is_retired_snapshot_member,
     free_disk_bytes,
     import_job_record,
     is_runtime_h5ad_name,
@@ -219,7 +215,7 @@ def _finalize_imported_state(
 ) -> None:
     """Apply every import-time fixup to *state*, in the one order that is correct.
 
-    ``normalize_disabled_snapshot_state`` has to run BEFORE
+    ``sanitize_legacy_state`` has to run BEFORE
     ``_normalize_imported_status``: it picks the next status from the failure's
     ``retry_context``, and it passes ``generating_report`` straight through — the
     one status the frontend renders no controls for, and precisely what
@@ -236,9 +232,8 @@ def _finalize_imported_state(
     the user at snapshot actions whose objects this archive never carried.
     """
     _mark_runtime_availability_after_import(state, imported_pkl=imported_runtime)
-    if not is_snapshot_v2_enabled():
-        # Nothing can own a session that is being created right now.
-        normalize_disabled_snapshot_state(state, workflow_active=False)
+    # Nothing can own a session that is being created right now.
+    sanitize_legacy_state(state, workflow_active=False)
     _normalize_imported_status(state)
     _arm_restore_intent_after_import(state)
     # Lifecycle generations belong to this installation, not to the archive.
@@ -259,10 +254,9 @@ def _resign_imported_live_pkl(session_id: str) -> bool:
     the kernel and sandbox startup fails outright, which is strictly worse than
     having no pkl at all.
 
-    Signing here mirrors what Snapshot V2 restore does in
-    ``runtime_apply.apply_runtime_pkl``: content arrives verified by other means
-    (the caller passed ``trust=true``), and integrity for local storage is
-    re-established under the destination key.
+    Content arrives verified by other means (the caller passed
+    ``trust=true``), so integrity for local storage is re-established under the
+    destination key rather than carried in.
 
     Returns True when a signature was written.
     """
@@ -273,12 +267,126 @@ def _resign_imported_live_pkl(session_id: str) -> bool:
     if not pkl.exists():
         return False
     _write_pkl_signature(pkl, _integrity_dir(session_id))
+    if not _rekey_imported_runtime_manifest(session_id, pkl):
+        return False
     logger.warning(
         "[%s] Re-signed imported sandbox pkl under this installation's key; "
         "the archive's origin is trusted on the caller's authority (trust=true).",
         session_id,
     )
     return True
+
+
+def _rekey_imported_runtime_manifest(session_id: str, pkl) -> bool:
+    """Re-sign an imported generation manifest under this installation's key.
+
+    The manifest arrives signed by the *source* installation, so it can never
+    verify here. Demoting the generation to legacy would work but would throw
+    away its coverage and pairing for a dump the caller has already trusted far
+    more than a JSON file: importing the pkl at all is an explicit grant of
+    arbitrary code execution.
+
+    So the manifest is re-keyed rather than retired -- but only if it still
+    describes these bytes. A manifest whose digest does not match the imported
+    dump belongs to some other generation and is quarantined instead.
+    """
+    import json
+
+    from backend.utils.runtime_apply import retire_live_runtime
+    from backend.utils.runtime_manifest import (
+        build_runtime_manifest,
+        runtime_manifest_path,
+        runtime_manifest_sig_path,
+        write_runtime_manifest,
+        RUNTIME_MANIFEST_SCHEMA_VERSION,
+    )
+    from backend.utils.sandbox_parts.regular_save import _sha256_file
+
+    manifest_path = runtime_manifest_path(session_id)
+    if not manifest_path.exists():
+        if runtime_manifest_sig_path(manifest_path).exists():
+            retire_live_runtime(session_id, include_checkpoint=True)
+            return False
+        return True
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("schema_version") != RUNTIME_MANIFEST_SCHEMA_VERSION:
+            raise ValueError("unsupported runtime manifest schema")
+        manifest = build_runtime_manifest(
+            revision=raw["revision"],
+            state_revision=raw["state_revision"],
+            pkl_digest=raw["pkl_sha256"],
+            saved_names=raw["saved_names"],
+            skipped_names=raw["skipped_names"],
+            serializer_version=raw["serializer_version"],
+            pairing=raw.get("pairing"),
+            # Optional like `pairing`, and dropped here until 2026-09-07: this
+            # is the fourth hop of a record that already had to be threaded
+            # through the kernel, the parser and the manifest builder, and
+            # losing it at the last one costs an imported session the only
+            # statement of what §5.5 carried and of the caveat on a carried
+            # class.
+            carried_definitions=raw.get("carried_definitions"),
+        )
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "[%s] imported runtime manifest is unusable (%s); refusing runtime",
+            session_id,
+            exc,
+        )
+        retire_live_runtime(session_id, include_checkpoint=True)
+        return False
+
+    if manifest["pkl_sha256"] != _sha256_file(pkl):
+        # Not the same situation as an archive that never carried a manifest.
+        # Here the archive asserts what these bytes should be and they are not
+        # that, which is positive evidence of corruption or of two generations
+        # mixed together. Accepting the dump as a legacy generation would launder
+        # that away, so the runtime is refused: the session imports without one
+        # and the existing re-run affordance offers a recompute.
+        logger.error(
+            "[%s] imported runtime manifest describes different bytes than the "
+            "imported dump; refusing the runtime and importing without it",
+            session_id,
+        )
+        retire_live_runtime(session_id, include_checkpoint=True)
+        return False
+
+    write_runtime_manifest(manifest_path, manifest)
+    logger.info(
+        "[%s] re-keyed the imported runtime manifest under this installation's key",
+        session_id,
+    )
+    return True
+
+
+def validate_imported_pairing(state: AnalysisState) -> None:
+    """Keep a validated generation paired with its imported control state."""
+    from backend.utils.runtime_apply import retire_live_runtime
+    from backend.utils.runtime_manifest import runtime_manifest_path, read_runtime_manifest, write_runtime_manifest
+    from backend.utils.runtime_pairing import checkpoint_identity
+
+    path = runtime_manifest_path(state.id)
+    if not path.exists():
+        return
+    manifest = read_runtime_manifest(path)
+    pairing = manifest.get("pairing")
+    if pairing is None:
+        return
+    checkpoint = checkpoint_identity(state.id)
+    # Reallocated imports intentionally drop the old thread's checkpoint and
+    # start a new graph from the restored inputs; they do not resume that ID.
+    restart_graph = checkpoint is None and state.restore_start_intent == "explicit_start"
+    if state.state_version != pairing["state_version"] or (
+        checkpoint != pairing["checkpoint"] and not restart_graph
+    ):
+        retire_live_runtime(state.id, include_checkpoint=True)
+        _mark_runtime_availability_after_import(state, imported_pkl=False)
+        _arm_restore_intent_after_import(state)
+        return
+    if restart_graph and pairing["checkpoint"] is not None:
+        manifest["pairing"] = {**pairing, "checkpoint": None}
+        write_runtime_manifest(path, manifest)
 
 
 def _cleanup_partial_session(session_id: Optional[str]) -> None:

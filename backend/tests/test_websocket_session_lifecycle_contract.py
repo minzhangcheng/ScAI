@@ -178,67 +178,6 @@ async def test_registration_lifecycle_race_uses_frontend_close_codes(
     assert websocket.events == [("close", expected_close, expected_reason)]
 
 
-@pytest.mark.asyncio
-async def test_analysis_websocket_does_not_publish_during_snapshot_reservation(
-    monkeypatch,
-):
-    from backend import state as state_mod
-    from backend.routes import websockets as websocket_routes
-    from backend.services import workflow_runner
-    from backend.services.snapshot_v2.safe_point import (
-        get_snapshot_safe_point_manager,
-    )
-
-    session_id = str(uuid4())
-    state = AnalysisState(
-        id=session_id,
-        user_id="request-owner",
-        status=TaskStatus.PENDING,
-    )
-    state_mod.sessions[session_id] = state
-    safe_point = get_snapshot_safe_point_manager()
-    owner_token = f"test:{uuid4()}"
-    assert await safe_point.request_safe_point(session_id, owner_token)
-    websocket = _RecordingWebSocket()
-    connection_ref = object()
-
-    monkeypatch.setattr(
-        websocket_routes,
-        "ws_authenticate_and_load",
-        AsyncMock(return_value=("request-owner", state)),
-    )
-    monkeypatch.setattr(
-        websocket_routes,
-        "resolve_config_for_user",
-        AsyncMock(return_value=object()),
-    )
-    monkeypatch.setattr(
-        websocket_routes, "assert_generation_writable", lambda *_args: None,
-    )
-    register = AsyncMock(return_value=connection_ref)
-    send = AsyncMock(return_value=True)
-    unregister = AsyncMock()
-    monkeypatch.setattr(websocket_routes, "register_analysis_websocket", register)
-    monkeypatch.setattr(websocket_routes, "send_connection_json", send)
-    monkeypatch.setattr(websocket_routes, "unregister_websocket", unregister)
-
-    try:
-        await websocket_routes.websocket_endpoint(websocket, session_id)
-
-        register.assert_awaited_once()
-        unregister.assert_awaited_once_with(connection_ref)
-        assert websocket.events[-1] == ("close", 1013, None)
-        assert session_id not in state_mod.initializing_sessions
-        assert session_id not in state_mod.workflows
-        assert session_id not in state_mod._run_tasks
-        assert session_id not in workflow_runner._report_tasks
-    finally:
-        await safe_point.cancel_safe_point_request(session_id, owner_token)
-        state_mod.sessions.pop(session_id, None)
-        state_mod.workflows.pop(session_id, None)
-        state_mod._run_tasks.pop(session_id, None)
-        state_mod.release_initializing_session(session_id)
-
 
 @pytest.mark.asyncio
 async def test_force_delete_cancellation_never_restarts_report_producer(
@@ -307,9 +246,6 @@ async def test_force_delete_cancellation_never_restarts_report_producer(
     monkeypatch.setattr(websocket_routes, "_update_session_cache", update)
     monkeypatch.setattr(
         websocket_routes, "assert_generation_writable", lambda *_args: None,
-    )
-    monkeypatch.setattr(
-        websocket_routes, "snapshot_operation_active", lambda _sid: False,
     )
     monkeypatch.setattr(
         "backend.services.session_store.assert_recovery_clear",

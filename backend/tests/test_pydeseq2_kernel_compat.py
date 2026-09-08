@@ -157,7 +157,7 @@ async def test_live_pydeseq2_minimal_inference_uses_threads(tmp_path):
             "  refit_cooks=False, inference=inference, quiet=True)\n"
             "dataset.deseq2()\n"
             "assert joblib.parallel_backend is global_parallel_backend\n",
-            save_to_history=False,
+            records_history=False,
             skip_safety_check=True,
         )
         assert result.success, result.error

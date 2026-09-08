@@ -292,9 +292,6 @@ async def build_exploration_result(self, ctx):
             )
             detailed_report_url = f"/api/session/{self.session_id}/detailed-report/html" if analysis_state.detailed_report_html_path else None
 
-            # Auto-snapshot before direction selection HITL
-            await self._create_auto_snapshot(analysis_state, "pre_direction")
-
             await self._send_message("exploration_report", {
                 "report_a": exploration_report.model_dump(mode="json"),
                 "round": round_result.round_number,
@@ -508,7 +505,6 @@ async def finalize_synthesis(self, ctx):
     )
 
     # Auto-snapshot before round wait HITL
-    await self._create_auto_snapshot(analysis_state, "pre_round_wait")
 
     # Clear continue event BEFORE announcing waiting status to prevent race
     # condition where frontend signals between status message and event.wait()
@@ -560,6 +556,43 @@ async def run_pi_synthesis(self, state):
     await persist_round_result(self, ctx)
     return await finalize_synthesis(self, ctx)
 
+async def _save_round_boundary_runtime(self, analysis_state) -> None:
+    """Attempt the round-boundary runtime save. Never raises.
+
+    The logger is resolved locally rather than through ``bind_facade``: this is
+    a failure path, and a helper whose only job is to swallow an exception must
+    not itself raise ``NameError`` because the facade had not been bound.
+    """
+    import logging
+
+    from backend.services.save_cadence import runtime_save_due
+
+    log = logging.getLogger(__name__)
+    sandbox = getattr(self, "sandbox", None)
+    if sandbox is None or getattr(sandbox, "km", None) is None:
+        return
+    if not runtime_save_due(sandbox, "round_boundary"):
+        return
+    try:
+        await sandbox.save_session()
+    except Exception:
+        log.warning(
+            "[%s] Round-boundary runtime save failed; keeping the previous "
+            "committed generation",
+            self.session_id,
+            exc_info=True,
+        )
+    finally:
+        try:
+            sandbox.sync_runtime_persistence_state(analysis_state)
+        except Exception:
+            log.warning(
+                "[%s] Could not publish the runtime persistence record",
+                self.session_id,
+                exc_info=True,
+            )
+
+
 async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
     """Block between rounds, waiting for user input or continue signal from frontend.
 
@@ -573,8 +606,19 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
     Auto-skip semantics for the post-exploration direction-selection gate:
     equivalent to "let PI decide" (sets user_chosen_direction = [PI_DECIDE]).
     """
-    await ack_restore_safe_point(self)
     analysis_state = state["analysis_state"]
+
+    # Spec 6.4's round boundary. The graph runs pi_synthesis -> this gate ->
+    # check_convergence, so this is the last point at which a round's work is
+    # complete and the next one has not started; an earlier point would skip the
+    # user's decision, the integration and the report. Reached on every round,
+    # gating or not.
+    #
+    # Spec 5.1 states the exposure bound in terms of this boundary, so it saves
+    # unconditionally. A failure keeps the previous committed generation, is
+    # recorded, and does not hold the gate: the user is about to be asked a
+    # question and must not be blocked behind a dump.
+    await _save_round_boundary_runtime(self, analysis_state)
 
     # Integration gate: auto-skip / timeout now triggers PI_DECIDE_SIGNAL
     # (instead of final_report_requested), so PI gets a chance to select
@@ -593,7 +637,6 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
         else:
             signaled = await wait_with_skip_time(
                 self._continue_event, wait_seconds, self.session_id, "integration_gate",
-                safe_point_hook=getattr(self, "await_restore_safe_point", None),
             )
             if not signaled:
                 analysis_state.user_chosen_direction = PI_DECIDE_SIGNAL
@@ -675,7 +718,6 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
                 wait_seconds,
                 self.session_id,
                 GATE_DIRECTION_SELECTION if is_direction_gate else GATE_ROUND_WAIT,
-                safe_point_hook=getattr(self, "await_restore_safe_point", None),
             )
             if not signaled:
                 # Auto-skip on timeout

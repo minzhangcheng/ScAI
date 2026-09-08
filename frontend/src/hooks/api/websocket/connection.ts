@@ -17,7 +17,7 @@ const RECONNECTABLE_SESSION_STATUSES = new Set([
 export function connectWebSocket(ctx: ConnectionContext): void {
   const {
     wsRef, connectionAttemptRef, connectTimeoutRef, reconnectCountRef,
-    reconnectTimerRef, restoreCommitRefreshesRef, stateSyncEpochRef, setConnected,
+    reconnectTimerRef, stateSyncEpochRef, setConnected,
     setWsConnected, addMessage,
   } = ctx
   // Use fresh state to avoid stale closure references
@@ -178,7 +178,7 @@ export function connectWebSocket(ctx: ConnectionContext): void {
 
   ws.onmessage = (event) => handleWebSocketMessage(event, {
     session, attempt, ws, isCurrentAttempt, ownsSocketSession,
-    restoreCommitRefreshesRef, stateSyncEpochRef, addMessage,
+    stateSyncEpochRef, addMessage,
   })
 
   ws.onerror = (error) => {

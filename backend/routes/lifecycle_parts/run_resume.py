@@ -1,7 +1,7 @@
 """Lifecycle run resume action owners."""
 from __future__ import annotations
 
-_OWNED_NAMES = frozenset({'resume_analysis', '_pause_analysis_locked', '_resume_analysis_locked', 'run_analysis', 'stop_analysis', 'pause_analysis', '_stop_analysis_locked'})
+_OWNED_NAMES = frozenset({'resume_analysis', '_pause_analysis_locked', '_resume_analysis_locked', 'run_analysis', '_run_analysis_locked', 'stop_analysis', 'pause_analysis', '_stop_analysis_locked'})
 
 bindings = None
 
@@ -22,35 +22,29 @@ async def run_analysis(session_id: str, request: Request):
     """Start running analysis (use WebSocket for real-time updates)"""
     bindings.validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
+    async with get_session_lock(session_id):
+        return await _run_analysis_locked(session_id, user_id)
+
+
+async def _run_analysis_locked(session_id: str, user_id: str):
     state = await bindings.require_session_ownership(session_id=session_id, user_id=user_id)
+    from backend.utils.runtime_pairing import refresh_runtime_availability
+    refresh_runtime_availability(state)
 
-    from backend.config import is_snapshot_v2_enabled
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
+    from backend.services.legacy_state_sanitizer import sanitize_legacy_state
+
+    sanitize_legacy_state(
+        state,
+        workflow_active=session_id in bindings.workflows,
     )
-
-    if not is_snapshot_v2_enabled():
-        normalize_disabled_snapshot_state(
-            state,
-            workflow_active=session_id in bindings.workflows,
-        )
 
     if state.status == TaskStatus.RUNNING:
         raise HTTPException(status_code=400, detail="Analysis already running")
 
     try:
         bindings.assert_recovery_clear(state, session_id=session_id)
-    except SnapshotTransactionError as exc:
+    except RecoveryBlockedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    if bindings.is_snapshot_failure_blocked(state):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Session is blocked on a required snapshot failure. "
-                "Use Retry, Manage, or Terminate — generic start is refused."
-            ),
-        )
 
     # Idle-restored session: signal explicit_start so the graph node
     # preserves the restored round and plan rather than auto-incrementing.
@@ -65,6 +59,24 @@ async def run_analysis(session_id: str, request: Request):
     # session had no way forward at all.
     from backend.config import get_session_states
     from backend.utils.runtime_apply import _live_pkl
+
+    # Decided first, because retiring the runtime changes the answer to every
+    # question below it. "Re-run from your data" promises an empty namespace,
+    # and the agent prompt says so; leaving the dump on disk let the new kernel
+    # rehydrate the old variables, and retiring it *after* the checkpoint test
+    # left the graph resuming an old node against a namespace that was gone.
+    if is_forward_resume_blocked(
+        getattr(state, "runtime_restore_status", "complete"),
+        coherence=state_runtime_coherence(state),
+    ):
+        closed = await bindings.teardown_running_workflow(
+            session_id, discard_runtime=True, retire_runtime=True,
+        )
+        if closed is False:
+            raise HTTPException(status_code=409, detail="Previous workflow cleanup is incomplete")
+        state.runtime_recompute_pending = True
+        state.restore_resume_kind = None
+        state.restore_resume_workflow_state = None
 
     # A checkpoint is only resumable together with the kernel it was written
     # against: it names the graph node to continue from, and the pkl holds the
@@ -92,12 +104,8 @@ async def run_analysis(session_id: str, request: Request):
     if getattr(state, "skip_required_snapshot_phase", None) is not None:
         state.skip_required_snapshot_phase = None
 
-    # Fresh rerun clears any snapshot restore state — new kernel will be built.
-    # Remember *why* it is being cleared: this run is the "re-run from your data"
-    # the blocked-resume message promises, so the bioinformatics agent has to be
-    # told its kernel is empty rather than left to trip over a missing adata.
-    if is_forward_resume_blocked(getattr(state, "runtime_restore_status", "complete")):
-        state.runtime_recompute_pending = True
+    # The recompute decision and its retirement happened above, before anything
+    # read the files it retires.
     state.runtime_restore_status = "complete"
     state.runtime_restore_warning = None
     state.status = TaskStatus.RUNNING
@@ -182,41 +190,30 @@ async def resume_analysis(session_id: str, request: Request):
 
 async def _resume_analysis_locked(session_id: str, user_id: str):
     state = await bindings.require_session_ownership(session_id=session_id, user_id=user_id)
+    from backend.utils.runtime_pairing import refresh_runtime_availability
 
-    from backend.config import is_snapshot_v2_enabled
-    from backend.services.snapshot_v2.feature_gate import (
-        normalize_disabled_snapshot_state,
+    # Check the live owner before the cold-file probe. A paused workflow whose
+    # save failed still owns an intact kernel, and a live HITL gate is itself
+    # the continuation boundary; absence of a committed pkl must not turn
+    # either case into a false runtime-unavailable refusal.
+    live_continuation = is_live_runtime_continuation_safe(session_id, state)
+    if not live_continuation:
+        refresh_runtime_availability(state)
+
+    from backend.services.legacy_state_sanitizer import sanitize_legacy_state
+
+    sanitize_legacy_state(
+        state,
+        workflow_active=session_id in bindings.workflows,
     )
-
-    if not is_snapshot_v2_enabled():
-        normalize_disabled_snapshot_state(
-            state,
-            workflow_active=session_id in bindings.workflows,
-        )
 
     try:
         bindings.assert_recovery_clear(state, session_id=session_id)
-    except SnapshotTransactionError as exc:
+    except RecoveryBlockedError as exc:
         return APIResponse(
             success=False,
             message=str(exc),
             data={"needs_reconnect": False, "recovery_blocked": True},
-        )
-
-    # Snapshot-failure gate: generic resume must not clear or advance.
-    # Only dedicated producer-aware snapshot-failure actions may clear it.
-    if bindings.is_snapshot_failure_blocked(state):
-        return APIResponse(
-            success=False,
-            message=(
-                "Session is blocked on a required snapshot failure. "
-                "Use a snapshot-failure action — generic resume is refused."
-            ),
-            data={
-                "needs_reconnect": False,
-                "snapshot_failure": getattr(state, "snapshot_failure", None),
-                "wait_input_reason": getattr(state, "wait_input_reason", None),
-            },
         )
 
     # A completed session first has to retire its old workflow. Do not consume
@@ -229,7 +226,37 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         state.max_rounds = state.original_max_rounds
         state.original_max_rounds = None
 
-    if is_forward_resume_blocked(state.runtime_restore_status) and state.status != TaskStatus.COMPLETED:
+    coherence = state_runtime_coherence(state)
+    if (
+        is_forward_resume_blocked(
+            state.runtime_restore_status,
+            coherence=coherence,
+        )
+        and not live_continuation
+        and state.status != TaskStatus.COMPLETED
+    ):
+        warning = getattr(state, "runtime_restore_warning", None)
+        if not warning:
+            if coherence == "stale":
+                warning = (
+                    "The committed runtime is stale after a failed save. "
+                    "Re-run the analysis from the input data to recompute it."
+                )
+            elif coherence == "inconsistent":
+                warning = (
+                    "The committed runtime is inconsistent with the saved "
+                    "analysis state. Re-run the analysis from the input data "
+                    "to recompute it."
+                )
+            else:
+                warning = (
+                    "No usable runtime is available. Re-run the analysis from "
+                    "the input data to recompute it."
+                )
+        state.runtime_restore_status = "unavailable"
+        state.runtime_restore_warning = warning
+        await bindings._update_session_cache(session_id, state)
+        await bindings.async_save_session(session_id, state, force=True)
         return APIResponse(
             success=True,
             message=(
@@ -237,7 +264,13 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
                 "Forward analysis is blocked. Re-run the analysis from your data to "
                 "recompute kernel state, or view the session read-only."
             ),
-            data={"needs_reconnect": False, "runtime_unavailable": True},
+            data={
+                "needs_reconnect": False,
+                "runtime_unavailable": True,
+                "runtime_restore_status": state.runtime_restore_status,
+                "runtime_restore_warning": state.runtime_restore_warning,
+                "status": state.status.value,
+            },
         )
 
     if state.status == TaskStatus.COMPLETED:
@@ -246,8 +279,14 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         # instead of resuming a graph already at END (infinite loop).
         from backend.workflow.provenance import consume_restore_provenance
 
+        recompute = is_forward_resume_blocked(
+            state.runtime_restore_status, coherence=state_runtime_coherence(state),
+        )
+        cleanup_options = {"discard_runtime": True}
+        if recompute:
+            cleanup_options["retire_runtime"] = True
         cleanup_complete = await bindings.teardown_running_workflow(
-            session_id, discard_runtime=True,
+            session_id, **cleanup_options,
         )
         if cleanup_complete is False:
             return APIResponse(
@@ -273,8 +312,11 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         # Same contract as POST /run: a re-analysis that is clearing an
         # unavailable runtime has to tell the agent its kernel is empty, or it
         # carries on as though adata were still loaded from the original run.
-        if is_forward_resume_blocked(getattr(state, "runtime_restore_status", "complete")):
+        if recompute:
             state.runtime_recompute_pending = True
+            state.restore_resume_kind = None
+            state.restore_resume_workflow_state = None
+            state.restore_start_intent = "explicit_start"
         state.runtime_restore_status = "complete"  # re-run recomputes kernel state
         state.runtime_restore_warning = None  # fresh rerun clears any restore warning
         await bindings._update_session_cache(session_id, state)

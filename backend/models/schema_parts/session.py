@@ -19,7 +19,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-from .enums import AnalysisPhaseType, PlanStage, PlanStatus, SnapshotPhase
+from .enums import AnalysisPhaseType, PlanStage, PlanStatus
 
 
 class ClusterAnnotation(BaseModel):
@@ -164,36 +164,6 @@ class DetailedReportSegment(BaseModel):
     content_html: str = ""  # Pre-rendered HTML
     timestamp: datetime = Field(default_factory=datetime.now)
     round_number: int = 0
-
-class Snapshot(BaseModel):
-    """A saved snapshot of analysis state for debugging rollback.
-
-    Derived compatibility cache for both V1 files and committed Snapshot V2
-    manifests. V2 listing projection may populate the optional V2 fields below.
-    """
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str
-    description: str = ""
-    phase: SnapshotPhase  # Auto-created at key analysis points
-    round_number: int = 0
-    timestamp: datetime = Field(default_factory=datetime.now)
-    state_file: str = ""  # Filename within snapshots/ directory
-    size_bytes: int = 0
-    parent_id: Optional[str] = None  # Parent snapshot ID for tree view
-    notebook_file: str = ""  # Filename of ipynb backup within snapshots/ directory
-    workspace_manifest: Dict[str, List[str]] = Field(default_factory=dict)
-    # e.g. {"figures": ["fig_001.jpg"], "tables": ["markers.csv"], "reproducibility": []}
-    branch_label: Optional[str] = None  # "main", "branch-A", "branch-B", etc.
-    runtime_state_included: bool = False
-    skipped_files: List[Dict[str, str]] = Field(default_factory=list)
-    branch_id: Optional[str] = None
-    # Snapshot V2 projection fields (optional; absent for pure V1 records)
-    format_version: Optional[int] = None
-    runtime_status: Optional[Literal["complete", "missing", "state_only", "corrupt"]] = None
-    logical_size_bytes: Optional[int] = None
-    physical_added_bytes: Optional[int] = None
-    source_restore_transaction_id: Optional[str] = None
-    continuation_kind: Optional[str] = None
 
 class FigureRequirement(BaseModel):
     """A visual deliverable that must exist before a plan step is complete.

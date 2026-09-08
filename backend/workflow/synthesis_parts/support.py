@@ -37,7 +37,7 @@ from ..direction_coverage import (
     normalize_direction_key,
     normalize_legacy_round_result,
 )
-from ..helpers import ack_restore_safe_point, wait_with_skip_time
+from ..helpers import wait_with_skip_time
 from ..provenance import consume_restore_provenance, restore_provenance_id
 
 if TYPE_CHECKING:
