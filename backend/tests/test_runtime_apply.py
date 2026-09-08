@@ -353,6 +353,58 @@ def test_a_pair_without_an_executor_position_clears_the_live_one():
     )["step_number"] == 61
 
 
+def test_pair_restore_keeps_stale_metadata_until_cleanup_can_retry(monkeypatch):
+    """A cleanup failure leaves the old declaration and a retry completes."""
+    sid = "sess-pair-restore-cleanup-retry"
+    states, _pair = _generation_pair(sid, 12, with_executor=False)
+    live_state = states / f"{sid}_state.json"
+    live_state.write_text(json.dumps({
+        "session_id": sid,
+        "runtime_persistence": {
+            "current_revision": 61,
+            "committed_revision": 12,
+        },
+    }))
+    live_checkpoint = states / "checkpoints.sqlite"
+    live_checkpoint.write_bytes(b"newer-and-unusable")
+    wal = live_checkpoint.with_name(live_checkpoint.name + "-wal")
+    shm = live_checkpoint.with_name(live_checkpoint.name + "-shm")
+    wal.write_bytes(b"stale-wal")
+    shm.write_bytes(b"stale-shm")
+    live_executor = states / f"{sid}_bioinfo_checkpoint.json"
+    live_executor.write_text(json.dumps({"step_number": 61}))
+
+    real_quarantine = runtime_apply._quarantine_path
+    failed = False
+
+    def fail_once(path):
+        nonlocal failed
+        if path == live_executor and not failed:
+            failed = True
+            raise OSError("cleanup interrupted")
+        return real_quarantine(path)
+
+    monkeypatch.setattr(runtime_apply, "_quarantine_path", fail_once)
+
+    with pytest.raises(OSError, match="cleanup interrupted"):
+        runtime_apply.restore_generation_pair(sid, revision=12)
+
+    assert json.loads(live_state.read_text())["runtime_persistence"][
+        "current_revision"
+    ] == 61
+
+    assert runtime_apply.restore_generation_pair(sid, revision=12) is True
+
+    restored = json.loads(live_state.read_text())
+    assert restored["runtime_persistence"]["pair_restore"]["restored_revision"] == 12
+    assert not wal.exists()
+    assert not shm.exists()
+    assert not live_executor.exists()
+    assert json.loads(
+        (states / f"{sid}_bioinfo_checkpoint.json.quarantine").read_text()
+    )["step_number"] == 61
+
+
 def test_a_missing_pair_changes_nothing():
     """Retirement is still the fallback, and it has to be reachable."""
     sid = "sess-pair-absent"

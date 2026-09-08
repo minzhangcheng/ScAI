@@ -135,14 +135,23 @@ def _committed_pair(sid, revision):
     import sqlite3
 
     from backend.config import get_session_states
+    from backend.models.schemas import AnalysisState
+    from backend.utils.checkpoint import DurableJsonPlusSerializer
 
     states = get_session_states(sid)
     pair = states / "generation" / str(revision)
     pair.mkdir(parents=True, exist_ok=True)
     (pair / "state.json").write_text(_json.dumps({"session_id": sid}))
+    kind, payload = DurableJsonPlusSerializer().dumps_typed({
+        "channel_values": {"analysis_state": AnalysisState(
+            id=sid, user_id="u1", current_round=2,
+        )},
+    })
     with sqlite3.connect(pair / "checkpoints.sqlite") as conn:
-        conn.execute("CREATE TABLE checkpoints (thread_id TEXT, blob TEXT)")
-        conn.execute("INSERT INTO checkpoints VALUES (?, 'paired')", (sid,))
+        conn.execute("CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, "
+                     "checkpoint_id TEXT, type TEXT, checkpoint BLOB, blob TEXT)")
+        conn.execute("INSERT INTO checkpoints VALUES (?, '', '1', ?, ?, 'paired')",
+                     (sid, kind, payload))
     (pair / "executor_checkpoint.json").write_text(
         _json.dumps({"step_number": 20, "runtime_revision": revision})
     )
@@ -160,6 +169,95 @@ def _stale_persistence(committed, current):
         "last_attempt_status": "succeeded",
         "last_attempt_revision": committed,
     }
+
+
+@pytest.mark.asyncio
+async def test_pair_start_restores_progress_before_publication_and_graph_resume(monkeypatch):
+    import aiosqlite
+    from typing import TypedDict
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from langgraph.graph import END, START, StateGraph
+    from backend.config import get_session_states
+    from backend.models.schemas import AnalysisPlan, AnalysisState, TaskStatus
+    from backend.routes import lifecycle
+    from backend.routes.websockets import _needs_report_only
+    from backend.services.session_store import load_session_from_disk
+    from backend.state import sessions
+    from backend.utils import runtime_apply
+    from backend.utils.checkpoint import DurableJsonPlusSerializer
+
+    sid = str(uuid.uuid4())
+    states = get_session_states(sid)
+    pair = states / "generation" / "44"
+    pair.mkdir(parents=True)
+    record = _stale_persistence(44, 44)
+    record["status"] = "current"
+    (pair / "state.json").write_text(json.dumps({
+        "session_id": sid, "runtime_persistence": record,
+    }))
+    (states / f"{sid}_state.json").write_text(json.dumps({
+        "session_id": sid, "runtime_persistence": _stale_persistence(44, 61),
+    }))
+    runtime_apply._live_pkl(sid).write_bytes(b"committed")
+    old = AnalysisState(
+        id=sid, user_id="u1", current_round=1,
+        current_plan=AnalysisPlan(id="paired-plan", phase="exploration"),
+        runtime_persistence=record,
+    )
+    schema = TypedDict("PairGraphState", {"analysis_state": AnalysisState})
+    builder = StateGraph(schema)
+    seen = []
+
+    def work(value):
+        seen.append((value["analysis_state"].current_round,
+                     value["analysis_state"].current_plan.id))
+        return value
+
+    builder.add_node("work", work)
+    builder.add_edge(START, "work")
+    builder.add_edge("work", END)
+    config = {"configurable": {"thread_id": sid}}
+    async with aiosqlite.connect(pair / "checkpoints.sqlite") as conn:
+        saver = AsyncSqliteSaver(conn, serde=DurableJsonPlusSerializer())
+        graph = builder.compile(checkpointer=saver, interrupt_before=["work"])
+        await graph.ainvoke({"analysis_state": old}, config)
+
+    current = old.model_copy(deep=True)
+    current.current_round = 3
+    current.current_plan.id = "newer-plan"
+    current.final_report_requested = True
+    current.status = TaskStatus.PAUSED
+    current.custom_models = {"pi": "current-model"}
+    current.agent_server_configs = {"pi": {"api_key": "current-key"}}
+    current.runtime_persistence = _stale_persistence(44, 61)
+    monkeypatch.setitem(sessions, sid, current)
+    monkeypatch.setattr(lifecycle, "require_session_ownership", AsyncMock(return_value=current))
+    monkeypatch.setattr(lifecycle, "assert_recovery_clear", lambda *a, **k: None)
+    original_restore = runtime_apply.restore_generation_pair
+
+    def restore_after_progress_save(*args, **kwargs):
+        persisted = load_session_from_disk(sid)
+        assert persisted.current_round == 1
+        assert persisted.current_plan.id == "paired-plan"
+        assert persisted.runtime_persistence["current_revision"] == 61
+        return original_restore(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_apply, "restore_generation_pair", restore_after_progress_save)
+    await lifecycle.run_analysis(sid, SimpleNamespace(state=SimpleNamespace(user_id="u1")))
+    assert sessions[sid] is current
+    assert current.current_round == 1
+    assert current.current_plan.id == "paired-plan"
+    assert current.custom_models == {"pi": "current-model"}
+    assert current.agent_server_configs["pi"]["api_key"] == "current-key"
+    assert not _needs_report_only(current, 3, False)
+    assert load_session_from_disk(sid).current_plan.id == "paired-plan"
+    # Exercise the same injection followed by continuation that resume uses.
+    async with aiosqlite.connect(states / "checkpoints.sqlite") as conn:
+        saver = AsyncSqliteSaver(conn, serde=DurableJsonPlusSerializer())
+        graph = builder.compile(checkpointer=saver, interrupt_before=["work"])
+        await graph.aupdate_state(config, {"analysis_state": current})
+        await graph.ainvoke(None, config)
+    assert seen == [(1, "paired-plan")]
 
 
 @pytest.mark.asyncio
@@ -194,8 +292,7 @@ async def test_a_stale_generation_with_a_pair_is_restored_not_retired(monkeypatc
     assert _live_pkl(sid).exists(), "a healthy generation must not be retired"
     assert not state.runtime_recompute_pending
 
-    # On disk, not on `state`: the graph resumes with its own AnalysisState,
-    # so this is the only place the executor and the UI can both read it.
+    # The notebook record carries the disclosure independently of graph state.
     import json as _json
 
     restored_record = _json.loads(

@@ -78,6 +78,8 @@ async def _run_analysis_locked(session_id: str, user_id: str):
         # the dump was taken at. Retirement stays the fallback for a generation
         # with no usable pair, and for `unavailable` and `inconsistent`.
         from backend.utils.runtime_apply import restore_generation_pair
+        from backend.services.generation_pair_state import read_generation_pair_state
+        from backend.services.session_store import refresh_runtime_persistence_projection
 
         committed = dict(
             getattr(state, "runtime_persistence", None) or {}
@@ -92,13 +94,21 @@ async def _run_analysis_locked(session_id: str, user_id: str):
                     status_code=409,
                     detail="Previous workflow cleanup is incomplete",
                 )
-            restored = restore_generation_pair(session_id, revision=int(committed))
+            paired_state = await read_generation_pair_state(state, revision=int(committed))
+            if paired_state is not None:
+                # Progress must reach session.json before the notebook record
+                # can declare the pair current. Both WebSocket routing and
+                # resume's aupdate_state then see the paired plan and results.
+                # Keep the existing object identity for cached route references.
+                for name in type(state).model_fields:
+                    setattr(state, name, getattr(paired_state, name))
+                await bindings.async_save_session(session_id, state, force=True)
+                restored = restore_generation_pair(session_id, revision=int(committed))
+                if restored:
+                    refresh_runtime_persistence_projection(session_id, state)
 
-        # Nothing is marked on `state` when the restore succeeds. Both things
-        # that need to know -- the user-facing disclosure and the executor's
-        # exact-revision rule -- read the persistence record that
-        # `restore_generation_pair` just wrote to disk, because a resume from
-        # the checkpoint carries the graph's own AnalysisState and not this one.
+        # An unusable paired analysis state takes the same recompute path as a
+        # missing pair; it cannot safely drive the graph over the old namespace.
         if not restored:
             closed = await bindings.teardown_running_workflow(
                 session_id, discard_runtime=True, retire_runtime=True,

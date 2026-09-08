@@ -382,19 +382,27 @@ def restore_generation_pair(session_id: str, *, revision: int) -> bool:
                 "discarded_revisions": max(0, discarded_from - int(revision)),
                 "discarded_since": discarded_since,
             }
-            staged_state.write_text(json.dumps(payload, indent=2))
-        except (OSError, ValueError, TypeError):
-            # The restore itself is sound; only its disclosure is not. Failing
-            # here would strand a session whose runtime is fine.
+            with staged_state.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except (OSError, ValueError, TypeError, AttributeError):
+            # The declaration is part of the restore transaction now: without
+            # a durable annotation, leave the old declaration in place so the
+            # caller can retry instead of publishing an unverified state.
             logger.warning(
-                "[%s] Could not annotate the restored record with what the "
-                "pair restore discarded",
+                "[%s] Could not prepare the restored state declaration",
                 session_id,
                 exc_info=True,
             )
+            raise
 
+    # Publish the positions first. The state declaration is deliberately held
+    # back until every prerequisite write and cleanup below is durable, so a
+    # failure leaves the old metadata describing the still-unfinished restore.
     for staged, target in incoming:
-        os.replace(staged, target)
+        if target != live_state:
+            os.replace(staged, target)
     fsync_directory(states_dir)
 
     # The write-ahead log and shared-memory file belong to the database that
@@ -414,6 +422,12 @@ def restore_generation_pair(session_id: str, *, revision: int) -> bool:
         # `validate_checkpoint` would see a checkpoint *ahead* of the committed
         # revision and treat it as ordinary.
         _quarantine_path(live_executor)
+    fsync_directory(states_dir)
+
+    # Publishing this declaration last makes the restore point visible only
+    # after its positions and cleanup have reached stable storage.
+    os.replace(staged_state, live_state)
+    fsync_directory(states_dir)
 
     logger.info(
         "[%s] Restored the generation pair for revision %d", session_id, revision,

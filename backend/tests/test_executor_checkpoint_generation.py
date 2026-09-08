@@ -127,15 +127,7 @@ def test_the_reader_supplies_the_committed_revision_it_has():
 
 
 def test_the_exact_rule_is_driven_by_the_persisted_record_not_a_state_field():
-    """The signal has to survive `ainvoke(None, config)`.
-
-    A resume from a checkpoint restores the graph's own `analysis_state` --
-    `execution.py` passes None precisely so nothing is injected over it -- so a
-    flag set on the in-memory AnalysisState by POST /run never reaches the
-    executor. `runtime_persistence` does: the sandbox re-reads it from the
-    notebook record on every sync, so a marker written to disk by the restore
-    arrives no matter which AnalysisState object the graph is carrying.
-    """
+    """The exact-generation marker survives through the notebook projection."""
     import pathlib as _pathlib
 
     repo = _pathlib.Path(__file__).resolve().parents[2]
