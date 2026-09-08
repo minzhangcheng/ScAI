@@ -14,6 +14,7 @@ reused by sandbox startup recovery.
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -326,16 +327,59 @@ def restore_generation_pair(session_id: str, *, revision: int) -> bool:
     if paired_executor.is_file():
         sources.append((paired_executor, live_executor))
 
+    # What this restore costs, read from the record it is about to replace.
+    # Spec B2-3: the restored record reads `current` again -- the pair holds a
+    # generation whose current_revision equals its committed_revision -- so
+    # without carrying this across, the disclosure would go silent at the exact
+    # moment the user most needs it.
+    discarded_from = 0
+    discarded_since = None
+    try:
+        previous = (
+            json.loads(live_state.read_text()).get("runtime_persistence") or {}
+        )
+        discarded_from = int(previous.get("current_revision") or 0)
+        discarded_since = previous.get("last_saved_at")
+    except (OSError, ValueError, TypeError, AttributeError):
+        logger.warning(
+            "[%s] Could not read the record being replaced by a pair restore",
+            session_id,
+        )
+
     incoming: list[tuple[Path, Path]] = []
+    staged_state = None
     try:
         for source, target in sources:
             staged = target.with_name(target.name + ".incoming")
             _copy_durable(source, staged)
+            if target == live_state:
+                staged_state = staged
             incoming.append((staged, target))
     except BaseException:
         for staged, _target in incoming:
             staged.unlink(missing_ok=True)
         raise
+
+    if staged_state is not None:
+        try:
+            payload = json.loads(staged_state.read_text())
+            persistence = payload.setdefault("runtime_persistence", {})
+            persistence["pair_restore"] = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "restored_revision": int(revision),
+                "discarded_revisions": max(0, discarded_from - int(revision)),
+                "discarded_since": discarded_since,
+            }
+            staged_state.write_text(json.dumps(payload, indent=2))
+        except (OSError, ValueError, TypeError):
+            # The restore itself is sound; only its disclosure is not. Failing
+            # here would strand a session whose runtime is fine.
+            logger.warning(
+                "[%s] Could not annotate the restored record with what the "
+                "pair restore discarded",
+                session_id,
+                exc_info=True,
+            )
 
     for staged, target in incoming:
         os.replace(staged, target)

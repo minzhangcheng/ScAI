@@ -375,3 +375,67 @@ def test_an_incomplete_pair_is_refused_rather_than_half_applied():
 
     assert runtime_apply.restore_generation_pair(sid, revision=7) is False
     assert json.loads(live_state.read_text())["marker"] == "live"
+
+
+def test_a_pair_restore_records_what_it_discarded():
+    """Spec B2-3: continuing from an earlier generation is not free.
+
+    The restored record reads `current` again -- current_revision equals
+    committed_revision, because that is what the pair holds -- so without this
+    the UI would go quiet at the exact moment the user most needs telling. The
+    work between the restored generation and the interruption is gone, and the
+    disclosure has to say so and from when.
+    """
+    sid = "sess-pair-restore-disclosure"
+    states, _pair = _generation_pair(sid, 44)
+
+    (states / f"{sid}_state.json").write_text(json.dumps({
+        "session_id": sid,
+        "runtime_persistence": {
+            "status": "live_dirty",
+            "current_revision": 61,
+            "committed_revision": 44,
+            "last_saved_at": "2026-09-08T08:10:19",
+        },
+    }))
+
+    assert runtime_apply.restore_generation_pair(sid, revision=44) is True
+
+    record = json.loads(
+        (states / f"{sid}_state.json").read_text()
+    )["runtime_persistence"]
+    restore = record["pair_restore"]
+    assert restore["restored_revision"] == 44
+    assert restore["discarded_revisions"] == 17
+    assert restore["discarded_since"] == "2026-09-08T08:10:19"
+    assert restore["at"]
+
+
+def test_a_pair_restore_disclosure_survives_only_until_the_next_commit():
+    """It describes one event, and the next successful save ends it.
+
+    Left in place it would accumulate into the permanent warning 0.55.4 took
+    out of the banner; cleared too early it would vanish before the user read
+    it. The next committed generation is the point at which the session is
+    genuinely current again.
+    """
+    from backend.utils.sandbox import NotebookState
+
+    sid = "sess-pair-restore-cleared"
+    states = get_session_states(sid)
+    states.mkdir(parents=True, exist_ok=True)
+    notebook = NotebookState(sid, str(states))
+    notebook.runtime_persistence["pair_restore"] = {"restored_revision": 44}
+
+    notebook.update_runtime_persistence(
+        "live_dirty", current_revision=45, saved_revision=44,
+    )
+    assert "pair_restore" in notebook.runtime_persistence, (
+        "an ordinary dirty cell must not silence the disclosure"
+    )
+
+    notebook.update_runtime_persistence(
+        "current", current_revision=45, saved_revision=45,
+        commit_source="regular_save", runtime_digest="b" * 64,
+    )
+    assert notebook.runtime_persistence.get("pair_restore") is None

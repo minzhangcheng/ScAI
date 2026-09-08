@@ -12,6 +12,14 @@ export interface RuntimePersistenceRecord {
       read here -- ``coherence`` answers the question this banner asks -- but
       declared because it travels with the record. */
   status?: string | null
+  /** Written by a pair restore (spec B2-3): what continuing from an earlier
+      generation cost. Present only until the next committed generation. */
+  pair_restore?: {
+    at?: string | null
+    restored_revision?: number | null
+    discarded_revisions?: number | null
+    discarded_since?: string | null
+  } | null
 }
 
 interface RuntimePersistenceBannerProps {
@@ -63,6 +71,47 @@ export function RuntimePersistenceBanner({
   isZh = false,
 }: RuntimePersistenceBannerProps) {
   const coherence = record?.coherence
+
+  // Before the `current` early-return, and deliberately: a pair restore leaves
+  // a record whose current_revision equals its committed_revision, so
+  // coherence reads `current` and every branch below would render nothing --
+  // silence at the one moment there is something real to say. The generation
+  // is coherent; the work after it is gone.
+  const pairRestore = record?.pair_restore
+  if (pairRestore) {
+    const resumedFrom = formatSince(pairRestore.discarded_since, isZh)
+    const discarded = pairRestore.discarded_revisions ?? 0
+    return (
+      <div
+        role="status"
+        className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-sm text-amber-900 dark:text-amber-200"
+      >
+        <div className="font-medium">
+          {isZh
+            ? '已从上次成功保存处继续'
+            : 'Resumed from the last successful save'}
+        </div>
+        <p className="text-xs mt-0.5">
+          {isZh
+            ? '分析在那次保存之后中断了。运行时已从该保存点恢复，其后的工作没有落盘，无法找回。'
+            : 'The analysis was interrupted after that save. The runtime was restored from it, and the work done afterwards never reached disk and cannot be recovered.'}
+        </p>
+        {resumedFrom && (
+          <p className="text-xs mt-0.5 opacity-80">
+            {isZh ? `继续自：${resumedFrom}` : `Resumed from: ${resumedFrom}`}
+          </p>
+        )}
+        {discarded > 0 && (
+          <p className="text-xs mt-0.5 opacity-80">
+            {isZh
+              ? `丢弃了 ${discarded} 次单元格执行`
+              : `${discarded} cell execution${discarded === 1 ? '' : 's'} discarded`}
+          </p>
+        )}
+      </div>
+    )
+  }
+
   if (!coherence || coherence === 'current') return null
 
   const since = formatSince(record?.exposure_since, isZh)

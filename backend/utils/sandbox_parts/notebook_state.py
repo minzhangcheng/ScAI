@@ -563,6 +563,12 @@ class NotebookState:
                 "degraded_recovery": False,
                 "degraded_from_revision": None,
                 "degraded_to_revision": None,
+                # Spec B2-3: the disclosure describes one event, and this is
+                # the point at which the session is genuinely current again.
+                # Clearing it on anything less -- an ordinary dirty cell, say
+                # -- would take it away before it had been read; leaving it
+                # would accumulate into the permanent warning 0.55.4 removed.
+                "pair_restore": None,
             })
         elif status == "failed":
             self.runtime_persistence.update({

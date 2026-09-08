@@ -79,6 +79,88 @@ describe('RuntimePersistenceBanner', () => {
   })
 
   /**
+   * Spec B2-3. Resuming onto an earlier generation is the outcome B2-2 chose
+   * over re-running from the data, and it is not free: the work between that
+   * generation and the interruption is gone. The restored record reads
+   * `current` -- the pair holds a generation whose revisions match -- so this
+   * is the one disclosure that has to survive a coherent record.
+   */
+  describe('after a pair restore', () => {
+    it('says what continuing from the earlier generation cost', () => {
+      render(
+        <RuntimePersistenceBanner
+          record={{
+            coherence: 'current',
+            pair_restore: {
+              at: '2026-09-08T12:00:00Z',
+              restored_revision: 44,
+              discarded_revisions: 17,
+              discarded_since: '2026-09-08T08:10:19Z',
+            },
+          }}
+        />,
+      )
+
+      const text = screen.getByRole('status').textContent ?? ''
+      expect(text).toContain('Resumed from the last successful save')
+      expect(text).toContain('cannot be recovered')
+      expect(text).toContain('17 cell executions discarded')
+    })
+
+    it('outranks the running-kernel wording, which would hide it', () => {
+      render(
+        <RuntimePersistenceBanner
+          record={{
+            coherence: 'stale',
+            last_attempt_status: 'succeeded',
+            pair_restore: { restored_revision: 44, discarded_revisions: 3 },
+          }}
+          sessionStatus="running"
+        />,
+      )
+
+      const text = screen.getByRole('status').textContent ?? ''
+      expect(text).toContain('Resumed from the last successful save')
+      expect(text).not.toContain('Analysis in progress')
+    })
+
+    it('counts one execution in the singular', () => {
+      render(
+        <RuntimePersistenceBanner
+          record={{ coherence: 'current', pair_restore: { discarded_revisions: 1 } }}
+        />,
+      )
+      expect(screen.getByRole('status').textContent).toContain(
+        '1 cell execution discarded',
+      )
+    })
+
+    it('says nothing about a count it does not have', () => {
+      render(
+        <RuntimePersistenceBanner
+          record={{ coherence: 'current', pair_restore: { restored_revision: 44 } }}
+        />,
+      )
+      expect(screen.getByRole('status').textContent).not.toContain('discarded')
+    })
+
+    it('renders in Chinese', () => {
+      render(
+        <RuntimePersistenceBanner
+          record={{
+            coherence: 'current',
+            pair_restore: { discarded_since: '2026-09-08T08:10:19Z' },
+          }}
+          isZh
+        />,
+      )
+      const text = screen.getByRole('status').textContent ?? ''
+      expect(text).toContain('已从上次成功保存处继续')
+      expect(text).toContain('无法找回')
+    })
+  })
+
+  /**
    * A running kernel is stale by construction. `current_revision` advances on
    * every cell while `committed_revision` only advances at a save point, so
    * between two round-boundary saves the verdict is `stale` continuously --
