@@ -41,6 +41,12 @@ from .layout import (
     uploads_root,
 )
 from .listing import read_session_listing
+from .writer import (
+    SnapshotAbandoned,
+    SnapshotPrecondition,
+    capture_decision_snapshot,
+    reclaim_abandoned_capture_work,
+)
 from .manifest import (
     SNAPSHOT_MANIFEST_SCHEMA_VERSION,
     SnapshotManifestError,
@@ -56,11 +62,14 @@ __all__ = [
     "DECISION_GATES",
     "GATE_WORDS",
     "SNAPSHOT_MANIFEST_SCHEMA_VERSION",
+    "SnapshotAbandoned",
     "SnapshotManifestError",
+    "SnapshotPrecondition",
     "SnapshotsDisabled",
     "WORD_GATES",
     "build_continuation",
     "build_snapshot_manifest",
+    "capture_decision_snapshot",
     "deletion_sort_key",
     "failed_record_path",
     "in_deletion_order",
@@ -70,6 +79,7 @@ __all__ = [
     "next_node_for",
     "parse_snapshot_id",
     "read_session_listing",
+    "reclaim_abandoned_capture_work",
     "read_snapshot_manifest",
     "restored_status_for",
     "retention_rank",

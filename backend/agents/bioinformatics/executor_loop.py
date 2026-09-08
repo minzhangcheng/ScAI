@@ -750,8 +750,16 @@ async def prepare_loop_context(
         *,
         save_sandbox: bool = False,
         budget_exhausted: bool = False,
+        extra_messages: list | None = None,
     ) -> None:
-        """Persist the executor transcript independently of planning history."""
+        """Persist the executor transcript independently of planning history.
+
+        ``extra_messages`` are appended to the transcript this checkpoint
+        records without touching the live list. One caller uses it: the
+        annotation decision snapshot, which checkpoints the loop while a tool
+        call is still outstanding and has to pair that call with a result or
+        the restore rebuilds the transcript from nothing.
+        """
         checkpoint_data = executor_checkpoint.build_checkpoint_payload(
             step_name=step_name,
             state=state,
@@ -760,7 +768,7 @@ async def prepare_loop_context(
             total_steps=loop_context.max_steps,
             attempt_start_step=loop_context.attempt_start_step,
             active_plan_id=_active_plan_id(),
-            messages=loop_context.messages,
+            messages=[*loop_context.messages, *(extra_messages or [])],
             findings=loop_context.findings,
             figures=loop_context.figures,
             code_history=[

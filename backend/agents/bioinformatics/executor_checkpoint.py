@@ -1,7 +1,38 @@
 """Executor checkpoint validation and payload construction."""
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
+
+
+@dataclass
+class PendingToolCheckpoint:
+    """A handle to checkpoint the executor at the tool call it is inside.
+
+    The executor's checkpoint closure is local to its run loop, and the cell
+    annotation decision is taken by the *workflow*, several frames above it,
+    inside a callback the tool handler awaits. Without a handle the workflow
+    would have to reconstruct the executor's position from outside, which is
+    the mismatch the save-chain repair's section 3.11 records: two records of
+    the same run that nothing binds together.
+
+    The synthetic tool result is not decoration. ``tool_calls_are_paired``
+    rejects a checkpoint whose last assistant message asks for a tool call that
+    has no result, and ``restore_executor_state`` then throws the transcript
+    away and starts fresh -- so a restored session would lose the executor's
+    whole account of the round it is resuming into.
+    """
+
+    tool_call_id: str
+    tool_name: str
+    save: Callable[..., Awaitable[None]]
+
+    async def checkpoint_now(self, step_name: str, *, result_text: str) -> None:
+        await self.save(step_name, extra_messages=[{
+            "role": "tool",
+            "tool_call_id": self.tool_call_id,
+            "content": result_text,
+        }])
 
 
 def validate_checkpoint(

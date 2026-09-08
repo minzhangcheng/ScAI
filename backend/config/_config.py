@@ -188,12 +188,31 @@ SNAPSHOT_FREE_SPACE_RESERVE_BYTES: Optional[int] = _resolve_snapshot_reserve_byt
 
 
 def snapshots_enabled() -> bool:
-    """Whether this installation takes decision snapshots.
-
-    Reads the module attribute rather than a captured value, so a test that
-    sets ``SNAPSHOT_DIR`` sees the same answer every caller does.
-    """
+    """Whether this installation takes decision snapshots."""
     return SNAPSHOT_DIR is not None
+
+
+# Accessors, not the constants themselves. `backend/config/__init__.py`
+# re-exports this module with `import *`, which binds a *copy* of every value
+# at import; a consumer reading `backend.config.SNAPSHOT_STALL_SECONDS` would
+# therefore hold a number nothing could ever change. A function closes over
+# this module's own globals and answers the live value, which is what makes the
+# watchdog's bounds settable at all.
+def snapshot_dir():
+    """Where decision snapshots are written, or None when they are off."""
+    return SNAPSHOT_DIR
+
+
+def snapshot_stall_seconds() -> int:
+    return SNAPSHOT_STALL_SECONDS
+
+
+def snapshot_max_seconds() -> int:
+    return SNAPSHOT_MAX_SECONDS
+
+
+def snapshot_free_space_reserve_bytes():
+    return SNAPSHOT_FREE_SPACE_RESERVE_BYTES
 
 _ENABLE_METHOD_DECISION_GUIDANCE = os.environ.get(
     "SCAI_ENABLE_METHOD_DECISION_GUIDANCE", ""

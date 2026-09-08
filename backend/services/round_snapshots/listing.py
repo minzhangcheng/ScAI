@@ -105,6 +105,12 @@ def read_session_listing(session_id: str) -> dict[str, Any]:
                 _failed_row(entry, entry.name[: -len(FAILED_SUFFIX)])
             )
 
+    # A decision that failed once and was captured on a later attempt is not
+    # a gap. The two records can share an identifier because the failure is
+    # named before the capture knows which revision it will commit.
+    published = {row["snapshot_id"] for row in rows}
+    failed = [row for row in failed if row["snapshot_id"] not in published]
+
     rows = with_deletion_order(mark_superseded(rows))
     rows.sort(key=lambda row: (row["round"], row["retention_rank"], row["runtime_revision"]))
     failed.sort(key=lambda row: (row["round"], row["snapshot_id"]))

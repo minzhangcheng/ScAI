@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from backend.services.round_snapshots.gates import round_boundary_gate
+from backend.services.round_snapshots.writer import capture_decision_snapshot
 
 
 _PATHOLOGY_IMAGE_PROJECTION_LIMIT = 20
@@ -642,6 +643,16 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
     # two predicates itself, forty lines apart; a capture that classified the
     # same boundary differently would restore a session onto the wrong dialog.
     decision_gate = round_boundary_gate(analysis_state, state)
+
+    # Part B hook A. Before the gate acts -- before the dialog opens and before
+    # an unattended run answers it for the user -- so a restored session lands
+    # with the decision still to be made. The round-boundary save above has
+    # just committed the generation this captures; the writer commits one
+    # itself only if a chat-delegated cell has run since.
+    await capture_decision_snapshot(
+        self, analysis_state, gate=decision_gate, workflow_state=state,
+    )
+
     is_integration_gate = decision_gate == GATE_INTEGRATION_SELECTION
     if is_integration_gate:
         wait_seconds = analysis_state.round_wait_seconds

@@ -75,13 +75,13 @@ class SnapshotsDisabled(RuntimeError):
 def snapshot_storage_root() -> Path:
     """The configured snapshot root, or raise.
 
-    Read through the module rather than imported by value: tests set
-    ``backend.config._config.SNAPSHOT_DIR`` and every path helper has to see
-    that, exactly as ``snapshots_enabled()`` does.
+    Read through the accessor rather than imported by value: the config
+    package re-exports its module with ``import *``, so a constant read at
+    import is a copy nothing can change.
     """
-    from backend.config import _config
+    from backend.config import snapshot_dir
 
-    root = _config.SNAPSHOT_DIR
+    root = snapshot_dir()
     if root is None:
         raise SnapshotsDisabled(
             "SCAI_SNAPSHOT_DIR is not set, so snapshots are disabled"
