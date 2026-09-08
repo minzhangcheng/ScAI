@@ -437,3 +437,116 @@ helper = make_helper()
         assert result.success, result.error
     finally:
         await sb.stop(save=False)
+
+
+@pytest.mark.asyncio
+async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
+    """Batch 2 end to end, on a real kernel. Spec B2-2's acceptance criterion.
+
+    The unit tests verify the pieces in isolation, and §4b R1 is what that
+    costs: the exact-revision rule was checked on its own while the signal
+    carrying it never survived a resume. This drives the whole path -- save a
+    generation, do more work, lose the process without a closing save, restore
+    the pair, and open the session again.
+
+    What it asserts is the promise B2-2 makes: the namespace is the one the
+    dump held, the two positions are the ones committed beside it, and the
+    record says what continuing from there cost.
+    """
+    import json
+    import sqlite3
+
+    from backend.config import get_session_states
+    from backend.utils import runtime_apply
+    from backend.utils.sandbox import LocalJupyterSandbox
+
+    session_id = "test-pair-restore-roundtrip"
+    states_dir = get_session_states(session_id)
+    states_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir = str(tmp_path / "workspace")
+
+    checkpoint = states_dir / "checkpoints.sqlite"
+    executor_checkpoint = states_dir / f"{session_id}_bioinfo_checkpoint.json"
+
+    def write_checkpoint(marker):
+        checkpoint.unlink(missing_ok=True)
+        with sqlite3.connect(checkpoint) as conn:
+            conn.execute("CREATE TABLE checkpoints (thread_id TEXT, blob TEXT)")
+            conn.execute(
+                "INSERT INTO checkpoints VALUES (?, ?)", (session_id, marker)
+            )
+
+    sb = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states_dir),
+        working_dir=workspace_dir,
+        timeout=60,
+    )
+    await sb.start()
+    try:
+        # The work that will survive, and the two positions as they stand
+        # when it is committed.
+        assert (await sb.execute("adata = {'cells': 1234}")).success
+        write_checkpoint("position-at-the-save")
+        executor_checkpoint.write_text(json.dumps({
+            "step_number": 10, "round_number": 2, "planning_stage": "stage1",
+        }))
+
+        assert await sb.save_session()
+        committed = int(
+            sb.notebook_state.runtime_persistence["committed_revision"]
+        )
+
+        # The work that will be lost, and the positions moving past it.
+        assert (await sb.execute("adata['cells'] = 9999")).success
+        assert (await sb.execute("lost_after_the_save = True")).success
+        write_checkpoint("position-the-crash-left")
+        executor_checkpoint.write_text(json.dumps({
+            "step_number": 40, "round_number": 2, "planning_stage": "stage1",
+        }))
+
+        record = sb.notebook_state.runtime_persistence
+        assert int(record["current_revision"]) > committed, (
+            "the kernel must be ahead of its newest generation before the crash"
+        )
+    finally:
+        # The crash: the process goes without a closing save.
+        await sb.stop(save=False)
+
+    assert runtime_apply.restore_generation_pair(
+        session_id, revision=committed
+    ) is True
+
+    # Both positions are the ones committed beside the dump.
+    with sqlite3.connect(checkpoint) as conn:
+        assert conn.execute(
+            "SELECT blob FROM checkpoints"
+        ).fetchone()[0] == "position-at-the-save"
+    assert json.loads(executor_checkpoint.read_text())["step_number"] == 10
+
+    # And the record says what continuing from there cost.
+    restored = json.loads(
+        (states_dir / f"{session_id}_state.json").read_text()
+    )["runtime_persistence"]
+    assert restored["pair_restore"]["restored_revision"] == committed
+    assert restored["pair_restore"]["discarded_revisions"] >= 2
+
+    # The namespace is the one the dump held.
+    sb2 = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states_dir),
+        working_dir=workspace_dir,
+        timeout=60,
+    )
+    await sb2.start()
+    try:
+        check = await sb2.execute(
+            "print(adata['cells'], 'lost_after_the_save' in globals())"
+        )
+        assert check.success, check.error
+        assert "1234" in check.output, check.output
+        assert "False" in check.output, (
+            f"work done after the save must not survive it: {check.output}"
+        )
+    finally:
+        await sb2.stop(save=False)
