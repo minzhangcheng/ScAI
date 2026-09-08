@@ -356,7 +356,6 @@ async def _tombstone_detach_and_publish(session_id: str, state, owner_id: str, *
     _binding_report_workflows = getattr(bindings, "report_workflows")
     _binding_session_access_times = getattr(bindings, "session_access_times")
     _binding_sessions = getattr(bindings, "sessions")
-    _binding_snapshot_restore_jobs = getattr(bindings, "snapshot_restore_jobs")
     _binding_state_lock = getattr(bindings, "state_lock")
     _binding_tombstone_generation = getattr(bindings, "tombstone_generation")
     _binding_websockets = getattr(bindings, "websockets")
@@ -430,18 +429,6 @@ async def _tombstone_detach_and_publish(session_id: str, state, owner_id: str, *
 
         async with _binding_chat_task_lock:
             chat_sandbox = _binding_chat_sandboxes.pop(session_id, None)
-
-        for transaction_id, handle in list(_binding_snapshot_restore_jobs.items()):
-            restore_record = getattr(handle, "record", None)
-            if getattr(restore_record, "session_id", None) != session_id:
-                continue
-            cancel_event = getattr(handle, "cancel_event", None)
-            if cancel_event is not None:
-                cancel_event.set()
-            task = getattr(handle, "task", None)
-            if isinstance(task, _binding_asyncio.Task):
-                tasks_to_cancel.append(task)
-            _binding_snapshot_restore_jobs.pop(transaction_id, None)
 
         tasks_to_cancel.extend(
             await _binding_mark_session_exports_for_deletion(

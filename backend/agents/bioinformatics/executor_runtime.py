@@ -9,6 +9,27 @@ async def start_sandbox(agent) -> dict:
     return await agent.sandbox.start()
 
 
+def _runtime_marked_unavailable(state, session_id: str) -> bool:
+    """Whether either view of this session says no runtime could be restored.
+
+    ``_mark_runtime_unavailable_if_work_exists`` runs inside ``sandbox.start()``
+    and can only reach the cached ``AnalysisState`` in ``backend.state.sessions``.
+    The graph carries its own object -- ``_restore_entry`` deep-copies one -- and
+    the two coincide only from the next state sync onward. Reading the graph's
+    object alone therefore lets a verdict recorded moments earlier, by the very
+    call this guard follows, go unseen: the run would continue over a namespace
+    that does not exist, which is exactly what the mark exists to prevent.
+    """
+    from backend.state import sessions as live_sessions
+
+    for candidate in (state, live_sessions.get(session_id)):
+        if candidate is None:
+            continue
+        if getattr(candidate, "runtime_restore_status", "complete") == "unavailable":
+            return True
+    return False
+
+
 async def prepare_sandbox(agent, state, *, bindings) -> None:
     logger = getattr(bindings, "logger")
     CodeExecution = getattr(bindings, "CodeExecution")
@@ -50,7 +71,7 @@ async def prepare_sandbox(agent, state, *, bindings) -> None:
     # dialog: there is nothing to retry, because nothing was ever saved.
     persistence = agent.sandbox.sync_runtime_persistence_state(state)
     if (
-        getattr(state, "runtime_restore_status", "complete") == "unavailable"
+        _runtime_marked_unavailable(state, agent.sandbox.session_id)
         and not getattr(state, "runtime_recompute_pending", False)
     ):
         from backend.services.runtime_recompute import RuntimeUnavailable

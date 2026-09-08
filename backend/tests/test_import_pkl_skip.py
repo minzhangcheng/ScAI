@@ -37,3 +37,37 @@ def test_blocks_nested_pkl_under_snapshot_blob_dir():
     # The S4 skip must match by basename regardless of path depth.
     assert is_sandbox_pickle("snapshots/abc_blobs/inner_session.pkl") is True
     assert is_sandbox_pickle("snapshots/abc_blobs/deep/inner_session.pkl.zst") is True
+
+
+def test_a_retired_generation_is_still_that_generation():
+    """`retire_live_runtime` renames the dump, it does not delete it.
+
+    A results-only export skips the runtime by name and an untrusted import
+    refuses it by name, so a predicate that stops at the live spelling let a
+    whole retired dump travel in an archive that declares no runtime, and let
+    one land on disk past the X-Trust grant that exists to stop exactly that.
+    """
+    from backend.routes.export_import_parts.core import (
+        is_runtime_generation_name,
+        is_runtime_h5ad_name,
+    )
+
+    for name in (
+        "states/abc_session.pkl.quarantine",
+        "states/abc_session.pkl.quarantine.3",
+        "states/abc_session.pkl.zst.quarantine",
+        "states/abc_session.runtime.json.quarantine",
+        "states/abc_session.runtime.json.sig.quarantine.1",
+    ):
+        assert is_runtime_generation_name(name) is True, name
+    assert is_runtime_h5ad_name("states/adata.h5ad.quarantine") is True
+    assert is_runtime_h5ad_name("states/runtime_h5ad_manifest.json.quarantine.2") is True
+
+
+def test_the_quarantine_suffix_does_not_widen_the_predicate():
+    """Only the retired spelling of a generation file, not anything set aside."""
+    from backend.routes.export_import_parts.core import is_runtime_generation_name
+
+    assert is_runtime_generation_name("states/notes.txt.quarantine") is False
+    assert is_runtime_generation_name("states/abc_session.pklx.quarantine") is False
+    assert is_runtime_generation_name("states/quarantine") is False

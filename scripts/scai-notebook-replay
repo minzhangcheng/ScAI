@@ -529,7 +529,14 @@ def cmd_replay(args) -> int:
             file=sys.stderr,
         )
 
-    workspace = pathlib.Path(args.workspace or (session / "_replay_workspace"))
+    # Absolute: the kernel is started with this as its cwd *and* handed the same
+    # string in SCAI_REPLAY_WORKSPACE, which the bootstrap resolves from inside
+    # that cwd. A relative --workspace would therefore nest one level per read,
+    # and `_UPLOADS_DIR = _WORKSPACE_DIR.parent / 'uploads'` would land somewhere
+    # else entirely.
+    workspace = pathlib.Path(
+        args.workspace or (session / "_replay_workspace")
+    ).resolve()
     declarations = (original.get("declared_persistent_outputs")
                     if original.get("persistent_outputs_status") == "measured" else None)
     outcomes, replayed = run_in_kernel(cells, workspace, declarations)

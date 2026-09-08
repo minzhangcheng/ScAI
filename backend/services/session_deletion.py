@@ -47,7 +47,6 @@ from backend.state import (
     release_initializing_session,
     session_access_times,
     sessions,
-    snapshot_restore_jobs,
     state_lock,
     websockets,
     workflows,
