@@ -169,9 +169,31 @@ components (pkl, signature, metadata, runtime manifest, manifest signature)
 commit together or not at all; `recover_regular_save_transaction` drives an
 interrupted one to a terminal state on the next load.
 
-`session.json`, the notebook, the workspace and the LangGraph checkpoint are
-each written by their own path. They are not captured as a set, and nothing
-rewinds them together — there is no restore.
+Three of those files *are* captured as a set. Each commit also copies the
+notebook metadata (`<id>_state.json`), the LangGraph checkpoint database and
+the executor's step checkpoint (`<id>_bioinfo_checkpoint.json`) into
+`<session>/states/generation/<revision>/`, inside the same transaction, so they
+roll back with the dump they belong to. One pair is kept, and the previous one
+is deleted only once the new one is durable. The checkpoint database is copied
+through SQLite's backup API, not as bytes, because LangGraph writes it in WAL
+mode.
+
+That pair is what makes a crash recoverable. After any interruption the
+persisted record reads `stale` — the state and both positions have advanced
+past the newest committed dump — and `POST /run` restores the pair rather than
+retiring the generation, so the run continues from the step the dump was taken
+at. Retirement remains the fallback when no usable pair exists, and for
+`unavailable` and `inconsistent`. The restore publishes the state record last,
+so an interrupted restore still reads as needing one and is simply retried;
+`runtime_persistence.pair_restore` then carries what continuing from the earlier
+generation cost, and the UI shows it until the next committed generation.
+
+`session.json`, the notebook and the workspace are still written by their own
+paths and are not in the pair. `session.json` does not need to be: the graph
+checkpoint already holds the `AnalysisState` of the moment it was written, and
+`session.json` is a projection of it for the API. See
+`docs/coding/runtime-save-chain-repair-spec.md` for the measurements behind all
+of this.
 
 ### What a failure does
 
