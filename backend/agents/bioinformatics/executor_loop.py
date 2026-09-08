@@ -33,7 +33,36 @@ async def start_turn(context) -> TurnStart:
             pass
     context.step_count += 1
     context.force_break = False  # Reset per-iteration
-    if context.checkpoint_manager.should_checkpoint(context.step_count):
+    # Two independent reasons to checkpoint here. The periodic one is the
+    # five-step counter; the other is §5.1's runtime cadence, which had no
+    # trigger of its own -- `step_count` restarts at 0 on every executor
+    # invocation, so `step % 5` almost never came round and the floor governed a
+    # branch that never ran. Asking every turn is what makes the floor mean
+    # something; `runtime_save_due` returns False until it has elapsed, so this
+    # does not save more often than §5.1 says.
+    runtime_due = False
+    try:
+        from backend.services.save_cadence import runtime_save_due
+
+        sandbox = getattr(context.agent, "sandbox", None)
+        # `live_dirty` is set by the execution boundary after a cell that could
+        # have changed the namespace, and cleared by a commit. Without it the
+        # floor's "nothing has committed yet, so save" rule fires on turn one of
+        # every run and dumps a kernel that has executed nothing.
+        record = getattr(
+            getattr(sandbox, "notebook_state", None), "runtime_persistence", None,
+        )
+        dirty = isinstance(record, dict) and record.get("status") == "live_dirty"
+        runtime_due = (
+            sandbox is not None
+            and dirty
+            and runtime_save_due(sandbox, "step_boundary")
+        )
+    except Exception:
+        # The cadence is an optimisation over the round boundary, never a
+        # precondition for continuing the analysis.
+        logger.debug("[Bioinformatics] runtime cadence check failed", exc_info=True)
+    if context.checkpoint_manager.should_checkpoint(context.step_count) or runtime_due:
         try:
             await context.save_checkpoint(
                 f'step_{context.step_count}',

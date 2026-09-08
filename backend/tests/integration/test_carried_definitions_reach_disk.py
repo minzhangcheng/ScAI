@@ -185,3 +185,46 @@ async def test_a_user_definition_named_open_is_still_theirs(sandbox):
         "a user-defined `open` was excluded by name; the exclusion must key on "
         "the bootstrap's tag, not the spelling"
     )
+
+
+# --- §5.1's intra-round cadence, against a real kernel ----------------------
+
+
+@pytest.mark.asyncio
+async def test_a_real_kernel_reports_the_step_cadence_the_loop_asks_for(sandbox):
+    """Wired is not the same as fires.
+
+    The loop's condition is "the runtime is dirty AND the floor has elapsed".
+    Both halves are read off a live sandbox here, because the source guard can
+    only show the question is asked -- across two measured runs the old trigger
+    was asked zero times, and nothing in the suite noticed.
+    """
+    from backend.services.save_cadence import last_committed_epoch, runtime_save_due
+
+    def dirty() -> bool:
+        record = sandbox.notebook_state.runtime_persistence
+        return record.get("status") == "live_dirty"
+
+    # A fresh kernel has executed nothing: nothing to save, whatever the floor
+    # says. This is the case that made turn one of every run dump an empty
+    # namespace before the dirty gate was added.
+    assert not dirty()
+
+    result = await sandbox.execute("cadence_value = 1\n", skip_safety_check=True)
+    assert result.success, result.error
+    assert dirty(), "an executed cell did not mark the runtime dirty"
+
+    # Nothing has committed yet, so the floor does not apply -- there is no
+    # generation to fall back to.
+    assert last_committed_epoch(sandbox) is None
+    assert runtime_save_due(sandbox, "step_boundary") is True
+
+    assert await sandbox.save_session() is True
+
+    # After a commit the clock exists and the floor throttles: the very next
+    # boundary must not save again.
+    assert last_committed_epoch(sandbox) is not None
+    assert runtime_save_due(sandbox, "step_boundary") is False
+    assert runtime_save_due(sandbox, "round_boundary") is True, (
+        "a round boundary must never wait out the floor"
+    )
