@@ -28,7 +28,7 @@ def test_replay_uses_no_static_tissue_vocabulary():
 class _Replay(LiteratureAgent):
     def __init__(self):
         self.max_search_rounds = 40; self.synth_calls = 0; self.focused_buckets = []
-        async def _vd(q, t, max_results=20): return q, [{"pmid": "1", "title": "a", "abstract": "b"}]
+        async def _vd(q, t, max_results=20, **kwargs): return q, [{"pmid": "1", "title": "a", "abstract": "b"}]
         self._validate_and_degrade_query = _vd
         async def _s(q, max_results=20): return []
         self._pubmed_search = _s
@@ -65,4 +65,8 @@ async def test_replay_terminates_triggers_focused_single_synthesis():
     assert lit.synth_calls == 1
     assert res["focused_evidence"]["19"]["status"] == "limited"
     assert res["focused_evidence"]["22"]["status"] == "strong"
-    assert "18" not in res["focused_evidence"]      # context_dependent_state 不做 focused
+    # context_dependent_state and covered clusters take the unadjudicated reference
+    # path: they are searched, but never receive an adjudicated status.
+    assert res["focused_evidence"]["18"]["bucket"] == "context_dependent_state"
+    assert res["focused_evidence"]["18"]["status"] not in ("strong", "limited", "contradictory")
+    assert res["focused_evidence"]["0"]["bucket"] == "covered"

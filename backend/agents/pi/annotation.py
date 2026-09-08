@@ -10,6 +10,7 @@ import logging
 # Configure logger
 logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState
+from ..literature.shared import ANNOTATION_REVIEW_MAX_CHARS, normalize_candidate_celltype
 
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
@@ -23,6 +24,134 @@ from .shared import (  # noqa: F401
     _format_database_priors_block,
     _build_default_bio_tasks,
 )
+
+
+# Articles shown to the PI when it judges whether the retrieved literature is
+# sufficient. Earlier windows (15 articles, 200-char abstracts, always the first
+# 15 retrieved) meant round 2+ evaluations never saw what the refined query found.
+_EVAL_MAX_ARTICLES = 25
+_EVAL_ABSTRACT_CHARS = 300
+
+
+def _evidence_articles(fe: Dict[str, Any], limit: int) -> str:
+    return "\n".join(
+        f"- {a.get('title', '')}: {(a.get('abstract') or '')[:300]}"
+        for a in (fe.get("articles") or [])[:limit]
+    )
+
+
+def _cluster_evidence_lines(cid: str, bucket: str, entry: Dict[str, Any],
+                            fe: Dict[str, Any]) -> List[str]:
+    """Render one cluster's triage note and retrieved literature."""
+    lines: List[str] = []
+    if bucket == "context_dependent_state":
+        lines.append(
+            f"[Note: Cluster {cid} classified as context-dependent state — parent: "
+            f"{entry.get('parent_celltype') or '?'}, driven by "
+            f"{entry.get('context') or 'experimental context'}. "
+            f"Annotate as a state variant of the parent, no literature deep-dive expected.]"
+        )
+    # A cluster in an unadjudicated bucket that the search never reached says
+    # nothing; rendering it as "exhausted" would assert evidence scarcity that
+    # was never measured.
+    if not fe and bucket in ("covered", "context_dependent_state"):
+        return lines
+
+    status = fe.get("status")
+    candidate = normalize_candidate_celltype(
+        entry.get("candidate_celltype") or entry.get("parent_celltype")
+    ) or "marker-defined population"
+
+    if status in ("strong", "limited"):
+        tag = "" if status == "strong" else " (limited evidence)"
+        lines.append(
+            f"[Focused evidence for Cluster {cid} (candidate: {candidate}){tag}]\n"
+            + _evidence_articles(fe, 5)
+        )
+    elif status == "retrieved":
+        lines.append(
+            f"[Retrieved literature for Cluster {cid} (query subject: {candidate}) — "
+            f"not relevance-adjudicated; judge for yourself whether each paper supports "
+            f"this cluster's identity]\n" + _evidence_articles(fe, 3)
+        )
+    elif status == "contradictory":
+        if bucket == "suspected_contamination":
+            lines.append(f"[Cluster {cid}: focused evidence supports suspected contamination "
+                         f"or non-target origin]")
+        else:
+            lines.append(f"[Cluster {cid}: focused evidence contradicts candidate {candidate}; "
+                         f"consider alternative cell identities]")
+    else:
+        reason = fe.get("exhaustion_reason")
+        error = fe.get("error")
+        if reason in ("search_failed", "judge_failed"):
+            detail = f" Error: {error}" if error else ""
+            lines.append(
+                f"[Focused evidence unavailable for Cluster {cid} due to runtime failure "
+                f"({reason}).{detail} Do not interpret as absence of literature.]"
+            )
+        elif reason == "no_pubmed_results":
+            lines.append(
+                f"[Focused search found no PubMed results for Cluster {cid} — this is evidence scarcity, "
+                f"not a runtime failure.]"
+            )
+        elif reason == "empty_query":
+            lines.append(
+                f"[Focused search skipped for Cluster {cid} — no candidate term or marker query terms were available.]"
+            )
+        elif reason == "no_relevant_evidence":
+            titles = "; ".join(a.get("title", "") for a in (fe.get("articles") or [])[:3])
+            suffix = f" Retrieved articles were not relevant: {titles}" if titles else " Retrieved articles were not relevant."
+            lines.append(f"[Focused evidence exhausted for Cluster {cid}.{suffix}]")
+        else:
+            lines.append(f"[Focused evidence exhausted for Cluster {cid} — no relevant literature found]")
+    return lines
+
+
+def _render_cluster_evidence(cluster_ids, triage: Dict[str, Any],
+                             focused_evidence: Dict[str, Any]) -> str:
+    """Per-cluster evidence block, in cluster order, for the matching prompt.
+
+    Every triaged cluster is rendered, including the covered ones: they used to
+    carry no evidence of their own into the matcher, which then had only the
+    pooled review to cite and frequently cited nothing.
+    """
+    triage = triage or {}
+    focused_evidence = focused_evidence or {}
+
+    by_cluster: Dict[str, Any] = {}
+    for bucket in ("rare_unresolved", "suspected_contamination", "context_dependent_state"):
+        for entry in triage.get(bucket) or []:
+            if isinstance(entry, dict):
+                by_cluster.setdefault(str(entry.get("cluster_id")), (bucket, entry))
+    covered_names = triage.get("covered_celltypes") or {}
+    for raw_cid in triage.get("covered") or []:
+        cid = str(raw_cid)
+        by_cluster.setdefault(
+            cid, ("covered", {"cluster_id": cid, "candidate_celltype": covered_names.get(cid)})
+        )
+
+    ordered = [str(c) for c in (cluster_ids or [])]
+    ordered += [cid for cid in by_cluster if cid not in set(ordered)]
+
+    lines: List[str] = []
+    for cid in ordered:
+        found = by_cluster.get(cid)
+        if found is None:
+            continue
+        bucket, entry = found
+        fe = focused_evidence.get(cid) or {}
+        lines.extend(_cluster_evidence_lines(cid, bucket, entry, fe))
+
+    if not lines:
+        return ""
+    return (
+        "\n\n=== PER-CLUSTER LITERATURE EVIDENCE ===\n"
+        "This is the primary evidence for each cluster. The background review that follows is\n"
+        "tissue-level context, not a substitute: where the two disagree about a cluster, the\n"
+        "evidence here is the one tied to that cluster's own markers.\n"
+        + "\n".join(lines) + "\n"
+    )
 
 
 class AnnotationMixin:
@@ -60,7 +189,7 @@ class AnnotationMixin:
                                  f"{it.get('reason','')} (mark low confidence; pass this reason through verbatim)")
         for it in triage.get("context_dependent_state", []):
             triage_lines.append(f"- Cluster {it.get('cluster_id')}: context-dependent state variant of "
-                                 f"{it.get('parent_celltype','?')} (confidence low/medium)")
+                                 f"{it.get('parent_celltype') or '?'} (confidence low/medium)")
         triage_block = ("\n## Triage notes from search phase\n" + "\n".join(triage_lines)) if triage_lines else ""
 
         prompt = f"""You are reviewing cell type annotations generated by a literature search for {organism} {tissue}.
@@ -116,7 +245,7 @@ Reply in JSON format (include ALL clusters):
                 reason = it.get("reason", "")
                 if reason:
                     result[cid]["low_confidence_reason"] = reason
-                cand = it.get("candidate_celltype")
+                cand = normalize_candidate_celltype(it.get("candidate_celltype"))
                 if cand:
                     alts = result[cid].setdefault("alternative_cell_types", [])
                     if cand not in alts:
@@ -303,11 +432,18 @@ that will help annotate these clusters. The query should retrieve articles about
 Rules for PubMed query:
 1. Use MeSH terms where appropriate (e.g., "Single-Cell Analysis"[MeSH] plus the MeSH term that matches the dataset's tissue)
 2. Use Boolean operators (AND, OR, NOT)
-3. Keep the query focused but not overly restrictive — aim for 20-200 results
-4. Include species and tissue/organ as filters
-5. Pick 2-3 of the most informative marker genes (genes that are highly specific to known cell types)
+3. Anchor the query on three required concepts joined by AND: the organism, the tissue/organ,
+   and single-cell or single-nucleus transcriptomics. Add one more AND concept for cell-type
+   identification (atlas, cell type, cell identity, cell population) written as OR alternatives
+4. Do NOT add generic words such as marker, markers, signature, classification or annotation
+   as standalone OR alternatives — they match papers on any topic and bury the atlas-level
+   studies this query exists to find. Combine such a word with the cell-type concept
+   (e.g. "cell type markers") if you use it at all
+5. Optionally add 2-3 marker genes that are highly specific to known cell types in this tissue,
+   as OR alternatives inside the cell-type concept, never as their own AND requirement
 6. Use field tags like [Title/Abstract], [MeSH] when helpful
-7. Prefer broader terms over highly specific ones to avoid zero-result queries
+7. Keep the query focused: a precise query returning a few dozen atlas-level studies is
+   better than a broad one padded with tangential papers
 
 Return ONLY the PubMed query string, nothing else."""
 
@@ -356,6 +492,31 @@ Return ONLY the research brief text."""
         response = await self.chat_without_history(prompt, temperature=0.3)
         return (response or "").strip()
 
+    @staticmethod
+    def _annotation_evaluation_window(
+        articles: List[Dict[str, str]],
+        search_history: List[Dict[str, Any]],
+        max_articles: int = _EVAL_MAX_ARTICLES,
+    ) -> List[Dict[str, str]]:
+        """Articles to show the evaluator: the latest round's retrievals first.
+
+        `articles` is cumulative in retrieval order, so a fixed head window kept
+        showing the first round's hits and hid whatever the refined query found.
+        """
+        latest_new = 0
+        if search_history:
+            try:
+                latest_new = int(search_history[-1].get("new_results") or 0)
+            except (TypeError, ValueError, AttributeError):
+                latest_new = 0
+        latest: List[Dict[str, str]] = []
+        earlier = list(articles)
+        if 0 < latest_new < len(articles):
+            latest = list(articles[len(articles) - latest_new:])
+            earlier = list(articles[: len(articles) - latest_new])
+            latest = latest[: max(1, (max_articles * 2) // 3)]
+        return (latest + earlier)[:max_articles]
+
     async def evaluate_annotation_search_results(
         self,
         cluster_markers: Dict[str, List[str]],
@@ -375,9 +536,11 @@ Return ONLY the research brief text."""
             for cid, genes in cluster_markers.items()
         )
 
+        shown = self._annotation_evaluation_window(articles, search_history)
         articles_summary = "\n".join(
-            f"- [{a.get('year', 'N/A')}] {a['title']}\n  Abstract: {a.get('abstract', 'N/A')[:200]}"
-            for a in articles[:15]
+            f"- [{a.get('year', 'N/A')}] {a['title']}\n"
+            f"  Abstract: {(a.get('abstract') or 'N/A')[:_EVAL_ABSTRACT_CHARS]}"
+            for a in shown
         )
 
         previous_queries = "\n".join(
@@ -402,7 +565,7 @@ to annotate cell clusters in a {organism} {tissue} single-cell/single-nucleus RN
 ## Previous Queries (DO NOT repeat these)
 {previous_queries}
 
-## Articles Found ({len(articles)} total, showing first 15 with abstracts)
+## Articles Found ({len(articles)} total, showing {len(shown)} with abstracts; articles retrieved by the most recent query are listed first)
 {articles_summary}
 
 Classify EVERY cluster into exactly one of four buckets, judging against the experimental
@@ -423,6 +586,7 @@ Respond in JSON format:
     "refined_query": "a NEW PubMed query (MUST differ from all previous queries)",
     "missing_aspects": ["cell types / markers not yet covered"],
     "covered": ["<cluster_id>", ...],
+    "covered_celltypes": {{"<cluster_id>": "the cell type the retrieved literature supports for this covered cluster, or null"}},
     "rare_unresolved": [{{"cluster_id": "..", "candidate_celltype": "Cell Ontology term or null",
         "candidate_celltype_confidence": "high|medium|low", "synonyms": ["CL official aliases, may be empty"],
         "top_markers": ["2-3 markers"], "triage_confidence": "high|medium|low",
@@ -440,6 +604,9 @@ IMPORTANT:
 - Classify ALL clusters; do not omit any cluster from the four buckets.
 - refined_query MUST be valid PubMed (AND/OR), and MUST NOT duplicate any previous query.
 - candidate_celltype MUST be a normalized Cell Ontology term; if you cannot, set it to null — do NOT invent.
+- covered_celltypes SHOULD name the supported cell type for every covered cluster (null when you
+  cannot). It is used to retrieve literature specific to that cluster, so a name here is what
+  gives a covered cluster any evidence of its own.
 - synonyms may be empty; do NOT fabricate synonyms when unsure.
 - Every non-covered entry MUST include evidence_need."""
 
@@ -480,6 +647,33 @@ IMPORTANT:
         for bucket in buckets:
             result[bucket] = cleaned_by_bucket[bucket]
 
+        # Models emit the literal strings "null"/"None" for the JSON null the
+        # prompt asks for; downstream they became PubMed terms and prompt text.
+        for bucket in ("rare_unresolved", "suspected_contamination"):
+            for item in result[bucket]:
+                item["candidate_celltype"] = normalize_candidate_celltype(
+                    item.get("candidate_celltype")
+                )
+                if isinstance(item.get("synonyms"), list):
+                    item["synonyms"] = [
+                        s for s in item["synonyms"]
+                        if normalize_candidate_celltype(s) is not None
+                    ]
+        for item in result["context_dependent_state"]:
+            item["parent_celltype"] = normalize_candidate_celltype(item.get("parent_celltype"))
+
+        raw_covered_names = result.get("covered_celltypes")
+        covered_names: Dict[str, str] = {}
+        if isinstance(raw_covered_names, dict):
+            for raw_cid, raw_name in raw_covered_names.items():
+                cid = str(raw_cid)
+                if cid not in covered_ids:
+                    continue
+                name = normalize_candidate_celltype(raw_name)
+                if name:
+                    covered_names[cid] = name
+        result["covered_celltypes"] = covered_names
+
         triaged = covered_ids | assigned_noncovered
         result["untriaged_cluster_ids"] = sorted(all_ids - triaged)
         result["triage_complete"] = bool(all_ids) and not (all_ids - triaged)
@@ -509,64 +703,17 @@ IMPORTANT:
 
         triage = triage or {}
         focused_evidence = focused_evidence or {}
-        hint_lines: List[str] = []
-        for it in triage.get("context_dependent_state", []):
-            cid = it.get("cluster_id")
-            hint_lines.append(
-                f"[Note: Cluster {cid} classified as context-dependent state — parent: "
-                f"{it.get('parent_celltype','?')}, driven by {it.get('context','experimental context')}. "
-                f"Annotate as a state variant of the parent, no literature deep-dive expected.]")
-        for bucket in ("rare_unresolved", "suspected_contamination"):
-            for it in triage.get(bucket, []):
-                cid = it.get("cluster_id")
-                fe = focused_evidence.get(str(cid)) or focused_evidence.get(cid) or {}
-                status = fe.get("status")
-                cand = it.get("candidate_celltype") or "marker-defined population"
-                if status in ("strong", "limited"):
-                    arts = "\n".join(f"- {a.get('title','')}: {a.get('abstract','')[:300]}"
-                                     for a in fe.get("articles", [])[:5])
-                    tag = "" if status == "strong" else " (limited evidence)"
-                    hint_lines.append(f"[Focused evidence for Cluster {cid} (candidate: {cand}){tag}]\n{arts}")
-                elif status == "contradictory":
-                    if bucket == "rare_unresolved":
-                        hint_lines.append(f"[Cluster {cid}: focused evidence contradicts candidate {cand}; "
-                                          f"consider alternative cell identities]")
-                    else:
-                        hint_lines.append(f"[Cluster {cid}: focused evidence supports suspected contamination "
-                                          f"or non-target origin]")
-                else:
-                    reason = fe.get("exhaustion_reason")
-                    error = fe.get("error")
-                    if reason in ("search_failed", "judge_failed"):
-                        detail = f" Error: {error}" if error else ""
-                        hint_lines.append(
-                            f"[Focused evidence unavailable for Cluster {cid} due to runtime failure "
-                            f"({reason}).{detail} Do not interpret as absence of literature.]"
-                        )
-                    elif reason == "no_pubmed_results":
-                        hint_lines.append(
-                            f"[Focused search found no PubMed results for Cluster {cid} — this is evidence scarcity, "
-                            f"not a runtime failure.]"
-                        )
-                    elif reason == "empty_query":
-                        hint_lines.append(
-                            f"[Focused search skipped for Cluster {cid} — no candidate term or marker query terms were available.]"
-                        )
-                    elif reason == "no_relevant_evidence":
-                        arts = "; ".join(a.get("title", "") for a in fe.get("articles", [])[:3])
-                        suffix = f" Retrieved articles were not relevant: {arts}" if arts else " Retrieved articles were not relevant."
-                        hint_lines.append(f"[Focused evidence exhausted for Cluster {cid}.{suffix}]")
-                    else:
-                        hint_lines.append(f"[Focused evidence exhausted for Cluster {cid} — no relevant literature found]")
-        hints_block = ("\n\n=== PER-CLUSTER TRIAGE & FOCUSED EVIDENCE ===\n" + "\n".join(hint_lines) + "\n") if hint_lines else ""
+        hints_block = _render_cluster_evidence(
+            list(cluster_markers.keys()), triage, focused_evidence
+        )
         priors_block = _format_database_priors_block(database_priors)
 
-        prompt = f"""Based on the following literature review about cell types in {organism}{tissue_part}, \
-annotate each cell cluster by matching its marker genes to known cell type signatures.
-
-=== LITERATURE REVIEW ===
-{literature_report[:12000]}
+        prompt = f"""Annotate each cell cluster in {organism}{tissue_part} by matching its marker \
+genes to known cell type signatures, using the evidence below.
 {hints_block}{priors_block}
+=== BACKGROUND LITERATURE REVIEW (tissue-level context; secondary to the per-cluster evidence above) ===
+{literature_report[:ANNOTATION_REVIEW_MAX_CHARS]}
+
 === CLUSTER MARKER GENES (from sc.tl.rank_genes_groups) ===
 {markers_text}
 

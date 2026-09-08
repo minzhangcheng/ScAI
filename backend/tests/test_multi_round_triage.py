@@ -12,7 +12,7 @@ class _Lit(LiteratureAgent):
         self.max_search_rounds = 40
         self._first = first_articles
 
-        async def _vd(query, topic, max_results=20):
+        async def _vd(query, topic, max_results=20, **kwargs):
             arts = [{"pmid": "1", "title": "t", "abstract": "a"}] if self._first else []
             return query, arts
         self._validate_and_degrade_query = _vd
@@ -49,7 +49,8 @@ class _Lit(LiteratureAgent):
 
 @pytest.mark.asyncio
 async def test_semantic_termination_focused_and_single_synthesis():
-    # triage_complete=True 且 low_confidence=False → 确定性终止
+    # triage_complete=True 且 low_confidence=False,但 sufficient=False 给了 refined_query:
+    # 允许一轮定向检索(q2 无新结果 → 查询停滞终止);focused 与合成仍只各跑一次
     ev = {"sufficient": False, "refined_query": "q2", "triage_complete": True,
           "triage_low_confidence": False, "covered": [],
           "rare_unresolved": [{"cluster_id": "22", "candidate_celltype": "pDC",
@@ -87,7 +88,7 @@ async def test_focused_articles_prioritized_for_synthesis_when_main_pool_large()
             self.synth_first_pmids = []
             self.focused_called = []
 
-            async def _vd(query, topic, max_results=20):
+            async def _vd(query, topic, max_results=20, **kwargs):
                 articles = [
                     {"pmid": str(i), "title": f"main-{i}", "abstract": "main"}
                     for i in range(1, 26)

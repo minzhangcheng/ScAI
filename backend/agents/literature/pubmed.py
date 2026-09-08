@@ -469,12 +469,18 @@ IMPORTANT:
         evaluate_fn: Optional[Callable] = None,
         organism: str = "",
         tissue: str = "",
+        seed_queries: Optional[List[str]] = None,
+        cluster_markers: Optional[Dict[str, List[str]]] = None,
     ) -> Dict[str, Any]:
         """Multi-round PubMed search with LLM-guided query refinement.
 
         When ``initial_query`` and ``evaluate_fn`` are provided, the search
         uses PI Agent-guided query generation and evaluation instead of
         Literature Agent's own LLM-based methods.
+
+        ``seed_queries`` are deterministic supplementary queries run once in the
+        first round; ``cluster_markers`` lets the per-cluster evidence pass build
+        a query for clusters whose triage entry carries no markers of its own.
         """
         pi_guided = initial_query is not None and evaluate_fn is not None
         label = "PI-guided PubMed" if pi_guided else "PubMed"
@@ -493,6 +499,10 @@ IMPORTANT:
         latest_evaluation: Dict[str, Any] = {}
         plateau_streak = 0
         evaluation_count = 0
+        post_triage_rounds = 0
+        post_triage_limit = int(
+            getattr(self, "post_triage_refinement_rounds", 2) or 0
+        )
         stop_reason = "max_search_rounds"
         search_started = time.monotonic()
         search_wall_clock_seconds = float(
@@ -599,6 +609,20 @@ IMPORTANT:
                     seen_pmids.add(a["pmid"])
             all_articles.extend(new_articles)
 
+            if round_num == 1 and seed_queries:
+                seed_articles = await self._run_seed_queries(
+                    seed_queries,
+                    max_results=int(getattr(self, "seed_query_articles", 20) or 20),
+                    seen_pmids=seen_pmids,
+                    query_attempts=query_attempts,
+                    deadline=deadline,
+                )
+                if seed_articles:
+                    # Seeds head the pool: the evaluator and the synthesis
+                    # prompt both read from the front of it.
+                    all_articles = seed_articles + all_articles
+                    new_articles = seed_articles + new_articles
+
             if len(all_articles) >= max_articles_per_topic:
                 all_articles = all_articles[:max_articles_per_topic]
                 stop_reason = "article_budget"
@@ -658,11 +682,20 @@ IMPORTANT:
                         }
                     latest_triage = evaluation
                     latest_evaluation = evaluation
-                    # 确定性语义终止: 全部簇已归桶 且 triage 非低置信
+                    # 确定性语义终止: 全部簇已归桶 且 triage 非低置信 且 评估认为文献充分。
+                    # 评估明确说 insufficient 并给出 refined_query 时,再允许有限几轮定向检索;
+                    # 否则针对未解决簇的 refined_query 永远不会执行。
                     if evaluation.get("triage_complete") and not evaluation.get("triage_low_confidence"):
-                        logger.info(f"[Literature] {label} semantic termination: all clusters triaged")
-                        stop_reason = "triage_complete"
-                        break
+                        if evaluation.get("sufficient", True) or post_triage_rounds >= post_triage_limit:
+                            logger.info(f"[Literature] {label} semantic termination: all clusters triaged")
+                            stop_reason = "triage_complete"
+                            break
+                        post_triage_rounds += 1
+                        logger.info(
+                            f"[Literature] {label} triage complete but evaluator reports "
+                            f"insufficient coverage; refinement round "
+                            f"{post_triage_rounds}/{post_triage_limit}"
+                        )
                 else:
                     evaluation_count += 1
                     try:
@@ -710,6 +743,10 @@ IMPORTANT:
                 "cache_hit": False,
                 "rounds": len(search_history),
                 "article_count": 0,
+                "seed_queries": sum(
+                    1 for attempt in query_attempts if attempt.get("kind") == "seed"
+                ),
+                "cluster_evidence": 0,
                 "sufficiency_evaluations": evaluation_count,
                 "elapsed_seconds": round(time.monotonic() - search_started, 3),
                 "fallback": "none",
@@ -724,58 +761,58 @@ IMPORTANT:
             cache_result(result)
             return result
 
-        # --- Focused search: run after main loop, before synthesis ---
+        # --- Per-cluster evidence: run after main loop, before synthesis ---
         focused_evidence: Dict[str, Any] = {}
         focused_articles_for_synthesis: List[Dict[str, Any]] = []
         if pi_guided and latest_triage:
-            for bucket in ("rare_unresolved", "suspected_contamination"):
-                items = latest_triage.get(bucket, [])
-                if not items:
-                    continue
-                focused_search = self._focused_rare_search
-                try:
-                    focused_parameters = inspect.signature(focused_search).parameters
-                except (TypeError, ValueError):
-                    focused_parameters = {}
-                focused_kwargs = {"bucket": bucket}
-                if (
-                    "deadline" in focused_parameters
-                    or any(
-                        parameter.kind is inspect.Parameter.VAR_KEYWORD
-                        for parameter in focused_parameters.values()
-                    )
-                ):
-                    focused_kwargs["deadline"] = deadline
-                fe = await focused_search(
-                    items, organism, tissue, **focused_kwargs
-                )
-                focused_evidence.update(fe)
-                for cid, data in fe.items():
-                    if data.get("status") in ("strong", "limited"):
-                        for article in data.get("articles", []):
-                            pmid = article.get("pmid")
-                            if not pmid:
-                                continue
-                            if pmid not in seen_pmids:
-                                all_articles.append(article)
-                                seen_pmids.add(pmid)
-                            focused_articles_for_synthesis.append(article)
+            focused_evidence = await self._collect_cluster_evidence(
+                latest_triage, organism, tissue,
+                cluster_markers=cluster_markers, deadline=deadline,
+            )
+            for cid, data in focused_evidence.items():
+                adjudicated = data.get("status") in ("strong", "limited")
+                for article in data.get("articles", []):
+                    pmid = article.get("pmid")
+                    if not pmid:
+                        continue
+                    if pmid not in seen_pmids:
+                        all_articles.append(article)
+                        seen_pmids.add(pmid)
+                    # Only adjudicated evidence is promoted ahead of the main
+                    # pool for synthesis; unadjudicated references would crowd
+                    # the synthesis budget with unweighed papers.
+                    if adjudicated:
+                        focused_articles_for_synthesis.append(article)
 
         if len(all_articles) > max_articles_per_topic:
             all_articles = all_articles[:max_articles_per_topic]
             stop_reason = "article_budget"
 
         # Prioritize focused evidence for synthesis because _synthesize_pubmed_results
-        # intentionally truncates to the first 20 articles.
+        # reads only the first `synthesis_max_articles` (annotation searches read more).
         synthesis_articles: List[Dict[str, Any]] = self._dedup_by_pmid(
             focused_articles_for_synthesis + all_articles, lambda a: a.get("pmid"),
             drop_empty=True,
         )[:max_articles_per_topic]
 
+        synth_kwargs: Dict[str, Any] = {"evaluation": latest_evaluation or None}
+        if pi_guided:
+            synthesize = self._synthesize_pubmed_results
+            try:
+                synth_parameters = inspect.signature(synthesize).parameters
+            except (TypeError, ValueError):
+                synth_parameters = {}
+            if "max_articles" in synth_parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in synth_parameters.values()
+            ):
+                synth_kwargs["max_articles"] = int(
+                    getattr(self, "annotation_synthesis_max_articles", 40) or 40
+                )
         report_text = await self._synthesize_pubmed_results(
             topic,
             synthesis_articles,
-            evaluation=latest_evaluation or None,
+            **synth_kwargs,
         )
 
         references = [
@@ -791,6 +828,10 @@ IMPORTANT:
             "cache_hit": False,
             "rounds": len(search_history),
             "article_count": len(all_articles),
+            "seed_queries": sum(
+                1 for attempt in query_attempts if attempt.get("kind") == "seed"
+            ),
+            "cluster_evidence": len(focused_evidence),
             "sufficiency_evaluations": evaluation_count,
             "elapsed_seconds": round(time.monotonic() - search_started, 3),
             "query_policy_version": active_query_policy_version,
@@ -799,6 +840,231 @@ IMPORTANT:
         }
         cache_result(final)
         return final
+
+    async def _run_seed_queries(
+        self,
+        seed_queries: List[str],
+        *,
+        max_results: int,
+        seen_pmids: Set[str],
+        query_attempts: List[Dict[str, Any]],
+        deadline: Optional[float] = None,
+    ) -> List[Dict[str, str]]:
+        """Run deterministic seed queries once and return their new articles.
+
+        ``max_results`` is both the per-seed retmax and the budget for the list:
+        seeds are tried in order and the rest are skipped once the budget is
+        filled, so a caller can pass a precise query followed by a broader
+        fallback and pay for the second one only when the first comes up short.
+
+        A seed is supplementary evidence, never the search's success condition:
+        its failure is recorded in the attempt log and skipped, so the primary
+        query's own outcome still decides whether the search falls back.
+        """
+        collected: List[Dict[str, str]] = []
+        for raw_seed in seed_queries or []:
+            seed = str(raw_seed or "").strip()
+            if not seed:
+                continue
+            if deadline is not None and time.monotonic() >= deadline:
+                query_attempts.append({
+                    "kind": "seed", "query": seed,
+                    "result_count": None, "error": "wall_clock_budget",
+                })
+                break
+            try:
+                search = self._pubmed_search(seed, max_results=max_results)
+                if deadline is None:
+                    articles = await search
+                else:
+                    articles = await asyncio.wait_for(
+                        search, timeout=max(0.001, deadline - time.monotonic())
+                    )
+            except Exception as exc:
+                logger.warning(f"[Literature] Seed query failed: {str(exc)[:200]}")
+                query_attempts.append({
+                    "kind": "seed", "query": seed,
+                    "result_count": None, "error": str(exc)[:500],
+                })
+                continue
+            query_attempts.append({
+                "kind": "seed", "query": seed, "result_count": len(articles),
+            })
+            for article in articles:
+                pmid = article.get("pmid")
+                if not pmid or pmid in seen_pmids:
+                    continue
+                seen_pmids.add(pmid)
+                collected.append(article)
+            if len(collected) >= max_results:
+                break
+            await asyncio.sleep(0.4)
+        return collected
+
+    def _reference_search_items(
+        self,
+        triage: Dict[str, Any],
+        cluster_markers: Optional[Dict[str, List[str]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """One reference-query item per context-state and covered cluster.
+
+        The contested buckets keep the adjudicated path and are absent here.
+        """
+        markers = cluster_markers or {}
+        max_items = int(getattr(self, "max_cluster_reference_queries", 40) or 40)
+        items: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+
+        for entry in triage.get("context_dependent_state") or []:
+            cid = str(entry.get("cluster_id") or "")
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            items.append({
+                "cluster_id": cid,
+                "candidate_celltype": entry.get("parent_celltype"),
+                "synonyms": [],
+                "top_markers": list(entry.get("top_markers") or markers.get(cid) or [])[:3],
+                "bucket": "context_dependent_state",
+            })
+
+        covered_names = triage.get("covered_celltypes") or {}
+        for raw_cid in triage.get("covered") or []:
+            cid = str(raw_cid or "")
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            items.append({
+                "cluster_id": cid,
+                "candidate_celltype": covered_names.get(cid),
+                "synonyms": [],
+                "top_markers": list(markers.get(cid) or [])[:3],
+                "bucket": "covered",
+            })
+        return items[:max_items]
+
+    async def _cluster_reference_search(
+        self,
+        items: List[Dict[str, Any]],
+        organism: str,
+        tissue: str,
+        deadline: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """One tier-1 PubMed query per cluster, with no relevance judge.
+
+        These clusters are not contested, so an LLM adjudication per cluster buys
+        little; what the matcher lacked was any literature tied to the cluster at
+        all. Results come back as ``retrieved`` and are shown to the matcher as
+        unadjudicated candidate references.
+        """
+        results: Dict[str, Any] = {}
+        max_articles = int(getattr(self, "cluster_reference_articles", 5) or 5)
+
+        def exhausted(reason, error=None, bucket=None):
+            return {
+                "articles": [], "status": "exhausted", "tier": 1,
+                "exhaustion_reason": reason, "error": error, "bucket": bucket,
+            }
+
+        for item in items or []:
+            cid = str(item.get("cluster_id") or "")
+            if not cid:
+                continue
+            bucket = item.get("bucket")
+            query = build_focused_query(
+                item, organism, tissue, tier=1, bucket="rare_unresolved"
+            )
+            if not query:
+                results[cid] = exhausted("empty_query", bucket=bucket)
+                continue
+            if deadline is not None and time.monotonic() >= deadline:
+                results[cid] = exhausted("wall_clock_budget", bucket=bucket)
+                continue
+            try:
+                search = self._pubmed_search(query, max_results=max_articles)
+                if deadline is None:
+                    articles = await search
+                else:
+                    articles = await asyncio.wait_for(
+                        search, timeout=max(0.001, deadline - time.monotonic())
+                    )
+            except asyncio.TimeoutError:
+                results[cid] = exhausted("wall_clock_budget", bucket=bucket)
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "[Literature] Reference PubMed search failed for cluster %s: %s",
+                    cid, exc,
+                )
+                results[cid] = exhausted("search_failed", str(exc)[:500], bucket=bucket)
+                continue
+            if not articles:
+                results[cid] = exhausted("no_pubmed_results", bucket=bucket)
+                continue
+            results[cid] = {
+                "articles": list(articles)[:max_articles],
+                "status": "retrieved",
+                "tier": 1,
+                "exhaustion_reason": None,
+                "error": None,
+                "bucket": bucket,
+            }
+            await asyncio.sleep(0.4)
+        return results
+
+    async def _collect_cluster_evidence(
+        self,
+        triage: Dict[str, Any],
+        organism: str,
+        tissue: str,
+        cluster_markers: Optional[Dict[str, List[str]]] = None,
+        deadline: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Retrieve literature for every triaged cluster, in two regimes.
+
+        ``rare_unresolved`` and ``suspected_contamination`` are the contested
+        calls and keep the adjudicated search: tiered queries plus an LLM
+        relevance judge returning strong/limited/contradictory. ``covered`` and
+        ``context_dependent_state`` clusters used to receive nothing and had to
+        be annotated from the pooled review alone, so each now gets one cheap
+        reference query whose result is labelled unadjudicated.
+        """
+        evidence: Dict[str, Any] = {}
+
+        for bucket in ("rare_unresolved", "suspected_contamination"):
+            items = triage.get(bucket) or []
+            if not items:
+                continue
+            focused_search = self._focused_rare_search
+            try:
+                focused_parameters = inspect.signature(focused_search).parameters
+            except (TypeError, ValueError):
+                focused_parameters = {}
+            focused_kwargs: Dict[str, Any] = {"bucket": bucket}
+            if (
+                "deadline" in focused_parameters
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in focused_parameters.values()
+                )
+            ):
+                focused_kwargs["deadline"] = deadline
+            found = await focused_search(items, organism, tissue, **focused_kwargs)
+            for cid, data in (found or {}).items():
+                entry = dict(data or {})
+                entry.setdefault("bucket", bucket)
+                evidence[str(cid)] = entry
+
+        reference_items = self._reference_search_items(triage, cluster_markers)
+        if reference_items:
+            found = await self._cluster_reference_search(
+                reference_items, organism, tissue, deadline=deadline
+            )
+            for cid, data in (found or {}).items():
+                if str(cid) in evidence:
+                    continue
+                evidence[str(cid)] = dict(data or {})
+        return evidence
 
     def _parse_pubmed_xml(self, xml_text: str) -> List[Dict[str, str]]:
         """Parse PubMed XML response into article metadata."""
@@ -1015,15 +1281,20 @@ Note: If you are not certain about specific citation information, please clearly
         topic: str,
         articles: List[Dict[str, str]],
         evaluation: Optional[Dict[str, Any]] = None,
+        max_articles: Optional[int] = None,
     ) -> str:
         """Synthesize PubMed articles into a comprehensive literature review."""
-        # Build article text with abstracts (limit to first 20 articles)
+        # Build article text with abstracts; only the first `max_articles`
+        # (default `synthesis_max_articles`, 20) are read.
+        article_cap = int(
+            max_articles or getattr(self, "synthesis_max_articles", 20) or 20
+        )
         articles_text = "\n\n".join(
             f"[PMID: {a['pmid']}] {a['title']} ({a.get('year', 'N/A')})\n"
             f"Authors: {a.get('authors', 'N/A')}\n"
             f"Journal: {a.get('journal', 'N/A')}\n"
             f"Abstract: {a['abstract'][:600]}"
-            for a in articles[:20]
+            for a in articles[:article_cap]
         )
 
         evaluation_context = ""

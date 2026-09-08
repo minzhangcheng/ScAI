@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState
 
 from .shared import (  # noqa: F401
+    ANNOTATION_REVIEW_MAX_CHARS,
+    build_atlas_query,
     _FALLBACK_EXCEPTIONS,
     _MAX_MAIN_RETRIES,
     _RETRY_DELAY_BASE,
@@ -110,10 +112,19 @@ class MarkersMixin:
         # Use PI-guided PubMed search if PI query and evaluator are provided
         if pi_initial_query and pi_evaluate_fn and self.literature_mode == "pubmed_llm":
             # PI Agent provides the search strategy; Literature Agent executes
+            # Tier 1 is the precise, title-anchored atlas query; tier 2 only runs
+            # if tier 1 came up short (see _run_seed_queries' budget rule).
+            atlas_seeds: List[str] = []
+            for tier in (1, 2):
+                seed = build_atlas_query(organism, tissue, tier=tier)
+                if seed and seed not in atlas_seeds:
+                    atlas_seeds.append(seed)
             research_result = await self._multi_round_pubmed(
                 topic, state, pubmed_max_results=50,
                 initial_query=pi_initial_query, evaluate_fn=pi_evaluate_fn,
                 organism=organism, tissue=tissue,
+                seed_queries=atlas_seeds,
+                cluster_markers=cluster_markers,
             )
         else:
             # Default: Literature Agent handles everything (original behavior)
@@ -153,7 +164,7 @@ class MarkersMixin:
 annotate each cell cluster by matching its marker genes to known cell type signatures.
 
 === LITERATURE REVIEW ===
-{literature_report[:12000]}
+{literature_report[:ANNOTATION_REVIEW_MAX_CHARS]}
 
 === CLUSTER MARKER GENES (from sc.tl.rank_genes_groups) ===
 {markers_text}

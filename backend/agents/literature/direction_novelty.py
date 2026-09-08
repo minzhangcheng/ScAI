@@ -31,6 +31,7 @@ NOVELTY_CANDIDATE_CONCURRENCY = 4
 from ...models.schemas import AnalysisState, DirectionSearchQuery, PubMedEvidenceItem
 
 from .shared import (  # noqa: F401
+    normalize_candidate_celltype,
     _FALLBACK_EXCEPTIONS,
     _MAX_MAIN_RETRIES,
     _RETRY_DELAY_BASE,
@@ -560,12 +561,15 @@ class DirectionNoveltyMixin:
         携带 candidate + markers + bucket 语境: 对 suspected_contamination,candidate 可能为 None,
         由 markers 指向判定 contradictory(marker 主要指向其它系统/细胞类型)。
         """
-        candidate = item.get("candidate_celltype") or "the marker-defined population"
+        candidate = (
+            normalize_candidate_celltype(item.get("candidate_celltype"))
+            or "the marker-defined population"
+        )
         markers = ", ".join(item.get("top_markers", [])[:3])
         purpose = ("verify rare cell identity" if bucket == "rare_unresolved"
                    else "test whether these markers plausibly arise in this tissue or indicate contamination")
         listing = "\n".join(
-            f"- {a.get('title','')}: {a.get('abstract','')[:200]}" for a in articles[:10]
+            f"- {a.get('title','')}: {(a.get('abstract') or '')[:400]}" for a in articles[:10]
         ) or "(no articles)"
         prompt = f"""Judge how many PubMed articles support identifying "{candidate}" (markers: {markers})
 in {tissue} tissue. Purpose: {purpose}. Score along cell-type identity, marker support, tissue

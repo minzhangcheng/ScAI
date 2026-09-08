@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.7 · **Last updated**: 2026-09-08
+**Version**: 0.55.8 · **Last updated**: 2026-09-08
 
 ## 1. Runtime Architecture
 
@@ -301,6 +301,49 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.55.x — (2026-09-08 onward)**
+
+- `0.55.8` — Rebuilds the PubMed search that grounds cell-type annotation, from
+  an audit of two completed runs. The retrieved pool was largely off topic, and
+  the annotations were carried by the PI's own knowledge and the
+  marker-database priors rather than by the papers cited beside them.
+
+  Four defects are repaired. The search loop stopped as soon as every cluster
+  had been triaged, so the refined query the evaluator had just written for the
+  clusters it called unresolved was never executed; a triage-complete verdict
+  now ends the loop only when the evaluator also reports the literature
+  sufficient, and otherwise buys up to `post_triage_refinement_rounds` further
+  rounds. The synthesized review was truncated to 12,000 characters before
+  cluster matching, silently dropping whole cell-type sections of a review three
+  times that length; the budget is now `ANNOTATION_REVIEW_MAX_CHARS`. A model
+  that answered the triage schema with the literal string `"null"` had it used
+  verbatim as a PubMed term and as prompt text, so `normalize_candidate_celltype`
+  maps null-like tokens to absent wherever a candidate name is read. And a
+  single `contradictory` flag erased the strong hits counted beside it, so
+  `status_from_judge` ranks counted support ahead of that flag.
+
+  Retrieval itself is restructured. An annotation search is now seeded with a
+  deterministic atlas query built from the dataset's own organism and tissue
+  plus study-design and cell-inventory wording, tried title-anchored first and
+  relaxed to title/abstract or MeSH only when that comes up short. The organism
+  is passed untagged so PubMed's automatic term mapping supplies the species
+  synonyms; a field-tagged phrase receives no such expansion, and reading the
+  synonyms off PubMed is what keeps the template free of a built-in organism
+  table. Every triaged cluster now receives literature of its own:
+  `rare_unresolved` and `suspected_contamination` keep the adjudicated tiered
+  search with its relevance judge, while `covered` and `context_dependent_state`
+  clusters — which previously received none and had to be annotated from the
+  pooled review alone — each get one reference query, returned unadjudicated and
+  labelled as such to the matcher. Covered clusters take their query subject
+  from a new `covered_celltypes` map in the triage. The matching prompt leads
+  with this per-cluster evidence and demotes the review to background context.
+
+  Measured against live PubMed for the audited dataset, the atlas seed returns
+  41 records where the broad wording returns 418, with 15 of the top 20 on topic
+  against 10, and 14 of the 20 absent from the audited run's pool; per-cluster
+  retrieval returned literature for all six sampled clusters. Two new focused
+  regression files cover the work, red on the unpatched tree and green after.
+  One contract changed with the behavior: `context_dependent_state` clusters are
+  no longer excluded from per-cluster retrieval.
 
 - `0.55.7` — Repairs the Round 1 exploration-report failure boundary. When
   direction generation, direction-level literature evaluation, or final
