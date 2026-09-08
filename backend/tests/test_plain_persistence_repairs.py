@@ -193,7 +193,15 @@ async def test_a_stale_generation_with_a_pair_is_restored_not_retired(monkeypatc
 
     assert _live_pkl(sid).exists(), "a healthy generation must not be retired"
     assert not state.runtime_recompute_pending
-    assert state.runtime_pair_restored_revision == 44
+
+    # On disk, not on `state`: the graph resumes with its own AnalysisState,
+    # so this is the only place the executor and the UI can both read it.
+    import json as _json
+
+    restored_record = _json.loads(
+        (states / f"{sid}_state.json").read_text()
+    )["runtime_persistence"]
+    assert restored_record["pair_restore"]["restored_revision"] == 44
 
     import sqlite3
 
@@ -227,7 +235,6 @@ async def test_a_stale_generation_without_a_pair_still_retires(monkeypatch):
 
     assert not _live_pkl(sid).exists()
     assert state.runtime_recompute_pending
-    assert state.runtime_pair_restored_revision is None
 
 
 @pytest.mark.asyncio

@@ -94,9 +94,12 @@ async def _run_analysis_locked(session_id: str, user_id: str):
                 )
             restored = restore_generation_pair(session_id, revision=int(committed))
 
-        if restored:
-            state.runtime_pair_restored_revision = int(committed)
-        else:
+        # Nothing is marked on `state` when the restore succeeds. Both things
+        # that need to know -- the user-facing disclosure and the executor's
+        # exact-revision rule -- read the persistence record that
+        # `restore_generation_pair` just wrote to disk, because a resume from
+        # the checkpoint carries the graph's own AnalysisState and not this one.
+        if not restored:
             closed = await bindings.teardown_running_workflow(
                 session_id, discard_runtime=True, retire_runtime=True,
             )

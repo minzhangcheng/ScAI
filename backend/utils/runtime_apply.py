@@ -323,9 +323,21 @@ def restore_generation_pair(session_id: str, *, revision: int) -> bool:
     live_executor = states_dir / f"{session_id}_bioinfo_checkpoint.json"
     paired_executor = pair / "executor_checkpoint.json"
 
-    sources = [(paired_state, live_state), (paired_checkpoint, live_checkpoint)]
+    # Ordered so the *declaration* lands last. There is no journal here, and
+    # adding one would duplicate the commit transaction for three small files;
+    # the ordering does the same job. `<sid>_state.json` is what says the
+    # restored generation is the current one, so publishing it last means a
+    # crash between publishes leaves a record that is still newer than the
+    # generation -- coherence still reads `stale`, the next start attempts the
+    # restore again, and this function is idempotent.
+    #
+    # The other order is the dangerous one: a record claiming the older
+    # generation is current, beside a graph position from the newer work, is a
+    # mismatch nothing downstream can detect.
+    sources = [(paired_checkpoint, live_checkpoint)]
     if paired_executor.is_file():
         sources.append((paired_executor, live_executor))
+    sources.append((paired_state, live_state))
 
     # What this restore costs, read from the record it is about to replace.
     # Spec B2-3: the restored record reads `current` again -- the pair holds a

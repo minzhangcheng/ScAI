@@ -572,15 +572,31 @@ def _commit_pkl_transaction(
         else None
     )
     pair_targets: List[Tuple[str, Path, Path]] = []
+    pair_removals: List[Tuple[str, Path]] = []
     if pair_dir is not None:
         for key, (kind, filename) in _PAIRED_COMPONENTS.items():
             source = (paired_sources or {}).get(key)
+            target = pair_dir / filename
             if source is None or not Path(source).is_file():
                 # Absent is absent, not a failed copy. A round boundary reached
                 # after the executor finished has no step checkpoint, and
                 # demanding one would fail every save taken at one.
+                #
+                # But the directory is named by revision and is therefore
+                # reused: a save at an unchanged revision -- which happens
+                # whenever the graph advances without the kernel executing --
+                # can find a *previous* save's file here. It describes a
+                # position this generation no longer holds, a restore would
+                # copy it back, and it would pass the exact-revision rule,
+                # because the revision it records really is this generation's.
+                # Removed inside the transaction, so a rollback puts it back.
+                if target.is_file():
+                    pair_removals.append((kind, target))
+                    component_records.append((
+                        _regular_component(kind, target, previous_exists=True),
+                        target,
+                    ))
                 continue
-            target = pair_dir / filename
             pair_targets.append((kind, Path(source), target))
             component_records.append((
                 _regular_component(
@@ -681,13 +697,15 @@ def _commit_pkl_transaction(
 
         # After `commit_metadata`, so the captured state is the one this
         # generation belongs to rather than the one it replaced.
-        if pair_targets:
+        if pair_targets or pair_removals:
             pair_dir.mkdir(parents=True, exist_ok=True)
             for kind, source, target in pair_targets:
                 if kind == "paired_checkpoint":
                     _copy_sqlite_durable(source, target)
                 else:
                     copy_durable(source, target)
+            for _kind, target in pair_removals:
+                _remove_durable(target)
             from backend.utils.files import fsync_directory as _fsync_dir
 
             _fsync_dir(pair_dir)
@@ -769,7 +787,7 @@ def _commit_pkl_transaction(
         [path for _descriptor, path in component_records],
         fault_hook=fault_hook,
     )
-    if pair_dir is not None and pair_targets:
+    if pair_dir is not None and (pair_targets or pair_removals):
         _prune_older_generations(Path(generation_root), keep=int(target_revision))
 
 

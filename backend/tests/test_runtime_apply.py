@@ -439,3 +439,50 @@ def test_a_pair_restore_disclosure_survives_only_until_the_next_commit():
         commit_source="regular_save", runtime_digest="b" * 64,
     )
     assert notebook.runtime_persistence.get("pair_restore") is None
+
+
+def test_an_interrupted_restore_still_reads_as_needing_one(monkeypatch):
+    """The declaration is published last, so a second crash is recoverable.
+
+    There is no journal here, and adding one would duplicate the commit
+    transaction for three small files. The ordering does the same job: the
+    record that says "this generation is the current one" goes last, so a
+    crash between publishes leaves a state that is still newer than the
+    generation -- coherence still reads `stale`, the next start attempts the
+    restore again, and the restore is idempotent.
+
+    The reverse order is the dangerous one: a record claiming the older
+    generation is current, beside a graph position from the newer work, is a
+    mismatch nothing downstream can detect.
+    """
+    sid = "sess-pair-restore-interrupted"
+    states, _pair = _generation_pair(sid, 44)
+    live_state = states / f"{sid}_state.json"
+    live_state.write_text(json.dumps({
+        "session_id": sid,
+        "runtime_persistence": {
+            "current_revision": 61,
+            "committed_revision": 44,
+            "last_saved_at": "2026-09-08T08:10:19",
+        },
+    }))
+    (states / "checkpoints.sqlite").write_bytes(b"the position the crash left")
+
+    real_replace = runtime_apply.os.replace
+    published = []
+
+    def flaky_replace(src, dst):
+        published.append(str(dst))
+        if len(published) == 2:
+            raise OSError("interrupted between publishes")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(runtime_apply.os, "replace", flaky_replace)
+
+    with pytest.raises(OSError):
+        runtime_apply.restore_generation_pair(sid, revision=44)
+
+    record = json.loads(live_state.read_text())["runtime_persistence"]
+    assert record["current_revision"] == 61, (
+        "the state record must not be the first thing published"
+    )

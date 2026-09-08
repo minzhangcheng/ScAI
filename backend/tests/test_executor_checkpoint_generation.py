@@ -124,3 +124,49 @@ def test_the_reader_supplies_the_committed_revision_it_has():
     ).read_text()
     assert "committed_revision=" in source
     assert '.get("committed_revision")' in source
+
+
+def test_the_exact_rule_is_driven_by_the_persisted_record_not_a_state_field():
+    """The signal has to survive `ainvoke(None, config)`.
+
+    A resume from a checkpoint restores the graph's own `analysis_state` --
+    `execution.py` passes None precisely so nothing is injected over it -- so a
+    flag set on the in-memory AnalysisState by POST /run never reaches the
+    executor. `runtime_persistence` does: the sandbox re-reads it from the
+    notebook record on every sync, so a marker written to disk by the restore
+    arrives no matter which AnalysisState object the graph is carrying.
+    """
+    import pathlib as _pathlib
+
+    repo = _pathlib.Path(__file__).resolve().parents[2]
+    source = (
+        repo / "backend" / "agents" / "bioinformatics" / "executor_checkpoint.py"
+    ).read_text()
+    assert '"pair_restore"' in source, (
+        "the exact-revision rule must key off the persisted record"
+    )
+    assert "runtime_pair_restored_revision" not in source, (
+        "a state field cannot carry this signal across a checkpoint resume"
+    )
+
+
+def test_a_pair_restore_makes_an_ahead_checkpoint_unacceptable():
+    """Ahead is ordinary for a live kernel and wrong right after a restore."""
+    record = {"pair_restore": {"restored_revision": 44}, "committed_revision": 44}
+    errors = validate_checkpoint(
+        _payload(runtime_revision=61),
+        current_round=2,
+        planning_stage="stage1",
+        committed_revision=44,
+        exact_revision=bool(record.get("pair_restore")),
+    )
+    assert any("runtime_revision" in error for error in errors), errors
+
+    # ... and ordinary again once the record no longer says a restore happened.
+    assert validate_checkpoint(
+        _payload(runtime_revision=61),
+        current_round=2,
+        planning_stage="stage1",
+        committed_revision=44,
+        exact_revision=False,
+    ) == []

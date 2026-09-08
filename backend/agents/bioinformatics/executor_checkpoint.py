@@ -138,9 +138,17 @@ async def load_checkpoint(
                     committed_revision=(
                         getattr(state, "runtime_persistence", None) or {}
                     ).get("committed_revision"),
-                    exact_revision=(
-                        getattr(state, "runtime_pair_restored_revision", None)
-                        is not None
+                    # From the persisted record, not from a field on this
+                    # object. A resume from a checkpoint restores the graph's
+                    # own AnalysisState -- `execution.py` passes None to
+                    # `ainvoke` precisely so nothing is injected over it -- so a
+                    # marker set by POST /run would never arrive. The sandbox
+                    # re-reads `runtime_persistence` from the notebook record
+                    # on every sync, and `restore_generation_pair` writes
+                    # `pair_restore` there, so this survives the resume.
+                    exact_revision=bool(
+                        (getattr(state, "runtime_persistence", None) or {})
+                        .get("pair_restore")
                     ),
                 )
 

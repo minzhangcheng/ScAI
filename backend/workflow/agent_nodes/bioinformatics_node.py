@@ -610,10 +610,6 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
 
     # One-shot: the recompute prompt has now been delivered and acted on.
     analysis_state.runtime_recompute_pending = False
-    # Likewise the pair restore (B2-2): the executor has read the checkpoint
-    # under the exact-revision rule, so from here a checkpoint ahead of the
-    # committed generation is an ordinary live kernel again.
-    analysis_state.runtime_pair_restored_revision = None
 
     result_state = {
         **state,

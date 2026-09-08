@@ -1368,3 +1368,41 @@ def test_the_save_path_measures_what_it_records():
     ).read_text()
     assert "save_seconds=" in source
     assert "monotonic()" in source
+
+
+def test_a_second_save_at_the_same_revision_drops_a_stale_pair_file(tmp_path):
+    """The executor finishes and clears its checkpoint; the pair must follow.
+
+    Generation directories are named by runtime revision, so a save at an
+    unchanged revision reuses the directory -- which happens because the
+    reuse branch cannot fire once the graph has advanced. Skipping an absent
+    source left the previous save's executor_checkpoint.json in place, and a
+    restore would copy it back. Worse, it would pass the exact-revision rule,
+    because the revision it records really is this generation's.
+    """
+    states, live, staged, state_json, checkpoint, executor = _paired_fixture(tmp_path)
+    integrity = tmp_path / "integrity"
+    pair_args = dict(
+        generation_root=states / "generation",
+        paired_sources={
+            "state": state_json,
+            "checkpoint": checkpoint,
+            "executor_checkpoint": executor,
+        },
+    )
+
+    _commit_pkl_transaction(
+        staged, live, integrity, lambda: None, target_revision=4, **pair_args,
+    )
+    assert (states / "generation" / "4" / "executor_checkpoint.json").is_file()
+
+    executor.unlink()  # the executor completed and cleared its checkpoint
+    staged.write_bytes(b"same revision, the graph moved on")
+    _commit_pkl_transaction(
+        staged, live, integrity, lambda: None, target_revision=4, **pair_args,
+    )
+
+    assert not (states / "generation" / "4" / "executor_checkpoint.json").exists(), (
+        "a pair must not carry a position its generation no longer has"
+    )
+    assert (states / "generation" / "4" / "state.json").is_file()
