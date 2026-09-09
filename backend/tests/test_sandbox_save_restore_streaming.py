@@ -494,6 +494,7 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
         # when it is committed.
         assert (await sb.execute("adata = {'cells': 1234}")).success
         (workspace / "kept.csv").write_text("gene,logfc\nCD3E,2.1\n")
+        (workspace / "rewritten.csv").write_text("gene,logfc\nAT THE SAVE,1.0\n")
         write_checkpoint("position-at-the-save")
         executor_checkpoint.write_text(json.dumps({
             "step_number": 10, "round_number": 2, "planning_stage": "stage1",
@@ -511,6 +512,10 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
         # prompted the sweep: a later step loading it by name would read a file
         # produced by work the rollback discards, and nothing would say so.
         (workspace / "adata_annotated.h5ad").write_bytes(b"from the lost work")
+        # And a file that existed at the save and was rewritten afterwards.
+        # A file list can take away what was added; only the copy brings this
+        # one back.
+        (workspace / "rewritten.csv").write_text("gene,logfc\nAFTER,9.9\n")
         write_checkpoint("position-the-crash-left")
         executor_checkpoint.write_text(json.dumps({
             "step_number": 40, "round_number": 2, "planning_stage": "stage1",
@@ -547,6 +552,9 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
     assert (workspace / "kept.csv").read_text().startswith("gene,logfc")
     assert not (workspace / "adata_annotated.h5ad").exists(), (
         "a file written after the save survived the rollback"
+    )
+    assert "AT THE SAVE" in (workspace / "rewritten.csv").read_text(), (
+        "a file overwritten after the save was not put back"
     )
 
     # The namespace is the one the dump held.

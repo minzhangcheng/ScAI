@@ -949,8 +949,14 @@ async def _execute_save(
                                 # one directory that decide what to delete must
                                 # not be able to disagree about which directory
                                 # it is.
-                                workspace_inventory=bindings.scan_workspace_inventory(
-                                    get_session_workspace(sandbox.session_id)
+                                # The workspace root, scanned and copied by the
+                                # commit itself. Taken from
+                                # `get_session_workspace`, which is also where
+                                # the rollback gets it: two readers that decide
+                                # what to delete must not be able to disagree
+                                # about which directory they are reading.
+                                workspace_root=get_session_workspace(
+                                    sandbox.session_id
                                 ),
                                 authoritative_pkl_names=saved_names,
                                 fault_hook=getattr(
