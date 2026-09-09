@@ -464,12 +464,16 @@ async def test_an_identifier_that_is_not_one_is_refused_as_a_bad_request(capture
     from fastapi import HTTPException
 
     source, _snapshot = await captured()
+    before = _jobs()
 
     with pytest.raises(HTTPException) as raised:
         await _restore_over_http(source, "../../etc")
 
     assert raised.value.status_code == 400
-    assert _jobs() == {}
+    # Compared against what was already there rather than against empty: the
+    # registry is module state that the whole suite shares, so a full run
+    # arrives here with other tests' jobs in it.
+    assert _jobs() == before
 
 
 @pytest.mark.asyncio
@@ -477,10 +481,13 @@ async def test_a_restore_that_can_run_is_still_accepted(captured):
     """The guard above must not answer for the bundle the job is meant to open."""
     source, snapshot = await captured()
 
+    before = _jobs()
+
     answer = await _restore_over_http(source, snapshot)
 
     assert answer["job_id"]
-    assert _jobs()
+    assert answer["job_id"] in _jobs()
+    assert answer["job_id"] not in before
 
 
 @pytest.mark.asyncio
