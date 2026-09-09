@@ -356,8 +356,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.55.11
-./build.sh --version 0.55.11 --push
+./build.sh --version 0.56.1
+./build.sh --version 0.56.1 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -398,15 +398,114 @@ Docker uses `/data`; direct startup normally uses the sibling `data` directory u
 
 Docker only needs `/dep/venv` persisted; the frontend assets are compiled into the image. Direct startup uses `<REPO>/../dep/venv` and `<REPO>/../dep/frontend/node_modules`. Dependencies are reproducible and may be rebuilt, but persistence reduces restart time.
 
-## 8. Snapshots (removed)
+## 8. Decision snapshots
 
-Snapshots have been removed. Earlier builds offered an experimental,
-off-by-default snapshot subsystem that could return a session to an earlier
-point of its analysis; it never reached operator acceptance and is gone —
-along with its HTTP API, its storage, its capture gates and the
-`SCAI_ENABLE_SNAPSHOT_V2` switch, which is now ignored.
+A decision snapshot is a restore point taken immediately before one of the
+four decisions an analysis asks about itself. Restoring one **creates a new
+session**; the session it was taken from is never modified. The feature is off
+until you give it somewhere to write.
 
-**What this means for an instance you are upgrading:**
+This is not the snapshot subsystem earlier builds had. That one — its HTTP API,
+its object store, its capture gates and the `SCAI_ENABLE_SNAPSHOT_V2` switch —
+was removed, and this replaces it with something narrower on purpose: no
+branch tree, no history browser, no way to make one by hand.
+
+### Turning it on
+
+Set `SCAI_SNAPSHOT_DIR` to an absolute path. Unset means off; there is no
+separate switch, so the directory and the feature cannot disagree. Point it at
+storage **separate from `SCAI_DATA_DIR`**: a snapshot is meant to survive the
+loss of the volume a session lives on, and a root under a session tree is
+reachable by analysis code. A relative path is refused and logged, and a root
+inside the data directory is warned about but accepted, for the single-volume
+case.
+
+Sizing it is the decision that matters. A snapshot stores the session's kernel
+dump whole, and finished sessions on a working deployment hold 3–8 GB dumps.
+Two snapshots that hold the same bytes share one copy — the filesystem counts
+the references — so a session that reaches several decisions without executing
+anything in between costs one dump, not several. A session that works between
+every decision costs one per decision.
+
+### What is captured, and when
+
+Four points, all of them immediately before a decision is made, and nowhere
+else:
+
+| Decision | When |
+|---|---|
+| Confirm the cell annotation | Round 1, Stage 1, before the confirmation dialog |
+| Choose the research direction | End of round 1, after the exploration report |
+| Choose the direction again | End of every integration round |
+| Accept the round's result | End of every other round |
+
+An error or incident dialog — an LLM failure, a disabled agent, a missing
+marker database — is not one of these and is not snapshotted. A run with the
+skip time set to zero, where the PI decides instead of the user, is: at this
+layer that is the same decision made by a different party, and a user who comes
+back to an unattended run is exactly who a rollback is for.
+
+The capture holds the analysis for the time it takes to copy the session's
+**workspace** and nothing else. The kernel dump is held by a hardlink, which
+costs nothing regardless of size, and copied afterwards; the uploaded inputs
+are copied afterwards too. Two bounds stop a slow or hung target from turning
+those copies into an outage: `SCAI_SNAPSHOT_STALL_SECONDS` (default 120)
+abandons a copy that has written no bytes for that long, and
+`SCAI_SNAPSHOT_MAX_SECONDS` (default 1800) is the backstop under it. A capture
+that is abandoned records the decision as having no snapshot and the analysis
+carries on unaffected.
+
+Both bounds govern the copies and nothing else, and each copy phase gets its
+own clock. They do **not** bound the runtime save a capture asks for when the
+kernel has moved since the last one, which is usually most of a capture's
+elapsed time: measured on ordinary array storage, the copies took 6-11 s while
+the saves took 46-73 s. So size these two from what the *copies* cost on your
+storage, not from the `capture_seconds` the listing reports -- that figure
+includes a save these knobs cannot stop. The save is the same one the ordinary
+persistence cadence takes; see `SCAI_RUNTIME_SAVE_FLOOR_MINUTES` for the knob
+that governs it.
+
+### Space, and which snapshot to give up first
+
+**Nothing is deleted automatically.** That is the default and it is deliberate:
+a snapshot is the only copy of the decision it precedes. When space runs short,
+delete them one at a time, in the order the listing already computes:
+
+| Keep | Decision | Why |
+|---|---|---|
+| 1st (longest) | Round 1 cell annotation | The earliest decision; every later label depends on it |
+| 2nd | Round 1 research direction | The choice the rest of the analysis follows |
+| 3rd | Integration-round direction | The choice after each cross-direction analysis |
+| 4th (first to go) | Round acceptance | Everything else |
+
+Within one rank the **later** snapshot is given up first. The API and the CLI
+report `deletion_order` on every row, so the browser, `scai snapshots list`
+and the optional prune all give up the same one.
+
+If you would rather that happened without you, set
+`SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB`. While free space on the snapshot volume
+is below it, a capture reclaims the next snapshot in that order — never the one
+it just wrote, and never a round-1 annotation snapshot of a session that is
+still running.
+
+### What travels, and what does not
+
+Deleting a session deletes its snapshots with it. If the feature is off at that
+moment the tree is left where it is, under
+`<SCAI_SNAPSHOT_DIR>/<session id>/`, and you can remove it by hand.
+
+Snapshots **do not travel in an export**. There is no `include_snapshots`
+parameter and no importer for one: they are local restore points, and an
+archive nothing can read back would be dead weight. To move a session between
+installations, use portable export/import (sections 9 and 13).
+
+### Upgrading from a build that had the old subsystem
+
+- **Existing snapshot data is inert, not migrated.** `sessions/<id>/v2/` and
+  `sessions/<id>/snapshots/` are no longer read or written. They still occupy
+  disk; deleting a session deletes them with it. You may delete those two
+  directories to reclaim space once you are satisfied you do not need the old
+  build. Nothing in this version can restore from them.
 
 - **Existing snapshot data is inert, not migrated.** `sessions/<id>/v2/` and
   `sessions/<id>/snapshots/` are no longer read or written. They still occupy
@@ -424,10 +523,13 @@ along with its HTTP API, its storage, its capture gates and the
   skipped, and the session imports with its content. An archive that carries
   *only* snapshot data and no session state is refused with an explanatory
   error.
-- **Memory sizing gets simpler.** The "snapshots on" column in
-  [Memory sizing](#memory-sizing) no longer applies; use the other one.
+- **Memory sizing is unaffected by this feature.** The "snapshots on" column
+  in [Memory sizing](#memory-sizing) belonged to the old subsystem, which
+  captured through the kernel; use the other one. A decision snapshot allocates
+  no kernel memory at all — it copies files an ordinary save has already
+  written.
 
-**What protects work now.** The kernel's runtime is saved at each persistence
+**What protects a running analysis.** The kernel's runtime is saved at each persistence
 boundary to `sessions/<id>/states/<id>_session.pkl` under a crash-recoverable
 transaction, signed with this installation's integrity key, and reloaded when
 the session's kernel next starts. That is a resume mechanism, not history: it
@@ -438,9 +540,36 @@ a data-root backup (section 9).
 
 ## 9. Backup, upgrade, recovery, and rollback
 
+**Stop long enough for the closing save.** A session with a live kernel writes
+its runtime on shutdown, and that write is a full dump: measured at 57 s for a
+1.28 GB kernel, and dumps of 3-8 GB are ordinary on real data. Docker's default
+stop grace is 10 s, which kills the process partway through. What survives is
+the last routine save, so an analysis that has run since then comes back unable
+to continue: the kernel state on disk is older than the work the session
+records, and the only remedies are a decision snapshot or re-running from the
+data. Pausing first does **not** help -- a pause holds the executor between
+cells and does not commit the runtime.
+
+```bash
+docker stop -t 300 scai      # not `docker stop`, and not `docker kill`
+```
+
+Give the timeout room for **every live session added together**, not for the
+largest one. The closing saves run one after another, so an instance holding
+two sessions needs both. Measured: a 400 s grace was not enough for two
+sessions of a few gigabytes each, and the second came back with its kernel
+behind its record while the first was clean.
+
+The shutdown log ends with `Session saved successfully` followed by `Sandbox
+stopped` for each live session; if it does not, the stop was too short. A
+session whose closing save was cut off is recoverable -- it rolls back to its
+last committed generation the next time the analysis is started -- but it gives
+up the work since that save, which is the cost this whole procedure exists to
+avoid.
+
 Prefer a quiescent file-level backup so SQLite and session files agree:
 
-1. Stop ScAI.
+1. Stop ScAI, with a grace period long enough for the closing save (above).
 2. Copy the entire data root, including hidden files, preserving ownership, modes, timestamps, and links.
 3. Record the application/image version and retain the stable secret values separately in a protected secret store.
 4. Restart ScAI and verify health.
@@ -448,7 +577,7 @@ Prefer a quiescent file-level backup so SQLite and session files agree:
 Example for Docker bind mounts:
 
 ```bash
-docker stop scai
+docker stop -t 300 scai
 sudo cp -a ./scai-data "./scai-data-backup-$(date +%Y%m%d-%H%M%S)"
 sudo test -f "$(ls -dt ./scai-data-backup-* | head -1)/app.db"
 docker start scai
@@ -738,6 +867,10 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_RUNTIME_SAVE_FLOOR_MINUTES` | `30` | Minutes that must pass since the last **successful** runtime save before a step boundary saves again. Round and closing boundaries ignore it. Unset, non-integer or non-positive values log and fall back |
 | `SCAI_RUNTIME_MAX_RSS_GB` | `auto` | Per-session kernel RSS ceiling for regular runtime persistence; numeric values are GiB administrator caps |
 | `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB` | `auto` | Total estimated size of live AnnData objects; numeric values are GiB administrator caps |
+| `SCAI_SNAPSHOT_DIR` | unset | Root for decision snapshots. **Unset means snapshots are off; setting it turns them on** — there is no separate switch. Must be absolute, and should be on separate storage from `SCAI_DATA_DIR` |
+| `SCAI_SNAPSHOT_STALL_SECONDS` | `120` | Abandon a snapshot **copy** after this long with no byte written. A hung mount makes no progress; a slow one does. Does not bound the runtime save a capture may ask for |
+| `SCAI_SNAPSHOT_MAX_SECONDS` | `1800` | Backstop under the stall bound, for a target that dribbles bytes without ever stalling |
+| `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | unset | Free space below which the least valuable snapshots are reclaimed. Unset means **nothing is ever deleted automatically**, which is the default |
 | `SCAI_MODE` | `prod` | Docker entrypoint mode; the production image rejects `dev` |
 | `PIP_INDEX_URL` | pip environment/default | Docker Python package index |
 | `SCAI_AUTO_FETCH_MARKERS` | `0` | Direct startup; `1` attempts marker-database download |

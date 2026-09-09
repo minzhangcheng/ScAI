@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.11 · **Last updated**: 2026-09-09
+**Version**: 0.56.1 · **Last updated**: 2026-09-09
 
 ## 1. Runtime Architecture
 
@@ -226,6 +226,51 @@ Nothing reads it, nothing writes it, and deleting the session deletes it. An
 archive built before the removal still imports: its snapshot members are
 skipped rather than rejected.
 
+### Decision snapshots
+
+Part B of the plain-persistence design
+(`docs/coding/plain-persistence-part-b-spec.md`), off unless
+`SCAI_SNAPSHOT_DIR` names an absolute path. It is not a return of Snapshot V2:
+there is no object store, no branch model, no history browser, and no way to
+create one on request.
+
+A snapshot is taken immediately before each of the four decisions an analysis
+asks about itself — confirm the cell annotation, choose the direction after
+Stage 2, choose it again after each integration cycle, accept a round — and
+nowhere else. An incident gate is not a decision. An unattended run whose skip
+time is zero still gets one, because at this layer the PI deciding is the same
+decision made by a different party.
+
+`backend/services/round_snapshots/` holds the whole of it.
+`gates.round_boundary_gate` is the single owner of the predicates
+`_wait_for_user_input` used to spell inline; the node now asks it, which is
+what keeps the writer and the node from classifying a boundary differently.
+`writer.capture_decision_snapshot` performs no serialisation: it asks for the
+ordinary save when the kernel has moved past its newest committed generation,
+then copies what that save committed. The dump is held by a hardlink — valid
+only because `_commit_pkl_transaction` publishes by rename onto a fresh inode —
+so the analysis is paused for the workspace copy and nothing else, bounded by a
+stall watchdog with an absolute backstop.
+
+The annotation decision is the one that needed new wiring, because it is taken
+inside the executor's `annotate_clusters` call. The tool handler publishes a
+`PendingToolCheckpoint` for the duration of that call, and the capture
+checkpoints the executor through it before asking for the save, pairing the
+outstanding tool call with a synthetic result — without which
+`tool_calls_are_paired` rejects the transcript on restore.
+
+`restore.restore_snapshot_into_new_session` is an import from a local bundle
+and reuses the import primitives rather than copying them. The graph checkpoint
+is read once for its channels and discarded, because it is keyed by the
+source's thread id; the new session is armed as a parked semantic gate, and
+every gate route's existing no-workflow branch converts that capsule into an
+exact graph-node continuation. Reports and logs are not carried, and every path
+naming them is stripped from the restored state.
+
+Nothing is deleted automatically unless `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB`
+is set. The order is fixed at capture as `retention_rank` and surfaced as
+`deletion_order`, so the browser, the CLI and the prune cannot disagree.
+
 ## 9. Request & Data Flow
 
 1. **Config** — first-run dialog posts API keys to `/api/config`; backend validates and persists.
@@ -302,6 +347,42 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.55.x — (2026-09-08 onward)**
 
+- `0.56.1` — Corrections from the first run of decision snapshots against real
+  data. A restored session now continues at the node its capsule names:
+  `_restore_entry_plan` was never a declared `WorkflowState` channel, and an
+  annotated conditional-edge router is handed the declared channels rather than
+  the node's return, so every graph-node restore had been falling back to
+  `initialize_round`. A fork's notebook is named after the fork rather than
+  after the session it came from. Giving up a session's last snapshot now
+  reclaims the input copy it was the last to need, and the listing's session
+  total counts it. Restoring an identifier that names nothing answers 404
+  rather than accepting a job that could only fail, and a refusal no longer
+  names the server's filesystem. A blocked resume says what actually stopped it
+  and, when the session has decision snapshots, that they exist. An import
+  settles the archive's extension before reading its body, so an export saved
+  under the wrong name is no longer reported as too large.
+
+  Beyond the snapshots, from the same run: a crash rollback now returns the
+  workspace along with the dump, the notebook record and the two positions.
+  Each save keeps its generation a copy of the workspace, built incrementally
+  against the previous one so an unchanged file is shared rather than copied
+  again, and a rollback puts back what was rewritten and takes away what was
+  added. The control that performs a rollback is called Recover rather than
+  Re-run, because it re-runs from the raw inputs only when no generation can be
+  restored. `backend/tests/test_workflow_state_channels.py` is back: it scans
+  `backend/workflow/` for state keys that are not declared channels, and its
+  absence is why the restore-routing defect could ship twice. And a runtime
+  restore tolerates a dead AnnData file-manager reference: mudata gives every
+  `MuData` one by construction, so a dump holding a `MuData` used to save
+  successfully and fail to load, which stopped a session's analysis without
+  stopping the run.
+- `0.56.0` — Adds decision snapshots: a restore point taken immediately
+  before each of the four decisions an analysis asks about itself, restorable
+  into a new session that leaves the source untouched. Off unless
+  `SCAI_SNAPSHOT_DIR` names an absolute path. The capture performs no
+  serialisation of its own — it copies what a committed generation already
+  wrote, holding the dump by hardlink so the analysis pauses only for the
+  workspace — and nothing is ever created on request or deleted automatically.
 - `0.55.11` — Cuts what the direction-novelty gate spends on triage and sharpens
   what it counts as prior work. Every number below was measured by replaying the
   eight research-direction candidates from two completed runs against live

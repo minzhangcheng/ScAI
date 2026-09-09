@@ -229,6 +229,124 @@ async def resume_analysis(session_id: str, request: Request):
     async with sess_lock:
         return await _resume_analysis_locked(session_id, user_id)
 
+def _why_the_runtime_cannot_be_continued(coherence: str, state) -> str:
+    """Say what happened, in the words of the thing that actually happened.
+
+    A stale verdict has two causes and this used to report one of them for
+    both. On a real crash it told the operator "the committed runtime is stale
+    after a failed save" when no save had failed: the kernel had simply run
+    past its last committed generation, which is what a crash between saves
+    looks like and is a different thing to fix.
+    """
+    if coherence == "stale":
+        persistence = getattr(state, "runtime_persistence", None) or {}
+        if not isinstance(persistence, dict):
+            persistence = {}
+        committed = int(persistence.get("committed_revision") or 0)
+        reached = max(
+            int(persistence.get("current_revision") or 0),
+            int(persistence.get("degraded_from_revision") or 0),
+        )
+        if reached > committed:
+            return (
+                "The analysis ran past its last saved runtime, so the kernel "
+                "state on disk is older than the work it records. This is what "
+                "an interrupted session looks like: the executor kept going "
+                "after the last save and stopped before the next one."
+            )
+        return (
+            "A runtime save failed, so the kernel state on disk is older than "
+            "the work the session records."
+        )
+    if coherence == "inconsistent":
+        return (
+            "The saved kernel state belongs to a different point in this "
+            "analysis than the state that was persisted with it."
+        )
+    return "This session has no kernel state that can be continued."
+
+
+def _remedies_for_an_unusable_runtime(session_id: str, state=None) -> str:
+    """What the operator can actually do, in the order they would rather do it.
+
+    The first remedy is usually the cheapest and this message used not to
+    mention it at all. ``_run_analysis_locked`` rolls a blocked session back to
+    its committed generation -- the dump, the notebook record, the graph
+    checkpoint and the executor position together -- and continues from the
+    step that dump was taken at. What the user is being asked to give up is the
+    work since the last save, not the run. Saying "re-run the analysis from
+    your data" described the fallback as though it were the only outcome, on a
+    screen where a five-hour analysis is at stake.
+    """
+    rollback = ""
+    persistence = dict(getattr(state, "runtime_persistence", None) or {})
+    committed = persistence.get("committed_revision")
+    try:
+        from backend.utils.runtime_apply import generation_pair_is_restorable
+
+        if generation_pair_is_restorable(session_id, committed):
+            reached = max(
+                int(persistence.get("current_revision") or 0),
+                int(persistence.get("degraded_from_revision") or 0),
+            )
+            lost = max(0, reached - int(committed or 0))
+            rollback = (
+                "Starting the analysis again rolls it back to the last saved "
+                f"runtime and continues from there, giving up the {lost} "
+                "step(s) run after that save. "
+                if lost
+                else "Starting the analysis again continues from the last "
+                "saved runtime. "
+            )
+    except Exception:  # noqa: BLE001 - an offer, never a reason to fail a refusal
+        logger.warning(
+            "Could not tell whether %s can roll back to its committed "
+            "generation", session_id, exc_info=True,
+        )
+
+    offer = ""
+    try:
+        from backend.config import snapshots_enabled
+
+        if snapshots_enabled():
+            from backend.services.round_snapshots.listing import (
+                read_session_listing,
+            )
+
+            count = len(read_session_listing(session_id)["snapshots"])
+            if count == 1:
+                offer = (
+                    "This session has one decision snapshot; restoring it "
+                    "opens a new session from just before that decision, with "
+                    "a runtime that verifies. "
+                )
+            elif count > 1:
+                offer = (
+                    f"This session has {count} decision snapshots; restoring "
+                    "one opens a new session from just before that decision, "
+                    "with a runtime that verifies. "
+                )
+    except Exception:  # noqa: BLE001 - an offer, never a reason to fail a refusal
+        logger.warning(
+            "Could not list decision snapshots for %s while explaining a "
+            "blocked resume", session_id, exc_info=True,
+        )
+    if rollback:
+        return (
+            f"{rollback}{offer}Otherwise re-run the analysis from your data to "
+            "recompute the kernel state, or view the session read-only."
+        )
+    if offer:
+        return (
+            f"{offer}Otherwise re-run the analysis from your data to recompute "
+            "the kernel state, or view the session read-only."
+        )
+    return (
+        "Re-run the analysis from your data to recompute the kernel state, or "
+        "view the session read-only."
+    )
+
+
 async def _resume_analysis_locked(session_id: str, user_id: str):
     state = await bindings.require_session_ownership(session_id=session_id, user_id=user_id)
     from backend.utils.runtime_pairing import refresh_runtime_availability
@@ -278,32 +396,17 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
     ):
         warning = getattr(state, "runtime_restore_warning", None)
         if not warning:
-            if coherence == "stale":
-                warning = (
-                    "The committed runtime is stale after a failed save. "
-                    "Re-run the analysis from the input data to recompute it."
-                )
-            elif coherence == "inconsistent":
-                warning = (
-                    "The committed runtime is inconsistent with the saved "
-                    "analysis state. Re-run the analysis from the input data "
-                    "to recompute it."
-                )
-            else:
-                warning = (
-                    "No usable runtime is available. Re-run the analysis from "
-                    "the input data to recompute it."
-                )
+            warning = _why_the_runtime_cannot_be_continued(coherence, state)
+        remedies = _remedies_for_an_unusable_runtime(session_id, state)
         state.runtime_restore_status = "unavailable"
-        state.runtime_restore_warning = warning
+        state.runtime_restore_warning = f"{warning} {remedies}"
         await bindings._update_session_cache(session_id, state)
         await bindings.async_save_session(session_id, state, force=True)
         return APIResponse(
             success=True,
             message=(
-                "This session was restored without a consistent kernel runtime. "
-                "Forward analysis is blocked. Re-run the analysis from your data to "
-                "recompute kernel state, or view the session read-only."
+                "This session cannot continue on the runtime it has. "
+                f"{remedies}"
             ),
             data={
                 "needs_reconnect": False,

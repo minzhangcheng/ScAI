@@ -66,6 +66,21 @@ async def _delete_tombstoned_files(session_id: str, owner_id: str | None=None, g
             ):
                 if legacy_dir.is_dir():
                     _binding_shutil.rmtree(legacy_dir)
+            # Decision snapshots live outside the session tree, on storage the
+            # operator chose, so nothing above reaches them. Deleting a session
+            # deletes its snapshots with it; with snapshots disabled the tree
+            # is left where it is and the admin manual says so.
+            from backend.services.round_snapshots.layout import (
+                SnapshotsDisabled,
+                session_root,
+            )
+
+            try:
+                snapshots = session_root(session_id)
+            except SnapshotsDisabled:
+                snapshots = None
+            if snapshots is not None and snapshots.is_dir():
+                _binding_shutil.rmtree(snapshots, ignore_errors=True)
             for state_file in _binding_legacy_session_state_paths(_binding_STATE_DIR, session_id):
                 if state_file.is_file():
                     state_file.unlink()

@@ -440,6 +440,101 @@ helper = make_helper()
 
 
 @pytest.mark.asyncio
+async def test_a_namespace_holding_a_mudata_can_be_restored(tmp_path, caplog):
+    """The library defect that made a whole dump unreadable, on a real kernel.
+
+    mudata gives every ``MuDataFileManager`` a weakref to a throwaway AnnData
+    that is freed before ``__init__`` returns, so ``_adata_ref()`` is None from
+    the moment the manager exists. ``__getstate__`` stores that None and the
+    stock ``__setstate__`` calls ``weakref.ref(None)``. The dump is written
+    happily and cannot be read back -- found in production as a session that
+    saved successfully, failed to restore, and then completed its analysis
+    without its kernel variables.
+
+    What is asserted is what the operator needs: the variable comes back, it is
+    the same data, and it can be used and saved again. The manager's reference
+    is rebuilt the way mudata's own constructor builds it, so the restored
+    object is in the state a freshly built MuData is in -- and the reference is
+    unreachable without a backing file, which a MuData never has.
+    """
+    pytest.importorskip("mudata")
+
+    from backend.config import get_session_states, get_session_workspace
+    from backend.utils.sandbox import LocalJupyterSandbox
+
+    session_id = "test-mudata-restore"
+    states_dir = get_session_states(session_id)
+    states_dir.mkdir(parents=True, exist_ok=True)
+    workspace = get_session_workspace(session_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    sb = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states_dir),
+        working_dir=str(workspace),
+        timeout=120,
+    )
+    await sb.start()
+    try:
+        built = await sb.execute(
+            "import numpy as np, anndata as ad, mudata\n"
+            "rna = ad.AnnData(np.arange(12, dtype=float).reshape(4, 3))\n"
+            "prot = ad.AnnData(np.ones((4, 2)))\n"
+            "mdata = mudata.MuData({'rna': rna, 'prot': prot})\n"
+            "print('built', mdata.shape, float(np.asarray(mdata['rna'].X).sum()))"
+        )
+        assert built.success, built.error
+        assert "built (4, 5) 66.0" in built.output, built.output
+
+        assert await sb.save_session()
+    finally:
+        await sb.stop(save=False)
+
+    sb2 = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states_dir),
+        working_dir=str(workspace),
+        timeout=120,
+    )
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        await sb2.start()
+    # Reported, not silently repaired: the same variable will carry the same
+    # library defect at the next save, and an operator reading the log should
+    # be able to name it.
+    repaired = [
+        record.getMessage() for record in caplog.records
+        if "Rebuilt a dead AnnData file-manager reference" in record.getMessage()
+    ]
+    assert repaired, "the repair was not reported"
+    assert "mdata" in repaired[0], repaired[0]
+    try:
+        assert not sb2._session_restore_failed, (
+            "the dump could not be read back: this is the defect under test"
+        )
+        check = await sb2.execute(
+            "import numpy as np\n"
+            "print('shape', mdata.shape)\n"
+            "print('sum', float(np.asarray(mdata['rna'].X).sum()))\n"
+            "print('mods', sorted(mdata.mod))\n"
+            "mdata.update()\n"
+            "print('copy', mdata.copy().shape)"
+        )
+        assert check.success, check.error
+        for expected in (
+            "shape (4, 5)", "sum 66.0", "mods ['prot', 'rna']", "copy (4, 5)",
+        ):
+            assert expected in check.output, (expected, check.output)
+
+        # And it can be saved again: a restore that left the object unpicklable
+        # would strand the session at its next save.
+        assert await sb2.save_session()
+    finally:
+        await sb2.stop(save=False)
+
+
+@pytest.mark.asyncio
 async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
     """Batch 2 end to end, on a real kernel. Spec B2-2's acceptance criterion.
 
@@ -456,14 +551,20 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
     import json
     import sqlite3
 
-    from backend.config import get_session_states
+    from backend.config import get_session_states, get_session_workspace
     from backend.utils import runtime_apply
     from backend.utils.sandbox import LocalJupyterSandbox
 
     session_id = "test-pair-restore-roundtrip"
     states_dir = get_session_states(session_id)
     states_dir.mkdir(parents=True, exist_ok=True)
-    workspace_dir = str(tmp_path / "workspace")
+    # The configured workspace, not one of this test's own: the save scans it
+    # through `get_session_workspace` and the rollback sweeps it through the
+    # same call, and a test that pointed the sandbox somewhere else would
+    # exercise neither.
+    workspace = get_session_workspace(session_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    workspace_dir = str(workspace)
 
     checkpoint = states_dir / "checkpoints.sqlite"
     executor_checkpoint = states_dir / f"{session_id}_bioinfo_checkpoint.json"
@@ -486,7 +587,19 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
     try:
         # The work that will survive, and the two positions as they stand
         # when it is committed.
+        # A first generation, so the save that matters has one to supersede.
+        # A generation holds a workspace *directory* now, and superseding it is
+        # a different operation from removing three files -- which is how every
+        # save after the first came to fail in production, invisible to a test
+        # that saves once because there is then nothing to prune.
+        assert (await sb.execute("from_the_first_save = 1")).success
+        (workspace / "only_in_the_first_generation.csv").write_text("a\n")
+        write_checkpoint("position-at-the-first-save")
+        assert await sb.save_session()
+
         assert (await sb.execute("adata = {'cells': 1234}")).success
+        (workspace / "kept.csv").write_text("gene,logfc\nCD3E,2.1\n")
+        (workspace / "rewritten.csv").write_text("gene,logfc\nAT THE SAVE,1.0\n")
         write_checkpoint("position-at-the-save")
         executor_checkpoint.write_text(json.dumps({
             "step_number": 10, "round_number": 2, "planning_stage": "stage1",
@@ -496,10 +609,23 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
         committed = int(
             sb.notebook_state.runtime_persistence["committed_revision"]
         )
+        # Retention is one, and the copy must not change that.
+        generations = sorted(
+            d.name for d in (states_dir / "generation").iterdir() if d.is_dir()
+        )
+        assert generations == [str(committed)], generations
 
         # The work that will be lost, and the positions moving past it.
         assert (await sb.execute("adata['cells'] = 9999")).success
         assert (await sb.execute("lost_after_the_save = True")).success
+        # An intermediate written after the save. This is the shape that
+        # prompted the sweep: a later step loading it by name would read a file
+        # produced by work the rollback discards, and nothing would say so.
+        (workspace / "adata_annotated.h5ad").write_bytes(b"from the lost work")
+        # And a file that existed at the save and was rewritten afterwards.
+        # A file list can take away what was added; only the copy brings this
+        # one back.
+        (workspace / "rewritten.csv").write_text("gene,logfc\nAFTER,9.9\n")
         write_checkpoint("position-the-crash-left")
         executor_checkpoint.write_text(json.dumps({
             "step_number": 40, "round_number": 2, "planning_stage": "stage1",
@@ -530,6 +656,19 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
     )["runtime_persistence"]
     assert restored["pair_restore"]["restored_revision"] == committed
     assert restored["pair_restore"]["discarded_revisions"] >= 2
+
+    # And the workspace holds what that generation held, which is what makes
+    # the files on disk agree with the namespace and the record above them.
+    assert (workspace / "kept.csv").read_text().startswith("gene,logfc")
+    assert not (workspace / "adata_annotated.h5ad").exists(), (
+        "a file written after the save survived the rollback"
+    )
+    assert "AT THE SAVE" in (workspace / "rewritten.csv").read_text(), (
+        "a file overwritten after the save was not put back"
+    )
+    # It survived the first generation being pruned, because the second
+    # generation's copy shares its inode rather than pointing into it.
+    assert (workspace / "only_in_the_first_generation.csv").read_text() == "a\n"
 
     # The namespace is the one the dump held.
     sb2 = LocalJupyterSandbox(

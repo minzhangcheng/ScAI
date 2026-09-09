@@ -51,6 +51,22 @@ def build_parser() -> argparse.ArgumentParser:
     listing.add_argument("--json", action="store_true")
     listing.set_defaults(handler=commands.cmd_list)
 
+    snapshots = sub.add_parser(
+        "snapshots",
+        help="list, restore or delete decision snapshots (never create one)",
+    )
+    snapshots.add_argument(
+        "action", choices=["list", "restore", "delete"], nargs="?", default="list",
+    )
+    snapshots.add_argument("session_id")
+    snapshots.add_argument("snapshot_id", nargs="?", default=None)
+    snapshots.add_argument("--json", action="store_true")
+    snapshots.add_argument(
+        "--no-wait", action="store_true",
+        help="return the job id instead of waiting for the new session",
+    )
+    snapshots.set_defaults(handler=commands.cmd_snapshots)
+
     status = sub.add_parser("status")
     status.add_argument("session_id")
     status.set_defaults(handler=commands.cmd_status)

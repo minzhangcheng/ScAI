@@ -162,6 +162,87 @@ class TestImportFilenameHandling:
         if resp.status_code == 400:
             assert "unsupported import format" in json.dumps(resp.json()).lower()
 
+    @staticmethod
+    def _request(filename, body=b"{}"):
+        """The route's own view of a request, without the auth stack in front.
+
+        The sibling test that posts through the TestClient never reaches this
+        route -- the stub user is not in the database and the answer is 401 --
+        so it can only assert "400 or 401" and passes whatever the route does.
+        Calling the route is the only way to see what it actually answers.
+        """
+        import types
+
+        async def _stream():
+            yield body
+            yield b""
+
+        return types.SimpleNamespace(
+            state=types.SimpleNamespace(user_id="user-1"),
+            headers={
+                "x-filename": filename,
+                "content-length": str(len(body)),
+            },
+            client=None,
+            stream=_stream,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_large_body_under_a_name_this_route_cannot_read_reports_the_name(
+        self, monkeypatch,
+    ):
+        """The message has to name the cause, and the cause is the name.
+
+        A session export is a gzipped tar. Saved as `.tar` rather than
+        `.tar.gz` it fell past the dispatch into the inline branch, where the
+        first thing it met was the request-body cap -- so a 1.6 GB export came
+        back as "Import file too large (max 104857600 bytes)". The same bytes
+        under the same server imported fine once renamed. A caller told the
+        file was too large goes looking for a limit to raise, and there is no
+        limit to raise: the tar path streams to disk uncapped.
+        """
+        from fastapi import BackgroundTasks, HTTPException
+
+        from backend.routes.export_import_parts import import_routes
+
+        # Stand in for a body larger than the cap without sending one.
+        monkeypatch.setattr(import_routes, "MAX_INLINE_IMPORT_BYTES", 8)
+
+        with pytest.raises(HTTPException) as raised:
+            await import_routes.import_state(
+                self._request("session.tar", b"x" * 4096), BackgroundTasks(),
+            )
+
+        assert raised.value.status_code == 400
+        detail = str(raised.value.detail).lower()
+        assert "unsupported import format" in detail
+        assert "too large" not in detail
+
+    @pytest.mark.asyncio
+    async def test_the_name_guard_does_not_answer_for_a_format_this_route_reads(
+        self, monkeypatch, tmp_path,
+    ):
+        """It must refuse names, not archives.
+
+        A `.tar.gz` gets far enough to be written to the upload directory; the
+        point here is only that it is not turned away at the door.
+        """
+        from fastapi import BackgroundTasks, HTTPException
+
+        from backend.routes.export_import_parts import import_routes
+
+        monkeypatch.setattr(import_routes, "MAX_INLINE_IMPORT_BYTES", 8)
+
+        for name in ("session.tar.gz", "session.TGZ"):
+            try:
+                await import_routes.import_state(
+                    self._request(name, b"x" * 64), BackgroundTasks(),
+                )
+            except HTTPException as exc:
+                assert "unsupported import format" not in str(exc.detail).lower(), name
+            except Exception:  # noqa: BLE001 - anything past the guard is fine
+                pass
+
     def test_extension_dispatch_is_case_insensitive(self):
         import inspect
 

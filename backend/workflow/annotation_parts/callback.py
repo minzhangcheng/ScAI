@@ -1,6 +1,52 @@
 """Annotation literature, PI matching, and HITL callback phases."""
 from __future__ import annotations
 
+#: What the model reads when a restored session resumes into this tool call.
+#: The call it made has no result yet -- the user is looking at the dialog --
+#: so the checkpoint pairs it with this, and a resumed executor sees an
+#: instruction rather than a truncated transcript. Calling annotate_clusters
+#: again is cheap and deterministic: begin_annotation returns the confirmed
+#: annotations straight from the state once the user has answered.
+_ANNOTATION_RESUME_NOTE = (
+    "[ANNOTATION AWAITING USER REVIEW] The cluster annotations were produced "
+    "and handed to the user for confirmation. If you are reading this after a "
+    "session was restored from this point, call annotate_clusters again with "
+    "the same arguments: it returns the confirmed annotations directly. Do not "
+    "re-run clustering or differential expression."
+)
+
+
+async def _capture_annotation_snapshot(self, state) -> None:
+    """The restore point for the cell annotation decision. Never raises.
+
+    Part B spec 1: this is the earliest decision an analysis makes and every
+    later label depends on it, which is why it carries the highest retention
+    rank. Taken before the dialog opens and before an unattended run accepts
+    the annotations on the user's behalf -- with ``round_wait_seconds = 0``
+    the PI decides, and at this layer that is the same decision made by a
+    different party.
+    """
+    from backend.constants import GATE_ANNOTATION_CONFIRMATION
+    from backend.services.round_snapshots.writer import capture_decision_snapshot
+
+    pending = getattr(
+        getattr(self, "bioinformatics_agent", None), "pending_tool_checkpoint", None,
+    )
+    prepare = None
+    if pending is not None:
+        async def prepare() -> None:
+            await pending.checkpoint_now(
+                "pre_annotation_confirmation", result_text=_ANNOTATION_RESUME_NOTE,
+            )
+
+    await capture_decision_snapshot(
+        self,
+        state,
+        gate=GATE_ANNOTATION_CONFIRMATION,
+        workflow_state=getattr(self, "_current_graph_state", None),
+        prepare=prepare,
+    )
+
 
 def bind_facade(facade) -> None:
     globals().update(
@@ -353,6 +399,11 @@ async def review_and_confirm_annotations(
 
             self._set_status(state, TaskStatus.WAITING_ANNOTATION)
             await self._send_state_sync(state, "annotation_confirmation")
+
+            # Part B hook B, after the pending state is published and before
+            # the wait: a snapshot taken any later could not restore into the
+            # dialog, and one taken earlier would not carry it.
+            await _capture_annotation_snapshot(self, state)
 
             signaled = await wait_with_skip_time(
                 self._annotation_event,

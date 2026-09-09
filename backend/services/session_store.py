@@ -754,6 +754,11 @@ def list_saved_sessions() -> List[Dict[str, Any]]:
                 "has_pathology": has_path,
                 "has_sequencing": has_seq,
                 "has_biochemistry": has_bio,
+                # Part B: which decision snapshot this session was restored
+                # from, as "<source id>/<snapshot id>". Read from the summary
+                # rather than from each session's full state, because the
+                # source session lists its forks by scanning these.
+                "last_restored_snapshot_id": data.get("last_restored_snapshot_id"),
             })
         except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning(f"Failed to read session file {session_file}: {e}")

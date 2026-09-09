@@ -188,11 +188,53 @@ def test_the_snapshot_v2_package_is_gone():
     assert spec is None or spec.loader is None, spec
 
 
-def test_no_snapshot_route_is_registered():
-    from backend.main import app
+#: The only registered paths that may carry "snapshot". Snapshot V2's HTTP
+#: surface was deleted whole and stays deleted; Part B's decision snapshots are
+#: a different feature with a different shape, so its routes are listed one by
+#: one rather than admitted by prefix. Note what is absent: there is no create
+#: route, because a capture is automatic at a decision point and a route that
+#: made one on request would be a second producer with different semantics.
+PART_B_SNAPSHOT_ROUTES: frozenset[str] = frozenset({
+    "/api/session/{session_id}/snapshots",
+    "/api/session/{session_id}/snapshots/{snapshot_id}",
+    "/api/session/{session_id}/snapshots/{snapshot_id}/restore",
+})
 
-    paths = {getattr(route, "path", "") for route in app.routes}
-    assert not [p for p in paths if "snapshot" in p.lower()], sorted(paths)
+
+def test_no_snapshot_route_outside_part_b_is_registered():
+    """Read through the registry helper, not ``app.routes`` directly.
+
+    This assertion used to scan ``app.routes`` for objects with a ``.path``.
+    Recent FastAPI parks an unexpanded wrapper there instead, which has no
+    ``.path`` at all, so the scan saw four built-in documentation routes and
+    would have passed no matter what was registered -- see the comment on
+    ``test_route_registry._iter_routes``.
+    """
+    from backend.tests.test_route_registry import _current_routes
+
+    unexpected = sorted(
+        path for path, _methods in _current_routes()
+        if "snapshot" in path.lower() and path not in PART_B_SNAPSHOT_ROUTES
+    )
+    assert not unexpected, unexpected
+
+
+def test_the_allow_list_is_exactly_what_is_registered():
+    """The other direction, so the ratchet above cannot become vacuous.
+
+    An allow-list only constrains anything while the routes it names are
+    actually registered and actually visible to the traversal. Asserting set
+    equality means an unlisted route fails the test above, and a listed route
+    that stopped being registered -- or that the traversal stopped seeing --
+    fails this one, which is the failure mode the previous version of this
+    guard had silently reached.
+    """
+    from backend.tests.test_route_registry import _current_routes
+
+    registered = sorted(
+        path for path, _methods in _current_routes() if "snapshot" in path.lower()
+    )
+    assert registered == sorted(PART_B_SNAPSHOT_ROUTES)
 
 
 def test_no_snapshot_configuration_survives():

@@ -48,6 +48,18 @@ class WorkflowState(TypedDict, total=False):
     # Stable checkpoint identity.  TaskStatus is lifecycle state and may be
     # RUNNING while a restored semantic wait node is executing.
     semantic_gate: Optional[str]
+    # The entry plan `restore_entry` computes and `_route_from_restore_entry`
+    # acts on. It has to be declared here, not merely returned by the node: a
+    # conditional-edge router whose state parameter is type-annotated is handed
+    # the *declared channels*, not the node's raw return, so an undeclared key
+    # is dropped between the two and the router silently takes its default
+    # ("normal") route. That is what sent every graph-node restore through
+    # `initialize_round` instead of to the node the capsule named.
+    #
+    # Safe to persist: `restore_entry` is the graph's entry point and rewrites
+    # this on every invocation, so the router never reads a stale plan, and no
+    # other node consults it.
+    _restore_entry_plan: Dict[str, Any]
 
 
 def make_initial_workflow_state(analysis_state: AnalysisState, current_round: int = 0) -> "WorkflowState":

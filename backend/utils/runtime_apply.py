@@ -286,6 +286,170 @@ def runtime_h5ad_manifest_path(
 
 
 
+def _roll_back_workspace(session_id: str, pair: Path) -> dict[str, int]:
+    """Put the workspace back to what this generation held.
+
+    A pair restore returns the dump, the notebook record and the two positions.
+    The workspace is the fourth thing a session is made of, and it used to be
+    left wherever the crash left it: on the run that prompted this, eight files
+    written after the last save survived the rollback, among them an
+    ``.h5ad`` intermediate. A later step loading one by name would read a file
+    produced by work the rollback had discarded, and nothing downstream could
+    tell.
+
+    Recording only the file list was the first attempt and it is not enough. It
+    can take away what was added, but a file that existed then and was
+    *rewritten* since cannot be got back from a list. So each save now keeps the
+    generation its own copy, built incrementally against the previous one, and
+    this restores from it.
+
+    Three outcomes, all reported: a file put back, a file taken away because
+    this generation did not have it, and a file left alone because it is already
+    the copy's own bytes. The last is the common case and costs nothing.
+    """
+    import os
+    import shutil
+    import stat as stat_module
+
+    from backend.config import get_session_workspace
+    from backend.utils.sandbox_parts.workspace_generation import (
+        WORKSPACE_COPY_DIRNAME,
+        WORKSPACE_INVENTORY_NAME,
+        WORKSPACE_INVENTORY_SCHEMA,
+    )
+
+    outcome = {"restored": 0, "removed": 0, "unchanged": 0}
+    record = pair / WORKSPACE_INVENTORY_NAME
+    saved = pair / WORKSPACE_COPY_DIRNAME
+    # The record is written after the copy, so its presence is what says the
+    # copy is whole. Without it, this generation restores nothing -- which is
+    # what every generation written before the copy existed does.
+    if not record.is_file() or not saved.is_dir():
+        return outcome
+    try:
+        payload = json.loads(record.read_text(encoding="utf-8"))
+        if int(payload.get("schema_version") or 0) != WORKSPACE_INVENTORY_SCHEMA:
+            logger.warning(
+                "[%s] Workspace record schema %r is not one this build reads; "
+                "leaving the workspace alone",
+                session_id, payload.get("schema_version"),
+            )
+            return outcome
+    except (OSError, ValueError, TypeError):
+        logger.warning(
+            "[%s] Could not read the workspace record; leaving the workspace "
+            "alone", session_id, exc_info=True,
+        )
+        return outcome
+
+    workspace = get_session_workspace(session_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    def _regular(path: Path):
+        try:
+            info = path.lstat()
+        except OSError:
+            return None
+        return info if stat_module.S_ISREG(info.st_mode) else None
+
+    held: set[str] = set()
+    for base, _dirs, files in os.walk(saved):
+        for name in files:
+            source = Path(base) / name
+            info = _regular(source)
+            if info is None:
+                continue
+            relative = source.relative_to(saved)
+            held.add(relative.as_posix())
+            target = workspace / relative
+            live = _regular(target)
+            if (
+                live is not None
+                and live.st_size == info.st_size
+                and live.st_mtime_ns == info.st_mtime_ns
+            ):
+                outcome["unchanged"] += 1
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                # Copied, never linked: a link would hand analysis code our own
+                # copy to truncate, and the next rollback would restore what it
+                # was supposed to undo.
+                shutil.copy2(source, target)
+            except OSError:
+                logger.warning(
+                    "[%s] Could not put %s back", session_id, relative,
+                    exc_info=True,
+                )
+                continue
+            outcome["restored"] += 1
+
+    for base, _dirs, files in os.walk(workspace):
+        for name in files:
+            path = Path(base) / name
+            if _regular(path) is None:
+                # Never follow a link out of the workspace, and never remove
+                # something that is not a plain file.
+                continue
+            try:
+                relative = path.relative_to(workspace).as_posix()
+            except ValueError:
+                continue
+            if relative in held:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                logger.warning(
+                    "[%s] Could not remove %s, written after the generation "
+                    "being restored", session_id, relative, exc_info=True,
+                )
+                continue
+            outcome["removed"] += 1
+
+    _remove_empty_workspace_directories(workspace)
+    return outcome
+
+
+def _remove_empty_workspace_directories(workspace: Path) -> None:
+    """Take away the directories a removed subtree left behind, root excepted."""
+    import os
+
+    for base, _dirs, _files in os.walk(workspace, topdown=False):
+        directory = Path(base)
+        if directory == workspace:
+            continue
+        try:
+            next(directory.iterdir())
+        except StopIteration:
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        except OSError:
+            continue
+
+
+def generation_pair_is_restorable(session_id: str, revision: int | None) -> bool:
+    """Whether a rollback to *revision* has the files it needs.
+
+    The same two-file precondition ``restore_generation_pair`` applies, exposed
+    so that what a refusal *tells* the user and what the run route would
+    actually *do* cannot drift apart. They had: the refusal offered only
+    "re-run from your data" while the run route was ready to roll the session
+    back to its last save and carry on.
+    """
+    from backend.utils.sandbox_parts.regular_save import GENERATION_PAIR_DIRNAME
+
+    if revision is None:
+        return False
+    try:
+        pair = _states_dir(session_id) / GENERATION_PAIR_DIRNAME / str(int(revision))
+    except (TypeError, ValueError):
+        return False
+    return (pair / "state.json").is_file() and (pair / "checkpoints.sqlite").is_file()
+
+
 def restore_generation_pair(session_id: str, *, revision: int) -> bool:
     """Put a committed generation's captured positions back beside its dump.
 
@@ -429,8 +593,24 @@ def restore_generation_pair(session_id: str, *, revision: int) -> bool:
     os.replace(staged_state, live_state)
     fsync_directory(states_dir)
 
+    # After the declaration, not before it. The workspace sweep is hygiene: the
+    # restore is already correct without it, and a failure here must leave a
+    # restored session rather than an unrestored one. It is idempotent, so a
+    # process that dies partway through finishes on the next attempt.
+    try:
+        swept = _roll_back_workspace(session_id, pair)
+    except Exception:  # noqa: BLE001 - never fail a restore over cleanup
+        logger.warning(
+            "[%s] Could not restore the workspace after restoring the "
+            "generation pair", session_id, exc_info=True,
+        )
+        swept = {"restored": 0, "removed": 0, "unchanged": 0}
+
     logger.info(
-        "[%s] Restored the generation pair for revision %d", session_id, revision,
+        "[%s] Restored the generation pair for revision %d "
+        "(workspace: %d file(s) put back, %d removed, %d already current)",
+        session_id, revision,
+        swept["restored"], swept["removed"], swept["unchanged"],
     )
     return True
 

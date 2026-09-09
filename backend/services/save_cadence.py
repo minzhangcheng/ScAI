@@ -12,6 +12,12 @@ Three boundaries ask:
 * ``step_boundary`` -- a cell finished inside a round. Saves only once the
   wall-clock floor has passed, because a save is minutes of work and a run that
   saved after every step would spend most of its time persisting.
+* ``decision_boundary`` -- a decision snapshot is about to be taken and the
+  kernel has moved past its newest committed generation (Part B spec 4.5).
+  Always saves: the snapshot copies a committed generation, so a boundary that
+  waited out the floor would capture a dump older than the workspace beside it.
+  The floor is not the instrument here -- the caller only asks at all when a
+  cell has run since the last commit.
 
 The clock runs from the last **successful** commit, never from the last
 attempt. Spec 5.1's promise -- "at most one round or N minutes of work is at
@@ -23,10 +29,14 @@ from __future__ import annotations
 
 from typing import Final, Literal
 
-SaveReason = Literal["round_boundary", "step_boundary", "closing"]
+SaveReason = Literal[
+    "round_boundary", "step_boundary", "closing", "decision_boundary",
+]
 
 #: Boundaries that persist unconditionally.
-_UNCONDITIONAL: Final[frozenset[str]] = frozenset({"round_boundary", "closing"})
+_UNCONDITIONAL: Final[frozenset[str]] = frozenset(
+    {"round_boundary", "closing", "decision_boundary"}
+)
 
 
 def should_save(

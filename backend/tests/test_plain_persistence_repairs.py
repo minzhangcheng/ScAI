@@ -584,6 +584,182 @@ async def test_cold_resume_refusal_persists_rerun_projection(monkeypatch):
     owner.signal_resume.assert_not_called()
 
 
+async def _refuse_a_cold_resume(monkeypatch, *, last_attempt_status):
+    """Drive the resume route to its refusal and hand back what it said."""
+    from backend.routes import lifecycle
+
+    state, owner = _live_paused_owner(monkeypatch)
+    owner.sandbox.kernel_epoch += 1
+    if last_attempt_status == "succeeded":
+        # A crash between saves: the kernel ran on, nothing failed.
+        moved_on = {"current_revision": 147, "last_attempt_revision": 106}
+    else:
+        # A save that failed: the kernel is where the commit is, the attempt
+        # that would have carried it forward did not land.
+        moved_on = {"current_revision": 106, "last_attempt_revision": 147}
+    state.runtime_persistence.update({
+        "committed_revision": 106,
+        "saved_revision": 106,
+        "last_attempt_status": last_attempt_status,
+        **moved_on,
+    })
+    monkeypatch.setattr(
+        lifecycle, "require_session_ownership", AsyncMock(return_value=state),
+    )
+    monkeypatch.setattr(lifecycle, "_update_session_cache", AsyncMock())
+    monkeypatch.setattr(lifecycle, "async_save_session", AsyncMock())
+    response = await lifecycle.resume_analysis(
+        state.id, SimpleNamespace(state=SimpleNamespace(user_id="u1")),
+    )
+    assert response.data["runtime_unavailable"] is True
+    return state, response
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_session_is_not_reported_as_a_failed_save(monkeypatch):
+    """What a real crash produced, and what the operator was told about it.
+
+    A stale verdict has two causes. The kernel ran past its last committed
+    generation -- a crash or a stop between saves -- or a save actually failed.
+    The refusal reported the second for both, so an operator whose container
+    was killed mid-round went looking for a save failure that had not happened;
+    the record even said the last attempt succeeded.
+    """
+    _state, response = await _refuse_a_cold_resume(
+        monkeypatch, last_attempt_status="succeeded",
+    )
+
+    warning = response.data["runtime_restore_warning"]
+    assert "ran past its last saved runtime" in warning
+    assert "failed" not in warning
+
+
+@pytest.mark.asyncio
+async def test_a_save_that_did_fail_is_still_reported_as_one(monkeypatch):
+    _state, response = await _refuse_a_cold_resume(
+        monkeypatch, last_attempt_status="failed",
+    )
+
+    assert "save failed" in response.data["runtime_restore_warning"]
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_resume_offers_the_restore_points_the_session_has(
+    monkeypatch, tmp_path,
+):
+    """The moment a user is asked to give the run up is the moment to say so.
+
+    Re-running from the data was the only remedy this refusal had, and it
+    discards the whole run. A session with decision snapshots has a cheaper one
+    and the refusal never mentioned it.
+    """
+    from backend.config import _config
+
+    monkeypatch.setattr(_config, "SNAPSHOT_DIR", tmp_path / "snapshots")
+
+    listed = {"snapshots": [{"snapshot_id": "r001-annotation-g106"}]}
+    monkeypatch.setattr(
+        "backend.services.round_snapshots.listing.read_session_listing",
+        lambda _sid: listed,
+    )
+
+    _state, response = await _refuse_a_cold_resume(
+        monkeypatch, last_attempt_status="succeeded",
+    )
+
+    warning = response.data["runtime_restore_warning"]
+    assert "one decision snapshot" in warning
+    assert "Otherwise re-run" in warning
+    assert "one decision snapshot" in response.message
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_resume_says_the_run_route_can_roll_it_back(
+    monkeypatch, tmp_path,
+):
+    """The cheapest remedy, which this message used not to mention at all.
+
+    `_run_analysis_locked` rolls a blocked session back to its committed
+    generation and continues from the step the dump was taken at. Measured on a
+    real crashed session: 45 revisions given up, the analysis resumed. The
+    refusal offered only "re-run the analysis from your data", which is what
+    happens when there is *no* usable pair, and on a five-hour run that reads
+    as a much larger loss than the one actually on the table.
+    """
+    from backend.config import _config
+    from backend.utils import runtime_apply
+
+    monkeypatch.setattr(_config, "SNAPSHOT_DIR", None)
+    monkeypatch.setattr(
+        runtime_apply, "generation_pair_is_restorable", lambda _sid, _rev: True,
+    )
+
+    _state, response = await _refuse_a_cold_resume(
+        monkeypatch, last_attempt_status="succeeded",
+    )
+
+    warning = response.data["runtime_restore_warning"]
+    assert "rolls it back to the last saved runtime" in warning
+    assert "41 step(s)" in warning
+    # The fallback is still named, because a pair can be unusable for reasons
+    # this check cannot see.
+    assert "Otherwise re-run" in warning
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_resume_offers_no_rollback_without_a_pair(
+    monkeypatch, tmp_path,
+):
+    """The check and the run route share a precondition; neither may bluff."""
+    from backend.config import _config
+    from backend.utils import runtime_apply
+
+    monkeypatch.setattr(_config, "SNAPSHOT_DIR", None)
+    monkeypatch.setattr(
+        runtime_apply, "generation_pair_is_restorable", lambda _sid, _rev: False,
+    )
+
+    _state, response = await _refuse_a_cold_resume(
+        monkeypatch, last_attempt_status="succeeded",
+    )
+
+    warning = response.data["runtime_restore_warning"]
+    assert "rolls it back" not in warning
+    assert warning.endswith(
+        "Re-run the analysis from your data to recompute the kernel state, or "
+        "view the session read-only."
+    )
+
+
+def test_the_rollback_check_and_the_rollback_agree_on_what_they_need():
+    """One precondition, read from the same place by the offer and the act."""
+    import inspect
+
+    from backend.utils import runtime_apply
+
+    for name in ("generation_pair_is_restorable", "restore_generation_pair"):
+        source = inspect.getsource(getattr(runtime_apply, name))
+        assert '"state.json"' in source, name
+        assert '"checkpoints.sqlite"' in source, name
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_resume_promises_nothing_when_snapshots_are_off(
+    monkeypatch,
+):
+    from backend.config import _config
+
+    monkeypatch.setattr(_config, "SNAPSHOT_DIR", None)
+
+    _state, response = await _refuse_a_cold_resume(
+        monkeypatch, last_attempt_status="succeeded",
+    )
+
+    warning = response.data["runtime_restore_warning"]
+    assert "snapshot" not in warning
+    assert "Re-run" in warning
+
+
 @pytest.mark.asyncio
 async def test_a_start_time_unavailable_verdict_reaches_the_graphs_own_state():
     """The mark and the guard must not read two different objects.

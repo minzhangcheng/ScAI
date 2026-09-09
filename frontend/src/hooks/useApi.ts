@@ -13,3 +13,9 @@ export function useSession() {
 }
 export { useWebSocket } from './api/useWebSocket'
 export { useConfig, usePrompts, useUserConfig } from './api/useConfig'
+export {
+  deleteSnapshot, getRestoreStatus, listSnapshots, restoreSnapshot,
+} from './api/snapshots'
+export type {
+  FailedCaptureRow, RestoreJobStatus, SnapshotListing, SnapshotRow,
+} from './api/snapshots'

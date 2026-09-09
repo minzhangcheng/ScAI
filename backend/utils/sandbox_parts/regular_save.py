@@ -6,11 +6,13 @@ import hmac
 import json
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from backend.utils.crypto import get_integrity_secret, sign_hmac_sha256
+from .workspace_generation import publish_workspace_generation
 
 logger = logging.getLogger("backend.utils.sandbox_parts.shared")
 
@@ -103,15 +105,46 @@ def _copy_sqlite_durable(src: Path, dst: Path) -> None:
         os.fsync(handle.fileno())
 
 
+#: The workspace inventory a generation is paired with, inside the pair
+#: directory so it is pruned with it. Not a fourth journalled component: it is
+#: written after the transaction commits, so a crash in between leaves a pair
+#: with no inventory, and a rollback with no inventory simply cleans nothing --
+#: which is what every pair written before this existed does. Failing the save
+#: over a hygiene record would be the wrong trade.
+WORKSPACE_INVENTORY_NAME = "workspace.json"
+
+#: Bumped when the shape changes. A reader that does not recognise the version
+#: cleans nothing rather than guessing, because the consequence of guessing
+#: here is deleting a file.
+WORKSPACE_INVENTORY_SCHEMA = 1
+
+
 def _prune_older_generations(generation_root: Path, *, keep: int) -> None:
-    """Retention is one (B2-1), and the newest is durable before this runs."""
+    """Retention is one (B2-1), and the newest is durable before this runs.
+
+    A generation is not three files any more: it also holds the workspace copy
+    the rollback restores from, which is a directory. `unlink` raises on one,
+    the exception left the commit through this call, and the save that was
+    otherwise complete was recorded as failed -- seen in production before a
+    test caught it, because a single save never prunes a generation that has
+    one.
+    """
     if not generation_root.is_dir():
         return
     for entry in generation_root.iterdir():
         if not entry.is_dir() or entry.name == str(keep):
             continue
         for child in entry.iterdir():
-            _remove_durable(child)
+            try:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    _remove_durable(child)
+            except OSError:
+                logger.warning(
+                    "Could not remove %s from a superseded generation", child,
+                    exc_info=True,
+                )
         try:
             entry.rmdir()
         except OSError:
@@ -513,6 +546,7 @@ def _commit_pkl_transaction(
     fault_hook=None,
     generation_root: Path | None = None,
     paired_sources: Dict[str, Path | None] | None = None,
+    workspace_root: Path | None = None,
 ) -> None:
     """Install a runtime generation with crash-recoverable commit semantics.
 
@@ -788,6 +822,11 @@ def _commit_pkl_transaction(
         fault_hook=fault_hook,
     )
     if pair_dir is not None and (pair_targets or pair_removals):
+        if workspace_root is not None:
+            publish_workspace_generation(
+                Path(workspace_root), pair_dir, Path(generation_root),
+                int(target_revision),
+            )
         _prune_older_generations(Path(generation_root), keep=int(target_revision))
 
 

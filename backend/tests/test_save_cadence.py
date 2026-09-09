@@ -40,7 +40,9 @@ def test_every_save_reason_has_a_production_call_site():
     to catch.
     """
     reasons = set(typing.get_args(SaveReason))
-    assert reasons == {"round_boundary", "step_boundary", "closing"}
+    assert reasons == {
+        "round_boundary", "step_boundary", "closing", "decision_boundary",
+    }
 
     call = re.compile(r"""runtime_save_due\(\s*[^()]*?["'](\w+)["']\s*\)""", re.S)
     called: set[str] = set()

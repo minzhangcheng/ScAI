@@ -247,11 +247,25 @@ async def handle_annotate_clusters(context, tool_call) -> ToolAction:
         "status", database_prior_result.realtime_message(n_clusters))
     annotation_result: Dict[str, Any] = {}
     if self.annotate_clusters_callback:
-        annotation_result = await self.annotate_clusters_callback(
-            cluster_markers, tissue, organism,
-            analysis_log=analysis_log,
-            database_priors=database_priors,
+        # The user's annotation decision is taken inside this call, and the
+        # executor's position is only reachable from here. Part B spec 4.5
+        # hook B: the snapshot writer checkpoints through this handle so the
+        # generation it commits is paired with the step the dump belongs to.
+        from .executor_checkpoint import PendingToolCheckpoint
+
+        self.pending_tool_checkpoint = PendingToolCheckpoint(
+            tool_call_id=tool_call.id,
+            tool_name="annotate_clusters",
+            save=context.save_checkpoint,
         )
+        try:
+            annotation_result = await self.annotate_clusters_callback(
+                cluster_markers, tissue, organism,
+                analysis_log=analysis_log,
+                database_priors=database_priors,
+            )
+        finally:
+            self.pending_tool_checkpoint = None
     else:
         annotation_result = {
             "status": "unavailable",

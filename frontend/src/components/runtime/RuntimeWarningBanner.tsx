@@ -41,13 +41,13 @@ export function RuntimeWarningBanner({
       className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2 text-sm text-slate-700 dark:text-slate-200"
     >
       <div className="font-medium">
-        {isZh ? '运行时不可用 — 只读 / 需重新运行' : 'Runtime unavailable — read-only / re-run required'}
+        {isZh ? '无法继续 — 可只读查看或恢复' : 'Cannot continue — view read-only or recover'}
       </div>
       <p className="text-xs mt-0.5 text-slate-600 dark:text-slate-300">
         {warning ||
           (isZh
-            ? '会话在无一致内核运行时的情况下恢复。继续分析已阻止；可只读查看，或点击“重新运行”从原始数据重新计算。'
-            : 'Session was restored without a consistent kernel runtime. Forward resume is blocked; view read-only, or use the Re-run button to recompute from the raw inputs.')}
+            ? '当前内核状态与本会话记录的工作对不上，继续分析已阻止。「恢复并继续」会回到最近一次保存的内核状态并从那里继续，只有在没有可用状态时才从原始数据重跑；也可以只读查看结果。'
+            : 'The kernel state does not match the work this session records, so forward analysis is blocked. Recover returns to the last saved runtime and continues from there, and re-runs from the raw inputs only if none can be used. Results stay viewable read-only.')}
       </p>
     </div>
   )

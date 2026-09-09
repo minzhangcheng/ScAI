@@ -650,6 +650,24 @@
     ]
   ],
   [
+    "/api/session/{session_id}/snapshots",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshots/{snapshot_id}",
+    [
+      "DELETE"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshots/{snapshot_id}/restore",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/session/{session_id}/species-input",
     [
       "POST"

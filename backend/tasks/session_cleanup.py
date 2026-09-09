@@ -367,5 +367,14 @@ async def cleanup_stale_sessions(
 
             await sweep_tombstoned_generations()
 
+            # A capture that was abandoned mid-flight leaves a hardlink to a
+            # whole dump behind, so a session that never reaches another
+            # decision would hold gigabytes until it was deleted.
+            from backend.services.round_snapshots.writer import (
+                reclaim_abandoned_capture_work,
+            )
+
+            await run_in_owned_thread(reclaim_abandoned_capture_work)
+
         except Exception:
             logger.exception("Error in session cleanup task")
