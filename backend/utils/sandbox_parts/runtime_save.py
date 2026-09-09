@@ -752,6 +752,8 @@ async def _execute_save(
     *,
     bindings,
 ) -> bool:
+    from backend.config import get_session_workspace
+
     started = time.monotonic()
     sandbox = context.sandbox
     result = await sandbox._execute_unlocked(
@@ -939,6 +941,17 @@ async def _execute_save(
                                     sandbox.notebook_state.state_dir
                                 ) / bindings.GENERATION_PAIR_DIRNAME,
                                 paired_sources=bindings.paired_generation_sources(sandbox),
+                                # Scanned here, under the execution lock the
+                                # save already holds, so the list describes the
+                                # same instant as the dump. The root comes from
+                                # `get_session_workspace`, which is also where
+                                # the rollback's sweep gets it: two readers of
+                                # one directory that decide what to delete must
+                                # not be able to disagree about which directory
+                                # it is.
+                                workspace_inventory=bindings.scan_workspace_inventory(
+                                    get_session_workspace(sandbox.session_id)
+                                ),
                                 authoritative_pkl_names=saved_names,
                                 fault_hook=getattr(
                                     sandbox, "_regular_save_fault_hook", None

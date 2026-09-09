@@ -332,6 +332,185 @@ def test_restoring_a_pair_puts_the_positions_back_beside_the_dump():
     assert not (states / "checkpoints.sqlite-shm").exists()
 
 
+# ------------------------------------------------- the workspace, on rollback
+
+# The gap this closes was found by rolling back a real crashed session: eight
+# files written between the last save and the kill survived the restore, among
+# them adata_annotated.h5ad. The kernel no longer knew it had made them, and a
+# later step that loads an intermediate by name would have read one produced by
+# work the rollback had just discarded.
+
+
+def _workspace_inventory(sid, pair, files, *, revision=44):
+    """Record a workspace the way a save does, from the files given."""
+    from backend.config import get_session_workspace
+    from backend.utils.sandbox_parts import regular_save
+
+    workspace = get_session_workspace(sid)
+    for relative, body in files.items():
+        target = workspace / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+    inventory = regular_save.scan_workspace_inventory(workspace)
+    regular_save._write_workspace_inventory(pair, revision, inventory)
+    return workspace
+
+
+def test_a_rollback_removes_the_files_written_after_the_generation():
+    sid = "sess-pair-workspace"
+    _states, pair = _generation_pair(sid, 44)
+    workspace = _workspace_inventory(
+        sid, pair, {"figures/umap.png": b"at the save", "table.csv": b"gene\n"},
+    )
+
+    # What the run wrote between that save and the crash.
+    (workspace / "adata_annotated.h5ad").write_bytes(b"from the discarded future")
+    (workspace / "figures" / "later.png").write_bytes(b"also later")
+
+    assert runtime_apply.restore_generation_pair(sid, revision=44) is True
+
+    assert (workspace / "figures" / "umap.png").read_bytes() == b"at the save"
+    assert (workspace / "table.csv").is_file()
+    assert not (workspace / "adata_annotated.h5ad").exists()
+    assert not (workspace / "figures" / "later.png").exists()
+
+
+def test_a_rollback_keeps_a_file_that_was_overwritten_rather_than_added():
+    """It was in the generation. Its contents are not, and cannot be got back.
+
+    Deleting it would lose a file the restored session is entitled to have;
+    keeping it silently would hide that its contents are from after the save.
+    So it is kept and reported.
+    """
+    import logging
+
+    sid = "sess-pair-overwritten"
+    _states, pair = _generation_pair(sid, 44)
+    workspace = _workspace_inventory(sid, pair, {"table.csv": b"gene\n"})
+
+    import os
+    import time
+
+    time.sleep(0.01)
+    (workspace / "table.csv").write_bytes(b"gene,logfc\nEDITED,9.9\n")
+    os.utime(workspace / "table.csv", ns=(time.time_ns(), time.time_ns()))
+
+    logger = logging.getLogger("backend.utils.runtime_apply")
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logger.addHandler(handler)
+    try:
+        assert runtime_apply.restore_generation_pair(sid, revision=44) is True
+    finally:
+        logger.removeHandler(handler)
+
+    assert (workspace / "table.csv").read_bytes() == b"gene,logfc\nEDITED,9.9\n"
+    assert any("overwritten after revision" in r.getMessage() for r in records)
+
+
+def test_a_directory_left_empty_by_the_sweep_goes_with_it():
+    sid = "sess-pair-empty-dir"
+    _states, pair = _generation_pair(sid, 44)
+    workspace = _workspace_inventory(sid, pair, {"table.csv": b"gene\n"})
+    (workspace / "scratch" / "deep").mkdir(parents=True)
+    (workspace / "scratch" / "deep" / "later.bin").write_bytes(b"later")
+
+    assert runtime_apply.restore_generation_pair(sid, revision=44) is True
+
+    assert not (workspace / "scratch").exists()
+    assert workspace.is_dir(), "the workspace root itself is never removed"
+
+
+def test_a_pair_with_no_inventory_leaves_the_workspace_alone():
+    """Every pair written before this existed has none, and must still restore."""
+    sid = "sess-pair-no-inventory"
+    _states, _pair = _generation_pair(sid, 44)
+    from backend.config import get_session_workspace
+
+    workspace = get_session_workspace(sid)
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "anything.bin").write_bytes(b"untouched")
+
+    assert runtime_apply.restore_generation_pair(sid, revision=44) is True
+
+    assert (workspace / "anything.bin").read_bytes() == b"untouched"
+
+
+def test_an_inventory_from_a_future_schema_leaves_the_workspace_alone():
+    """The consequence of guessing here is deleting a file, so it does not."""
+    import json as json_module
+
+    from backend.config import get_session_workspace
+    from backend.utils.sandbox_parts.regular_save import WORKSPACE_INVENTORY_NAME
+
+    sid = "sess-pair-future-schema"
+    _states, pair = _generation_pair(sid, 44)
+    (pair / WORKSPACE_INVENTORY_NAME).write_text(
+        json_module.dumps({"schema_version": 99, "revision": 44, "files": {}})
+    )
+    workspace = get_session_workspace(sid)
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "anything.bin").write_bytes(b"untouched")
+
+    assert runtime_apply.restore_generation_pair(sid, revision=44) is True
+
+    assert (workspace / "anything.bin").read_bytes() == b"untouched"
+
+
+def test_a_sweep_that_fails_still_leaves_the_session_restored(monkeypatch):
+    """The restore is correct without the sweep; the sweep must not undo that."""
+    sid = "sess-pair-sweep-fails"
+    states, pair = _generation_pair(sid, 44)
+    _workspace_inventory(sid, pair, {"table.csv": b"gene\n"})
+    (states / f"{sid}_state.json").write_text(
+        json.dumps({"session_id": sid, "marker": "live-newer"})
+    )
+
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("the volume went away")
+
+    monkeypatch.setattr(runtime_apply, "_roll_back_workspace", _explode)
+
+    assert runtime_apply.restore_generation_pair(sid, revision=44) is True
+    assert json.loads((states / f"{sid}_state.json").read_text())["marker"] == "paired"
+
+
+def test_the_sweep_never_reaches_outside_the_workspace(tmp_path):
+    """A symlink is not a regular file, and is left where it is."""
+    from backend.config import get_session_workspace
+
+    sid = "sess-pair-symlink"
+    _states, pair = _generation_pair(sid, 44)
+    workspace = _workspace_inventory(sid, pair, {"table.csv": b"gene\n"})
+
+    outside = tmp_path / "precious.bin"
+    outside.write_bytes(b"not ours to delete")
+    (workspace / "link.bin").symlink_to(outside)
+
+    assert runtime_apply.restore_generation_pair(sid, revision=44) is True
+
+    assert outside.read_bytes() == b"not ours to delete"
+    assert (workspace / "link.bin").is_symlink()
+
+
+def test_a_scan_and_a_sweep_agree_on_what_counts_as_a_file():
+    """Both walk with lstat and both keep only regular files.
+
+    If the scan counted something the sweep does not, that thing would be
+    deleted on every rollback; if the sweep counted something the scan does
+    not, it would be deleted the first time.
+    """
+    import inspect
+
+    from backend.utils.sandbox_parts.regular_save import scan_workspace_inventory
+
+    for function in (scan_workspace_inventory, runtime_apply._roll_back_workspace):
+        source = inspect.getsource(function)
+        assert "lstat()" in source, function.__name__
+        assert "S_ISREG" in source, function.__name__
+
+
 def test_a_pair_without_an_executor_position_clears_the_live_one():
     """A round boundary reached after the executor finished has no step
     checkpoint, and the live one is then newer than the generation.

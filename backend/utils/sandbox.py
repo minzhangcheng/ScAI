@@ -63,6 +63,7 @@ from .sandbox_parts.shared import (  # noqa: F401
     _commit_pkl_transaction,
     GENERATION_PAIR_DIRNAME,
     paired_generation_sources,
+    scan_workspace_inventory,
     recover_regular_save_transaction,
     _verify_pkl_integrity,
     _integrity_dir,

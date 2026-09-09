@@ -127,10 +127,12 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
                   ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
                   : 'bg-indigo-100 dark:bg-indigo-900/60 hover:bg-indigo-200 dark:hover:bg-indigo-800/70 text-indigo-800 dark:text-indigo-200'
               }`}
-              title={language === 'zh' ? '从原始数据重新运行' : 'Re-run analysis from raw inputs'}
+              title={language === 'zh'
+                ? '回到最近一次保存的内核状态并继续；没有可用状态时才从原始数据重跑'
+                : 'Continue from the last saved runtime; re-runs from the raw inputs only if none can be used'}
             >
               <Play className="w-3.5 h-3.5" />
-              {language === 'zh' ? '重新运行' : 'Re-run'}
+              {language === 'zh' ? '恢复并继续' : 'Recover'}
             </button>
           )}
 

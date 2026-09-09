@@ -456,14 +456,20 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
     import json
     import sqlite3
 
-    from backend.config import get_session_states
+    from backend.config import get_session_states, get_session_workspace
     from backend.utils import runtime_apply
     from backend.utils.sandbox import LocalJupyterSandbox
 
     session_id = "test-pair-restore-roundtrip"
     states_dir = get_session_states(session_id)
     states_dir.mkdir(parents=True, exist_ok=True)
-    workspace_dir = str(tmp_path / "workspace")
+    # The configured workspace, not one of this test's own: the save scans it
+    # through `get_session_workspace` and the rollback sweeps it through the
+    # same call, and a test that pointed the sandbox somewhere else would
+    # exercise neither.
+    workspace = get_session_workspace(session_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    workspace_dir = str(workspace)
 
     checkpoint = states_dir / "checkpoints.sqlite"
     executor_checkpoint = states_dir / f"{session_id}_bioinfo_checkpoint.json"
@@ -487,6 +493,7 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
         # The work that will survive, and the two positions as they stand
         # when it is committed.
         assert (await sb.execute("adata = {'cells': 1234}")).success
+        (workspace / "kept.csv").write_text("gene,logfc\nCD3E,2.1\n")
         write_checkpoint("position-at-the-save")
         executor_checkpoint.write_text(json.dumps({
             "step_number": 10, "round_number": 2, "planning_stage": "stage1",
@@ -500,6 +507,10 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
         # The work that will be lost, and the positions moving past it.
         assert (await sb.execute("adata['cells'] = 9999")).success
         assert (await sb.execute("lost_after_the_save = True")).success
+        # An intermediate written after the save. This is the shape that
+        # prompted the sweep: a later step loading it by name would read a file
+        # produced by work the rollback discards, and nothing would say so.
+        (workspace / "adata_annotated.h5ad").write_bytes(b"from the lost work")
         write_checkpoint("position-the-crash-left")
         executor_checkpoint.write_text(json.dumps({
             "step_number": 40, "round_number": 2, "planning_stage": "stage1",
@@ -530,6 +541,13 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
     )["runtime_persistence"]
     assert restored["pair_restore"]["restored_revision"] == committed
     assert restored["pair_restore"]["discarded_revisions"] >= 2
+
+    # And the workspace holds what that generation held, which is what makes
+    # the files on disk agree with the namespace and the record above them.
+    assert (workspace / "kept.csv").read_text().startswith("gene,logfc")
+    assert not (workspace / "adata_annotated.h5ad").exists(), (
+        "a file written after the save survived the rollback"
+    )
 
     # The namespace is the one the dump held.
     sb2 = LocalJupyterSandbox(

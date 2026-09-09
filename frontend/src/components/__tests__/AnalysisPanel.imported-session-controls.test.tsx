@@ -66,7 +66,7 @@ describe('controls offered to an imported session', () => {
     })
   })
 
-  it('offers Re-run and refuses Resume when the archive carried no kernel', async () => {
+  it('offers Recover and refuses Resume when the archive carried no kernel', async () => {
     useAppStore.setState({
       runtimeRestoreStatus: 'unavailable',
       runtimeRestoreWarning: 'imported without kernel runtime state',
@@ -78,10 +78,17 @@ describe('controls offered to an imported session', () => {
     })
 
     expect(screen.getByRole('button', { name: /resume/i })).toBeDisabled()
-    const rerun = screen.getByRole('button', { name: /re-run/i })
-    expect(rerun).toBeEnabled()
+    const recover = screen.getByRole('button', { name: /recover/i })
+    expect(recover).toBeEnabled()
 
-    fireEvent.click(rerun)
+    // The label used to say "Re-run", which describes the outcome this button
+    // takes only when no generation pair can be restored. Its ordinary outcome
+    // is a rollback to the last saved runtime, and a user reading "re-run from
+    // raw inputs" on a long analysis does not press it.
+    expect(recover.getAttribute('title')).toMatch(/last saved runtime/i)
+    expect(recover.textContent).not.toMatch(/re-run/i)
+
+    fireEvent.click(recover)
     await waitFor(() => {
       expect(mockApiFetch).toHaveBeenCalledWith(
         '/session/sess-imported/run',
@@ -92,9 +99,9 @@ describe('controls offered to an imported session', () => {
 
   // The mirror case: re-importing a runtime-carrying archive onto the instance
   // that wrote it keeps the kernel but drops the checkpoint, so the runtime
-  // reads `complete` and Re-run is not rendered at all. Resume has to work,
+  // reads `complete` and Recover is not rendered at all. Resume has to work,
   // which is only true because the import arms a restore intent for it.
-  it('offers Resume and no Re-run when the kernel survived', async () => {
+  it('offers Resume and no Recover when the kernel survived', async () => {
     render(<AnalysisPanel />)
     await act(async () => {
       await Promise.resolve()
@@ -102,7 +109,7 @@ describe('controls offered to an imported session', () => {
 
     const resume = screen.getByRole('button', { name: /resume/i })
     expect(resume).toBeEnabled()
-    expect(screen.queryByRole('button', { name: /re-run/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /recover/i })).not.toBeInTheDocument()
 
     fireEvent.click(resume)
     await waitFor(() => {

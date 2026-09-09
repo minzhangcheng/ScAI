@@ -121,8 +121,8 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
       id: generateId(),
       type: 'error',
       content: options.language === 'zh'
-        ? '当前会话的运行时不可用，无法继续分析。请使用「重新运行」从已导入的数据重新计算。'
-        : 'Forward resume is blocked: the runtime is unavailable. Use re-run to recompute from the imported data.',
+        ? '当前内核状态与本会话记录的工作对不上，无法直接继续。请使用「恢复并继续」，它会回到最近一次保存的内核状态。'
+        : 'Cannot continue: the kernel state does not match the work this session records. Use Recover, which returns to the last saved runtime.',
       timestamp: new Date().toISOString(),
     })
     return true

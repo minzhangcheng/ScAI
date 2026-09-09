@@ -286,6 +286,133 @@ def runtime_h5ad_manifest_path(
 
 
 
+def _roll_back_workspace(session_id: str, pair: Path) -> dict[str, int]:
+    """Remove the workspace files this generation did not have.
+
+    A pair restore puts the dump, the notebook record and the two positions
+    back. It cannot put the workspace back, because the workspace is not copied
+    at save time -- it is the one part of a session that can be tens of
+    gigabytes and is written by analysis code rather than by us. What it *can*
+    do is take away the files that were written after the save, which is the
+    difference between a session that matches its record and one carrying
+    artefacts from a future it has just discarded.
+
+    That difference is not cosmetic. A later step that loads an intermediate by
+    name -- ``adata_annotated.h5ad`` was the one this was found on -- would read
+    a file produced by work the rollback has thrown away, and nothing
+    downstream can tell.
+
+    Two things are deliberately *not* done. A file that existed at the save and
+    was overwritten afterwards is kept, because it was in the generation and
+    deleting it would lose more than leaving it; it is reported instead, since
+    its contents are from after the save and cannot be recovered. And a pair
+    with no inventory cleans nothing, which is what every pair written before
+    this existed does.
+    """
+    import os
+    import stat as stat_module
+
+    from backend.config import get_session_workspace
+    from backend.utils.sandbox_parts.regular_save import (
+        WORKSPACE_INVENTORY_NAME,
+        WORKSPACE_INVENTORY_SCHEMA,
+    )
+
+    outcome = {"removed": 0, "overwritten": 0}
+    record = pair / WORKSPACE_INVENTORY_NAME
+    if not record.is_file():
+        return outcome
+    try:
+        payload = json.loads(record.read_text(encoding="utf-8"))
+        if int(payload.get("schema_version") or 0) != WORKSPACE_INVENTORY_SCHEMA:
+            logger.warning(
+                "[%s] Workspace inventory schema %r is not one this build "
+                "reads; leaving the workspace alone",
+                session_id, payload.get("schema_version"),
+            )
+            return outcome
+        known = payload["files"]
+        if not isinstance(known, dict):
+            raise ValueError("files is not an object")
+    except (OSError, ValueError, TypeError, KeyError):
+        logger.warning(
+            "[%s] Could not read the workspace inventory; leaving the "
+            "workspace alone", session_id, exc_info=True,
+        )
+        return outcome
+
+    workspace = get_session_workspace(session_id)
+    if not workspace.is_dir():
+        return outcome
+
+    overwritten: list[str] = []
+    for base, _dirs, files in os.walk(workspace):
+        for name in files:
+            path = Path(base) / name
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if not stat_module.S_ISREG(info.st_mode):
+                # Never follow a link out of the workspace, and never remove
+                # something that is not a plain file.
+                continue
+            try:
+                relative = path.relative_to(workspace).as_posix()
+            except ValueError:
+                continue
+            entry = known.get(relative)
+            if entry is None:
+                try:
+                    path.unlink()
+                except OSError:
+                    logger.warning(
+                        "[%s] Could not remove %s, written after the "
+                        "generation being restored", session_id, relative,
+                        exc_info=True,
+                    )
+                    continue
+                outcome["removed"] += 1
+                logger.info(
+                    "[%s] Removed %s: written after revision %s",
+                    session_id, relative, payload.get("revision"),
+                )
+                continue
+            if int(entry.get("mtime_ns") or 0) != int(info.st_mtime_ns):
+                overwritten.append(relative)
+
+    if overwritten:
+        outcome["overwritten"] = len(overwritten)
+        logger.warning(
+            "[%s] %d workspace file(s) were overwritten after revision %s and "
+            "cannot be rolled back; their contents are from after the save: %s",
+            session_id, len(overwritten), payload.get("revision"),
+            ", ".join(sorted(overwritten)[:10]),
+        )
+
+    _remove_empty_workspace_directories(workspace)
+    return outcome
+
+
+def _remove_empty_workspace_directories(workspace: Path) -> None:
+    """Take away the directories a removed subtree left behind, root excepted."""
+    import os
+
+    for base, _dirs, _files in os.walk(workspace, topdown=False):
+        directory = Path(base)
+        if directory == workspace:
+            continue
+        try:
+            next(directory.iterdir())
+        except StopIteration:
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        except OSError:
+            continue
+
+
 def generation_pair_is_restorable(session_id: str, revision: int | None) -> bool:
     """Whether a rollback to *revision* has the files it needs.
 
@@ -449,8 +576,24 @@ def restore_generation_pair(session_id: str, *, revision: int) -> bool:
     os.replace(staged_state, live_state)
     fsync_directory(states_dir)
 
+    # After the declaration, not before it. The workspace sweep is hygiene: the
+    # restore is already correct without it, and a failure here must leave a
+    # restored session rather than an unrestored one. It is idempotent, so a
+    # process that dies partway through finishes on the next attempt.
+    try:
+        swept = _roll_back_workspace(session_id, pair)
+    except Exception:  # noqa: BLE001 - never fail a restore over cleanup
+        logger.warning(
+            "[%s] Could not sweep the workspace after restoring the generation "
+            "pair", session_id, exc_info=True,
+        )
+        swept = {"removed": 0, "overwritten": 0}
+
     logger.info(
-        "[%s] Restored the generation pair for revision %d", session_id, revision,
+        "[%s] Restored the generation pair for revision %d "
+        "(removed %d workspace file(s) written after it, %d could not be "
+        "rolled back)",
+        session_id, revision, swept["removed"], swept["overwritten"],
     )
     return True
 
