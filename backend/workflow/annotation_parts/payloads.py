@@ -101,6 +101,8 @@ def _build_cluster_annotations(annotations: Dict) -> List[ClusterAnnotation]:
             group_proportions=info.get("group_proportions", {}) or {},
             alternative_cell_types=info.get("alternative_cell_types", []),
             low_confidence_reason=info.get("low_confidence_reason", ""),
+            citations=info.get("citations", []) or [],
+            citation_status=info.get("citation_status", "unavailable"),
             requires_reclustering=info.get("requires_reclustering", False),
             reclustering_reason=info.get("reclustering_reason", ""),
             suggested_reclustering_scope=info.get("suggested_reclustering_scope"),
@@ -142,6 +144,11 @@ def _annotations_from_cluster_annotations(cluster_annotations) -> Dict[str, Any]
             "group_proportions": dict(ca.group_proportions or {}),
             "alternative_cell_types": list(ca.alternative_cell_types),
             "low_confidence_reason": ca.low_confidence_reason,
+            # Both fields are enumerated here on purpose. This function is the
+            # only path back from a saved annotation, so anything it omits is
+            # dropped on the first reload and no type check catches it.
+            "citations": [c.model_dump() for c in (ca.citations or [])],
+            "citation_status": ca.citation_status,
             "requires_reclustering": ca.requires_reclustering,
             "reclustering_reason": ca.reclustering_reason,
             "suggested_reclustering_scope": ca.suggested_reclustering_scope,

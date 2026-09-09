@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.9 · **Last updated**: 2026-09-08
+**Version**: 0.55.10 · **Last updated**: 2026-09-09
 
 ## 1. Runtime Architecture
 
@@ -301,6 +301,48 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.55.x — (2026-09-08 onward)**
+
+- `0.55.10` — Gives a cluster annotation a citation it can be checked against,
+  and repairs the per-cluster search that was supposed to supply one. Both come
+  from replaying a completed run's own cluster labels and marker genes against
+  live PubMed.
+
+  Citations existed only as whatever prose the matcher happened to write into
+  `evidence`. Nothing could resolve, verify or link them, and the per-cluster
+  articles the annotation was actually based on were discarded when the call
+  returned, so a run that cited nothing left no trace of what it had read. In
+  the two runs measured, neither model ever invented an identifier; one of them
+  cited none at all because the prompt it was given contained none. A
+  `ClusterAnnotation` now carries `citations` and `citation_status`. The
+  articles are recorded by the system from the evidence block the matcher was
+  shown, so the record survives a matcher that names nothing, and `used_by_model`
+  marks the ones it did name. An identifier it names that was never shown for
+  that cluster is dropped rather than stored as provenance it cannot have. Title
+  and year are copied into the record because the evidence behind them is not
+  persisted and a bare PMID would be unresolvable. `citation_status` is explicit
+  because an empty citation list has four different meanings: the matcher cited
+  something, it cited nothing from what it was shown, the search found nothing,
+  or no evidence reached the record at all. A validation round that changes
+  `cell_type` marks the existing citations stale rather than clearing them,
+  since clearing would make a re-examined cluster look less supported than one
+  nobody looked at again.
+
+  Retrieval is what the citations were starving on. `build_focused_query` put
+  the candidate cell type into the query as a verbatim `[tiab]` phrase and ANDed
+  it with a marker block and the tissue. Labels are free text, so
+  "Hepatocyte (Stress/Inflammatory State)" and
+  "Mesenchymal Cell (Pericyte/Fibroblast)" matched nothing and emptied the whole
+  query; and even a clean label such as "Pericentral Hepatocyte" returned
+  nothing once the markers were required alongside it. Measured on fifteen real
+  clusters, eleven retrieved no evidence whatsoever, and the existing tier-2
+  relaxation, which drops only the tissue, recovered one of them. The label is
+  now normalised with the same helper the direction search uses, moved into
+  `shared.py` so both paths can reach it, and a third tier drops the marker
+  block while keeping the tissue once tiers one and two come up empty. Markers
+  stay a precision filter rather than a precondition: on the same fifteen
+  clusters, eight still resolve at tier one and none is left without evidence.
+  A cluster with no candidate name skips tier three entirely, because its
+  markers are the only subject the query has.
 
 - `0.55.9` — Repairs the literature search behind research-direction discovery,
   from an audit of two completed runs. Every candidate direction came back marked

@@ -405,7 +405,8 @@ IMPORTANT:
     ) -> dict:
         """两级 focused 检索,按簇返回 {articles,status,tier}。
 
-        rare_unresolved: tier1(加 tissue) → 仅当 exhausted/contradictory 时升级 tier2(去 tissue)。
+        rare_unresolved: tier1(加 tissue) → 仅当 exhausted/contradictory 时升级 tier2(去 tissue)
+        → 仍为空时升级 tier3(去 markers,保留 tissue)。
         suspected_contamination: 顺序跑 tier1=discovery(无 tissue) 再 tier2=plausibility(加 tissue),
         (受 NCBI 限速约束，未并发；如需并发须配 Semaphore 后再改)
                                  取相关性 rank 更高者(spec §5.2: 两条都查)。
@@ -507,6 +508,14 @@ IMPORTANT:
                 best = await _run(item, 1)
                 if best["status"] in ("exhausted", "contradictory"):
                     alt = await _run(item, 2)
+                    if self._focused_result_score(alt) > self._focused_result_score(best):
+                        best = alt
+                # Tier 2 only drops tissue, which recovered one cluster of the
+                # eleven that came back empty. What actually starves the search
+                # is the mandatory marker block, so a cluster still without
+                # evidence gets one more attempt without it.
+                if best["status"] in ("exhausted", "contradictory"):
+                    alt = await _run(item, 3)
                     if self._focused_result_score(alt) > self._focused_result_score(best):
                         best = alt
             results[cid] = best

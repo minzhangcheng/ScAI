@@ -29,6 +29,7 @@ from .analysis import (  # noqa: F401
     CrossModalSynthesis,
 )
 from .session import (  # noqa: F401
+    AnnotationCitation,
     ClusterAnnotation,
     AnnotationConfirmationState,
     SelectionEntry,

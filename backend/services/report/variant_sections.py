@@ -456,6 +456,30 @@ def build_annotation_sections(
         if ca.low_confidence_reason:
             reason = f'<div class="low-conf-reason">{bindings.html_module.escape(ca.low_confidence_reason)}</div>'
 
+        # Citations. An empty cell would read as "no literature supports this",
+        # which is only one of the four things an empty list can mean, so the
+        # status is spelled out instead.
+        citations = list(getattr(ca, "citations", None) or [])
+        status = getattr(ca, "citation_status", "unavailable")
+        if citations:
+            used = [c for c in citations if getattr(c, "used_by_model", False)]
+            listed = used or citations
+            items = []
+            for c in listed[:5]:
+                pmid = bindings.html_module.escape(str(getattr(c, "pmid", "") or ""))
+                title = bindings.html_module.escape(str(getattr(c, "title", "") or "")[:110])
+                mark = " (read, not cited)" if not getattr(c, "used_by_model", False) else ""
+                stale = " (predates a label change)" if getattr(c, "stale", False) else ""
+                items.append(
+                    f'<li><a href="https://pubmed.ncbi.nlm.nih.gov/{pmid}/" '
+                    f'target="_blank" rel="noopener">{pmid}</a> {title}{mark}{stale}</li>'
+                )
+            cites_html = f'<ul class="citations">{"".join(items)}</ul>'
+        elif status == "no_evidence":
+            cites_html = '<span class="citations-none">Searched, nothing found</span>'
+        else:
+            cites_html = '<span class="citations-none">Not recorded</span>'
+
         ann_rows += f"""
             <tr class="{'ann-low' if conf == 'low' else ('ann-medium' if conf == 'medium' else '')}">
                 <td class="cluster-id">{cid}</td>
@@ -463,6 +487,7 @@ def build_annotation_sections(
                 <td class="text-center">{conf_badge}</td>
                 <td class="markers">{markers}</td>
                 <td class="evidence">{evidence}</td>
+                <td class="citations">{cites_html}</td>
             </tr>"""
 
     ann_html = f"""
@@ -477,6 +502,7 @@ def build_annotation_sections(
                             <th>Confidence</th>
                             <th>Key Markers</th>
                             <th>Evidence</th>
+                            <th>Citations</th>
                         </tr>
                     </thead>
                     <tbody>{ann_rows}</tbody>

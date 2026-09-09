@@ -16,6 +16,17 @@ export type { AgentType, TaskStatus, Session, TreatmentGroup, DataFile, Biochemi
 
 /** One cluster annotation as persisted in `annotation_state`. Fields are
  * optional so states written by older releases still parse. */
+/** One article recorded behind a cluster annotation. */
+export interface RawAnnotationCitation {
+  pmid?: string
+  title?: string
+  year?: string | null
+  url?: string | null
+  source?: string
+  used_by_model?: boolean
+  stale?: boolean
+}
+
 export interface RawClusterAnnotation {
   cluster_id?: string
   cell_type?: string
@@ -25,6 +36,8 @@ export interface RawClusterAnnotation {
   evidence?: string
   alternative_cell_types?: string[]
   low_confidence_reason?: string
+  citations?: RawAnnotationCitation[]
+  citation_status?: string
   user_confirmed?: boolean
   user_override?: string | null
   group_proportions?: Record<string, number>

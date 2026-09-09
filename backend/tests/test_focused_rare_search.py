@@ -186,7 +186,11 @@ async def test_rare_tier2_failure_not_hidden_by_tier1_no_results():
     items = [{"cluster_id": "7", "candidate_celltype": "pDC", "synonyms": [], "top_markers": ["Siglech"]}]
     out = await fake._focused_rare_search(items, "mouse", "liver", bucket="rare_unresolved")
 
-    assert calls["n"] == 2
+    # Three attempts now: tier 1 returns nothing, tier 2 fails, and the cluster
+    # is still without evidence so tier 3 tries once more without the marker
+    # block. What this test is about is unchanged -- the tier-2 failure must
+    # still be what gets recorded, not tier 1's empty result.
+    assert calls["n"] == 3
     assert out["7"]["status"] == "exhausted"
     assert out["7"]["exhaustion_reason"] == "search_failed"
     assert "tier2 network failure" in out["7"]["error"]
@@ -236,3 +240,112 @@ async def test_successful_later_tier_still_beats_runtime_failure():
     assert out["7"]["status"] == "limited"
     assert out["7"]["exhaustion_reason"] is None
     assert out["7"]["error"] is None
+
+
+# --- tier 3: the marker block stops being a precondition ---------------------
+#
+# Measured against live PubMed on one run's real cluster labels: at tier 1,
+# 11 of 15 clusters retrieved nothing, and the production tier-2 relaxation
+# (dropping tissue) recovered exactly one of them. The binding constraint was
+# the mandatory marker conjunction, which turned even a clean label such as
+# "Pericentral Hepatocyte" into a zero-result query. With tier 3 the same 15
+# clusters all retrieved evidence, and 8 of them still resolved at tier 1, so
+# markers remain a precision filter where they work.
+
+
+def test_a_compound_label_is_normalised_before_it_becomes_a_phrase():
+    from backend.agents.literature.shared import build_focused_query
+
+    q = build_focused_query(
+        {"candidate_celltype": "Hepatocyte (Stress/Inflammatory State)",
+         "synonyms": [], "top_markers": ["Mx2"]},
+        "Mus musculus", "liver", tier=1, bucket="rare_unresolved",
+    )
+
+    assert '"Hepatocyte (Stress/Inflammatory State)"' not in q
+    assert '"Hepatocyte"[tiab]' in q
+
+
+def test_a_parenthesised_acronym_survives_as_an_alternative():
+    from backend.agents.literature.shared import build_focused_query
+
+    q = build_focused_query(
+        {"candidate_celltype": "Liver Sinusoidal Endothelial Cell (LSEC)",
+         "synonyms": [], "top_markers": ["Stab2"]},
+        "Mus musculus", "liver", tier=1, bucket="rare_unresolved",
+    )
+
+    assert '"Liver Sinusoidal Endothelial Cell"[tiab]' in q
+    assert '"LSEC"[tiab]' in q
+
+
+def test_tier3_drops_the_markers_and_keeps_the_tissue():
+    from backend.agents.literature.shared import build_focused_query
+
+    item = {"candidate_celltype": "Pericentral Hepatocyte", "synonyms": [],
+            "top_markers": ["Cyp2d9", "Slco1a1"]}
+
+    t1 = build_focused_query(item, "Mus musculus", "liver", tier=1, bucket="rare_unresolved")
+    t2 = build_focused_query(item, "Mus musculus", "liver", tier=2, bucket="rare_unresolved")
+    t3 = build_focused_query(item, "Mus musculus", "liver", tier=3, bucket="rare_unresolved")
+
+    assert "Cyp2d9" in t1 and "liver" in t1
+    assert "Cyp2d9" in t2 and "liver" not in t2      # tier 2 drops tissue only
+    assert "Cyp2d9" not in t3 and "liver" in t3      # tier 3 drops markers only
+    assert '"Pericentral Hepatocyte"[tiab]' in t3
+
+
+def test_tier3_is_skipped_when_there_is_no_candidate_name():
+    from backend.agents.literature.shared import build_focused_query
+
+    # Markers are the only subject the query has; dropping them would search
+    # for the tissue alone, which says nothing about this cluster.
+    q = build_focused_query(
+        {"candidate_celltype": None, "synonyms": [], "top_markers": ["Siglech"]},
+        "Mus musculus", "liver", tier=3, bucket="rare_unresolved",
+    )
+
+    assert q == ""
+
+
+@pytest.mark.asyncio
+async def test_a_cluster_still_empty_after_tier2_gets_a_tier3_attempt():
+    fake = _FakeLit()
+    seen = []
+
+    async def _search(query, max_results=10):
+        seen.append(query)
+        # Nothing matches while the marker block is present.
+        return [] if "Siglech" in query else [{"pmid": "9", "title": "t", "abstract": "a"}]
+
+    fake._pubmed_search = _search
+
+    async def judge(item, tissue, articles, bucket):
+        return {"status": "strong" if articles else "exhausted", "judge": {}}
+
+    fake._judge_focused_relevance = judge
+
+    items = [{"cluster_id": "7", "candidate_celltype": "pDC", "synonyms": [],
+              "top_markers": ["Siglech"]}]
+    out = await fake._focused_rare_search(items, "mouse", "liver", bucket="rare_unresolved")
+
+    assert len(seen) == 3
+    assert "Siglech" not in seen[2]
+    assert out["7"]["tier"] == 3
+    assert out["7"]["status"] == "strong"
+
+
+@pytest.mark.asyncio
+async def test_tier3_is_not_reached_when_tier1_already_worked():
+    fake = _FakeLit()
+
+    async def judge(item, tissue, articles, bucket):
+        return {"status": "strong", "judge": {}}
+
+    fake._judge_focused_relevance = judge
+    items = [{"cluster_id": "22", "candidate_celltype": "pDC", "synonyms": [],
+              "top_markers": ["Siglech"]}]
+
+    out = await fake._focused_rare_search(items, "mouse", "liver", bucket="rare_unresolved")
+
+    assert len(fake.searched) == 1 and out["22"]["tier"] == 1

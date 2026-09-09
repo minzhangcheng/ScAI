@@ -118,6 +118,9 @@ _ANNOTATION_STYLE = """    :root {
     .cluster-id { font-family: monospace; font-weight: 600; color: var(--primary-color); white-space: nowrap; }
     .markers { font-size: 0.85rem; color: var(--text-secondary); }
     .evidence { font-size: 0.85rem; color: var(--text-secondary); max-width: 300px; }
+    .citations { font-size: 0.8rem; max-width: 260px; }
+    .citations ul { margin: 0; padding-left: 1rem; }
+    .citations-none { font-size: 0.8rem; color: var(--text-secondary); font-style: italic; }
     .subtypes { font-size: 0.8rem; color: var(--text-secondary); margin-top: 2px; }
     .alt-types {
         margin-top: 6px; padding: 4px 8px; background: #fef3c7; border-radius: 4px;

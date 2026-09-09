@@ -53,6 +53,8 @@ async def begin_annotation(
                 "evidence": ca.evidence,
                 "alternative_cell_types": ca.alternative_cell_types,
                 "low_confidence_reason": ca.low_confidence_reason,
+                "citations": [c.model_dump() for c in (ca.citations or [])],
+                "citation_status": ca.citation_status,
             }
         return {
             "annotations": cached_annotations,

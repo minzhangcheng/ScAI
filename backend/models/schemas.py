@@ -73,6 +73,7 @@ from .schema_parts.analysis import (  # noqa: F401
     CrossModalSynthesis,
 )
 from .schema_parts.session import (  # noqa: F401
+    AnnotationCitation,
     ClusterAnnotation,
     AnnotationConfirmationState,
     SelectionEntry,

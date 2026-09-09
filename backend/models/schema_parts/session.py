@@ -22,6 +22,30 @@ logger = logging.getLogger(__name__)
 from .enums import AnalysisPhaseType, PlanStage, PlanStatus
 
 
+class AnnotationCitation(BaseModel):
+    """One article behind a cluster annotation.
+
+    Title and year are copied rather than referenced on purpose. The per-cluster
+    evidence that produced them lives only for the duration of the annotation
+    call and is never persisted, so a bare PMID stored here would be
+    unresolvable the moment that call returns.
+
+    ``used_by_model`` separates the two facts a citation can carry: whether the
+    article was put in front of the matcher, and whether the matcher said it
+    used it. Recording only the second loses what the annotation actually read;
+    recording only the first cannot distinguish support from background.
+    """
+    pmid: str
+    title: str = ""
+    year: Optional[str] = None
+    url: Optional[str] = None
+    source: Literal["focused_search", "background_review"] = "focused_search"
+    used_by_model: bool = False
+    # Set when a later validation round changed cell_type: the article was
+    # evidence for the previous label and may not support the new one.
+    stale: bool = False
+
+
 class ClusterAnnotation(BaseModel):
     """Single cluster annotation for user review during exploration phase"""
     cluster_id: str
@@ -36,6 +60,18 @@ class ClusterAnnotation(BaseModel):
     group_proportions: Dict[str, float] = Field(default_factory=dict)
     alternative_cell_types: List[str] = Field(default_factory=list)  # Other possible cell types
     low_confidence_reason: str = ""  # Why confidence is low/medium
+    citations: List[AnnotationCitation] = Field(default_factory=list)
+    # An empty `citations` has four different meanings and the reader cannot
+    # tell them apart, so the reason is recorded explicitly:
+    #   grounded    - the matcher named at least one of the articles it was shown
+    #   pool_only   - articles were shown for this cluster, the matcher named none
+    #   no_evidence - the focused search ran and returned nothing
+    #   unavailable - no per-cluster evidence reached this record at all, which
+    #                 is also what every annotation written before this field
+    #                 existed reports. Never read it as "no literature support".
+    citation_status: Literal[
+        "grounded", "pool_only", "no_evidence", "unavailable"
+    ] = "unavailable"
     user_confirmed: bool = False
     user_override: Optional[str] = None  # User-provided cell type override
     # Validation round: signal that current clustering may be insufficient for this cluster

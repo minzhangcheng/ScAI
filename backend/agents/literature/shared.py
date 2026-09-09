@@ -13,10 +13,72 @@ to PubMed+LLM for insufficiently covered topics.
 """
 import re
 import logging
-from typing import Optional
+from typing import Any, List, Optional
 
 
 logger = logging.getLogger(__name__)
+
+
+# Candidate term hygiene.
+#
+# key_pathways, key_cell_types and tissue are free text written by a model, and
+# they arrive as descriptive labels rather than index terms: "Integrated Stress
+# Response (ISR)", "Nrf2/Antioxidant Response", "Hepatocyte (Pericentral)",
+# "Liver, with primary emphasis on hepatocytes". Quoted verbatim as "..."[tiab],
+# PubMed matches none of them. Inside an OR list that is only a wasted arm, but
+# tissue is ANDed into the direct-prior-work and prior-art queries, so an
+# unmatchable tissue phrase returns the whole query empty -- one observed run
+# lost its only matched-model query exactly that way and then recorded zero
+# direct evidence for the direction.
+#
+# The rules below are domain-neutral. They split on punctuation the writer
+# already used, keep a parenthesised acronym as an alternative, drop clauses too
+# long to be an index term, and deduplicate. Nothing here knows what a tissue,
+# a pathway or an organism is.
+_TERM_SPLIT_PATTERN = re.compile(r"[/;,]")
+_PARENTHETICAL_PATTERN = re.compile(r"\(([^()]*)\)")
+_MAX_INDEXABLE_WORDS = 4
+_MAX_ACRONYM_LENGTH = 8
+
+
+def _split_free_text_label(label: str) -> List[str]:
+    """Searchable phrases contained in one free-text label."""
+    alternatives: List[str] = []
+    for inner in _PARENTHETICAL_PATTERN.findall(label):
+        acronym = inner.strip()
+        if (
+            acronym
+            and len(acronym.split()) == 1
+            and len(acronym) <= _MAX_ACRONYM_LENGTH
+        ):
+            alternatives.append(acronym)
+    base = _PARENTHETICAL_PATTERN.sub(" ", label)
+
+    pieces: List[str] = []
+    for raw_piece in _TERM_SPLIT_PATTERN.split(base) + alternatives:
+        piece = " ".join(str(raw_piece).split()).strip(" -_.:")
+        if not piece:
+            continue
+        if len(piece.split()) > _MAX_INDEXABLE_WORDS:
+            # A clause this long is a description, not something PubMed indexes.
+            continue
+        pieces.append(piece)
+    return pieces
+
+
+def normalize_search_terms(raw_terms: List[Any]) -> List[str]:
+    """Searchable phrases from free-text labels, order-preserving and deduped."""
+    normalized: List[str] = []
+    seen = set()
+    for raw in raw_terms:
+        for piece in _split_free_text_label(str(raw or "")):
+            key = piece.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(piece)
+    return normalized
+
 from ...utils.llm_client import RETRYABLE_EXCEPTIONS
 from openai import RateLimitError
 
@@ -179,7 +241,8 @@ def build_focused_query(item: dict, organism: str, tissue: str, tier: int, bucke
                         plausibility_terms: list = None) -> str:
     """构造 focused PubMed query;无可用检索词时返回空串(调用方应跳过)。
 
-    rare_unresolved: (候选名 OR synonyms) AND (markers 双拼);tier1 加 tissue,tier2 去 tissue。
+    rare_unresolved: (候选名 OR synonyms) AND (markers 双拼);tier1 加 tissue,tier2 去 tissue,
+        tier3 去 markers 保留 tissue(仅 rare_unresolved 使用)。
         候选名与基因符号是两个 AND 组,不再放进同一个 OR 组:一个恰好也是肿瘤抗原的
         基因符号曾单独拉回整批无关论文。无候选名时只用 markers。
     suspected_contamination: 仅 markers 双拼(不用可疑候选名);tier1=discovery(无 tissue),
@@ -204,22 +267,40 @@ def build_focused_query(item: dict, organism: str, tissue: str, tier: int, bucke
             parts.append(tissue)
         return " AND ".join(parts)
 
-    candidate_terms = []
+    # A candidate label is free text written by a model. Quoted verbatim,
+    # "Hepatocyte (Stress/Inflammatory State)" or "Mesenchymal Cell
+    # (Pericyte/Fibroblast)" match nothing, and the label is a mandatory AND
+    # group, so the entire query returns empty. Measured against live PubMed on
+    # one run's real labels: 11 of 15 clusters retrieved nothing at tier 1,
+    # between this and the marker conjunction relaxed at tier 3 below.
+    labels = []
     cand = normalize_candidate_celltype(item.get("candidate_celltype"))
     if cand:
-        candidate_terms.append(f'"{cand}"[tiab]')
-    for syn in _sanitize_synonyms(item.get("synonyms")):
-        candidate_terms.append(f'"{syn}"[tiab]')
+        labels.append(cand)
+    labels.extend(_sanitize_synonyms(item.get("synonyms")))
+    candidate_terms = [f'"{t}"[tiab]' for t in normalize_search_terms(labels)]
 
     if not candidate_terms and not marker_terms:
         return ""
+
+    # Tier 3 relaxes the markers, never the subject. Requiring them turned even
+    # a clean label such as "Pericentral Hepatocyte" into a zero-result query,
+    # so past this tier they stop being a precondition and the label plus
+    # tissue carries the search. With no candidate name there is nothing to
+    # relax towards and the tier is skipped rather than run unanchored.
+    if tier >= 3:
+        if not candidate_terms:
+            return ""
+        marker_terms = []
 
     parts = [species] if species else []
     if candidate_terms:
         parts.append("(" + " OR ".join(candidate_terms) + ")")
     if marker_terms:
         parts.append("(" + " OR ".join(marker_terms) + ")")
-    if tier == 1 and tissue:
+    # Tier 2 is the one that drops tissue; tier 3 keeps it, because it is the
+    # only constraint left once the markers are gone.
+    if tier != 2 and tissue:
         parts.append(tissue)
     return " AND ".join(parts)
 

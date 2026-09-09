@@ -114,7 +114,10 @@ def test_static_variant_normalized_html_is_stable(tmp_path, monkeypatch):
 
     assert {name: _normalized_html_digest(path) for name, path in paths.items()} == {
         "exploration": "7a6f5c8738d3569dfe026c8832d42aa4da3c06f72c80fc9f39484508aeddbdaa",
-        "annotation": "26f08ad70a0ee87a291b179103ab74b509aac4ac784399b8b140a20840a3de98",
+        # Moved when the annotation table gained a Citations column. The
+        # exploration and integration digests are unchanged, which is what
+        # bounds the edit to the annotation report.
+        "annotation": "2bce50c00b22b91882f57883533df8d74aef7f6a58d59af5f321006b568c6091",
         "integration": "39e7468e3da3a851d52c228b29fd4927f08091c0f85b12b7f4cbd251fe65d05f",
     }
 

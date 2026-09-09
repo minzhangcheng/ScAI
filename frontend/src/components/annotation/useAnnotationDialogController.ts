@@ -2,6 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { Language } from '../../i18n/translations'
 
+export interface AnnotationCitation {
+  pmid: string
+  title: string
+  year?: string | null
+  url?: string | null
+  source?: string
+  used_by_model: boolean
+  stale?: boolean
+}
+
 export interface ClusterAnnotation {
   cluster_id: string
   cell_type: string
@@ -11,6 +21,11 @@ export interface ClusterAnnotation {
   evidence: string
   alternative_cell_types: string[]
   low_confidence_reason: string
+  /** Optional so payloads and fixtures written without them still type-check;
+   *  the gate mapper always fills both. */
+  citations?: AnnotationCitation[]
+  /** grounded | pool_only | no_evidence | unavailable */
+  citation_status?: string
   user_confirmed: boolean
   user_override: string | null
   group_proportions?: Record<string, number>

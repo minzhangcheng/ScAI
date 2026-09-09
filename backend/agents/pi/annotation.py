@@ -34,16 +34,37 @@ _EVAL_ABSTRACT_CHARS = 300
 
 
 def _evidence_articles(fe: Dict[str, Any], limit: int) -> str:
+    """Render this cluster's articles, identifier first.
+
+    The PMID used to be omitted, so the matcher was shown titles and abstracts
+    it could not cite: measured on one run, zero identifiers reached the prompt
+    and none of the fifteen clusters carried a citation. A model cannot name
+    what it was never given.
+    """
     return "\n".join(
-        f"- {a.get('title', '')}: {(a.get('abstract') or '')[:300]}"
+        f"- PMID {a.get('pmid', '?')}: {a.get('title', '')}: {(a.get('abstract') or '')[:300]}"
         for a in (fe.get("articles") or [])[:limit]
     )
 
 
+def _shown_articles(fe: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
+    """The article records _evidence_articles just rendered, same slice.
+
+    Kept beside the renderer so the recorded pool cannot drift from what the
+    prompt actually showed.
+    """
+    return [a for a in (fe.get("articles") or [])[:limit] if isinstance(a, dict)]
+
+
 def _cluster_evidence_lines(cid: str, bucket: str, entry: Dict[str, Any],
-                            fe: Dict[str, Any]) -> List[str]:
-    """Render one cluster's triage note and retrieved literature."""
+                            fe: Dict[str, Any]) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Render one cluster's triage note and retrieved literature.
+
+    Returns the prompt lines and the article records behind them, so the
+    annotation can record what it was based on without re-deriving it.
+    """
     lines: List[str] = []
+    shown: List[Dict[str, Any]] = []
     if bucket == "context_dependent_state":
         lines.append(
             f"[Note: Cluster {cid} classified as context-dependent state — parent: "
@@ -55,7 +76,7 @@ def _cluster_evidence_lines(cid: str, bucket: str, entry: Dict[str, Any],
     # nothing; rendering it as "exhausted" would assert evidence scarcity that
     # was never measured.
     if not fe and bucket in ("covered", "context_dependent_state"):
-        return lines
+        return lines, shown
 
     status = fe.get("status")
     candidate = normalize_candidate_celltype(
@@ -68,12 +89,14 @@ def _cluster_evidence_lines(cid: str, bucket: str, entry: Dict[str, Any],
             f"[Focused evidence for Cluster {cid} (candidate: {candidate}){tag}]\n"
             + _evidence_articles(fe, 5)
         )
+        shown.extend(_shown_articles(fe, 5))
     elif status == "retrieved":
         lines.append(
             f"[Retrieved literature for Cluster {cid} (query subject: {candidate}) — "
             f"not relevance-adjudicated; judge for yourself whether each paper supports "
             f"this cluster's identity]\n" + _evidence_articles(fe, 3)
         )
+        shown.extend(_shown_articles(fe, 3))
     elif status == "contradictory":
         if bucket == "suspected_contamination":
             lines.append(f"[Cluster {cid}: focused evidence supports suspected contamination "
@@ -105,11 +128,12 @@ def _cluster_evidence_lines(cid: str, bucket: str, entry: Dict[str, Any],
             lines.append(f"[Focused evidence exhausted for Cluster {cid}.{suffix}]")
         else:
             lines.append(f"[Focused evidence exhausted for Cluster {cid} — no relevant literature found]")
-    return lines
+    return lines, shown
 
 
-def _render_cluster_evidence(cluster_ids, triage: Dict[str, Any],
-                             focused_evidence: Dict[str, Any]) -> str:
+def _render_cluster_evidence(
+    cluster_ids, triage: Dict[str, Any], focused_evidence: Dict[str, Any]
+) -> Tuple[str, Dict[str, List[Dict[str, Any]]]]:
     """Per-cluster evidence block, in cluster order, for the matching prompt.
 
     Every triaged cluster is rendered, including the covered ones: they used to
@@ -135,23 +159,29 @@ def _render_cluster_evidence(cluster_ids, triage: Dict[str, Any],
     ordered += [cid for cid in by_cluster if cid not in set(ordered)]
 
     lines: List[str] = []
+    pool: Dict[str, List[Dict[str, Any]]] = {}
     for cid in ordered:
         found = by_cluster.get(cid)
         if found is None:
             continue
         bucket, entry = found
         fe = focused_evidence.get(cid) or {}
-        lines.extend(_cluster_evidence_lines(cid, bucket, entry, fe))
+        cluster_lines, shown = _cluster_evidence_lines(cid, bucket, entry, fe)
+        lines.extend(cluster_lines)
+        # An entry with an empty list still matters: it separates "the search
+        # ran for this cluster and found nothing" from "this cluster was never
+        # reached", which the citation status has to tell apart.
+        pool[cid] = shown
 
     if not lines:
-        return ""
+        return "", pool
     return (
         "\n\n=== PER-CLUSTER LITERATURE EVIDENCE ===\n"
         "This is the primary evidence for each cluster. The background review that follows is\n"
         "tissue-level context, not a substitute: where the two disagree about a cluster, the\n"
         "evidence here is the one tied to that cluster's own markers.\n"
         + "\n".join(lines) + "\n"
-    )
+    ), pool
 
 
 class AnnotationMixin:
@@ -372,12 +402,92 @@ Only include clusters you are actually changing in "revisions"."""
                     "validation_summary_for_user": "Validation completed; no annotation changes were applied."}
         for cid, change in (parsed.get("revisions") or {}).items():
             if cid in revised and isinstance(revised[cid], dict) and isinstance(change, dict):
+                new_type = str(change.get("cell_type") or "").strip()
+                old_type = str(revised[cid].get("cell_type") or "").strip()
+                if new_type and new_type != old_type:
+                    # These articles were gathered for the previous label. Keep
+                    # them: dropping them would make a re-examined cluster look
+                    # less supported than one nobody looked at again. Mark them
+                    # so nothing reads them as backing the label they now sit
+                    # beside.
+                    for citation in revised[cid].get("citations") or []:
+                        if isinstance(citation, dict):
+                            citation["stale"] = True
                 for k, v in change.items():
                     if v not in (None, ""):
                         revised[cid][k] = v
         summary = parsed.get("validation_summary_for_user") or \
             "Validation completed; annotations reviewed against data evidence."
         return {"annotations": revised, "validation_summary_for_user": str(summary)}
+
+    @staticmethod
+    def _attach_annotation_citations(
+        parsed: Dict[str, Any],
+        evidence_pool: Dict[str, List[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        """Record, per cluster, the articles its annotation was based on.
+
+        Two different facts are kept. The pool is what the prompt put in front
+        of the matcher, so the record survives a matcher that names nothing --
+        measured, that is most clusters. ``used_by_model`` is what the matcher
+        said it used, and an identifier it names that was never shown for that
+        cluster is dropped rather than stored as provenance it cannot have.
+        """
+        annotations = parsed.get("annotations")
+        if not isinstance(annotations, dict):
+            return parsed
+
+        unshown_total = 0
+        for cid, info in annotations.items():
+            if not isinstance(info, dict):
+                continue
+            claimed = {
+                str(pmid).strip()
+                for pmid in (info.get("cited_pmids") or [])
+                if str(pmid).strip()
+            }
+            info.pop("cited_pmids", None)
+
+            shown = evidence_pool.get(str(cid))
+            if shown is None:
+                # No per-cluster evidence block reached the prompt for this
+                # cluster. That is not the same as finding no literature.
+                info["citations"] = []
+                info["citation_status"] = "unavailable"
+                continue
+
+            by_pmid: Dict[str, Dict[str, Any]] = {}
+            for article in shown:
+                pmid = str(article.get("pmid") or "").strip()
+                if pmid:
+                    by_pmid.setdefault(pmid, article)
+            unshown_total += len(claimed - set(by_pmid))
+
+            citations = [
+                {
+                    "pmid": pmid,
+                    "title": str(article.get("title") or "")[:300],
+                    "year": (str(article.get("year") or "").strip() or None),
+                    "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                    "source": "focused_search",
+                    "used_by_model": pmid in claimed,
+                }
+                for pmid, article in by_pmid.items()
+            ]
+            info["citations"] = citations
+            if any(citation["used_by_model"] for citation in citations):
+                info["citation_status"] = "grounded"
+            elif citations:
+                info["citation_status"] = "pool_only"
+            else:
+                info["citation_status"] = "no_evidence"
+
+        if unshown_total:
+            logger.warning(
+                "[PI] Annotation matcher named %s PMID(s) absent from the evidence "
+                "shown for their cluster; dropped from citations.", unshown_total
+            )
+        return parsed
 
     @staticmethod
     def _summarize_cluster_markers(
@@ -703,7 +813,7 @@ IMPORTANT:
 
         triage = triage or {}
         focused_evidence = focused_evidence or {}
-        hints_block = _render_cluster_evidence(
+        hints_block, evidence_pool = _render_cluster_evidence(
             list(cluster_markers.keys()), triage, focused_evidence
         )
         priors_block = _format_database_priors_block(database_priors)
@@ -723,6 +833,9 @@ For each cluster, provide:
 3. Key marker genes that support this annotation (from the cluster's markers)
 4. Confidence level (high/medium/low) based on how well markers match literature
 5. Brief evidence/reasoning citing the literature
+6. cited_pmids: the PMIDs from THIS cluster's own evidence block that you actually
+   relied on. Use only identifiers printed in that block, never one from memory,
+   and return an empty list when none of them supported the call
 
 IMPORTANT:
 - Be as specific as the markers actually support, and no more: a subtype label is justified
@@ -744,7 +857,8 @@ Return a JSON object with this EXACT structure:
             "subtypes": ["possible subtype 1", "possible subtype 2"],
             "key_markers": ["gene1", "gene2", "gene3"],
             "confidence": "high|medium|low",
-            "evidence": "Brief reasoning with literature support"
+            "evidence": "Brief reasoning with literature support",
+            "cited_pmids": ["12345678"]
         }}
     }},
     "tissue_summary": "Brief summary of expected cell types in this tissue"
@@ -755,7 +869,7 @@ Return a JSON object with this EXACT structure:
         parsed = self._safe_parse_json(response, default={})
 
         if parsed and "annotations" in parsed:
-            return parsed
+            return self._attach_annotation_citations(parsed, evidence_pool)
 
         # Retry once with a more explicit prompt if first attempt fails
         retry_prompt = prompt + "\n\nIMPORTANT: Respond with ONLY the JSON object, no additional text or markdown formatting."
@@ -763,7 +877,7 @@ Return a JSON object with this EXACT structure:
         parsed_retry = self._safe_parse_json(response_retry, default={})
 
         if parsed_retry and "annotations" in parsed_retry:
-            return parsed_retry
+            return self._attach_annotation_citations(parsed_retry, evidence_pool)
 
         # Both attempts failed
         logger.warning(f"[PI] Failed to parse annotation matching JSON after 2 attempts. Response preview: {response[:500]}")
