@@ -361,6 +361,17 @@ Detailed release notes for every version are available through `git log` and rel
   and, when the session has decision snapshots, that they exist. An import
   settles the archive's extension before reading its body, so an export saved
   under the wrong name is no longer reported as too large.
+
+  Beyond the snapshots, from the same run: a crash rollback now returns the
+  workspace along with the dump, the notebook record and the two positions.
+  Each save keeps its generation a copy of the workspace, built incrementally
+  against the previous one so an unchanged file is shared rather than copied
+  again, and a rollback puts back what was rewritten and takes away what was
+  added. The control that performs a rollback is called Recover rather than
+  Re-run, because it re-runs from the raw inputs only when no generation can be
+  restored. `backend/tests/test_workflow_state_channels.py` is back: it scans
+  `backend/workflow/` for state keys that are not declared channels, and its
+  absence is why the restore-routing defect could ship twice.
 - `0.56.0` — Adds decision snapshots: a restore point taken immediately
   before each of the four decisions an analysis asks about itself, restorable
   into a new session that leaves the source untouched. Off unless
