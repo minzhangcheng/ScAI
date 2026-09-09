@@ -554,9 +554,18 @@ cells and does not commit the runtime.
 docker stop -t 300 scai      # not `docker stop`, and not `docker kill`
 ```
 
-Give the timeout room for the largest kernel the installation holds. The
-shutdown log ends with `Session saved successfully` followed by `Sandbox
-stopped` for each live session; if it does not, the stop was too short.
+Give the timeout room for **every live session added together**, not for the
+largest one. The closing saves run one after another, so an instance holding
+two sessions needs both. Measured: a 400 s grace was not enough for two
+sessions of a few gigabytes each, and the second came back with its kernel
+behind its record while the first was clean.
+
+The shutdown log ends with `Session saved successfully` followed by `Sandbox
+stopped` for each live session; if it does not, the stop was too short. A
+session whose closing save was cut off is recoverable -- it rolls back to its
+last committed generation the next time the analysis is started -- but it gives
+up the work since that save, which is the cost this whole procedure exists to
+avoid.
 
 Prefer a quiescent file-level backup so SQLite and session files agree:
 
