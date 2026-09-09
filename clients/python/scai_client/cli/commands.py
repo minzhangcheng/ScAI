@@ -144,13 +144,19 @@ def cmd_snapshots(args: argparse.Namespace) -> int:
                         str(row["round"]),
                         str(row["retention_rank"]),
                         str(row["deletion_order"]),
+                        human(row.get("bytes_total") or 0),
                         "superseded" if row.get("superseded") else "",
                         row["created_at"],
                     ]
                     for row in rows
                 ],
-                ["ID", "DECISION", "ROUND", "KEEP", "DROP", "", "CREATED"],
+                ["ID", "DECISION", "ROUND", "KEEP", "DROP", "SIZE", "", "CREATED"],
             )
+            # What the session occupies, not the sum of the column above it:
+            # snapshots share a dump through one inode and share one copy of
+            # the inputs, so the total is smaller than the parts and is the
+            # number that changes when one is given up.
+            log(f"{human(listing.get('bytes_total') or 0)} on disk for this session")
         for row in listing.get("failed") or []:
             log(f"no snapshot for {row['snapshot_id']}: {row['reason']}")
     return 0

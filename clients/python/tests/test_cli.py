@@ -72,3 +72,67 @@ def test_print_jwt_stores_nothing(tmp_path, monkeypatch, capsys):
     ) == 0
     assert capsys.readouterr().out.strip() == "jwt-token"
     assert not credentials.key_path().exists()
+
+
+def test_the_snapshot_listing_says_what_each_one_costs(capsys, monkeypatch):
+    """An operator choosing what to give up is choosing by size.
+
+    The table shipped without one. Running it against a real session made that
+    obvious in a way reading it did not: a listing that ranks snapshots by what
+    to drop first, and does not say what dropping any of them frees.
+
+    The session total is printed separately because it is not the column's sum
+    -- snapshots share a dump through one inode and share one copy of the
+    inputs -- and it is the number that actually changes when one goes.
+    """
+    from scai_client.cli import commands
+
+    listing = {
+        "enabled": True,
+        "bytes_total": 1_600_000_000,
+        "snapshots": [
+            {
+                "snapshot_id": "r001-annotation-g106",
+                "gate": "annotation_confirmation",
+                "round": 1,
+                "retention_rank": 1,
+                "deletion_order": 2,
+                "bytes_total": 1_297_980_839,
+                "created_at": "2026-09-09T00:50:21+00:00",
+            },
+            {
+                "snapshot_id": "r003-round-g140",
+                "gate": "round_wait",
+                "round": 3,
+                "retention_rank": 4,
+                "deletion_order": 1,
+                "bytes_total": 20_000_000,
+                "created_at": "2026-09-09T01:50:21+00:00",
+            },
+        ],
+        "failed": [],
+    }
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def list_snapshots(self, _session_id):
+            return listing
+
+    monkeypatch.setattr(commands, "_client", lambda _args: _Client())
+
+    import argparse
+
+    assert commands.cmd_snapshots(
+        argparse.Namespace(action="list", session_id="s1", json=False),
+    ) == 0
+
+    out, err = capsys.readouterr()
+    assert "SIZE" in out
+    assert "1.2 GiB" in out
+    assert "19.1 MiB" in out
+    assert "1.5 GiB on disk for this session" in err
