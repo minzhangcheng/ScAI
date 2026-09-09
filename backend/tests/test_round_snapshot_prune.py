@@ -280,6 +280,114 @@ async def test_pressure_is_a_property_of_the_volume_not_of_one_session(
     assert _remaining(second) == second_ids
 
 
+# ------------------------------------------------------------- giving one up
+
+# Found by deleting a real snapshot: the bundle went and 331 MB of inputs
+# stayed. They are shared by a record rather than by the filesystem -- stored
+# once per session, named by each bundle's manifest -- so the reference count
+# that protects a shared dump does not protect them, and nothing else was
+# going to notice they had become unreferenced.
+
+
+def _inputs(session_id):
+    from backend.services.round_snapshots.layout import uploads_root
+
+    return uploads_root(session_id)
+
+
+@pytest.mark.asyncio
+async def test_giving_up_the_last_snapshot_reclaims_the_inputs_it_shared(snapshots):
+    from backend.services.round_snapshots.layout import remove_snapshot, session_root
+
+    session_id, ids = await snapshots([(GATE_ROUND_WAIT, 3, 51)])
+    assert any(_inputs(session_id).rglob("*"))
+
+    remove_snapshot(session_id, ids[0])
+
+    assert not _inputs(session_id).exists()
+    assert not session_root(session_id).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_still_has_a_snapshot_keeps_its_inputs(snapshots):
+    from backend.services.round_snapshots.layout import remove_snapshot
+
+    session_id, ids = await snapshots([
+        (GATE_ANNOTATION_CONFIRMATION, 1, 51),
+        (GATE_ROUND_WAIT, 3, 52),
+    ])
+
+    remove_snapshot(session_id, ids[1])
+
+    assert any(_inputs(session_id).rglob("*"))
+    assert _remaining(session_id) == [ids[0]]
+
+
+@pytest.mark.asyncio
+async def test_the_record_of_a_decision_with_no_restore_point_survives(snapshots):
+    """The inputs go; the account of what happened does not.
+
+    A ``.failed.json`` is the only evidence that a decision was reached and no
+    snapshot was written for it. It costs nothing to keep and it is the first
+    thing an operator asks about.
+    """
+    import json
+
+    from backend.services.round_snapshots.layout import (
+        failed_record_path,
+        remove_snapshot,
+        snapshots_root,
+    )
+
+    session_id, ids = await snapshots([(GATE_ROUND_WAIT, 3, 51)])
+    failed = failed_record_path(session_id, "r004-round-g60")
+    failed.write_text(json.dumps({"reason": "save_failed"}), encoding="utf-8")
+
+    remove_snapshot(session_id, ids[0])
+
+    assert not _inputs(session_id).exists()
+    assert failed.is_file()
+    assert snapshots_root(session_id).is_dir()
+
+
+@pytest.mark.asyncio
+async def test_a_capture_that_is_staging_keeps_the_inputs_it_is_about_to_name(
+    snapshots,
+):
+    """The one race this reclamation could lose.
+
+    A capture stages its session files, then its inputs, then publishes. Delete
+    the last existing bundle in that window and the inputs the in-flight
+    capture is about to declare would go with it -- producing a published
+    snapshot that cannot be restored, which is worse than the space.
+    """
+    from backend.services.round_snapshots.layout import remove_snapshot, staging_root
+
+    session_id, ids = await snapshots([(GATE_ROUND_WAIT, 3, 51)])
+    (staging_root(session_id) / "live-attempt").mkdir(parents=True, exist_ok=True)
+
+    remove_snapshot(session_id, ids[0])
+
+    assert _remaining(session_id) == []
+    assert any(_inputs(session_id).rglob("*"))
+
+
+@pytest.mark.asyncio
+async def test_the_delete_route_gives_up_what_a_prune_would(snapshots):
+    """One removal, two callers. Two implementations is how they drifted."""
+    import types
+
+    from backend.routes.round_snapshots import delete_session_snapshot
+
+    session_id, ids = await snapshots([(GATE_ROUND_WAIT, 3, 51)])
+    request = types.SimpleNamespace(state=types.SimpleNamespace(user_id="owner-1"))
+
+    answer = await delete_session_snapshot(session_id, ids[0], request)
+
+    assert answer["status"] == "deleted"
+    assert not _inputs(session_id).exists()
+
+
 # ------------------------------------------------------------------ accounting
 
 

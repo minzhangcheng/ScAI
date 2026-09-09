@@ -159,6 +159,53 @@ def manifest_path(session_id: str, snapshot: str) -> Path:
     return snapshot_dir(session_id, snapshot) / MANIFEST_NAME
 
 
+def remove_snapshot(session_id: str, snapshot: str) -> None:
+    """Give up one bundle, and the shared copy it was the last to need.
+
+    Renamed aside before removal, so a caller never sees a directory being
+    emptied under it. A dump shared with a neighbouring snapshot survives: the
+    filesystem reference counts it, which is the whole reason sharing is a
+    hardlink rather than a record.
+
+    The inputs are the exception, because they are shared by a record rather
+    than by the filesystem: they are stored once per session and named by every
+    bundle's manifest, so once the last bundle is gone nothing refers to them.
+    Leaving them behind kept the largest part of a session's snapshot storage
+    alive with no restore point left to spend it on -- and a reclaim under
+    space pressure would have walked away from a session it had just emptied
+    while its inputs still occupied the volume.
+
+    Two things are deliberately kept. Failed-capture records survive: they are
+    small, and they are the only account of a decision that has no restore
+    point. And nothing is reclaimed while a capture is staging, because that
+    capture is about to publish a manifest naming these inputs.
+    """
+    import shutil
+
+    bundle = snapshot_dir(session_id, snapshot)
+    if bundle.is_dir():
+        doomed = bundle.with_name(f".deleting-{bundle.name}")
+        shutil.rmtree(doomed, ignore_errors=True)
+        bundle.rename(doomed)
+        shutil.rmtree(doomed, ignore_errors=True)
+
+    snapshots = snapshots_root(session_id)
+    if not snapshots.is_dir():
+        return
+    if any(
+        entry.is_dir() and not entry.name.startswith(".")
+        for entry in snapshots.iterdir()
+    ):
+        return
+    staging = staging_root(session_id)
+    if staging.is_dir() and any(staging.iterdir()):
+        return
+
+    shutil.rmtree(uploads_root(session_id), ignore_errors=True)
+    if not any(snapshots.iterdir()):
+        shutil.rmtree(session_root(session_id), ignore_errors=True)
+
+
 def failed_record_path(session_id: str, snapshot: str) -> Path:
     """Where an un-snapshotted decision is recorded.
 

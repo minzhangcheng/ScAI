@@ -14,13 +14,13 @@ first.
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Any
 
 from .gates import in_deletion_order
 from .layout import (
     SnapshotsDisabled,
+    remove_snapshot,
     snapshot_dir,
     snapshot_storage_root,
 )
@@ -100,14 +100,16 @@ def _is_running(session_id: str) -> bool:
 
 
 def _remove(session_id: str, snapshot: str) -> int:
-    """Rename aside, then remove. Returns the bytes the manifest claimed."""
-    bundle = snapshot_dir(session_id, snapshot)
-    if not bundle.is_dir():
+    """Give up one snapshot, through the same removal the delete route uses.
+
+    One implementation rather than two, so the shared inputs a session's last
+    bundle was holding are reclaimed whichever way the bundle goes -- a prune
+    that left them behind would keep freeing nothing on exactly the sessions it
+    had already emptied.
+    """
+    if not snapshot_dir(session_id, snapshot).is_dir():
         return 0
-    doomed = bundle.with_name(f".deleting-{bundle.name}")
-    shutil.rmtree(doomed, ignore_errors=True)
-    bundle.rename(doomed)
-    shutil.rmtree(doomed, ignore_errors=True)
+    remove_snapshot(session_id, snapshot)
     return 1
 
 

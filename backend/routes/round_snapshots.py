@@ -180,7 +180,11 @@ async def delete_session_snapshot(session_id: str, snapshot_id: str, request: Re
     hardlink rather than a record.
     """
     from backend.config import snapshots_enabled
-    from backend.services.round_snapshots.layout import parse_snapshot_id, snapshot_dir
+    from backend.services.round_snapshots.layout import (
+        parse_snapshot_id,
+        remove_snapshot,
+        snapshot_dir,
+    )
 
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
@@ -195,13 +199,5 @@ async def delete_session_snapshot(session_id: str, snapshot_id: str, request: Re
     if not bundle.is_dir():
         raise HTTPException(status_code=404, detail="No such snapshot")
 
-    def _remove() -> None:
-        import shutil
-
-        doomed = bundle.with_name(f".deleting-{bundle.name}")
-        shutil.rmtree(doomed, ignore_errors=True)
-        bundle.rename(doomed)
-        shutil.rmtree(doomed, ignore_errors=True)
-
-    await run_in_owned_thread(_remove)
+    await run_in_owned_thread(lambda: remove_snapshot(session_id, snapshot_id))
     return {"status": "deleted", "snapshot_id": snapshot_id}
