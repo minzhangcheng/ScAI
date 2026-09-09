@@ -341,8 +341,43 @@ _restored_names = []
 _scai_pending = {{}}
 _compression_magic = b"SCAI_ZSTD_DILL_V1\\n"
 
+# mudata 0.3.10 gives every MuDataFileManager a weakref to a throwaway AnnData
+# that is freed before __init__ returns, so `_adata_ref()` is None from the
+# moment the manager exists. `__getstate__` stores that None and the stock
+# `__setstate__` calls `weakref.ref(None)`, which raises -- so a dump holding a
+# MuData is written happily and cannot be read back at all. Rebuilding the
+# reference the way the library's own constructor does leaves the manager in
+# exactly the state a freshly built MuData has, and the reference is
+# unreachable without a backing file, which a MuData never has: its only reader
+# is `_to_memory_mode`, and `filename` is None.
+#
+# Narrow on purpose. Anything whose reference survived pickling takes the
+# library's own path, and the stock method is put back before this script ends,
+# so nothing the user does later sees a patched class.
+_scai_tolerated = []
+_scai_repaired = []
+try:
+    import weakref as _scai_weakref
+    from anndata import AnnData as _scai_AnnData
+    from anndata._core.file_backing import AnnDataFileManager as _scai_FileManager
+except Exception:
+    _scai_FileManager = None
+else:
+    _scai_stock_setstate = _scai_FileManager.__setstate__
+
+    def _scai_tolerant_setstate(_self, _state):
+        if _state.get("_adata_ref") is None:
+            _self.__dict__ = dict(_state)
+            _self.__dict__["_adata_ref"] = _scai_weakref.ref(_scai_AnnData())
+            _scai_tolerated.append(1)
+            return
+        _scai_stock_setstate(_self, _state)
+
+    _scai_FileManager.__setstate__ = _scai_tolerant_setstate
+
 def _restore_dill_frames(_stream):
     while True:
+        _seen_before = len(_scai_tolerated)
         try:
             _frame = _scai_dill.load(_stream)
         except EOFError:
@@ -365,6 +400,8 @@ def _restore_dill_frames(_stream):
             _name, _obj = _frame
         _scai_pending[_name] = _obj
         _restored_names.append(_name)
+        if len(_scai_tolerated) > _seen_before:
+            _scai_repaired.append(_name)
 
 try:
     if {has_session_dump!r}:
@@ -387,9 +424,13 @@ try:
     _scai_pending.clear()
     print(f"Session restored: {{len(_restored_names)}} variables")
     print("__SCAI_RESTORED_NAMES__:" + _scai_json.dumps(sorted(_restored_names)))
+    print("__SCAI_RESTORE_REPAIRED__:" + _scai_json.dumps(sorted(set(_scai_repaired))))
 except Exception as e:
     print(f"__SCAI_RESTORE_ERROR__: {{type(e).__name__}}: {{e}}")
     raise
+finally:
+    if _scai_FileManager is not None:
+        _scai_FileManager.__setstate__ = _scai_stock_setstate
 """
     result = await sandbox._execute_unlocked(restore_code, records_history=False, skip_safety_check=True)
 
@@ -405,6 +446,25 @@ except Exception as e:
                     parsed = None
                 if isinstance(parsed, list):
                     restored_names = {str(name) for name in parsed}
+            elif line.startswith("__SCAI_RESTORE_REPAIRED__:"):
+                # Named rather than counted: an operator seeing this wants to
+                # know which variable carried the library defect, and the same
+                # variable will carry it again on the next save.
+                try:
+                    repaired = bindings.json.loads(
+                        line[len("__SCAI_RESTORE_REPAIRED__:"):]
+                    )
+                except (bindings.json.JSONDecodeError, TypeError):
+                    repaired = None
+                if repaired:
+                    bindings.logger.warning(
+                        "[%s] Rebuilt a dead AnnData file-manager reference "
+                        "while restoring %s. mudata builds every MuData with "
+                        "one, and the stock unpickler raises on it; the "
+                        "manager is left exactly as a freshly built MuData "
+                        "has it.",
+                        sandbox.session_id, ", ".join(str(n) for n in repaired),
+                    )
         try:
             verify_restored_generation(restore_plan, restored_names)
         except RuntimeIntegrityError as integrity_error:

@@ -440,6 +440,101 @@ helper = make_helper()
 
 
 @pytest.mark.asyncio
+async def test_a_namespace_holding_a_mudata_can_be_restored(tmp_path, caplog):
+    """The library defect that made a whole dump unreadable, on a real kernel.
+
+    mudata gives every ``MuDataFileManager`` a weakref to a throwaway AnnData
+    that is freed before ``__init__`` returns, so ``_adata_ref()`` is None from
+    the moment the manager exists. ``__getstate__`` stores that None and the
+    stock ``__setstate__`` calls ``weakref.ref(None)``. The dump is written
+    happily and cannot be read back -- found in production as a session that
+    saved successfully, failed to restore, and then completed its analysis
+    without its kernel variables.
+
+    What is asserted is what the operator needs: the variable comes back, it is
+    the same data, and it can be used and saved again. The manager's reference
+    is rebuilt the way mudata's own constructor builds it, so the restored
+    object is in the state a freshly built MuData is in -- and the reference is
+    unreachable without a backing file, which a MuData never has.
+    """
+    pytest.importorskip("mudata")
+
+    from backend.config import get_session_states, get_session_workspace
+    from backend.utils.sandbox import LocalJupyterSandbox
+
+    session_id = "test-mudata-restore"
+    states_dir = get_session_states(session_id)
+    states_dir.mkdir(parents=True, exist_ok=True)
+    workspace = get_session_workspace(session_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    sb = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states_dir),
+        working_dir=str(workspace),
+        timeout=120,
+    )
+    await sb.start()
+    try:
+        built = await sb.execute(
+            "import numpy as np, anndata as ad, mudata\n"
+            "rna = ad.AnnData(np.arange(12, dtype=float).reshape(4, 3))\n"
+            "prot = ad.AnnData(np.ones((4, 2)))\n"
+            "mdata = mudata.MuData({'rna': rna, 'prot': prot})\n"
+            "print('built', mdata.shape, float(np.asarray(mdata['rna'].X).sum()))"
+        )
+        assert built.success, built.error
+        assert "built (4, 5) 66.0" in built.output, built.output
+
+        assert await sb.save_session()
+    finally:
+        await sb.stop(save=False)
+
+    sb2 = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states_dir),
+        working_dir=str(workspace),
+        timeout=120,
+    )
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        await sb2.start()
+    # Reported, not silently repaired: the same variable will carry the same
+    # library defect at the next save, and an operator reading the log should
+    # be able to name it.
+    repaired = [
+        record.getMessage() for record in caplog.records
+        if "Rebuilt a dead AnnData file-manager reference" in record.getMessage()
+    ]
+    assert repaired, "the repair was not reported"
+    assert "mdata" in repaired[0], repaired[0]
+    try:
+        assert not sb2._session_restore_failed, (
+            "the dump could not be read back: this is the defect under test"
+        )
+        check = await sb2.execute(
+            "import numpy as np\n"
+            "print('shape', mdata.shape)\n"
+            "print('sum', float(np.asarray(mdata['rna'].X).sum()))\n"
+            "print('mods', sorted(mdata.mod))\n"
+            "mdata.update()\n"
+            "print('copy', mdata.copy().shape)"
+        )
+        assert check.success, check.error
+        for expected in (
+            "shape (4, 5)", "sum 66.0", "mods ['prot', 'rna']", "copy (4, 5)",
+        ):
+            assert expected in check.output, (expected, check.output)
+
+        # And it can be saved again: a restore that left the object unpicklable
+        # would strand the session at its next save.
+        assert await sb2.save_session()
+    finally:
+        await sb2.stop(save=False)
+
+
+@pytest.mark.asyncio
 async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
     """Batch 2 end to end, on a real kernel. Spec B2-2's acceptance criterion.
 

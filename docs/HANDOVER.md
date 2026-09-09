@@ -371,7 +371,11 @@ Detailed release notes for every version are available through `git log` and rel
   Re-run, because it re-runs from the raw inputs only when no generation can be
   restored. `backend/tests/test_workflow_state_channels.py` is back: it scans
   `backend/workflow/` for state keys that are not declared channels, and its
-  absence is why the restore-routing defect could ship twice.
+  absence is why the restore-routing defect could ship twice. And a runtime
+  restore tolerates a dead AnnData file-manager reference: mudata gives every
+  `MuData` one by construction, so a dump holding a `MuData` used to save
+  successfully and fail to load, which stopped a session's analysis without
+  stopping the run.
 - `0.56.0` — Adds decision snapshots: a restore point taken immediately
   before each of the four decisions an analysis asks about itself, restorable
   into a new session that leaves the source untouched. Off unless
