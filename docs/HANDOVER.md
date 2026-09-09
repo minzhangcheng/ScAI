@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.0 · **Last updated**: 2026-09-08
+**Version**: 0.56.1 · **Last updated**: 2026-09-09
 
 ## 1. Runtime Architecture
 
@@ -347,6 +347,20 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.55.x — (2026-09-08 onward)**
 
+- `0.56.1` — Corrections from the first run of decision snapshots against real
+  data. A restored session now continues at the node its capsule names:
+  `_restore_entry_plan` was never a declared `WorkflowState` channel, and an
+  annotated conditional-edge router is handed the declared channels rather than
+  the node's return, so every graph-node restore had been falling back to
+  `initialize_round`. A fork's notebook is named after the fork rather than
+  after the session it came from. Giving up a session's last snapshot now
+  reclaims the input copy it was the last to need, and the listing's session
+  total counts it. Restoring an identifier that names nothing answers 404
+  rather than accepting a job that could only fail, and a refusal no longer
+  names the server's filesystem. A blocked resume says what actually stopped it
+  and, when the session has decision snapshots, that they exist. An import
+  settles the archive's extension before reading its body, so an export saved
+  under the wrong name is no longer reported as too large.
 - `0.56.0` — Adds decision snapshots: a restore point taken immediately
   before each of the four decisions an analysis asks about itself, restorable
   into a new session that leaves the source untouched. Off unless
