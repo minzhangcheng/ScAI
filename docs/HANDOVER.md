@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.55.10 · **Last updated**: 2026-09-09
+**Version**: 0.55.11 · **Last updated**: 2026-09-09
 
 ## 1. Runtime Architecture
 
@@ -301,6 +301,54 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.55.x — (2026-09-08 onward)**
+
+- `0.55.11` — Cuts what the direction-novelty gate spends on triage and sharpens
+  what it counts as prior work. Every number below was measured by replaying the
+  eight research-direction candidates from two completed runs against live
+  PubMed, not from a synthetic fixture.
+
+  A direction's query categories overlap heavily, and each one sent its whole
+  result list to the triage model. A fifth of the articles in the two runs had
+  already been triaged for the same direction under an earlier category, and
+  `_dedup_evidence` keeps only the first verdict per article, so the repeat was
+  paid for and then discarded. Articles already seen for a direction are now
+  withheld before the call, and a query whose results are entirely repeats is
+  not sent at all. `DirectionSearchQuery` gained `duplicate_count`, because
+  without it such a query records "twenty results, none relevant", which reads
+  as a finding about the literature rather than as bookkeeping.
+
+  The evidence record named the articles behind its direct and contradictory
+  counts and nothing else, so a direction whose search returned only adjacent
+  work carried no article identity at all. That is precisely the
+  `adjacent_work_only` case, and it was three of the eight candidates, each
+  holding between 57 and 77 adjacent articles. Up to three of them are now named
+  as well, labelled as adjacent rather than direct, and only when there is no
+  direct evidence to show instead.
+
+  The two challenge queries carried no organism or tissue constraint. Unanchored
+  they returned 159 articles across the eight candidates, of which 11 were in
+  the study's own organism and tissue; anchored they return 23, all 23 of them
+  in organism and tissue. Six of sixteen now return nothing, which is the honest
+  outcome: the twenty off-topic articles they used to return produced no
+  contradiction after triage.
+
+  Finally, what makes an article direct prior work. Retrieval is keyword-based,
+  so a query built from gene symbols returns that symbol in any context, and a
+  melatonin-receptor paper was counted as direct prior art for a metallothionein
+  direction, after which the scoring step repeated the claim. The triage bucket
+  definition had always asked for the experimental context, but the prompt never
+  said what that context was. It is now stated once per gate run from the
+  research objective, and the definition says plainly that the same gene under a
+  different perturbation is not direct. The objective is used rather than the
+  candidate's own `experimental_context` field, which one run filled with
+  "2 group(s): Con (3 sample(s)), DKO (3 sample(s))" for every candidate and
+  which names no perturbation at all.
+
+  One shape was measured and rejected rather than shipped: adding the condition
+  as a further mandatory clause of the direct-prior-work query returned zero
+  articles for all eight candidates. Four required blocks is one too many, the
+  same over-conjunction that starved the annotation search in 0.55.10, which is
+  why the condition informs the triage decision instead of the query.
 
 - `0.55.10` — Gives a cluster annotation a citation it can be checked against,
   and repairs the per-cluster search that was supposed to supply one. Both come

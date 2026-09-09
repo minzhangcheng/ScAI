@@ -177,9 +177,17 @@ async def test_relevant_count_matches_all_evidence(monkeypatch):
         {"direction_id": "dir_rel", "direction": "Relevant test", "key_genes": ["Y"], "key_cell_types": ["Z"], "key_pathways": ["W"], "suggested_methods": ["Q"], "organism": "Mus musculus", "tissue": "test", "experimental_context": "model"}
     ])
 
-    for q in result[0]["queries"]:
-        if q["result_count"] > 0:
-            assert q["relevant_count"] == 1, f"relevant_count should be 1, got {q['relevant_count']}"
+    # Every query in this test re-finds the same article. It is triaged once,
+    # for the first query; the rest report it as a duplicate rather than as an
+    # article the model looked at and rejected.
+    executed = [q for q in result[0]["queries"] if q["result_count"] > 0]
+    assert executed, "no query returned an article"
+    assert sum(q["relevant_count"] for q in executed) == 1
+    for q in executed:
+        assert q["relevant_count"] == 1 or q["duplicate_count"] == q["result_count"], (
+            f"query {q['category']} reports {q['relevant_count']} relevant and "
+            f"{q['duplicate_count']} duplicates out of {q['result_count']}"
+        )
 
 
 @pytest.mark.asyncio
@@ -187,7 +195,7 @@ async def test_direction_timeout_preserves_evidence_collected_before_deadline(mo
     agent = _make_literature_agent()
     calls = {"count": 0}
 
-    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None):
+    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None, **kwargs):
         calls["count"] += 1
         if calls["count"] == 1:
             return (
@@ -241,7 +249,7 @@ async def test_direction_timeout_preserves_evidence_collected_before_deadline(mo
 async def test_direction_timeout_before_any_query_keeps_zero_counts(monkeypatch):
     agent = _make_literature_agent()
 
-    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None):
+    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None, **kwargs):
         if query.category in ("tier3_support", "tier3_challenge"):
             return [], {}, True, ["Tier-3 query timed out"]
         raise AssertionError("No standard/deep query should run after an already-expired direction deadline")
@@ -358,7 +366,7 @@ async def test_slow_first_candidate_does_not_starve_later_candidates(monkeypatch
     agent = _make_literature_agent()
     calls = []
 
-    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None):
+    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None, **kwargs):
         calls.append((candidate["direction_id"], query.category))
         if candidate["direction_id"] == "dir_slow" and query.category == "direct_prior_work":
             await asyncio.sleep(0.05)
@@ -393,7 +401,7 @@ async def test_slow_first_candidate_does_not_starve_later_candidates(monkeypatch
 async def test_timeout_zero_evidence_records_unknown_due_to_timeout_and_fallback(monkeypatch):
     agent = _make_literature_agent()
 
-    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None):
+    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None, **kwargs):
         return [], {}, True, [f"PubMed search timeout for query: {query.category}"]
 
     monkeypatch.setattr(agent, "_execute_query_batch", fake_execute_query_batch)

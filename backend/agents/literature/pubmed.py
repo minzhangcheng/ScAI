@@ -178,6 +178,7 @@ class PubMedMixin:
         matching_cache: List[Dict[str, Any]],
         query_timeout_seconds: float,
         deadline: Optional[float] = None,
+        triaged_pmids: Optional[Set[str]] = None,
     ) -> Tuple[List[PubMedEvidenceItem], Dict[str, Any], bool, List[str]]:
         evidence: List[PubMedEvidenceItem] = []
         limitations: List[str] = []
@@ -243,6 +244,30 @@ class PubMedMixin:
 
         if not articles:
             return evidence, meta, timed_out, limitations
+
+        # A direction's query categories overlap heavily: measured on two real
+        # runs, a fifth of every article sent to triage had already been triaged
+        # for the same direction under a different category. The verdict was
+        # paid for and then discarded, because _dedup_evidence keeps the first
+        # one per PMID. Drop the repeats before the LLM call, not after.
+        if triaged_pmids is not None:
+            fresh = [
+                a for a in articles
+                if str(a.get("pmid") or "") not in triaged_pmids
+            ]
+            skipped = len(articles) - len(fresh)
+            query.duplicate_count = skipped
+            if skipped:
+                logger.debug(
+                    "[Literature] %s: %s of %s articles already triaged for this "
+                    "direction; not re-sent", query.category, skipped, len(articles)
+                )
+            triaged_pmids.update(
+                str(a.get("pmid") or "") for a in fresh if a.get("pmid")
+            )
+            articles = fresh
+            if not articles:
+                return evidence, meta, timed_out, limitations
 
         # LLM triage
         try:
@@ -1357,6 +1382,7 @@ Note: If you are not certain about specific citation information, please clearly
         self, queries, candidate, matching_cache, timeout, *,
         all_evidence, executed_categories, triage_metadata_list, all_limitations,
         deadline: Optional[float] = None,
+        triaged_pmids: Optional[Set[str]] = None,
     ) -> bool:
         """Run a list of query batches, accumulating into the passed-in lists.
         Returns True if any batch timed out or the direction deadline expired."""
@@ -1374,7 +1400,8 @@ Note: If you are not certain about specific citation information, please clearly
                 mark_direction_timeout()
                 return True
             evidence, meta, q_timedout, limitations = await self._execute_query_batch(
-                q, candidate, matching_cache, timeout, deadline=deadline
+                q, candidate, matching_cache, timeout, deadline=deadline,
+                triaged_pmids=triaged_pmids,
             )
             all_evidence.extend(evidence)
             if not q.degraded:

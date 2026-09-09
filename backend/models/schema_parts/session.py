@@ -303,6 +303,11 @@ class DirectionSearchQuery(BaseModel):
     query: str
     result_count: int = 0
     relevant_count: int = 0
+    # How many of result_count had already been triaged for this direction under
+    # an earlier category and were therefore not sent to the model again. Without
+    # it a repeat-heavy query reads as "20 results, 0 relevant", which is a
+    # statement about the literature rather than about the deduplication.
+    duplicate_count: int = 0
     degraded: bool = False
     notes: str = ""
 

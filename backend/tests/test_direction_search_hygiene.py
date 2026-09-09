@@ -31,7 +31,7 @@ import pytest
 
 from backend.agents.literature_agent import LiteratureAgent
 from backend.agents.literature.query_builders import normalize_search_terms
-from backend.models.schemas import PubMedEvidenceItem
+from backend.models.schemas import DirectionSearchQuery, PubMedEvidenceItem
 from backend.tests.split_facade import split_source
 from backend.utils.direction_payload import EVIDENCE_PROMPT_FIELDS
 
@@ -411,3 +411,262 @@ async def test_a_persistent_rate_limit_raises_rather_than_reporting_no_results(m
 
     with pytest.raises(httpx.HTTPStatusError):
         await agent._pubmed_search("copper deficiency")
+
+
+# --------------------------------------------- triage cost and evidence identity
+#
+# Measured on two 0.55.9 runs of the direction gate: a fifth of every article
+# sent to the triage model had already been triaged for the same direction under
+# a different query category, and _dedup_evidence keeps only the first verdict
+# per PMID, so the repeat was paid for and thrown away. Separately, key_evidence
+# rendered only the direct and contradictory buckets, which left it empty for
+# exactly the adjacent_work_only directions -- the ones carrying 57 to 77
+# analogous articles and no direct hit.
+
+
+def _ev(pmid, supports, title="T"):
+    return PubMedEvidenceItem(
+        pmid=pmid, title=title, year="2024", relevance="high",
+        supports=supports, why_it_matters="because",
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_article_is_not_sent_to_triage_twice_for_one_direction(monkeypatch):
+    agent = _make_literature_agent()
+    triaged_batches = []
+
+    async def fake_search(query, max_results=20):
+        return [{"pmid": "111", "title": "a", "abstract": ""},
+                {"pmid": "222", "title": "b", "abstract": ""}]
+
+    async def fake_triage(articles, candidate, query):
+        triaged_batches.append([a["pmid"] for a in articles])
+        return [], {"off_topic": False, "contradictory_ambiguous": False,
+                    "species_tissue_qualification": "", "summary": ""}
+
+    agent._pubmed_search = fake_search
+    agent._triage_articles_with_llm = fake_triage
+
+    seen = set()
+    q1 = DirectionSearchQuery(category="direct_prior_work", query="q1")
+    q2 = DirectionSearchQuery(category="pathway_focused", query="q2")
+    for q in (q1, q2):
+        await agent._execute_query_batch(q, {}, [], 30.0, triaged_pmids=seen)
+
+    assert triaged_batches[0] == ["111", "222"]
+    assert len(triaged_batches) == 1, "the second category re-sent articles already triaged"
+    assert seen == {"111", "222"}
+
+
+@pytest.mark.asyncio
+async def test_only_the_repeated_articles_are_withheld(monkeypatch):
+    agent = _make_literature_agent()
+    batches = []
+    pages = iter([
+        [{"pmid": "111", "title": "a", "abstract": ""}],
+        [{"pmid": "111", "title": "a", "abstract": ""},
+         {"pmid": "333", "title": "c", "abstract": ""}],
+    ])
+
+    async def fake_search(query, max_results=20):
+        return next(pages)
+
+    async def fake_triage(articles, candidate, query):
+        batches.append([a["pmid"] for a in articles])
+        return [], {}
+
+    agent._pubmed_search = fake_search
+    agent._triage_articles_with_llm = fake_triage
+
+    seen = set()
+    for cat in ("direct_prior_work", "pathway_focused"):
+        await agent._execute_query_batch(
+            DirectionSearchQuery(category=cat, query="q"), {}, [], 30.0,
+            triaged_pmids=seen,
+        )
+
+    assert batches == [["111"], ["333"]]
+
+
+@pytest.mark.asyncio
+async def test_deduplication_is_off_when_no_set_is_supplied():
+    # Other callers and older tests must keep their behaviour exactly.
+    agent = _make_literature_agent()
+    batches = []
+
+    async def fake_search(query, max_results=20):
+        return [{"pmid": "111", "title": "a", "abstract": ""}]
+
+    async def fake_triage(articles, candidate, query):
+        batches.append([a["pmid"] for a in articles])
+        return [], {}
+
+    agent._pubmed_search = fake_search
+    agent._triage_articles_with_llm = fake_triage
+
+    for cat in ("direct_prior_work", "pathway_focused"):
+        await agent._execute_query_batch(
+            DirectionSearchQuery(category=cat, query="q"), {}, [], 30.0
+        )
+
+    assert batches == [["111"], ["111"]]
+
+
+def test_key_evidence_names_adjacent_articles_when_there_is_no_direct_hit():
+    agent = _make_literature_agent()
+
+    rendered = agent._build_key_evidence(
+        [], [], [_ev("111", "analogous", "Interferon signalling in mouse liver")]
+    )
+
+    assert "adjacent (not direct)" in rendered
+    assert "PMID 111" in rendered
+
+
+def test_adjacent_articles_are_not_added_beside_direct_evidence():
+    agent = _make_literature_agent()
+
+    rendered = agent._build_key_evidence(
+        [_ev("111", "direct")], [], [_ev("222", "analogous")]
+    )
+
+    assert "PMID 111" in rendered
+    assert "PMID 222" not in rendered
+
+
+def test_key_evidence_is_still_empty_when_nothing_was_retrieved():
+    assert _make_literature_agent()._build_key_evidence([], [], []) == ""
+
+
+# ------------------------------------------- challenge anchoring and study context
+#
+# Measured over the 8 real direction candidates from two runs, against live
+# PubMed. The unanchored challenge query returned 159 articles of which 11 were
+# in the study's organism and tissue; anchored it returns 17, all 17 of them in
+# organism and tissue. Six of sixteen challenge queries now return nothing at
+# all, which is the honest outcome: before, they returned twenty off-topic
+# articles that triaged to no contradiction.
+#
+# Separately, adding the study condition as another mandatory AND block was
+# measured and REJECTED: `(genes) AND organism AND tissue AND (condition)`
+# returned zero articles for all eight candidates. The condition belongs in the
+# triage decision, where it costs no extra search.
+
+
+def _terms(agent, **over):
+    candidate = {
+        "key_genes": ["Mt1", "Mt2"],
+        "key_pathways": ["oxidative stress"],
+        "organism": "Mus musculus",
+        "tissue": "Liver",
+    }
+    candidate.update(over)
+    return agent._candidate_terms(candidate)
+
+
+def test_the_challenge_query_is_anchored_to_organism_and_tissue():
+    agent = _make_literature_agent()
+
+    q = agent._build_active_challenge_query(_terms(agent))
+
+    assert '"Mus musculus"[all]' in q
+    assert '"Liver"[tiab]' in q
+    assert "contradict*[tiab]" in q
+
+
+def test_the_contradictory_expectedness_query_is_anchored_too():
+    agent = _make_literature_agent()
+
+    q = agent._build_contradictory_expectedness(_terms(agent))
+
+    assert '"Mus musculus"[all]' in q
+    assert '"Liver"[tiab]' in q
+
+
+def test_the_anchor_is_omitted_when_the_candidate_names_no_organism_or_tissue():
+    agent = _make_literature_agent()
+
+    q = agent._build_active_challenge_query(_terms(agent, organism="", tissue=""))
+
+    assert q
+    assert "[all]" not in q
+    assert "Mt1" in q
+
+
+@pytest.mark.asyncio
+async def test_the_triage_prompt_states_the_study_under_investigation():
+    agent = _make_literature_agent()
+    agent._direction_study_context = "Hepatocyte-specific ZnT1/CTR1 double knockout"
+    captured = {}
+
+    async def fake_chat(prompt, temperature=0.1):
+        captured["p"] = prompt
+        return '{"items": []}', False
+
+    agent._chat_with_fallback = fake_chat
+
+    await agent._triage_articles_with_llm(
+        [{"pmid": "1", "title": "T", "abstract": "A"}],
+        {"direction": "d", "key_genes": ["Mt1"], "organism": "Mus musculus", "tissue": "Liver"},
+        DirectionSearchQuery(category="direct_prior_work", query="q"),
+    )
+
+    assert "Study under investigation: Hepatocyte-specific ZnT1/CTR1 double knockout" in captured["p"]
+
+
+@pytest.mark.asyncio
+async def test_the_triage_prompt_says_so_when_no_study_context_is_available():
+    agent = _make_literature_agent()
+    captured = {}
+
+    async def fake_chat(prompt, temperature=0.1):
+        captured["p"] = prompt
+        return '{"items": []}', False
+
+    agent._chat_with_fallback = fake_chat
+
+    await agent._triage_articles_with_llm(
+        [{"pmid": "1", "title": "T", "abstract": "A"}], {"direction": "d"},
+        DirectionSearchQuery(category="direct_prior_work", query="q"),
+    )
+
+    assert "Study under investigation: not supplied" in captured["p"]
+
+
+@pytest.mark.asyncio
+async def test_the_same_gene_under_a_different_perturbation_is_not_direct():
+    # A melatonin-receptor MT2 paper came back as direct prior art for a
+    # metallothionein direction, because the bucket definition asked for the
+    # experimental context and the prompt never supplied it.
+    agent = _make_literature_agent()
+    captured = {}
+
+    async def fake_chat(prompt, temperature=0.1):
+        captured["p"] = prompt
+        return '{"items": []}', False
+
+    agent._chat_with_fallback = fake_chat
+
+    await agent._triage_articles_with_llm(
+        [{"pmid": "1", "title": "T", "abstract": "A"}], {"direction": "d"},
+        DirectionSearchQuery(category="direct_prior_work", query="q"),
+    )
+
+    assert "is NOT direct" in captured["p"]
+
+
+@pytest.mark.asyncio
+async def test_the_study_context_comes_from_the_objective_not_the_candidate_field():
+    # One observed run filled experimental_context with
+    # "2 group(s): Con (3 sample(s)), DKO (3 sample(s))" for every candidate,
+    # which names no perturbation at all.
+    agent = _make_literature_agent()
+    state = SimpleNamespace(
+        initial_instruction="Hepatocyte-specific ZnT1/CTR1 double knockout mice",
+        literature_reports=[],
+    )
+
+    await agent.evaluate_direction_novelty_candidates([], state=state)
+
+    assert agent._direction_study_context == "Hepatocyte-specific ZnT1/CTR1 double knockout mice"

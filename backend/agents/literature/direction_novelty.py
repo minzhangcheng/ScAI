@@ -2,7 +2,7 @@
 
 Moved verbatim out of backend/agents/literature_agent.py; composed into LiteratureAgent.
 """
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Set, Tuple
 import asyncio
 import logging
 import time
@@ -192,6 +192,9 @@ class DirectionNoveltyMixin:
         triage_metadata_list: List[Dict[str, Any]] = []
         limitations: List[str] = []
         matching_cache = [a for a in cached_articles if self._article_matches_candidate(a, candidate)]
+        triaged_pmids: Set[str] = {
+            str(a.get("pmid") or "") for a in matching_cache if a.get("pmid")
+        }
         deadline = time.monotonic() + direction_timeout_seconds
         cache_ev, cache_meta, cache_timed_out, cache_limits = (
             await self._triage_cached_articles_once(
@@ -212,6 +215,7 @@ class DirectionNoveltyMixin:
             triage_metadata_list=triage_metadata_list,
             all_limitations=limitations,
             deadline=deadline,
+            triaged_pmids=triaged_pmids,
         )
         timed_out = timed_out or cache_timed_out
         if timed_out and "Minimum-attempt query timed out" not in limitations:
@@ -305,6 +309,11 @@ class DirectionNoveltyMixin:
         # so they are triaged once here and the per-query path is handed an empty
         # cache. Passing them down would re-run this call for every query.
         matching_cache = [a for a in cached_articles if self._article_matches_candidate(a, candidate)]
+        # Everything already put in front of triage for THIS candidate. The
+        # cached articles are triaged first, so they seed it.
+        triaged_pmids: Set[str] = {
+            str(a.get("pmid") or "") for a in matching_cache if a.get("pmid")
+        }
 
         if direction_deadline_expired():
             mark_direction_timeout()
@@ -331,7 +340,7 @@ class DirectionNoveltyMixin:
                 standard_queries, candidate, [], query_timeout_seconds,
                 all_evidence=all_evidence, executed_categories=executed_categories,
                 triage_metadata_list=triage_metadata_list, all_limitations=all_limitations,
-                deadline=deadline,
+                deadline=deadline, triaged_pmids=triaged_pmids,
             ):
                 timed_out_flag = True
 
@@ -357,7 +366,7 @@ class DirectionNoveltyMixin:
                 deep_queries, candidate, [], query_timeout_seconds,
                 all_evidence=all_evidence, executed_categories=executed_categories,
                 triage_metadata_list=triage_metadata_list, all_limitations=all_limitations,
-                deadline=deadline,
+                deadline=deadline, triaged_pmids=triaged_pmids,
             ):
                 timed_out_flag = True
 
@@ -393,6 +402,7 @@ class DirectionNoveltyMixin:
                     triage_metadata_list=triage_metadata_list,
                     all_limitations=all_limitations,
                     deadline=time.monotonic() + tier3_query_timeout_seconds,
+                    triaged_pmids=triaged_pmids,
                 )
 
         # Deduplicate by PMID so the same article is not counted across multiple query categories.
@@ -484,7 +494,9 @@ class DirectionNoveltyMixin:
             "methodological_precedent": [e.model_dump() for e in methodological_ev],
             "queries": [q.model_dump() for q in queries],
             "species_tissue_qualification": best_qualification,
-            "key_evidence": self._build_key_evidence(direct_ev, contradictory_ev),
+            "key_evidence": self._build_key_evidence(
+                direct_ev, contradictory_ev, analogous_ev
+            ),
             "gap_assessment": gap,
             "summary": summary,
             "limitations": all_limitations,
@@ -529,7 +541,9 @@ class DirectionNoveltyMixin:
             "contradictory_evidence": [e.model_dump() for e in contradictory_ev],
             "methodological_precedent": [e.model_dump() for e in methodological_ev],
             "queries": [q.model_dump() for q in queries],
-            "key_evidence": self._build_key_evidence(direct_ev, contradictory_ev),
+            "key_evidence": self._build_key_evidence(
+                direct_ev, contradictory_ev, analogous_ev
+            ),
             "limitations": result.get("limitations", []) + limitations,
             "timed_out": timed_out,
             "fallback_tier": fallback_tier,
@@ -594,6 +608,7 @@ Respond JSON: {{"strong": <count strongly relevant>, "moderate": <count moderate
     def _build_key_evidence(
         direct_ev: List["PubMedEvidenceItem"],
         contradictory_ev: List["PubMedEvidenceItem"],
+        analogous_ev: Optional[List["PubMedEvidenceItem"]] = None,
         *,
         per_bucket: int = 3,
         title_chars: int = 90,
@@ -605,6 +620,14 @@ Respond JSON: {{"strong": <count strongly relevant>, "moderate": <count moderate
         cite one, and a mis-bucketed article is indistinguishable from a real
         hit. Bounded on purpose: this shares a per-record slot with the rest of
         the evidence block.
+
+        Analogous articles are named only when there is no direct evidence.
+        Rendering direct and contradictory alone left this field EMPTY for
+        exactly the adjacent_work_only directions -- measured, three of eight
+        across two runs, each carrying 57 to 77 analogous articles -- which are
+        the ones where the scorer most needs something it can look at. When
+        direct evidence exists it is the more useful thing to show, and adding
+        the adjacent pile beside it only dilutes the slot.
         """
         def render(label: str, items: List["PubMedEvidenceItem"]) -> str:
             if not items:
@@ -620,15 +643,13 @@ Respond JSON: {{"strong": <count strongly relevant>, "moderate": <count moderate
             suffix = f" (+{hidden} more)" if hidden > 0 else ""
             return f"{label}: " + "; ".join(shown) + suffix
 
-        parts = [
-            part
-            for part in (
-                render("direct", direct_ev),
-                render("contradictory", contradictory_ev),
-            )
-            if part
+        rendered = [
+            render("direct", direct_ev),
+            render("contradictory", contradictory_ev),
         ]
-        return " | ".join(parts)
+        if not direct_ev:
+            rendered.append(render("adjacent (not direct)", analogous_ev or []))
+        return " | ".join(part for part in rendered if part)
 
     @staticmethod
     def _partition_evidence(
@@ -698,6 +719,18 @@ Respond JSON: {{"strong": <count strongly relevant>, "moderate": <count moderate
                          "species_tissue_qualification": "", "summary": "No articles to triage."}
 
         terms = self._candidate_terms(candidate)
+        # Retrieval is keyword-based, so a query built from gene symbols returns
+        # the same symbol in any context: a melatonin-receptor MT2 paper came
+        # back as direct prior art for a metallothionein direction. The bucket
+        # definition already asked for the experimental context, but the prompt
+        # never said what it was. Supplying it costs no extra search.
+        study_context = str(getattr(self, "_direction_study_context", "") or "").strip()
+        study_line = (
+            f"Study under investigation: {study_context}\n"
+            if study_context else
+            "Study under investigation: not supplied; judge the context from the "
+            "research direction above.\n"
+        )
         articles_text = "\n".join(
             f"[PMID: {a.get('pmid', '?')}] {a.get('title', '')} - {a.get('abstract', '')[:400]}"
             for a in articles[:30]
@@ -712,10 +745,10 @@ Key pathways: {', '.join(terms['pathways'])}
 Organism: {', '.join(terms['organism'])}
 Tissue: {', '.join(terms['tissue'])}
 Query category: {query.category}
-
+{study_line}
 Buckets:
-- direct: Directly studies the same gene(s), cell type(s), pathway(s), and experimental context
-- analogous: Studies a related but distinct mechanism, cell type, or context that could inform this direction
+- direct: Studies this question in this study's experimental context, meaning the same perturbation, model or condition as the study named above. The same gene, pathway or cell type under a different perturbation, disease or intervention is NOT direct
+- analogous: Studies a related but distinct mechanism, cell type, or context that could inform this direction, including the same genes under a different perturbation
 - contradictory: Presents evidence that contradicts or challenges the proposed biology
 - methodological: Describes a method or technique relevant to the proposed approach
 - irrelevant: Not relevant to this research direction
@@ -791,6 +824,16 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         unaffordable and a stingy one useless.
         """
         cached_articles = self._extract_session_cached_pubmed_articles(state)
+        # One study per session and per gate run, so this is set once here and
+        # read by the triage step rather than threaded through four call frames.
+        # The research objective is used and the candidate's own
+        # experimental_context is not: one observed run filled that field with
+        # "2 group(s): Con (3 sample(s)), DKO (3 sample(s))" for every candidate,
+        # which names no perturbation and would mislead the bucket decision.
+        self._direction_study_context = (
+            str(getattr(state, "initial_instruction", "") or "").strip()[:400]
+            if state is not None else ""
+        )
         semaphore = asyncio.Semaphore(max(1, concurrency))
 
         async def evaluate_one(index: int, candidate: Dict[str, Any]) -> Dict[str, Any]:

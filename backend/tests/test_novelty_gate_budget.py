@@ -107,7 +107,7 @@ async def test_the_per_query_path_is_not_handed_the_cache_again(monkeypatch):
     agent = _make_agent()
     seen = []
 
-    async def fake_execute(query, candidate, matching_cache, timeout, deadline=None):
+    async def fake_execute(query, candidate, matching_cache, timeout, deadline=None, **kwargs):
         seen.append(list(matching_cache))
         return [], {}, False, []
 
