@@ -383,6 +383,101 @@ async def test_a_bundle_claiming_another_session_is_refused(captured, monkeypatc
     await _expect_refusal(other, snapshot, "snapshot_unverified")
 
 
+# ------------------------------------------------------ what the caller is told
+
+# Both of these were found by driving the real HTTP surface on a live
+# deployment rather than by reading it. The restore job answers everything a
+# caller cannot know until the bundle is opened; these are the two things the
+# server knew before it started, and the one thing it should not have said.
+
+
+def _request(user_id=OWNER):
+    import types
+
+    return types.SimpleNamespace(state=types.SimpleNamespace(user_id=user_id))
+
+
+async def _restore_over_http(source, snapshot):
+    from backend.routes.round_snapshots import restore_session_snapshot
+
+    return await restore_session_snapshot(source, snapshot, _request())
+
+
+def _jobs():
+    from backend.routes.round_snapshots import _import_jobs
+
+    return dict(_import_jobs)
+
+
+@pytest.mark.asyncio
+async def test_an_id_that_names_no_snapshot_is_refused_before_a_job_starts(captured):
+    """404, not an accepted job that fails later.
+
+    Answering 200 and reporting the failure through the import-job record made
+    a caller poll to be told something the server could have said immediately,
+    and it spent a job slot on a request that was never going to do any work.
+    """
+    from fastapi import HTTPException
+
+    source, _snapshot = await captured()
+    before = _jobs()
+
+    with pytest.raises(HTTPException) as raised:
+        await _restore_over_http(source, "r009-round-g999")
+
+    assert raised.value.status_code == 404
+    assert _jobs() == before
+
+
+@pytest.mark.asyncio
+async def test_an_identifier_that_is_not_one_is_refused_as_a_bad_request(captured):
+    """400 rather than 404: the request is malformed, not merely unsatisfiable."""
+    from fastapi import HTTPException
+
+    source, _snapshot = await captured()
+
+    with pytest.raises(HTTPException) as raised:
+        await _restore_over_http(source, "../../etc")
+
+    assert raised.value.status_code == 400
+    assert _jobs() == {}
+
+
+@pytest.mark.asyncio
+async def test_a_restore_that_can_run_is_still_accepted(captured):
+    """The guard above must not answer for the bundle the job is meant to open."""
+    source, snapshot = await captured()
+
+    answer = await _restore_over_http(source, snapshot)
+
+    assert answer["job_id"]
+    assert _jobs()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_does_not_tell_the_caller_where_the_bundle_lives(captured):
+    """The reason travels; the server's storage layout does not.
+
+    The underlying manifest error names an absolute path, and that detail was
+    reaching the client verbatim. A caller can do nothing with it, and it
+    describes a filesystem they cannot see.
+    """
+    source, snapshot = await captured()
+    bundle = layout.snapshot_dir(source, snapshot)
+    (bundle / MANIFEST_NAME).unlink()
+
+    with pytest.raises(SnapshotRestoreError) as raised:
+        await restore_snapshot_into_new_session(
+            source_session_id=source, snapshot=snapshot, user_id=OWNER,
+        )
+
+    assert raised.value.reason == "snapshot_unverified"
+    detail = str(raised.value)
+    assert str(bundle) not in detail
+    assert MANIFEST_NAME not in detail
+    assert "/" not in detail
+
+
 # ------------------------------------------------------------------ lineage
 
 

@@ -573,7 +573,15 @@ async def restore_snapshot_into_new_session(
     try:
         manifest = read_snapshot_manifest(bundle / MANIFEST_NAME)
     except SnapshotManifestError as exc:
-        raise _refuse("snapshot_unverified", str(exc)) from exc
+        # The detail travels to the client, so it says what is wrong rather
+        # than where: the underlying message names the manifest's absolute
+        # path, which describes the server's storage layout to a caller who
+        # can do nothing with it.
+        logger.warning("Snapshot %s/%s failed verification: %s", source_session_id, snapshot, exc)
+        raise _refuse(
+            "snapshot_unverified",
+            "The snapshot's manifest is missing, unsigned, or does not verify.",
+        ) from exc
     if manifest["source_session_id"] != source_session_id:
         raise _refuse(
             "snapshot_unverified", "the bundle belongs to a different session",

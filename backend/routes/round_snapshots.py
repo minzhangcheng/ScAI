@@ -92,11 +92,27 @@ async def restore_session_snapshot(session_id: str, snapshot_id: str, request: R
         restore_snapshot_into_new_session,
     )
 
+    from backend.services.round_snapshots.layout import (
+        parse_snapshot_id,
+        snapshot_dir,
+    )
+
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     await require_session_ownership(session_id=session_id, user_id=user_id)
     if not snapshots_enabled():
         raise HTTPException(status_code=409, detail="Snapshots are not enabled")
+    # Answered here rather than by the job. A caller that has to poll to learn
+    # the id does not exist is being told asynchronously what the server knew
+    # before it started. Everything the job *cannot* know synchronously -- a
+    # tampered manifest, a digest that has drifted -- is still its to report.
+    try:
+        parse_snapshot_id(snapshot_id)
+        exists = snapshot_dir(session_id, snapshot_id).is_dir()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not exists:
+        raise HTTPException(status_code=404, detail="No such snapshot")
 
     job_id = str(uuid.uuid4())
     async with _import_jobs_lock:
