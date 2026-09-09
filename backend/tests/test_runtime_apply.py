@@ -512,6 +512,64 @@ def test_the_rollback_never_reaches_outside_the_workspace(tmp_path):
     assert (workspace / "link.bin").is_symlink()
 
 
+def test_a_superseded_generation_is_removed_workspace_and_all():
+    """The second save is the one that finds a generation with a copy.
+
+    Found in production, not here: a generation used to be three files and the
+    prune removed them with `unlink`, which raises on the workspace directory.
+    The exception left the commit, and a save that had already written its dump
+    was recorded as failed. Every save after the first would have failed the
+    same way, and a single-save test cannot see it because there is nothing to
+    prune.
+    """
+    from backend.config import get_session_states
+    from backend.utils.sandbox_parts.regular_save import _prune_older_generations
+
+    sid = "sess-prune-with-workspace"
+    states, first = _generation_pair(sid, 44)
+    _generation_workspace(sid, first, {"big.bin": b"z" * 10_000}, revision=44)
+    assert (first / "workspace").is_dir()
+
+    second = states / "generation" / "45"
+    second.mkdir(parents=True, exist_ok=True)
+
+    _prune_older_generations(states / "generation", keep=45)
+
+    assert not first.exists(), "the superseded generation survived the prune"
+    assert second.is_dir()
+
+
+def test_a_second_save_leaves_exactly_one_generation():
+    """Retention is one, and the copy must not change that.
+
+    Asserted through the two calls a save makes rather than through the commit,
+    so the arithmetic of the retention is visible: publish, then prune.
+    """
+    from backend.config import get_session_states
+    from backend.utils.sandbox_parts import workspace_generation
+    from backend.utils.sandbox_parts.regular_save import _prune_older_generations
+
+    sid = "sess-two-saves"
+    states, first = _generation_pair(sid, 44)
+    workspace = _generation_workspace(sid, first, {"a.bin": b"one"}, revision=44)
+    _prune_older_generations(states / "generation", keep=44)
+
+    (workspace / "b.bin").write_bytes(b"two")
+    second = states / "generation" / "45"
+    second.mkdir(parents=True, exist_ok=True)
+    workspace_generation.publish_workspace_generation(
+        workspace, second, states / "generation", 45,
+    )
+    _prune_older_generations(states / "generation", keep=45)
+
+    kept = sorted(d.name for d in (states / "generation").iterdir() if d.is_dir())
+    assert kept == ["45"]
+    # And the surviving copy still holds the file it shared with the one that
+    # was just removed: the hardlink outlives the directory it came from.
+    assert (second / "workspace" / "a.bin").read_bytes() == b"one"
+    assert (second / "workspace" / "b.bin").read_bytes() == b"two"
+
+
 # ------------------------------------------------------ what the copy costs
 
 

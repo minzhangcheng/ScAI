@@ -492,6 +492,16 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
     try:
         # The work that will survive, and the two positions as they stand
         # when it is committed.
+        # A first generation, so the save that matters has one to supersede.
+        # A generation holds a workspace *directory* now, and superseding it is
+        # a different operation from removing three files -- which is how every
+        # save after the first came to fail in production, invisible to a test
+        # that saves once because there is then nothing to prune.
+        assert (await sb.execute("from_the_first_save = 1")).success
+        (workspace / "only_in_the_first_generation.csv").write_text("a\n")
+        write_checkpoint("position-at-the-first-save")
+        assert await sb.save_session()
+
         assert (await sb.execute("adata = {'cells': 1234}")).success
         (workspace / "kept.csv").write_text("gene,logfc\nCD3E,2.1\n")
         (workspace / "rewritten.csv").write_text("gene,logfc\nAT THE SAVE,1.0\n")
@@ -504,6 +514,11 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
         committed = int(
             sb.notebook_state.runtime_persistence["committed_revision"]
         )
+        # Retention is one, and the copy must not change that.
+        generations = sorted(
+            d.name for d in (states_dir / "generation").iterdir() if d.is_dir()
+        )
+        assert generations == [str(committed)], generations
 
         # The work that will be lost, and the positions moving past it.
         assert (await sb.execute("adata['cells'] = 9999")).success
@@ -556,6 +571,9 @@ async def test_real_kernel_crash_and_pair_restore_round_trip(tmp_path):
     assert "AT THE SAVE" in (workspace / "rewritten.csv").read_text(), (
         "a file overwritten after the save was not put back"
     )
+    # It survived the first generation being pruned, because the second
+    # generation's copy shares its inode rather than pointing into it.
+    assert (workspace / "only_in_the_first_generation.csv").read_text() == "a\n"
 
     # The namespace is the one the dump held.
     sb2 = LocalJupyterSandbox(

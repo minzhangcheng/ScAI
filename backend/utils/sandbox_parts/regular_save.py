@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -119,14 +120,31 @@ WORKSPACE_INVENTORY_SCHEMA = 1
 
 
 def _prune_older_generations(generation_root: Path, *, keep: int) -> None:
-    """Retention is one (B2-1), and the newest is durable before this runs."""
+    """Retention is one (B2-1), and the newest is durable before this runs.
+
+    A generation is not three files any more: it also holds the workspace copy
+    the rollback restores from, which is a directory. `unlink` raises on one,
+    the exception left the commit through this call, and the save that was
+    otherwise complete was recorded as failed -- seen in production before a
+    test caught it, because a single save never prunes a generation that has
+    one.
+    """
     if not generation_root.is_dir():
         return
     for entry in generation_root.iterdir():
         if not entry.is_dir() or entry.name == str(keep):
             continue
         for child in entry.iterdir():
-            _remove_durable(child)
+            try:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    _remove_durable(child)
+            except OSError:
+                logger.warning(
+                    "Could not remove %s from a superseded generation", child,
+                    exc_info=True,
+                )
         try:
             entry.rmdir()
         except OSError:
