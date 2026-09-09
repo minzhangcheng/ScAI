@@ -449,12 +449,21 @@ The capture holds the analysis for the time it takes to copy the session's
 **workspace** and nothing else. The kernel dump is held by a hardlink, which
 costs nothing regardless of size, and copied afterwards; the uploaded inputs
 are copied afterwards too. Two bounds stop a slow or hung target from turning
-that pause into an outage: `SCAI_SNAPSHOT_STALL_SECONDS` (default 120)
-abandons a capture that has written no bytes for that long, and
-`SCAI_SNAPSHOT_MAX_SECONDS` (default 1800) is the backstop under it. Size them
-from the `capture_seconds` the listing reports on your own storage, not from
-these defaults. A capture that is abandoned records the decision as having no
-snapshot and the analysis carries on unaffected.
+those copies into an outage: `SCAI_SNAPSHOT_STALL_SECONDS` (default 120)
+abandons a copy that has written no bytes for that long, and
+`SCAI_SNAPSHOT_MAX_SECONDS` (default 1800) is the backstop under it. A capture
+that is abandoned records the decision as having no snapshot and the analysis
+carries on unaffected.
+
+Both bounds govern the copies and nothing else, and each copy phase gets its
+own clock. They do **not** bound the runtime save a capture asks for when the
+kernel has moved since the last one, which is usually most of a capture's
+elapsed time: measured on ordinary array storage, the copies took 6-11 s while
+the saves took 46-73 s. So size these two from what the *copies* cost on your
+storage, not from the `capture_seconds` the listing reports -- that figure
+includes a save these knobs cannot stop. The save is the same one the ordinary
+persistence cadence takes; see `SCAI_RUNTIME_SAVE_FLOOR_MINUTES` for the knob
+that governs it.
 
 ### Space, and which snapshot to give up first
 
@@ -849,8 +858,8 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_RUNTIME_SAVE_FLOOR_MINUTES` | `30` | Minutes that must pass since the last **successful** runtime save before a step boundary saves again. Round and closing boundaries ignore it. Unset, non-integer or non-positive values log and fall back |
 | `SCAI_RUNTIME_MAX_RSS_GB` | `auto` | Per-session kernel RSS ceiling for regular runtime persistence; numeric values are GiB administrator caps |
 | `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB` | `auto` | Total estimated size of live AnnData objects; numeric values are GiB administrator caps |
-| `SCAI_SNAPSHOT_DIR` | unset | Root for decision snapshots. **Unset means snapshots are off; setting it turns them on** — there is no separate switch. Must be absolute, and should be on separate storage from `SCAI_DATA_DIR`. Nothing is captured yet in this version |
-| `SCAI_SNAPSHOT_STALL_SECONDS` | `120` | Abandon a snapshot capture after this long with no byte written. A hung mount makes no progress; a slow one does |
+| `SCAI_SNAPSHOT_DIR` | unset | Root for decision snapshots. **Unset means snapshots are off; setting it turns them on** — there is no separate switch. Must be absolute, and should be on separate storage from `SCAI_DATA_DIR` |
+| `SCAI_SNAPSHOT_STALL_SECONDS` | `120` | Abandon a snapshot **copy** after this long with no byte written. A hung mount makes no progress; a slow one does. Does not bound the runtime save a capture may ask for |
 | `SCAI_SNAPSHOT_MAX_SECONDS` | `1800` | Backstop under the stall bound, for a target that dribbles bytes without ever stalling |
 | `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB` | unset | Free space below which the least valuable snapshots are reclaimed. Unset means **nothing is ever deleted automatically**, which is the default |
 | `SCAI_MODE` | `prod` | Docker entrypoint mode; the production image rejects `dev` |
