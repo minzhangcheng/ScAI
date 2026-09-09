@@ -60,6 +60,10 @@ from .import_impl import (
 
 logger = logging.getLogger(__name__)
 
+#: Every suffix this route knows how to read. The up-front guard and the
+#: dispatch below both read this, so a new format cannot be accepted by one
+#: and refused by the other.
+_IMPORT_SUFFIXES = (".tar.gz", ".tgz", ".zip", ".json")
 
 
 @router.post(
@@ -117,6 +121,20 @@ async def import_state(
     # Dispatch on the extension case-insensitively: a browser or an OS that
     # normalises the case of a download must not change how the body is read.
     lowered = filename.lower()
+    # Answered before a byte is read. The session archive this server writes is
+    # a gzipped tar, and a caller who saved it as `.tar` used to have it routed
+    # into the inline branch, where the first thing it met was the 100 MiB body
+    # cap -- so a 1.6 GB session export came back as "Import file too large".
+    # The size was never the problem, and a caller told it was would go looking
+    # for a limit to raise.
+    if not lowered.endswith(_IMPORT_SUFFIXES):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported import format. Expected a .tar.gz/.tgz session "
+                f"archive, or a legacy .zip/.json export; got {filename!r}."
+            ),
+        )
 
     import_id = request.headers.get("x-import-id") or None
     trust = (request.headers.get("x-trust") or "").lower() in ("true", "1", "yes")

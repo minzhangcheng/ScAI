@@ -454,9 +454,23 @@ Docker `/dep` 仅需持久化 `/dep/venv`，前端产物已编译进镜像。直
 
 ## 9. 备份、升级、恢复与回滚
 
+**停机时必须留出收尾保存的时间。**持有活动内核的会话会在关闭时写出运行时，
+这是一次完整 dump：1.28 GB 内核实测 57 秒，而真实数据上 3-8 GB 的 dump 很常见。
+Docker 默认停机宽限期为 10 秒，会在写到一半时杀死进程。此时盘上只剩最近一次常规
+保存的内容，那之后运行过的分析将无法继续：磁盘上的内核状态比会话记录的工作更旧，
+补救手段只剩下决策快照或从数据重跑。先执行暂停**没有**帮助 —— 暂停只是让执行器
+停在两个单元格之间，并不提交运行时。
+
+```bash
+docker stop -t 300 scai      # 不要用 `docker stop`，更不要用 `docker kill`
+```
+
+超时值要能容纳该部署中最大的内核。关机日志中每个活动会话应依次出现
+`Session saved successfully` 与 `Sandbox stopped`；若没有，说明停机时间不够。
+
 应优先执行静止状态下的文件级备份，使 SQLite 与会话文件保持一致：
 
-1. 停止 ScAI。
+1. 停止 ScAI，并留出足以完成收尾保存的宽限期（见上）。
 2. 复制整个数据根目录（包括隐藏文件），保留所有权、模式、时间戳和链接。
 3. 记录应用/镜像版本，并将稳定的密钥值单独保存在受保护的密钥存储中。
 4. 重启 ScAI 并验证健康状况。
@@ -464,7 +478,7 @@ Docker `/dep` 仅需持久化 `/dep/venv`，前端产物已编译进镜像。直
 Docker bind mount 示例：
 
 ```bash
-docker stop scai
+docker stop -t 300 scai
 sudo cp -a ./scai-data "./scai-data-backup-$(date +%Y%m%d-%H%M%S)"
 sudo test -f "$(ls -dt ./scai-data-backup-* | head -1)/app.db"
 docker start scai

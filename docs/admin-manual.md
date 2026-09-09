@@ -531,9 +531,27 @@ a data-root backup (section 9).
 
 ## 9. Backup, upgrade, recovery, and rollback
 
+**Stop long enough for the closing save.** A session with a live kernel writes
+its runtime on shutdown, and that write is a full dump: measured at 57 s for a
+1.28 GB kernel, and dumps of 3-8 GB are ordinary on real data. Docker's default
+stop grace is 10 s, which kills the process partway through. What survives is
+the last routine save, so an analysis that has run since then comes back unable
+to continue: the kernel state on disk is older than the work the session
+records, and the only remedies are a decision snapshot or re-running from the
+data. Pausing first does **not** help -- a pause holds the executor between
+cells and does not commit the runtime.
+
+```bash
+docker stop -t 300 scai      # not `docker stop`, and not `docker kill`
+```
+
+Give the timeout room for the largest kernel the installation holds. The
+shutdown log ends with `Session saved successfully` followed by `Sandbox
+stopped` for each live session; if it does not, the stop was too short.
+
 Prefer a quiescent file-level backup so SQLite and session files agree:
 
-1. Stop ScAI.
+1. Stop ScAI, with a grace period long enough for the closing save (above).
 2. Copy the entire data root, including hidden files, preserving ownership, modes, timestamps, and links.
 3. Record the application/image version and retain the stable secret values separately in a protected secret store.
 4. Restart ScAI and verify health.
@@ -541,7 +559,7 @@ Prefer a quiescent file-level backup so SQLite and session files agree:
 Example for Docker bind mounts:
 
 ```bash
-docker stop scai
+docker stop -t 300 scai
 sudo cp -a ./scai-data "./scai-data-backup-$(date +%Y%m%d-%H%M%S)"
 sudo test -f "$(ls -dt ./scai-data-backup-* | head -1)/app.db"
 docker start scai
