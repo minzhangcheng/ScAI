@@ -439,8 +439,171 @@ helper = make_helper()
         await sb.stop(save=False)
 
 
+def _load_dump_with_stock_dill(states_dir, session_id):
+    """Read a dump the way anything that is not this restore would read it.
+
+    Deliberately no tolerance: this process has none installed, because the
+    restore's own patch lives inside the kernel and is put back when it ends.
+    So this is what a different installation, an older build, or an offline tool
+    sees when it opens the file.
+    """
+    import dill
+    import zstandard
+
+    magic = b"SCAI_ZSTD_DILL_V1\n"
+    path = states_dir / f"{session_id}_session.pkl"
+    frames = {}
+    with open(path, "rb") as raw:
+        head = raw.read(len(magic))
+        stream = (
+            zstandard.ZstdDecompressor().stream_reader(raw)
+            if head == magic
+            else raw
+        )
+        if head != magic:
+            raw.seek(0)
+        while True:
+            try:
+                frame = dill.load(stream)
+            except EOFError:
+                break
+            if isinstance(frame, tuple) and len(frame) == 2:
+                frames[frame[0]] = frame[1]
+    return frames
+
+
 @pytest.mark.asyncio
-async def test_a_namespace_holding_a_mudata_can_be_restored(tmp_path, caplog):
+async def test_a_dump_written_before_the_writer_fix_still_restores(tmp_path, caplog):
+    """The tolerance is backward compatibility, and it has files to be
+    compatible with.
+
+    Every dump written before the save learned to substitute the reference
+    holds the None that raises, including ones already on disk on a running
+    deployment. The old shape is reproduced here the only way a test honestly
+    can: the save's patch is guarded on mudata being in ``sys.modules``, so a
+    kernel that has dropped that entry writes exactly what an older build wrote,
+    while the MuData object itself is untouched.
+    """
+    pytest.importorskip("mudata")
+
+    import logging
+
+    from backend.config import get_session_states, get_session_workspace
+    from backend.utils.sandbox import LocalJupyterSandbox
+
+    session_id = "test-mudata-legacy-dump"
+    states_dir = get_session_states(session_id)
+    states_dir.mkdir(parents=True, exist_ok=True)
+    workspace = get_session_workspace(session_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    sb = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states_dir),
+        working_dir=str(workspace),
+        timeout=120,
+    )
+    await sb.start()
+    try:
+        built = await sb.execute(
+            "import sys, numpy as np, anndata as ad, mudata\n"
+            "mdata = mudata.MuData({'rna': ad.AnnData(np.ones((4, 3)))})\n"
+            "del sys.modules['mudata']\n"
+            "print('built', mdata.shape)"
+        )
+        assert built.success, built.error
+        assert await sb.save_session()
+    finally:
+        await sb.stop(save=False)
+
+    # The dump is the old shape: an unpatched reader cannot open it.
+    import dill
+
+    with pytest.raises(TypeError):
+        _load_dump_with_stock_dill(states_dir, session_id)
+    del dill
+
+    sb2 = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states_dir),
+        working_dir=str(workspace),
+        timeout=120,
+    )
+    with caplog.at_level(logging.WARNING):
+        await sb2.start()
+    try:
+        assert not sb2._session_restore_failed, "an older dump must still open"
+        check = await sb2.execute("print('shape', mdata.shape)")
+        assert check.success, check.error
+        assert "shape (4, 3)" in check.output, check.output
+    finally:
+        await sb2.stop(save=False)
+
+    # Reported by name, because the operator's next question is which variable.
+    repaired = [
+        record.getMessage() for record in caplog.records
+        if "Rebuilt a dead AnnData file-manager reference" in record.getMessage()
+    ]
+    assert repaired, "the repair was not reported"
+    assert "mdata" in repaired[0], repaired[0]
+
+
+@pytest.mark.asyncio
+async def test_a_dump_holding_a_mudata_is_readable_without_this_restore(tmp_path):
+    """The bytes are portable, which is the point of fixing the writing side.
+
+    mudata stores a dead weakref in every MuDataFileManager, and the stock
+    unpickler raises on it. Tolerating that on the way in would have left the
+    file readable only by a build carrying the same tolerance -- so an archive
+    exported to another installation, or any tool that opens the dump, would
+    still have failed. The save writes an empty AnnData in place of the dead
+    reference instead, which is what mudata's own constructor hands the parent,
+    so an unpatched reader succeeds.
+    """
+    pytest.importorskip("mudata")
+
+    from backend.config import get_session_states, get_session_workspace
+    from backend.utils.sandbox import LocalJupyterSandbox
+
+    session_id = "test-mudata-portable"
+    states_dir = get_session_states(session_id)
+    states_dir.mkdir(parents=True, exist_ok=True)
+    workspace = get_session_workspace(session_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    sb = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(states_dir),
+        working_dir=str(workspace),
+        timeout=120,
+    )
+    await sb.start()
+    try:
+        built = await sb.execute(
+            "import numpy as np, anndata as ad, mudata\n"
+            "mdata = mudata.MuData({'rna': ad.AnnData(np.ones((4, 3))),\n"
+            "                       'prot': ad.AnnData(np.zeros((4, 2)))})\n"
+            "print('built', mdata.shape)"
+        )
+        assert built.success, built.error
+        assert await sb.save_session()
+    finally:
+        await sb.stop(save=False)
+
+    frames = _load_dump_with_stock_dill(states_dir, session_id)
+
+    assert "mdata" in frames, sorted(frames)[:20]
+    restored = frames["mdata"]
+    assert restored.shape == (4, 5)
+    assert sorted(restored.mod) == ["prot", "rna"]
+    # The manager comes back in the state a freshly built MuData has: a live
+    # weakref whose target is already gone, which is what mudata itself makes.
+    assert restored.file._adata_ref() is None
+    assert restored.file.filename is None
+
+
+@pytest.mark.asyncio
+async def test_a_namespace_holding_a_mudata_can_be_restored(tmp_path):
     """The library defect that made a whole dump unreadable, on a real kernel.
 
     mudata gives every ``MuDataFileManager`` a weakref to a throwaway AnnData
@@ -496,19 +659,7 @@ async def test_a_namespace_holding_a_mudata_can_be_restored(tmp_path, caplog):
         working_dir=str(workspace),
         timeout=120,
     )
-    import logging
-
-    with caplog.at_level(logging.WARNING):
-        await sb2.start()
-    # Reported, not silently repaired: the same variable will carry the same
-    # library defect at the next save, and an operator reading the log should
-    # be able to name it.
-    repaired = [
-        record.getMessage() for record in caplog.records
-        if "Rebuilt a dead AnnData file-manager reference" in record.getMessage()
-    ]
-    assert repaired, "the repair was not reported"
-    assert "mdata" in repaired[0], repaired[0]
+    await sb2.start()
     try:
         assert not sb2._session_restore_failed, (
             "the dump could not be read back: this is the defect under test"

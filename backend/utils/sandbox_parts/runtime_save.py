@@ -480,6 +480,7 @@ import json as _scai_json
 import builtins as _scai_builtins
 _scai_open = _scai_builtins.open
 import os as _scai_os
+import sys as _scai_sys
 import tempfile as _scai_tempfile
 import types as _scai_types
 import zstandard as _scai_zstd
@@ -558,6 +559,54 @@ _live = {_n: globals()[_n] for _n in _scai_snapshot if not _n.startswith('_')}
 # names alone silently dropped things like `adata_hepatocyte`, which is exactly
 # the state a resumed analysis cannot recompute.
 #
+# mudata gives every MuDataFileManager a weakref to a throwaway AnnData that is
+# freed before __init__ returns, so `_adata_ref()` is None from the moment the
+# manager exists. `__getstate__` stores that None and the stock `__setstate__`
+# calls weakref.ref(None), which raises: a dump holding a MuData is written
+# happily and cannot be read back at all. Measured still true in mudata 0.4.1
+# and anndata 0.13.3, so it is not a version this can wait out.
+#
+# The manager never reads that reference -- MuDataFileManager overrides
+# _to_memory_mode, which is its only reader -- so what is stored may be anything
+# weakref-able. An empty AnnData is what mudata's own constructor hands the
+# parent, so writing that instead of None leaves a restored manager in the state
+# a freshly built MuData has, and makes the bytes readable by an *unpatched*
+# reader too. That is why only the writing side is touched here: the dump this
+# produces needs no cooperation from whoever opens it.
+#
+# Installed here rather than at kernel bootstrap because importing mudata costs
+# 2.6 s and most analyses never touch it. sys.modules already knows whether this
+# one did.
+_scai_mudata_patched = False
+if _scai_sys.modules.get("mudata") is not None:
+    try:
+        _scai_mu_backing = _scai_sys.modules.get("mudata._core.file_backing")
+        _scai_mu_manager = getattr(_scai_mu_backing, "MuDataFileManager", None)
+        # Only patch what is actually broken, so the day mudata fixes its
+        # constructor this stops applying itself.
+        _scai_mu_ref = (
+            _scai_mu_manager().__dict__.get("_adata_ref")
+            if _scai_mu_manager is not None else None
+        )
+        if _scai_mu_ref is not None and _scai_mu_ref() is None:
+            import anndata as _scai_ad_for_mudata
+
+            def _scai_mudata_getstate(_self):
+                _state = _self.__dict__.copy()
+                _ref = _state.get("_adata_ref")
+                _parent = _ref() if _ref is not None else None
+                if _parent is None:
+                    _parent = _scai_ad_for_mudata.AnnData()
+                _state["_adata_ref"] = _parent
+                return _state
+
+            _scai_mu_manager.__getstate__ = _scai_mudata_getstate
+            _scai_mudata_patched = True
+    except Exception:
+        # Never fail a save over this. Without it a MuData dump is unreadable,
+        # which the restore's own tolerance still covers.
+        _scai_mudata_patched = False
+
 # A backed AnnData wraps an open h5py handle that dill cannot pickle. It is
 # still authoritative runtime state: silently removing it and committing the
 # remaining namespace made the metadata claim `current` while a real analysis

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.1 · **Last updated**: 2026-09-09
+**Version**: 0.56.2 · **Last updated**: 2026-09-09
 
 ## 1. Runtime Architecture
 
@@ -347,6 +347,36 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.55.x — (2026-09-08 onward)**
 
+- `0.56.2` — Makes a kernel that holds a `MuData` survivable, and records the
+  last measurement the Part B protocol was waiting for.
+
+  mudata gives every `MuDataFileManager` a weakref to a throwaway `AnnData`
+  that is freed before `__init__` returns, so the reference is dead from the
+  moment the manager exists. `__getstate__` stores that `None` and the stock
+  `__setstate__` calls `weakref.ref(None)`, which raises: any dump holding a
+  `MuData` was written happily and could not be read back. Found on a real run
+  as a session that saved successfully, failed to restore its kernel, and then
+  completed its analysis without it — nothing on the completion path said the
+  kernel was lost. Still true in mudata 0.4.1 and anndata 0.13.3, so it is not
+  a version this can wait out.
+
+  The save now substitutes an empty `AnnData` for the dead reference, which is
+  what mudata's own constructor hands the parent. A restored manager is left in
+  the state a freshly built `MuData` has, and the bytes become readable by an
+  **unpatched** reader — so an archive exported to another installation, or any
+  tool that opens the dump, works without carrying this fix. Only the writing
+  side is touched, only mudata's own class, and only when a version probe finds
+  the reference actually dead, so the day upstream fixes its constructor this
+  stops applying itself. It is installed by the save rather than at kernel
+  bootstrap because importing mudata costs 2.6 s and most analyses never touch
+  it. The restore keeps the tolerance 0.56.1 added: dumps already on disk still
+  hold the `None`, and each repair is logged with the variable's name.
+
+  Also fills in section 6.6 of the Part B measurement protocol: what a reclaim
+  under a free-space reserve actually gave up, measured against real bundles.
+  Round acceptance went first, the round 1 direction second, and the round 1
+  annotation was reached, skipped because its session was running, and left.
+  15.9 GB freed of 20.0 GB held.
 - `0.56.1` — Corrections from the first run of decision snapshots against real
   data. A restored session now continues at the node its capsule names:
   `_restore_entry_plan` was never a declared `WorkflowState` channel, and an
