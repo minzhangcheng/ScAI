@@ -124,7 +124,9 @@ def _verify_in_place(source: Path, expected: str, progress) -> None:
         progress(size)
 
 
-def _destination(relpath: str, session_id: str) -> Path | None:
+def _destination(
+    relpath: str, session_id: str, source_session_id: str = "",
+) -> Path | None:
     """Where one declared bundle file lands in the new session, or nowhere.
 
     The graph checkpoint is read once and discarded: it is keyed by the source
@@ -144,7 +146,16 @@ def _destination(relpath: str, session_id: str) -> Path | None:
     if relpath.startswith(f"{BLOBS_DIRNAME}/"):
         return get_session_dir(session_id) / relpath
     if relpath.startswith(f"{NOTEBOOKS_DIRNAME}/"):
-        return states / relpath.split("/", 1)[1]
+        name = relpath.split("/", 1)[1]
+        # The bundle stores the notebook under the name it had, which is the
+        # source session's id. A session reads its history from the file named
+        # after itself, so laying it down unrenamed gives the fork an empty
+        # notebook and leaves its real history in a file naming a session that
+        # does not exist here -- which then travels into the fork's own
+        # exports. Anything else in the directory keeps the name it had.
+        if source_session_id and name == f"{source_session_id}.ipynb":
+            name = f"{session_id}.ipynb"
+        return states / name
     if relpath.startswith(f"{WORKSPACE_DIRNAME}/"):
         return get_session_dir(session_id) / relpath
     if relpath == RUNTIME_PKL_RELPATH:
@@ -173,7 +184,7 @@ def _materialise(bundle: Path, manifest: dict, session_id: str, progress) -> Non
         source = bundle / relpath
         if not source.is_file():
             raise _refuse("bundle_incomplete", f"{relpath} is missing from the bundle")
-        target = _destination(relpath, session_id)
+        target = _destination(relpath, session_id, manifest["source_session_id"])
         if target is None:
             # Read in place rather than installed -- the graph checkpoint and
             # the generation manifest are both handled elsewhere -- but still

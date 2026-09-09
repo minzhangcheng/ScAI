@@ -211,7 +211,8 @@ async def test_the_restore_brings_the_notebook_workspace_and_inputs(captured):
         source_session_id=source, snapshot=snapshot, user_id=OWNER,
     )
 
-    assert (get_session_states(new_id) / f"{source}.ipynb").is_file()
+    # Under the fork's own name -- see the test that follows this section.
+    assert (get_session_states(new_id) / f"{new_id}.ipynb").is_file()
     assert (get_session_dir(new_id) / "workspace" / "table.csv").is_file()
     assert (get_session_dir(new_id) / "workspace" / "figures" / "umap.png").is_file()
     assert (get_session_uploads(new_id) / "matrix.h5ad").read_bytes() == b"an input matrix"
@@ -239,6 +240,34 @@ async def test_no_report_or_log_path_survives_into_the_restored_state(captured):
     # forks and the fork name its origin.
     assert str(get_session_dir(source)) not in text
     assert f'"{source}"' not in text
+
+
+@pytest.mark.asyncio
+async def test_the_fork_reads_its_history_from_a_notebook_named_after_itself(captured):
+    """Found by exporting a fork: its notebook was named after the source.
+
+    A session reads its history from ``states/<its own id>.ipynb``. The bundle
+    stores that file under the name it had, so laying it down unrenamed gave
+    the fork an empty notebook, left the real history in a file naming a
+    session that does not exist on this installation, and carried that name
+    into every export the fork later produced.
+    """
+    from backend.config import get_session_states
+
+    source, snapshot = await captured()
+    new_id = await restore_snapshot_into_new_session(
+        source_session_id=source, snapshot=snapshot, user_id=OWNER,
+    )
+
+    states = get_session_states(new_id)
+    carried = states / f"{new_id}.ipynb"
+    assert carried.is_file(), "the fork has no notebook of its own"
+    assert carried.read_bytes() == (
+        get_session_states(source) / f"{source}.ipynb"
+    ).read_bytes()
+    assert not (states / f"{source}.ipynb").exists(), (
+        "a file named after the source session was left in the fork"
+    )
 
 
 # ------------------------------------------------------------------ the source
