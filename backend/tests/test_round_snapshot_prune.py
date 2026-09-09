@@ -418,6 +418,76 @@ async def test_a_shared_dump_is_counted_once(snapshots):
     assert listing["bytes_total"] > len(dump)
 
 
+def _bytes_under(root, seen=None):
+    """Regular files under *root*, an inode counted once -- ``du`` on a tree."""
+    seen = set() if seen is None else seen
+    total = 0
+    for path in root.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        info = path.lstat()
+        key = (info.st_dev, info.st_ino)
+        if key in seen:
+            continue
+        seen.add(key)
+        total += info.st_size
+    return total
+
+
+@pytest.mark.asyncio
+async def test_the_session_total_includes_the_inputs_every_bundle_depends_on(
+    snapshots, monkeypatch, tmp_path,
+):
+    """The number an operator budgets and reclaims by.
+
+    The inputs are stored once per session, they are usually the second largest
+    thing a session's snapshots hold, and giving up the last bundle now gives
+    them up too. A total that walked only ``snapshots/`` under-reported by the
+    whole input set and made that reclamation look like it freed nothing.
+
+    The input here is deliberately large relative to everything else in the
+    fixture. With the seed's fifteen-byte matrix the assertion held either way,
+    which is exactly the sort of green that proves nothing.
+    """
+    from backend.config import get_session_uploads
+    from backend.services.round_snapshots.layout import snapshots_root
+
+    big = b"i" * 400_000
+    original = _seed_session
+
+    def _seed_with_a_real_input(session_id, **kwargs):
+        digest = original(session_id, **kwargs)
+        (get_session_uploads(session_id) / "matrix.h5ad").write_bytes(big)
+        return digest
+
+    monkeypatch.setattr(
+        "backend.tests.test_round_snapshot_prune._seed_session",
+        _seed_with_a_real_input,
+    )
+    session_id, _ids = await snapshots([(GATE_ROUND_WAIT, 3, 51)])
+
+    inputs = _bytes_under(_inputs(session_id))
+    assert inputs >= len(big)
+
+    total = read_session_listing(session_id)["bytes_total"]
+    assert total >= _bytes_under(snapshots_root(session_id)) + inputs
+
+
+@pytest.mark.asyncio
+async def test_a_capture_in_flight_is_not_counted_as_occupancy(snapshots):
+    """Otherwise the number jumps during a decision and settles afterwards."""
+    from backend.services.round_snapshots.layout import staging_root
+
+    session_id, _ids = await snapshots([(GATE_ROUND_WAIT, 3, 51)])
+    settled = read_session_listing(session_id)["bytes_total"]
+
+    staging = staging_root(session_id) / "live-attempt"
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "half-copied.bin").write_bytes(b"y" * 500_000)
+
+    assert read_session_listing(session_id)["bytes_total"] == settled
+
+
 @pytest.mark.asyncio
 async def test_an_installation_with_snapshots_off_reports_no_occupancy(monkeypatch):
     monkeypatch.setattr(_config, "SNAPSHOT_DIR", None)

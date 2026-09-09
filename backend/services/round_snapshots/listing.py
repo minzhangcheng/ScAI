@@ -16,8 +16,10 @@ from .gates import mark_superseded, with_deletion_order
 from .layout import (
     FAILED_SUFFIX,
     MANIFEST_NAME,
+    STAGING_DIRNAME,
     SnapshotsDisabled,
     parse_snapshot_id,
+    session_root,
     snapshots_root,
 )
 from .manifest import SnapshotManifestError, read_snapshot_manifest
@@ -118,7 +120,7 @@ def read_session_listing(session_id: str) -> dict[str, Any]:
     return {
         "snapshots": rows,
         "failed": failed,
-        "bytes_total": _occupied_bytes(root),
+        "bytes_total": _occupied_bytes(session_root(session_id)),
     }
 
 
@@ -128,10 +130,23 @@ def _occupied_bytes(root: Path) -> int:
     Summing each manifest's ``bytes_total`` would double-count a dump two
     snapshots share, and the sharing is a hardlink -- so the filesystem is the
     only thing that knows, and an inode seen twice is counted once.
+
+    Walked from the session root rather than from ``snapshots/``, so the input
+    copy every bundle depends on is counted. It is stored once per session and
+    it is usually the second largest thing here -- a fifth of this session's
+    total on the run that prompted this -- and it is reclaimed with the last
+    bundle, so an operator deciding what to give up needs to see it.
+
+    A capture in flight is not occupancy: ``.staging`` holds a copy that either
+    becomes part of a bundle or is reclaimed, and counting it would make the
+    number jump during a decision and settle afterwards.
     """
     seen: set[tuple[int, int]] = set()
     total = 0
+    staging = root / STAGING_DIRNAME
     for path in root.rglob("*"):
+        if staging in path.parents:
+            continue
         try:
             info = path.lstat()
         except OSError:
