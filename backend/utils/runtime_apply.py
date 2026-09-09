@@ -286,6 +286,26 @@ def runtime_h5ad_manifest_path(
 
 
 
+def generation_pair_is_restorable(session_id: str, revision: int | None) -> bool:
+    """Whether a rollback to *revision* has the files it needs.
+
+    The same two-file precondition ``restore_generation_pair`` applies, exposed
+    so that what a refusal *tells* the user and what the run route would
+    actually *do* cannot drift apart. They had: the refusal offered only
+    "re-run from your data" while the run route was ready to roll the session
+    back to its last save and carry on.
+    """
+    from backend.utils.sandbox_parts.regular_save import GENERATION_PAIR_DIRNAME
+
+    if revision is None:
+        return False
+    try:
+        pair = _states_dir(session_id) / GENERATION_PAIR_DIRNAME / str(int(revision))
+    except (TypeError, ValueError):
+        return False
+    return (pair / "state.json").is_file() and (pair / "checkpoints.sqlite").is_file()
+
+
 def restore_generation_pair(session_id: str, *, revision: int) -> bool:
     """Put a committed generation's captured positions back beside its dump.
 

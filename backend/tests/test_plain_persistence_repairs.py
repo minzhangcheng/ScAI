@@ -674,6 +674,76 @@ async def test_a_blocked_resume_offers_the_restore_points_the_session_has(
 
 
 @pytest.mark.asyncio
+async def test_a_blocked_resume_says_the_run_route_can_roll_it_back(
+    monkeypatch, tmp_path,
+):
+    """The cheapest remedy, which this message used not to mention at all.
+
+    `_run_analysis_locked` rolls a blocked session back to its committed
+    generation and continues from the step the dump was taken at. Measured on a
+    real crashed session: 45 revisions given up, the analysis resumed. The
+    refusal offered only "re-run the analysis from your data", which is what
+    happens when there is *no* usable pair, and on a five-hour run that reads
+    as a much larger loss than the one actually on the table.
+    """
+    from backend.config import _config
+    from backend.utils import runtime_apply
+
+    monkeypatch.setattr(_config, "SNAPSHOT_DIR", None)
+    monkeypatch.setattr(
+        runtime_apply, "generation_pair_is_restorable", lambda _sid, _rev: True,
+    )
+
+    _state, response = await _refuse_a_cold_resume(
+        monkeypatch, last_attempt_status="succeeded",
+    )
+
+    warning = response.data["runtime_restore_warning"]
+    assert "rolls it back to the last saved runtime" in warning
+    assert "41 step(s)" in warning
+    # The fallback is still named, because a pair can be unusable for reasons
+    # this check cannot see.
+    assert "Otherwise re-run" in warning
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_resume_offers_no_rollback_without_a_pair(
+    monkeypatch, tmp_path,
+):
+    """The check and the run route share a precondition; neither may bluff."""
+    from backend.config import _config
+    from backend.utils import runtime_apply
+
+    monkeypatch.setattr(_config, "SNAPSHOT_DIR", None)
+    monkeypatch.setattr(
+        runtime_apply, "generation_pair_is_restorable", lambda _sid, _rev: False,
+    )
+
+    _state, response = await _refuse_a_cold_resume(
+        monkeypatch, last_attempt_status="succeeded",
+    )
+
+    warning = response.data["runtime_restore_warning"]
+    assert "rolls it back" not in warning
+    assert warning.endswith(
+        "Re-run the analysis from your data to recompute the kernel state, or "
+        "view the session read-only."
+    )
+
+
+def test_the_rollback_check_and_the_rollback_agree_on_what_they_need():
+    """One precondition, read from the same place by the offer and the act."""
+    import inspect
+
+    from backend.utils import runtime_apply
+
+    for name in ("generation_pair_is_restorable", "restore_generation_pair"):
+        source = inspect.getsource(getattr(runtime_apply, name))
+        assert '"state.json"' in source, name
+        assert '"checkpoints.sqlite"' in source, name
+
+
+@pytest.mark.asyncio
 async def test_a_blocked_resume_promises_nothing_when_snapshots_are_off(
     monkeypatch,
 ):

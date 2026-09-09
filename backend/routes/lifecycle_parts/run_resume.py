@@ -266,14 +266,44 @@ def _why_the_runtime_cannot_be_continued(coherence: str, state) -> str:
     return "This session has no kernel state that can be continued."
 
 
-def _remedies_for_an_unusable_runtime(session_id: str) -> str:
+def _remedies_for_an_unusable_runtime(session_id: str, state=None) -> str:
     """What the operator can actually do, in the order they would rather do it.
 
-    Re-running from the data was the only remedy Part A had, and it is the one
-    that discards the whole run. An installation with decision snapshots on
-    usually has a cheaper one, and this refusal is the moment a user most wants
-    to be told so -- it is the moment they are being asked to give the run up.
+    The first remedy is usually the cheapest and this message used not to
+    mention it at all. ``_run_analysis_locked`` rolls a blocked session back to
+    its committed generation -- the dump, the notebook record, the graph
+    checkpoint and the executor position together -- and continues from the
+    step that dump was taken at. What the user is being asked to give up is the
+    work since the last save, not the run. Saying "re-run the analysis from
+    your data" described the fallback as though it were the only outcome, on a
+    screen where a five-hour analysis is at stake.
     """
+    rollback = ""
+    persistence = dict(getattr(state, "runtime_persistence", None) or {})
+    committed = persistence.get("committed_revision")
+    try:
+        from backend.utils.runtime_apply import generation_pair_is_restorable
+
+        if generation_pair_is_restorable(session_id, committed):
+            reached = max(
+                int(persistence.get("current_revision") or 0),
+                int(persistence.get("degraded_from_revision") or 0),
+            )
+            lost = max(0, reached - int(committed or 0))
+            rollback = (
+                "Starting the analysis again rolls it back to the last saved "
+                f"runtime and continues from there, giving up the {lost} "
+                "step(s) run after that save. "
+                if lost
+                else "Starting the analysis again continues from the last "
+                "saved runtime. "
+            )
+    except Exception:  # noqa: BLE001 - an offer, never a reason to fail a refusal
+        logger.warning(
+            "Could not tell whether %s can roll back to its committed "
+            "generation", session_id, exc_info=True,
+        )
+
     offer = ""
     try:
         from backend.config import snapshots_enabled
@@ -300,6 +330,11 @@ def _remedies_for_an_unusable_runtime(session_id: str) -> str:
         logger.warning(
             "Could not list decision snapshots for %s while explaining a "
             "blocked resume", session_id, exc_info=True,
+        )
+    if rollback:
+        return (
+            f"{rollback}{offer}Otherwise re-run the analysis from your data to "
+            "recompute the kernel state, or view the session read-only."
         )
     if offer:
         return (
@@ -362,7 +397,7 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         warning = getattr(state, "runtime_restore_warning", None)
         if not warning:
             warning = _why_the_runtime_cannot_be_continued(coherence, state)
-        remedies = _remedies_for_an_unusable_runtime(session_id)
+        remedies = _remedies_for_an_unusable_runtime(session_id, state)
         state.runtime_restore_status = "unavailable"
         state.runtime_restore_warning = f"{warning} {remedies}"
         await bindings._update_session_cache(session_id, state)
