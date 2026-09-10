@@ -1,7 +1,12 @@
 """Pure response assembly for the execute-code tool family."""
 from __future__ import annotations
 
+import ast
+
 from .executor_dispatch import ToolAction
+
+
+MAX_IDENTICAL_SUCCESSFUL_EXECUTIONS = 3
 
 
 def bind_facade(facade) -> None:
@@ -43,6 +48,120 @@ def build_execution_tool_result(code_execution, result) -> str:
     if result.figures:
         content += f"Generated {len(result.figures)} figure(s).\n"
     return content
+
+
+def _normalized_execution_code(code: str) -> str:
+    """Normalize formatting noise for the bounded identical-cell guard."""
+    return "\n".join(line.rstrip() for line in code.strip().splitlines())
+
+
+def _execution_request_error(state, args, code_history) -> tuple[str, str | None]:
+    """Validate objective execute-code input and its per-plan replay ceiling.
+
+    This deliberately does not judge whether an analysis is scientifically useful.
+    It only rejects a missing/no-op cell or a byte-equivalent cell that already
+    succeeded three times under the same approved plan. Repeating work intentionally
+    remains possible by expressing the new operation in a distinct cell.
+    """
+    code = args.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return "", (
+            "InvalidToolArgumentsError: execute_code requires a non-empty string "
+            "in the 'code' field"
+        )
+    try:
+        if not ast.parse(code).body:
+            return code, (
+                "InvalidToolArgumentsError: execute_code requires at least one "
+                "executable Python statement"
+            )
+    except SyntaxError:
+        # Preserve the existing execution/error path, which returns the concrete
+        # Python syntax diagnostic to the agent.
+        pass
+
+    normalized = _normalized_execution_code(code)
+    current_plan_id = str(
+        getattr(getattr(state, "current_plan", None), "id", "") or ""
+    ).strip() or None
+    current_round = int(getattr(state, "current_round", 0) or 0)
+    current_lineage = getattr(state, "restore_branch_id", None) or "main"
+    sandbox_state = getattr(state, "sandbox_state", None) or {}
+    current_analysis_generation = int(
+        sandbox_state.get("analysis_generation", 0) or 0
+    )
+    cohort = sandbox_state.get("cohort_identity_v1") or {}
+    current_cohort_digest = str(cohort.get("cohort_digest") or "") or None
+    current_cohort_generation = int(cohort.get("cohort_generation", 0) or 0)
+    prior_ids: list[str] = []
+    for execution in code_history:
+        execution_plan_id = str(
+            getattr(execution, "plan_id", "") or ""
+        ).strip() or None
+        if execution_plan_id != current_plan_id:
+            continue
+        if int(getattr(execution, "round_number", 0) or 0) != current_round:
+            continue
+        if (getattr(execution, "lineage_id", None) or "main") != current_lineage:
+            continue
+        if int(
+            getattr(execution, "analysis_generation", 0) or 0
+        ) != current_analysis_generation:
+            continue
+        if int(
+            getattr(execution, "cohort_generation", 0) or 0
+        ) != current_cohort_generation:
+            continue
+        if current_cohort_digest is not None and str(
+            getattr(execution, "cohort_digest", "") or ""
+        ) != current_cohort_digest:
+            continue
+        status = str(getattr(execution, "execution_status", "") or "")
+        succeeded = status == "succeeded" or (
+            not status and not getattr(execution, "error", None)
+        )
+        if not succeeded:
+            continue
+        prior_code = getattr(execution, "code", "")
+        if (
+            isinstance(prior_code, str)
+            and _normalized_execution_code(prior_code) == normalized
+        ):
+            prior_ids.append(str(getattr(execution, "id", "") or "unknown"))
+
+    if len(prior_ids) >= MAX_IDENTICAL_SUCCESSFUL_EXECUTIONS:
+        examples = ", ".join(prior_ids[-MAX_IDENTICAL_SUCCESSFUL_EXECUTIONS:])
+        return code, (
+            "RepeatedExecutionError: this identical code cell already succeeded "
+            f"{len(prior_ids)} times under the current approved plan "
+            f"(recent execution IDs: {examples}). Re-execution is blocked because "
+            "the bounded identical-cell replay ceiling has been reached. Use the "
+            "Supervisor/PI feedback to change the code or approach, move to another "
+            "plan step, or call report_findings with the results already obtained."
+        )
+    return code, None
+
+
+async def _reject_execution_request(context, tool_call, code: str, error: str) -> None:
+    """Record a malformed/replayed tool request without creating a receipt."""
+    logger.warning("[Bioinformatics] Blocking execute_code request: %s", error)
+    await context.agent._notify("error", error)
+    context.messages.append({
+        "role": "tool",
+        "tool_call_id": tool_call.id,
+        "content": f"Execution blocked: {error}",
+    })
+    context.analysis_log.append(AnalysisStep(
+        step_number=context.step_count,
+        step_type="execute_code",
+        agent_reasoning=context.agent_reasoning,
+        code=code,
+        code_error=error,
+        code_description=str(tool_call.arguments.get("description") or ""),
+        code_step_type=str(tool_call.arguments.get("step_type") or "technical"),
+    ))
+    context.consecutive_errors += 1
+    context.total_errors += 1
 
 
 def execution_plan_binding(
@@ -235,8 +354,15 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
     step_count = context.step_count
     agent_reasoning = context.agent_reasoning
     args = tool_call.arguments
+    code, request_error = _execution_request_error(
+        state, args, self.code_history
+    )
+    if request_error:
+        await _reject_execution_request(
+            context, tool_call, code, request_error
+        )
+        return ToolAction.CONTINUE
     context.has_substantive_work = True
-    code = args.get("code", "")
     description = args.get("description", "")
     step_type = args.get("step_type", "technical")
     persistent_outputs = args.get("persistent_outputs", [])

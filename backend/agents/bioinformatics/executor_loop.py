@@ -5,6 +5,8 @@ continue to affect a resumed executor without creating an import cycle.
 """
 from __future__ import annotations
 
+import hashlib
+
 from ...constants import NO_OUTPUT_TOKEN_CAP
 from .executor_auxiliary import LoopExit, TurnEffects, TurnStart, finalize_run
 
@@ -13,6 +15,13 @@ def bind_facade(facade) -> None:
     globals().update(
         {name: value for name, value in vars(facade).items() if not name.startswith("__")}
     )
+
+
+def _supervisor_feedback_key(feedback: str) -> str:
+    """Deduplicate the complete verdict without discarding changed guidance."""
+    return "supervisor:" + hashlib.sha256(
+        feedback.encode("utf-8", errors="replace")
+    ).hexdigest()
 
 
 async def start_turn(context) -> TurnStart:
@@ -482,10 +491,10 @@ async def finish_turn(context, effects) -> LoopExit:
                 _step_figures       # Figures from this iteration (may be empty)
             )
             if sup_result.feedback:
-                # De-duplicate: skip if the same feedback (first 120 chars)
-                # was already injected recently to avoid wasting tokens on
-                # repeated identical warnings.
-                sup_key = sup_result.feedback[:120]
+                # The same warning can acquire new redirect or PI guidance at
+                # the end. Hash the complete verdict so a shared prefix cannot
+                # suppress materially new instructions.
+                sup_key = _supervisor_feedback_key(sup_result.feedback)
                 if sup_key not in self._recent_sup_feedback:
                     messages.append({
                         "role": "user",
@@ -493,7 +502,10 @@ async def finish_turn(context, effects) -> LoopExit:
                     })
                     self._recent_sup_feedback.add(sup_key)
                 else:
-                    logger.debug(f"[Bioinformatics] Skipping duplicate supervisor feedback: {sup_key[:60]}...")
+                    logger.debug(
+                        "[Bioinformatics] Skipping exact duplicate supervisor "
+                        "feedback: %s...", sup_key[:24],
+                    )
             if sup_result.force_skip:
                 current_err_type = extract_error_type(analysis_log[-1].code_error) if analysis_log[-1].code_error else None
                 if self._force_skip_error_type != current_err_type:

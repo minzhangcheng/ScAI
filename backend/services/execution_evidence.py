@@ -37,6 +37,8 @@ def execution_supports_evidence(execution: Any) -> bool:
     """Return whether an execution contains technically citable output."""
     if execution is None:
         return False
+    if not str(getattr(execution, "code", "") or "").strip():
+        return False
     if getattr(execution, "error", None):
         return False
     if not bool(getattr(execution, "evidence_eligible", True)):

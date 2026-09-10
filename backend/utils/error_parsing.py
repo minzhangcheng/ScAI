@@ -27,6 +27,8 @@ TECHNICAL_ERROR_TYPES: FrozenSet[str] = frozenset({
     "UnicodeDecodeError", "UnicodeEncodeError",
     "RecursionError", "OverflowError", "NotImplementedError",
     "UnboundLocalError",
+    # Host-side objective tool-contract/resource-ceiling failures.
+    "InvalidToolArgumentsError", "RepeatedExecutionError",
     # Library-specific technical errors
     "InvalidIndexError", "AnnDataReadError", "SparseDataError",
     # Network and transport failures. Absent from this set, a failed remote call

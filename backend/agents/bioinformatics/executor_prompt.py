@@ -110,6 +110,10 @@ WORKFLOW GUIDELINES:
   fields record producer intent only. The host captures objective identity and the
   PI later decides semantic plan credit; uncertain or omitted links remain available
   for PI review and never block the analysis.
+- Do not submit an identical execute_code cell repeatedly. Under one approved plan,
+  the host blocks a cell after three successful identical executions. After
+  Supervisor or PI feedback, change the code or approach, move to the next plan
+  step, or call report_findings with the evidence already produced.
 - Cite every host BulkInputProfile read by the cell in input_profile_ids. Use an
   empty list only when the cell does not consume bulk input.
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE

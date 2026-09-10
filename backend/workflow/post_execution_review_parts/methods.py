@@ -35,6 +35,7 @@ from backend.services.figure_contract import (
     legacy_figure_opt_out,
     valid_text_only_exception,
 )
+from backend.services.execution_evidence import execution_supports_evidence
 from backend.services.report.artifacts import (
     archival_render_available,
     is_report_eligible,

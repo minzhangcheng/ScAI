@@ -223,6 +223,7 @@ def test_host_execution_linkage_is_observation_not_plan_completion():
     [
         {"execution_purpose": "supplementary", "plan_binding_status": "supplementary"},
         {"execution_status": "failed", "error": "boom"},
+        {"code": ""},
         {"cohort_digest": "b" * 64},
     ],
 )
@@ -232,11 +233,11 @@ def test_ineligible_v2_receipt_never_falls_back_to_keyword_inference(overrides):
         phase="innovation",
         steps=[PlanStep(id=1, title="Markers", method="sc.tl.rank_genes_groups")],
     )
-    receipt = _receipt(
-        plan,
-        code="sc.tl.rank_genes_groups(adata, 'cluster')",
+    receipt_values = {
+        "code": "sc.tl.rank_genes_groups(adata, 'cluster')",
         **overrides,
-    )
+    }
+    receipt = _receipt(plan, **receipt_values)
 
     audit = audit_plan_execution(
         plan,

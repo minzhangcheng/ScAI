@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.3 · **Last updated**: 2026-09-10
+**Version**: 0.56.4 · **Last updated**: 2026-09-10
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,17 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.55.x — (2026-09-08 onward)**
+
+- `0.56.4` — Bounds autonomous Bioinformatics execution when a provider emits
+  malformed or repeatedly identical tool calls. Empty and comment-only
+  `execute_code` requests are rejected before kernel execution and cannot create
+  evidence receipts. A normalized code cell is limited to three successful
+  replays within the same plan, round, lineage, analysis generation, and cohort;
+  a fourth request enters the existing technical-error/supervisor path so an
+  LLM repetition cannot consume the full step budget. Supervisor feedback is
+  deduplicated by its complete content, preserving new redirect or PI guidance.
+  Historical empty receipts are excluded from evidence and plan-audit linkage,
+  while plan-step nominations remain candidate observations for PI review.
 
 - `0.56.3` — Restores figure coverage for targeted analyses after Round 2 by
   making missing-figure work explicit, durable, and tied to the PI's later

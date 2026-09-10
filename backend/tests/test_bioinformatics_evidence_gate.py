@@ -18,6 +18,7 @@ from backend.services.report.analysis_log import build_round_summaries
 
 def test_failed_or_explicitly_failed_validation_cannot_support_findings():
     good = CodeExecution(code="print(metric)", output="metric=0.81", round_number=2)
+    empty = CodeExecution(code="", output="", round_number=2)
     exception = CodeExecution(code="run()", error="TypeError: bad argument")
     failed_validation = CodeExecution(
         code="bulk_validation()",
@@ -25,9 +26,12 @@ def test_failed_or_explicitly_failed_validation_cannot_support_findings():
     )
 
     assert execution_supports_evidence(good) is True
+    assert execution_supports_evidence(empty) is False
     assert execution_supports_evidence(exception) is False
     assert execution_supports_evidence(failed_validation) is False
-    assert successful_evidence_executions([exception, good, failed_validation]) == [good]
+    assert successful_evidence_executions(
+        [exception, empty, good, failed_validation]
+    ) == [good]
     assert successful_evidence_executions(
         [exception, good, failed_validation], round_number=1
     ) == []

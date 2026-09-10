@@ -220,8 +220,7 @@ def audit_plan_execution(
     eligible_receipt_records = [
         execution
         for execution in receipt_records
-        if not getattr(execution, "error", None)
-        and bool(getattr(execution, "evidence_eligible", True))
+        if execution_supports_evidence(execution)
         and getattr(execution, "execution_status", "succeeded") == "succeeded"
     ]
     reconciliation_current = bool(
