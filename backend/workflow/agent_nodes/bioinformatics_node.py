@@ -1,6 +1,17 @@
 """Bioinformatics workflow-node phases behind AgentNodesMixin."""
 from __future__ import annotations
 
+from copy import deepcopy
+
+
+def _execution_cache_key(analysis_state, planning_stage):
+    import json
+
+    return "bioinformatics_execution:" + json.dumps([
+        analysis_state.restore_branch_id or "main", analysis_state.current_round,
+        getattr(analysis_state.current_plan, "id", None), planning_stage,
+    ])
+
 
 def bind_facade(facade) -> None:
     globals().update(
@@ -60,6 +71,15 @@ async def start_bioinformatics_analysis(self, state):
 async def prepare_bioinformatics_instruction(self, state, analysis_state):
     # Planning stage support: filter tasks and adjust instructions based on stage
     planning_stage = state.get("planning_stage", "full")
+    self._current_analysis_state = analysis_state
+    self._current_graph_state = state
+
+    if cache_hit(analysis_state, _execution_cache_key(analysis_state, planning_stage)):
+        return {
+            "state": state, "analysis_state": analysis_state,
+            "planning_stage": planning_stage, "instruction": "",
+            "max_steps": 0,
+        }
 
     # Detect resume: a non-completed checkpoint for this round+stage means a
     # prior run already started the autonomous loop (e.g. it failed and the
@@ -263,6 +283,20 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
 async def execute_bioinformatics_analysis(self, ctx):
     analysis_state = ctx["analysis_state"]
     planning_stage = ctx["planning_stage"]
+    cached = cache_hit(analysis_state, _execution_cache_key(analysis_state, planning_stage))
+    if cached is not None:
+        from ...models.schemas import CodeExecution, DataDrivenMechanismProgram
+
+        result = deepcopy(cached)
+        result["code_history"] = [
+            CodeExecution(**item) if isinstance(item, dict) else item
+            for item in result.get("code_history", [])
+        ]
+        result["mechanism_programs"] = [
+            DataDrivenMechanismProgram(**item) if isinstance(item, dict) else item
+            for item in result.get("mechanism_programs", [])
+        ]
+        return result
     instruction = ctx["instruction"]
     max_steps = ctx["max_steps"]
     # No retry loop: a failed runtime save no longer raises for a person to
@@ -430,6 +464,29 @@ async def collect_bioinformatics_results(self, ctx, result):
         )
         review_meta["plan_audit"] = audit_summary
 
+    preliminary_figure_contract = audit_figure_contract(
+        analysis_state,
+        plan=analysis_state.current_plan,
+        planning_stage=planning_stage,
+    )
+    # Keep the main result recoverable before entering the separate figure pass.
+    # A retry of this graph node must not mistake a figure-only transcript for
+    # the original analysis or lose its scientific findings.
+    cache_store(
+        analysis_state, _execution_cache_key(analysis_state, planning_stage),
+        self._serialize_review_record({
+            **result, "findings": all_findings, "figures": all_figures,
+        }),
+    )
+    figure_followup = await self._run_figure_followup(
+        analysis_state,
+        preliminary_figure_contract,
+        planning_stage,
+    )
+    for figure_name in figure_followup.get("figures", []) or []:
+        if figure_name not in all_figures:
+            all_figures.append(figure_name)
+
     # Re-evaluate after deterministic baselines and any supplementary work.
     # The executor's own audit was taken before these workflow-owned repair
     # paths ran, so carrying it forward would mark a figure missing even
@@ -444,7 +501,7 @@ async def collect_bioinformatics_results(self, ctx, result):
     ctx.update(
         all_findings=all_findings, all_figures=all_figures,
         audit_summary=audit_summary, review_meta=review_meta,
-        figure_contract=figure_contract,
+        figure_contract=figure_contract, figure_followup=figure_followup,
     )
 
 async def finalize_bioinformatics_analysis(self, ctx, result):
@@ -456,6 +513,7 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
     audit_summary = ctx["audit_summary"]
     review_meta = ctx["review_meta"]
     figure_contract = ctx["figure_contract"]
+    figure_followup = ctx.get("figure_followup") or {}
     # Step 3: PI summarizes results
     await self._send_message("status", "PI is reviewing analysis results...", AgentType.PI)
 
@@ -500,6 +558,7 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
         "plan_audit": audit_summary,
         "post_execution_review": review_meta,
         "figure_contract": figure_contract.summary(),
+        "figure_followup": figure_followup,
     }
 
     _saved_fig_count = count_saved_figures(result.get("analysis_log", []))
@@ -610,6 +669,9 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
 
     # One-shot: the recompute prompt has now been delivered and acted on.
     analysis_state.runtime_recompute_pending = False
+    cache_invalidate(
+        analysis_state, _execution_cache_key(analysis_state, planning_stage)
+    )
 
     result_state = {
         **state,

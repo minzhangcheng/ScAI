@@ -57,6 +57,7 @@ from .outputs import (  # noqa: F401
     PublicationFigure,
     PublicationTable,
     FigureRevisionTask,
+    PIDecisionRecord,
     GraphicAbstract,
     APIRequest,
     APIResponse,

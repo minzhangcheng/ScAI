@@ -228,29 +228,27 @@ async def _finish_exhausted_review(attempt: FigureAttemptState) -> str:
         unresolved_summary = "; ".join(figure.unresolved_must_fix[:5])[:1000]
         reason = (
             "The bounded revision budget was exhausted. The candidate with the "
-            f"highest available PI quality score ({selected_score}/10) was retained; "
-            "all unresolved PI and renderer observations remain disclosed."
+            f"highest available review score ({selected_score}/10) was retained as "
+            "a candidate for the PI's explicit round-end disposition; all unresolved "
+            "PI and renderer observations remain disclosed."
             + (
                 f" Unresolved observations: {unresolved_summary}"
                 if unresolved_summary
                 else ""
             )
         )
-        figure.review_status = FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
-        figure.pi_degraded_acceptance = True
-        figure.pi_degraded_acceptance_reason = reason
+        figure.review_status = FigureReviewStatus.REVISION_REQUESTED
+        figure.pi_degraded_acceptance = False
+        figure.pi_degraded_acceptance_reason = None
         selected_feedback = str(selected_review.get("feedback") or "").strip()
         figure.pi_feedback = (
-            f"[DEGRADED ACCEPTANCE] {reason}"
+            f"[AWAITING PI DISPOSITION] {reason}"
             + (
-                f"\n\nPI feedback for the retained candidate: {selected_feedback}"
+                f"\n\nReview feedback for the retained candidate: {selected_feedback}"
                 if selected_feedback
                 else ""
             )
         )
-        # The exhausted task remains as audit evidence, but it no longer asks a
-        # later round to redraw a candidate the PI has accepted with reservations.
-        task.status = "resolved"
     else:
         figure.review_status = FigureReviewStatus.REVISION_REQUESTED
     publish_error = await finalize_render(attempt)
@@ -299,8 +297,8 @@ async def _finish_exhausted_review(attempt: FigureAttemptState) -> str:
     )
     return (
         f"Figure {attempt.request.figure_name} saved after {attempt.revision_count} "
-        "revision attempts. Status: excluded from reports; a durable redraw task "
-        "remains pending.\n"
+        "revision attempts. Status: excluded from reports; the durable task "
+        "awaits an explicit PI round-end disposition.\n"
         f"Last feedback: {figure.pi_feedback}{layout_note}"
         + (
             "\nThe highest-scoring prior render was restored before exclusion."

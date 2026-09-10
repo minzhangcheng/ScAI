@@ -24,6 +24,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from ..models.schemas import AgentType
 from ..models.schema_parts.enums import AnalysisPhase
 from ..services.figure_contract import visual_plan_inheritance_for_plan
+from ..services.figure_revision_tasks import (
+    apply_pi_fallback_selection,
+    candidate_figures_for_task,
+    materialize_missing_figure_tasks,
+)
 from .post_execution_review import (
     audit_plan_execution,
     collect_failure_admissions,
@@ -118,6 +123,157 @@ class PostExecutionReviewMixin:
             return (iterations, step, max(step, total), tasks)
         except Exception:
             return (5, self._DEFAULT_STEP_TIMEOUT, self._DEFAULT_STEP_TIMEOUT * 5, 5)
+
+    async def _run_figure_followup(
+        self, analysis_state, contract, planning_stage: str,
+    ) -> Dict[str, Any]:
+        """Close figure tasks through durable PI decisions and one bounded pass."""
+        materialize_missing_figure_tasks(analysis_state, contract)
+        plan_id = getattr(analysis_state.current_plan, "id", None)
+        lineage = analysis_state.restore_branch_id or "main"
+        tasks = [
+            task for task in analysis_state.figure_revision_tasks
+            if task.status in {"pending", "in_progress", "blocked", "exhausted_excluded"}
+            and (task.plan_id or None) == plan_id
+            and (task.lineage_id or "main") == lineage
+            and (not task.round_number or task.round_number == analysis_state.current_round)
+        ]
+        if not tasks:
+            return {"status": "not_needed", "dispositions": []}
+
+        undecided = [task for task in tasks if not task.pi_disposition]
+        candidate_counts = {
+            task.id: len(candidate_figures_for_task(analysis_state, task))
+            for task in undecided
+        }
+        for offset in range(0, len(undecided), 12):
+            batch = undecided[offset:offset + 12]
+            decisions = await self.pi_agent.decide_figure_followups(
+                analysis_state, batch, candidate_counts,
+            )
+            by_id = {task.id: task for task in batch}
+            for decision in decisions:
+                task = by_id.get(decision["task_id"])
+                if task is None:
+                    continue
+                task.pi_disposition = decision["disposition"]
+                task.pi_instruction = decision.get("instruction") or None
+                task.pi_rationale = decision.get("rationale") or None
+                task.pi_report_note = decision.get("report_note") or None
+                task.updated_at = datetime.now()
+
+        targeted, select_existing = [], []
+        for task in tasks:
+            if task.followup_finished_at:
+                continue
+            if not task.pi_disposition:
+                task.status = "blocked"
+                task.pi_report_note = "No valid PI figure disposition was obtained."
+            elif task.pi_disposition == "omit":
+                task.status = "abandoned"
+                task.followup_finished_at = datetime.now()
+            elif task.pi_disposition == "accept_best":
+                select_existing.append(task)
+            elif task.followup_started_at or task.status == "in_progress":
+                # A prior invocation may have dispatched code before interruption.
+                # Resume closure using existing candidates, without granting a new
+                # execution budget or replaying a possibly completed tool call.
+                select_existing.append(task)
+            else:
+                task.status = "in_progress"
+                task.followup_started_at = datetime.now()
+                targeted.append(task)
+
+        if not await self._persist_review_state(analysis_state):
+            # Nothing has been dispatched. An unacknowledged lifecycle transition
+            # must never authorize a possibly duplicated execution after restart.
+            for task in targeted:
+                task.status = "pending"
+                task.followup_started_at = None
+            return {"status": "persistence_failed", "dispositions": []}
+
+        redraw_result: Dict[str, Any] = {}
+        if targeted:
+            lines = [
+                f"- task_id={task.id}; logical_figure_id={task.logical_figure_id}; "
+                f"plan_step_id={task.plan_step_id}; "
+                f"plan_requirement_key={task.plan_requirement_key or 'supplementary'}; "
+                f"coverage={task.found_count}/{task.required_count}\n"
+                f"  PI instruction: {task.pi_instruction}"
+                for task in targeted
+            ]
+            instruction = (
+                "Complete only the PI-directed publication-figure tasks below. "
+                "Use loaded session objects and existing results. Do not rerun "
+                "unrelated analysis or introduce new scientific claims. Each task "
+                "owns ONE DISTINCT output. Use a distinct filename for each task. "
+                "Call generate_publication_figure with the exact logical_figure_id, "
+                "plan_step_id, and a supporting evidence_execution_id. Existing "
+                "execution receipts remain available. Normal PI review applies. "
+                "After attempting these tasks, call report_findings with a concise "
+                "artifact-delivery summary.\n\n" + "\n".join(lines)
+            )
+            try:
+                redraw_result = await self.bioinformatics_agent.run_autonomous_analysis(
+                    analysis_state, instruction,
+                    max_steps=min(40, max(12, len(targeted) * 8)),
+                    figure_review_callback=self._figure_review_callback,
+                    supervisor_callback=self._supervisor_callback,
+                    resume_from_checkpoint=False,
+                    planning_stage=planning_stage,
+                    figure_followup=True,
+                )
+            except Exception as exc:
+                logger.warning("[%s] figure follow-up failed: %s", self.session_id, exc)
+                redraw_result = {"status": "failed", "error": str(exc)}
+
+            from ..models.schemas import AnalysisStep, CodeExecution
+            for key, model in (("code_history", CodeExecution), ("analysis_log", AnalysisStep)):
+                destination = getattr(analysis_state, key)
+                known = {item.id for item in destination}
+                for item in redraw_result.get(key, []) or []:
+                    item = model(**item) if isinstance(item, dict) else item
+                    if item.id not in known:
+                        item.round_number = analysis_state.current_round
+                        destination.append(item)
+                        known.add(item.id)
+            select_existing.extend(targeted)
+
+        for task in select_existing:
+            if task.status != "resolved":
+                candidates = candidate_figures_for_task(analysis_state, task)
+                selection = await self.pi_agent.select_fallback_figure(
+                    analysis_state, task, candidates
+                )
+                selected = apply_pi_fallback_selection(
+                    analysis_state, task, **selection
+                ) if selection else None
+                if selected is None:
+                    task.status = "blocked"
+                    task.pi_report_note = (
+                        "The figure task remains incomplete: no usable candidate "
+                        "was selected by the PI after the bounded attempt. "
+                        + (task.pi_report_note or "")
+                    )[:4000]
+            task.followup_finished_at = datetime.now()
+            task.updated_at = datetime.now()
+        persisted = await self._persist_review_state(analysis_state)
+        remaining = [task.id for task in tasks if task.status not in {"resolved", "abandoned"}]
+        return {
+            "status": "persistence_failed" if not persisted else (
+                "completed" if not remaining else "incomplete"
+            ),
+            "dispositions": [
+                {"task_id": task.id, "disposition": task.pi_disposition,
+                 "status": task.status, "report_note": task.pi_report_note,
+                 "selected_figure_id": task.selected_figure_id}
+                for task in tasks
+            ],
+            "remaining_task_ids": remaining,
+            "targeted_task_ids": [task.id for task in targeted],
+            "redraw_status": redraw_result.get("status"),
+            "figures": list(redraw_result.get("figures", []) or []),
+        }
 
     # ------------------------------------------------------------------
     # Last-direction detection

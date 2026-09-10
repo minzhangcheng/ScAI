@@ -9,6 +9,7 @@ from PIL import Image
 from backend.agents.pi.reports import ReportsMixin
 from backend.models.schemas import (
     AnalysisState,
+    FigureRevisionTask,
     FigureReviewStatus,
     PublicationFigure,
 )
@@ -103,6 +104,14 @@ async def test_integrated_report_uses_only_renderable_report_eligible_figure_met
             png_path=str(tmp_path / "missing.jpg"),
         ),
     ]
+    state.figure_revision_tasks = [FigureRevisionTask(
+        logical_figure_id="logical-degraded",
+        plan_requirement_key="plan.3.1",
+        reason="attempts_exhausted",
+        status="resolved",
+        pi_disposition="accept_best",
+        pi_report_note="Two labels remain crowded; use this panel cautiously.",
+    )]
 
     harness = _Harness()
     result = await harness.generate_integrated_report(state)
@@ -115,6 +124,8 @@ async def test_integrated_report_uses_only_renderable_report_eligible_figure_met
     assert "covered_panel" not in harness.prompt
     assert "pi_degraded_panel" in harness.prompt
     assert "highest-scoring exhausted candidate" in harness.prompt
+    assert "Two labels remain crowded; use this panel cautiously" in harness.prompt
+    assert "Do not imply that an omitted or reserved figure passed ordinary review" in harness.prompt
     assert "approved_ghost" not in harness.prompt
     assert "declared type: barplot" in harness.prompt
     assert "bar-plot metadata" in harness.prompt

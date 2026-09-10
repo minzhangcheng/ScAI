@@ -94,6 +94,16 @@ class ReportsMixin:
                 )
             )
 
+        figure_disposition_notes = []
+        for task in getattr(state, "figure_revision_tasks", None) or []:
+            note = str(getattr(task, "pi_report_note", None) or "").strip()
+            if not note:
+                continue
+            figure_disposition_notes.append(
+                f"- {task.plan_requirement_key or task.logical_figure_id}: "
+                f"{task.pi_disposition or task.status} — {note[:1000]}"
+            )
+
         # Collect tables
         tables_info = []
         for i, table in enumerate(state.publication_tables):
@@ -140,9 +150,14 @@ class ReportsMixin:
 **Available Figures:**
 {chr(10).join(figures_info) if figures_info else "No figures generated"}
 
+**PI Figure Dispositions and Reservations:**
+{chr(10).join(figure_disposition_notes) if figure_disposition_notes else "None"}
+
 The declared figure type and description above are authoritative. Do not infer
 a different plot type from a filename, and keep every caption consistent with
 the supplied metadata (for example, never describe a declared barplot as a UMAP).
+Disclose the PI figure notes where they affect interpretation or explain an omitted
+planned visual. Do not imply that an omitted or reserved figure passed ordinary review.
 
 **Available Tables:**
 {chr(10).join(tables_info) if tables_info else "No tables generated"}

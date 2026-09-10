@@ -692,6 +692,7 @@ async def handle_publication_figure(context, tool_call) -> ToolAction:
             state,
             plan_id=str(getattr(plan, "id", "") or "") or None,
             plan_requirement_key=requirement_key,
+            logical_figure_id=str(args.get("logical_figure_id") or "") or None,
         )
         if revision_task is not None:
             logical_figure_id = revision_task.logical_figure_id

@@ -299,6 +299,21 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                     except Exception as e:
                         logger.warning(f"[{self.session_id}] Plan deviation judgment failed: {e}")
 
+            if analysis_state is not None:
+                from ..models.schemas import PIDecisionRecord
+
+                plan = getattr(analysis_state, "current_plan", None)
+                graph_state = self._current_graph_state or {}
+                analysis_state.pi_decision_records.append(PIDecisionRecord(
+                    question=str(question or "")[:2000],
+                    context=str(context or "")[:4000],
+                    response=str(response or "")[:8000],
+                    plan_id=str(getattr(plan, "id", "") or "") or None,
+                    round_number=int(getattr(analysis_state, "current_round", 0) or 0),
+                    planning_stage=str(graph_state.get("planning_stage") or "full"),
+                ))
+                analysis_state.pi_decision_records = analysis_state.pi_decision_records[-40:]
+
             return response
         except Exception as e:
             error_msg = f"PI consultation failed: {str(e)}"

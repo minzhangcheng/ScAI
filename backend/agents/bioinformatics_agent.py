@@ -755,6 +755,7 @@ class BioinformaticsAgent(
         supervisor_callback: Optional[Callable] = None,
         resume_from_checkpoint: bool = True,
         planning_stage: PlanStage = "full",
+        figure_followup: bool = False,
     ) -> Dict[str, Any]:
         return await executor_controller.run_autonomous_analysis(
             self,
@@ -765,6 +766,7 @@ class BioinformaticsAgent(
             supervisor_callback=supervisor_callback,
             resume_from_checkpoint=resume_from_checkpoint,
             planning_stage=planning_stage,
+            figure_followup=figure_followup,
             bindings=ExecutorBindings.from_facade(),
         )
 

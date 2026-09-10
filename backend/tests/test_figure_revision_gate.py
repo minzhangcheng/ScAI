@@ -465,35 +465,36 @@ async def test_preview_message_failure_trace_abandons_attempt(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_exhausted_revision_accepts_pi_scored_best_with_reservations(tmp_path):
-    """Exhaustion retains PI observations while closing the bounded loop."""
+async def test_exhausted_revision_waits_for_explicit_pi_disposition(tmp_path):
+    """Exhaustion retains the best candidate without silently publishing it."""
     agent, state, result = await _run(
         tmp_path, [CLEAN], [_review(score=6), _review(score=6)],
     )
     figure = state.publication_figures[0]
-    assert figure.review_status == FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
-    assert figure.pi_degraded_acceptance is True
+    assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
+    assert figure.pi_degraded_acceptance is False
     assert figure.unresolved_must_fix
-    assert "fix the legend" in (figure.pi_degraded_acceptance_reason or "")
-    assert "bounded revision budget is exhausted" in result
+    assert figure.pi_degraded_acceptance_reason is None
+    assert "fix the legend" in (figure.pi_feedback or "")
+    assert "awaits an explicit PI round-end disposition" in result
     assert agent.sandbox.executions == 3  # initial + two redraw attempts
-    assert state.figure_revision_tasks[0].status == "resolved"
+    assert state.figure_revision_tasks[0].status == "exhausted_excluded"
 
     from backend.services.report.artifacts import is_report_eligible
 
-    assert is_report_eligible(figure) is True
+    assert is_report_eligible(figure) is False
 
 
 @pytest.mark.asyncio
 async def test_stalled_score_cannot_ship_a_measured_collision(tmp_path):
-    """Measured defects stay disclosed on a PI-degraded exhausted candidate."""
+    """Measured defects stay disclosed while the candidate awaits the PI."""
     agent, state, _ = await _run(
         tmp_path, [BLOCKING],
         [_review(score=6), _review(score=6), _review(score=6), _review(score=6)],
     )
     figure = state.publication_figures[0]
-    assert figure.review_status == FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
-    assert figure.pi_degraded_acceptance is True
+    assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
+    assert figure.pi_degraded_acceptance is False
     assert agent.sandbox.executions == 3  # initial + 2 revisions, budget spent
     assert figure.unresolved_must_fix, "unfixed defects must be recorded"
 
@@ -573,27 +574,27 @@ async def test_a_worse_revision_is_rolled_back(tmp_path):
         tmp_path, [CLEAN], [_review(score=6), _review(score=5)],
     )
     figure = state.publication_figures[0]
-    assert figure.review_status == FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
-    assert figure.pi_degraded_acceptance is True
+    assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
+    assert figure.pi_degraded_acceptance is False
     assert "restored" in result
     # the first render's bytes are back on disk
     assert (tmp_path / "figures" / "f.jpg").read_bytes().endswith(b"\x01" * 100)
 
 
 @pytest.mark.asyncio
-async def test_pi_degraded_acceptance_keeps_layout_observations_visible(tmp_path):
-    """The selected candidate remains reportable without hiding measured facts."""
+async def test_exhausted_candidate_keeps_observations_while_excluded(tmp_path):
+    """The candidate remains visible for PI choice without hiding measured facts."""
     _, state, _ = await _run(
         tmp_path, [BLOCKING], [_review(approved=True, score=9)] * 4,
     )
     figure = state.publication_figures[0]
     from backend.services.report.artifacts import is_report_eligible
 
-    assert is_report_eligible(figure) is True
+    assert is_report_eligible(figure) is False
     assert figure.layout_violations
     assert figure.unresolved_must_fix
-    assert "[DEGRADED ACCEPTANCE]" in (figure.pi_feedback or "")
-    assert figure.pi_degraded_acceptance_reason
+    assert "[AWAITING PI DISPOSITION]" in (figure.pi_feedback or "")
+    assert figure.pi_degraded_acceptance_reason is None
 
 
 @pytest.mark.asyncio
@@ -651,7 +652,7 @@ async def test_a_malformed_lint_verdict_is_recorded_as_unverified(tmp_path):
 @pytest.mark.asyncio
 async def test_a_revision_with_no_verdict_does_not_clear_a_known_collision(tmp_path):
     """An unmeasured render must not read as a fixed one. Clearing the previous
-    measurement would hide the observation from the PI-degraded result."""
+    measurement would hide the observation from the candidate shown to the PI."""
     agent, state, _ = await _run(
         tmp_path,
         [BLOCKING, {"violations": None}, {"violations": None}, {"violations": None}],
@@ -659,8 +660,8 @@ async def test_a_revision_with_no_verdict_does_not_clear_a_known_collision(tmp_p
     )
     figure = state.publication_figures[0]
     assert figure.layout_violations == BLOCKING
-    assert figure.review_status == FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
-    assert figure.pi_degraded_acceptance is True
+    assert figure.review_status == FigureReviewStatus.REVISION_REQUESTED
+    assert figure.pi_degraded_acceptance is False
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.2 · **Last updated**: 2026-09-09
+**Version**: 0.56.3 · **Last updated**: 2026-09-10
 
 ## 1. Runtime Architecture
 
@@ -347,6 +347,32 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.55.x — (2026-09-08 onward)**
 
+- `0.56.3` — Restores figure coverage for targeted analyses after Round 2 by
+  making missing-figure work explicit, durable, and tied to the PI's later
+  decisions.
+
+  Figure revision tasks now carry the plan step, active lineage, round, required
+  and found counts, and a distinct logical figure identity. Materialization uses
+  those identities to create one task per missing output, while candidate
+  selection and report discovery stay scoped to the exact plan and lineage.
+  Omitted or completed tasks remain settled across retries, and a requirement's
+  `minimum_count` is reflected in the number of reportable outputs rather than
+  being collapsed into one logical figure.
+
+  The PI follow-up receives the current plan, later PI decisions, execution
+  receipts, and bounded analysis notes. A targeted redraw runs through its own
+  executor checkpoint and merges its receipts back into the main analysis without
+  replacing the main checkpoint or findings. A retried Bioinformatics node can
+  reuse the persisted main result instead of rerunning the analysis. Image review
+  uses verified artifact bytes or a registered preview, compressed to a bounded
+  JPEG before a vision call, so an empty preview is never sent as an image.
+
+  When ordinary figure review is exhausted, the PI must explicitly choose the
+  best available candidate or omit it. An accepted fallback records the PI's
+  rationale, reservations, and report note; an omission remains visible as an
+  unresolved task. Focused regression coverage exercises distinct multi-output
+  fulfillment, cross-plan isolation, checkpoint preservation, retry recovery,
+  later-decision context, and the fallback path.
 - `0.56.2` — Makes a kernel that holds a `MuData` survivable, and records the
   last measurement the Part B protocol was waiting for.
 

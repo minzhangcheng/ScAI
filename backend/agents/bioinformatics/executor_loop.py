@@ -647,6 +647,7 @@ async def prepare_loop_context(
     supervisor_callback: Optional[Callable] = None,
     resume_from_checkpoint: bool = True,
     planning_stage: PlanStage = "full",  # "stage1", "stage2", or "full"
+    figure_followup: bool = False,
 ) -> Dict[str, Any]:
     """
     Run analysis with autonomous technical steps, PI consultation, and step-level checkpointing.
@@ -674,7 +675,10 @@ async def prepare_loop_context(
         # Use sandbox working directory as base for states
         state_dir = str(Path(self.sandbox.working_dir) / "states")
         Path(state_dir).mkdir(parents=True, exist_ok=True)
-    checkpoint_mgr = CheckpointManager(session_id=state.id, state_dir=state_dir)
+    checkpoint_kwargs = {"prefix": "bioinfo_figure_followup"} if figure_followup else {}
+    checkpoint_mgr = CheckpointManager(
+        session_id=state.id, state_dir=state_dir, **checkpoint_kwargs
+    )
 
     checkpoint, checkpoint_valid = await executor_checkpoint.load_checkpoint(
         self,
@@ -718,6 +722,10 @@ async def prepare_loop_context(
     max_steps = restored.max_steps
     analysis_log = restored.analysis_log
     restored_messages_rebuilt = restored.messages_rebuilt
+    if figure_followup and not checkpoint_valid:
+        # Plotting existing results must still be able to cite their execution
+        # receipts, which the ordinary fresh-run path clears from the agent.
+        self.code_history = list(state.code_history)
 
 
     def _active_plan_id() -> Optional[str]:

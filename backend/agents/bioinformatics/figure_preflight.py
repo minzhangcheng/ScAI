@@ -276,6 +276,7 @@ async def prepare_figure_request(
         request.state,
         plan_id=current_plan_id,
         plan_requirement_key=request.plan_requirement_key,
+        logical_figure_id=logical_id,
     )
     starting_revision_count = (
         min(revision_task.attempt_count, revision_task.max_attempts)

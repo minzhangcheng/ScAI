@@ -100,7 +100,7 @@ from .schema_parts.outputs import (  # noqa: F401
     RoundResult,
     PublicationFigure,
     LegacyArtifactRecord,
-    PublicationTable, FigureRevisionTask,
+    PublicationTable, FigureRevisionTask, PIDecisionRecord,
     GraphicAbstract,
     APIRequest,
     APIResponse,
@@ -313,6 +313,9 @@ class AnalysisState(BaseModel):
     legacy_artifacts: List[LegacyArtifactRecord] = Field(default_factory=list)
     publication_tables: List[PublicationTable] = Field(default_factory=list)
     figure_revision_tasks: List[FigureRevisionTask] = Field(default_factory=list)
+    # PI guidance issued after plan approval. Figure review reads applicable
+    # records so a later decision cannot be silently replaced by stale plan text.
+    pi_decision_records: List[PIDecisionRecord] = Field(default_factory=list)
     invalidated_artifact_stems: List[str] = Field(default_factory=list)
     graphic_abstract: Optional[GraphicAbstract] = None
     integrated_report: Optional[str] = None  # Integrated report with figure/table references

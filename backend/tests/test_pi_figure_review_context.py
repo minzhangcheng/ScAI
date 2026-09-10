@@ -8,6 +8,7 @@ from backend.models.schemas import (
     AnalysisPlan,
     AnalysisState,
     FigureRequirement,
+    PIDecisionRecord,
     PlanStep,
     PublicationFigure,
 )
@@ -32,7 +33,10 @@ async def test_figure_review_receives_the_linked_plan_deliverable():
     agent.set_session("review-plan-context")
     agent._set_llm_context = lambda: None
 
-    state = AnalysisState(user_id="u", name="Project", initial_instruction="Analyze data")
+    state = AnalysisState(
+        user_id="u", name="Project", initial_instruction="Analyze data",
+        current_round=4,
+    )
     state.current_plan = AnalysisPlan(
         id="plan-current",
         phase="innovation",
@@ -53,7 +57,23 @@ async def test_figure_review_receives_the_linked_plan_deliverable():
         png_path="/tmp/de_result.jpg",
         pdf_path="/tmp/de_result.pdf",
         plan_step_id=7,
+        plan_id="plan-current",
+        round_number=4,
     )
+    state.pi_decision_records = [
+        PIDecisionRecord(
+            question="Which contrast should the volcano plot show?",
+            response="Use the responder-versus-control contrast and label CXCL10.",
+            plan_id="plan-current",
+            round_number=4,
+        ),
+        PIDecisionRecord(
+            question="Unrelated later-round choice",
+            response="Use an unrelated panel.",
+            plan_id="plan-other",
+            round_number=4,
+        ),
+    ]
 
     result = await agent.review_figure(state, figure, "base64")
 
@@ -63,4 +83,7 @@ async def test_figure_review_receives_the_linked_plan_deliverable():
     assert "Linked plan: plan-current" in prompt
     assert "Linked step 7: Differential expression summary" in prompt
     assert "volcano x1: Effect size versus adjusted significance" in prompt
+    assert "Later PI decisions applicable to this plan and round" in prompt
+    assert "Use the responder-versus-control contrast and label CXCL10" in prompt
+    assert "Use an unrelated panel" not in prompt
     assert "merely attractive plot of the wrong result" in prompt
