@@ -60,6 +60,20 @@ def test_docker_runtime_has_no_node_toolchain_and_uses_port_3000():
     assert "backend.main:app --host 0.0.0.0 --port 3000" in entrypoint
 
 
+def test_docker_entrypoint_prepares_configured_snapshot_mount():
+    entrypoint = (ROOT / "docker-entrypoint.sh").read_text(encoding="utf-8")
+    root_setup = entrypoint.split("# ---- from here on", 1)[0]
+
+    assert 'SNAPSHOT_ROOT="${SCAI_SNAPSHOT_DIR:-}"' in root_setup
+    assert 'case "$SNAPSHOT_ROOT" in' in root_setup
+    assert 'mkdir -p "$SNAPSHOT_ROOT"' in root_setup
+    assert 'chown scai:scai "$SNAPSHOT_ROOT"' in root_setup
+    assert 'chmod u+rwx "$SNAPSHOT_ROOT"' in root_setup
+    assert root_setup.index('mkdir -p "$SNAPSHOT_ROOT"') < root_setup.index(
+        'chown scai:scai "$SNAPSHOT_ROOT"'
+    ) < root_setup.index('exec gosu scai')
+
+
 def test_native_production_is_single_process_and_development_keeps_vite_proxy():
     start = (ROOT / "start.sh").read_text(encoding="utf-8")
     lock = json.loads(

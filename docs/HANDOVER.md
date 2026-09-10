@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.4 · **Last updated**: 2026-09-10
+**Version**: 0.56.5 · **Last updated**: 2026-09-10
 
 ## 1. Runtime Architecture
 
@@ -345,7 +345,17 @@ six minutes per occurrence rather than blocking.
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
-**0.55.x — (2026-09-08 onward)**
+**0.56.x — (2026-09-08 onward)**
+
+- `0.56.5` — Fixes Docker bind-mounted decision-snapshot storage for the
+  non-root production process. When `SCAI_SNAPSHOT_DIR` is an absolute path,
+  `docker-entrypoint.sh` now creates the mount root before dropping privileges,
+  resolves it, assigns ownership to `scai`, and ensures the owner can write.
+  Existing snapshot contents are not recursively walked at every startup, and
+  invalid relative paths remain subject to the backend's existing validation.
+  A production launch-contract regression test covers setup ordering. Focused
+  production launch checks passed `8/8`; no image build, registry push,
+  deployment, or live-session mutation was performed.
 
 - `0.56.4` — Bounds autonomous Bioinformatics execution when a provider emits
   malformed or repeatedly identical tool calls. Empty and comment-only

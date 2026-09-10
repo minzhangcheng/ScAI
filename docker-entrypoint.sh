@@ -6,6 +6,22 @@ trap 'echo "Error on line $LINENO"; exit 1' ERR
 if [ "$(id -u)" = "0" ]; then
     mkdir -p /dep /data
     chown -R scai:scai /dep /data
+
+    # Docker creates a missing bind-mounted path on the host as root. Prepare
+    # an absolute snapshot root before dropping privileges; the backend still
+    # validates the configured path when it loads its configuration.
+    SNAPSHOT_ROOT="${SCAI_SNAPSHOT_DIR:-}"
+    case "$SNAPSHOT_ROOT" in
+        /*)
+            mkdir -p "$SNAPSHOT_ROOT"
+            SNAPSHOT_ROOT="$(cd -- "$SNAPSHOT_ROOT" && pwd -P)"
+            if [ "$SNAPSHOT_ROOT" != "/" ]; then
+                chown scai:scai "$SNAPSHOT_ROOT"
+                chmod u+rwx "$SNAPSHOT_ROOT"
+            fi
+            ;;
+    esac
+
     exec gosu scai "$0" "$@"
 fi
 # ---- from here on, we are always running as `scai` ----
