@@ -2,6 +2,7 @@ import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useWebSocket } from '../api/useWebSocket'
+import { subscribeSnapshotListingChanged } from '../api/snapshots'
 import { reloadSessionState } from '../api/websocket/sessionReload'
 import { useAppStore } from '../../stores/appStore'
 import { setToken } from '../../utils/authStorage'
@@ -423,6 +424,8 @@ describe('WebSocket async response ownership', () => {
   it('reloads authoritative state before overlap-bounded reconnect paging', async () => {
     vi.useFakeTimers()
     setToken('test-token')
+    const invalidated = vi.fn()
+    const unsubscribe = subscribeSnapshotListingChanged(invalidated)
     const resolvers: Array<(response: Response) => void> = []
     const fetchMock = vi.fn<typeof fetch>(() => new Promise<Response>(resolve => {
       resolvers.push(resolve)
@@ -447,6 +450,8 @@ describe('WebSocket async response ownership', () => {
       await Promise.resolve()
     })
 
+    expect(invalidated).toHaveBeenCalledTimes(1)
+    expect(invalidated).toHaveBeenCalledWith('history')
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(String(fetchMock.mock.calls[0][0])).toBe('/api/session/history/load')
     await act(async () => {
@@ -460,6 +465,7 @@ describe('WebSocket async response ownership', () => {
       resolvers[1](jsonResponse({ session_id: 'history', status: 'running', messages: [], has_more: false }))
       await reconnectOpen
     })
+    unsubscribe()
     vi.useRealTimers()
   })
 

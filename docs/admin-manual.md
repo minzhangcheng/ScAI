@@ -160,9 +160,11 @@ conservative rather than expensive; lowering it trades wall clock for a smaller
 exposure window.
 After a failed save the window runs from the last successful commit, not from
 the failed attempt, and it keeps growing until one succeeds. The analysis page
-says so: a persistent, non-blocking banner appears whenever the committed
-generation is behind the session, and it shows the time of the last successful
-save rather than the last attempt.
+stays quiet when a live kernel is merely ahead of its last successful commit,
+because that is the expected state between save points. It still shows a
+non-blocking warning for a failed save, an inconsistent generation, or a
+non-live session whose committed generation is behind the session; those
+warnings show the time of the last successful save rather than the last attempt.
 
 The 30-minute default is not a measurement. It is a starting value pending
 before/after save timings on real sessions; expect it to be confirmed or
@@ -356,8 +358,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.56.5
-./build.sh --version 0.56.5 --push
+./build.sh --version 0.56.6
+./build.sh --version 0.56.6 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -399,6 +401,10 @@ Docker uses `/data`; direct startup normally uses the sibling `data` directory u
 Docker only needs `/dep/venv` persisted; the frontend assets are compiled into the image. Direct startup uses `<REPO>/../dep/venv` and `<REPO>/../dep/frontend/node_modules`. Dependencies are reproducible and may be rebuilt, but persistence reduces restart time.
 
 ## 8. Decision snapshots
+
+> **Status: Experimental.** Decision snapshots may be unstable. Capture, restore, the
+> on-disk format, and the user interface may change between versions. Do not
+> treat snapshots as a backup; keep independent backups of required data.
 
 A decision snapshot is a restore point taken immediately before one of the
 four decisions an analysis asks about itself. Restoring one **creates a new
@@ -465,22 +471,23 @@ includes a save these knobs cannot stop. The save is the same one the ordinary
 persistence cadence takes; see `SCAI_RUNTIME_SAVE_FLOOR_MINUTES` for the knob
 that governs it.
 
-### Space, and which snapshot to give up first
+### Space and snapshot importance
 
 **Nothing is deleted automatically.** That is the default and it is deliberate:
 a snapshot is the only copy of the decision it precedes. When space runs short,
-delete them one at a time, in the order the listing already computes:
+delete them one at a time, starting with the lowest importance. The analysis
+panel labels every snapshot with its importance rank (`1` is highest):
 
-| Keep | Decision | Why |
+| Importance rank | Decision | Why |
 |---|---|---|
-| 1st (longest) | Round 1 cell annotation | The earliest decision; every later label depends on it |
-| 2nd | Round 1 research direction | The choice the rest of the analysis follows |
-| 3rd | Integration-round direction | The choice after each cross-direction analysis |
-| 4th (first to go) | Round acceptance | Everything else |
+| 1 (highest) | Round 1 cell annotation | The earliest decision; every later label depends on it |
+| 2 | Round 1 research direction | The choice the rest of the analysis follows |
+| 3 | Integration-round direction | The choice after each cross-direction analysis |
+| 4 (lowest) | Round acceptance | Everything else |
 
-Within one rank the **later** snapshot is given up first. The API and the CLI
-report `deletion_order` on every row, so the browser, `scai snapshots list`
-and the optional prune all give up the same one.
+Within one importance rank the **later** snapshot is given up first. The API and
+`scai snapshots list` report `deletion_order` on every row; the optional prune
+uses that exact order.
 
 If you would rather that happened without you, set
 `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB`. While free space on the snapshot volume

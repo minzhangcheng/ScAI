@@ -55,11 +55,12 @@ function formatSince(raw: string | null | undefined, isZh: boolean): string | nu
 /**
  * What the last committed runtime generation actually promises. Spec 5.1.
  *
- * Persistent and non-blocking by design: the capture gate that used to stop the
- * analysis here is gone, and there is no action a dialog could offer — the
- * previous generation is intact and the run continues either way. What the user
- * needs is to know that "continue where I left off" is no longer guaranteed,
- * and from when.
+ * Non-blocking by design: the capture gate that used to stop the analysis here
+ * is gone, and there is no action a dialog could offer — the previous generation
+ * is intact and the run continues either way. A live kernel normally advances
+ * between successful save points, so that ordinary gap stays silent. A failed
+ * save, an inconsistent generation, or a non-live stale session still needs the
+ * warning because exact continuation is then at risk beyond normal live work.
  *
  * The time shown is the last **successful** commit. Measuring from the last
  * attempt would keep reading "saved a moment ago" through an unbounded run of
@@ -117,44 +118,17 @@ export function RuntimePersistenceBanner({
   const since = formatSince(record?.exposure_since, isZh)
 
   // A live kernel is "stale" by construction: `current_revision` advances on
-  // every cell, `committed_revision` only at a save point, and spec 5.1's
-  // cadence saves at round boundaries -- so between two of them the verdict is
-  // stale continuously, with every save succeeding. Rendering the warning for
-  // that made it permanent, and a warning that is always on carries no signal.
-  //
-  // The disclosure is kept in full, including the last successful save; only
-  // its severity changes. Two cases are excluded because the kernel being
-  // alive does not make them ordinary: a failing save, and `inconsistent` --
-  // a generation committed against a state that was never persisted, which no
-  // amount of continued running repairs.
+  // every cell while `committed_revision` advances only at a save point. This
+  // is expected between successful saves, so the ordinary live state stays
+  // silent. Save failures and inconsistent generations still reach the
+  // actionable warning below.
   const liveUnsavedWork =
     coherence === 'stale' &&
     record?.last_attempt_status !== 'failed' &&
     LIVE_STATUSES.has(sessionStatus ?? '')
 
   if (liveUnsavedWork) {
-    return (
-      <div
-        role="status"
-        className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 px-3 py-2 text-sm text-slate-700 dark:text-slate-300"
-      >
-        <div className="font-medium">
-          {isZh
-            ? '分析进行中，部分工作尚未落盘'
-            : 'Analysis in progress — recent work is not on disk yet'}
-        </div>
-        <p className="text-xs mt-0.5">
-          {isZh
-            ? '这是运行期间的正常状态：内核中的工作会在下一个保存点写入磁盘。'
-            : 'This is normal during a run: work held in the kernel reaches disk at the next save point.'}
-        </p>
-        {since && (
-          <p className="text-xs mt-0.5 opacity-80">
-            {isZh ? `上次成功保存：${since}` : `Last successful save: ${since}`}
-          </p>
-        )}
-      </div>
-    )
+    return null
   }
 
   if (coherence === 'unavailable') {

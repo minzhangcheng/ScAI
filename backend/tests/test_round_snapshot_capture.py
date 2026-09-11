@@ -346,6 +346,49 @@ async def test_a_committed_generation_is_captured_whole(capture):
 
 
 @pytest.mark.asyncio
+async def test_listing_invalidation_follows_snapshot_publication(capture, monkeypatch):
+    observed: list[tuple[str, list[str], list[str]]] = []
+
+    async def _observe(session_id: str) -> None:
+        listing = read_session_listing(session_id)
+        observed.append((
+            session_id,
+            [row["snapshot_id"] for row in listing["snapshots"]],
+            [row["reason"] for row in listing["failed"]],
+        ))
+
+    monkeypatch.setattr(
+        writer_module, "_notify_snapshot_listing_changed", _observe,
+    )
+    workflow, state = capture()
+    snapshot = await capture_decision_snapshot(
+        workflow, state, gate=GATE_ROUND_WAIT,
+    )
+
+    assert observed == [(state.id, [snapshot], [])]
+
+
+@pytest.mark.asyncio
+async def test_listing_invalidation_is_an_ephemeral_websocket_event(monkeypatch):
+    sent: list[tuple[str, dict]] = []
+
+    async def _send(session_id: str, payload: dict) -> bool:
+        sent.append((session_id, payload))
+        return True
+
+    monkeypatch.setattr(
+        "backend.utils.websocket_delivery.send_analysis_json", _send,
+    )
+    await writer_module._notify_snapshot_listing_changed("snapshot-session")
+
+    assert len(sent) == 1
+    session_id, payload = sent[0]
+    assert session_id == "snapshot-session"
+    assert payload["type"] == "snapshot_listing_changed"
+    assert payload["content"] == {"session_id": "snapshot-session"}
+
+
+@pytest.mark.asyncio
 async def test_the_bundle_carries_the_dump_the_generation_manifest_names(capture):
     from backend.config import get_session_states
     from backend.utils.runtime_manifest import read_runtime_manifest, runtime_manifest_path
@@ -492,6 +535,29 @@ async def test_a_save_that_does_not_commit_leaves_a_recorded_gap(capture):
     listing = read_session_listing(state.id)
     assert listing["snapshots"] == []
     assert [row["reason"] for row in listing["failed"]] == ["save_failed"]
+
+
+@pytest.mark.asyncio
+async def test_listing_invalidation_follows_a_recorded_capture_failure(
+    capture, monkeypatch,
+):
+    observed: list[list[str]] = []
+
+    async def _observe(session_id: str) -> None:
+        observed.append([
+            row["reason"] for row in read_session_listing(session_id)["failed"]
+        ])
+
+    monkeypatch.setattr(
+        writer_module, "_notify_snapshot_listing_changed", _observe,
+    )
+    workflow, state = capture(revision=57, current=60)
+    workflow.sandbox.save_result = False
+
+    assert await capture_decision_snapshot(
+        workflow, state, gate=GATE_ROUND_WAIT,
+    ) is None
+    assert observed == [["save_failed"]]
 
 
 @pytest.mark.asyncio

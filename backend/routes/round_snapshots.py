@@ -42,13 +42,13 @@ async def list_session_snapshots(session_id: str, request: Request):
     """Every decision snapshot this session has, and every capture that failed.
 
     ``enabled`` is what the frontend renders the panel on: with no snapshot
-    directory configured there is nothing to show and no action to offer, and a
-    panel that appeared empty would read as "this analysis produced none"
-    rather than "this installation does not take them".
+    directory configured there is nothing to show and no action to offer. When
+    enabled, the panel retains an expandable zero state so failed captures can
+    still be inspected.
 
     Rows carry ``deletion_order`` and ``retention_rank`` already computed, so
-    the browser, the CLI and the space-pressure prune cannot disagree about
-    which snapshot to give up first.
+    the API, CLI and space-pressure prune share one deletion order while the
+    browser can present the stable importance rank.
     """
     listing = await _owned_listing(session_id, request)
     if listing["enabled"]:

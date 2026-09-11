@@ -204,7 +204,7 @@ def test_an_unreadable_timestamp_is_deleted_last_within_its_rank():
 
 
 def test_the_order_is_total_so_three_consumers_cannot_disagree():
-    """The browser, the CLI and the prune read this order, not their own."""
+    """The API, CLI and prune read this order, not their own."""
     records = [
         _record("r002-round-g100", gate=GATE_ROUND_WAIT, round_number=2,
                 revision=100, created_at="2026-09-08T10:00:00+00:00"),

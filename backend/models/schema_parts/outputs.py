@@ -379,7 +379,7 @@ class WebSocketMessage(BaseModel):
         # Integrated report and graphic abstract
         "integrated_report", "graphic_abstract", "detailed_report",
         # State synchronization and error tracking
-        "state_sync", "parallel_errors",
+        "state_sync", "parallel_errors", "snapshot_listing_changed",
         # WebSocket reconnection recovery
         "message_history",
         # Cluster annotation

@@ -65,15 +65,16 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
         </div>
       )}
 
-      {/* What the last committed generation promises (spec 5.1). Persistent
-          and non-blocking: the capture gate that used to stop the analysis
-          here is gone, and there is nothing a dialog could offer — the
-          previous generation is intact and the run continues either way.
+      {/* What the last committed generation promises (spec 5.1). Non-blocking:
+          the capture gate that used to stop the analysis here is gone, and
+          there is nothing a dialog could offer — the previous generation is
+          intact and the run continues either way.
 
           The status goes in because the same record means different things on
           either side of it: while the run is live, "the state is newer than
-          the newest committed runtime" is what a working kernel looks like
-          between save points, not a loss. */}
+          the newest committed runtime" is the expected state between successful
+          save points and stays silent; failed saves and non-live gaps remain
+          visible. */}
       <div className="mb-2 empty:mb-0">
         <RuntimePersistenceBanner
           record={currentSession.runtimePersistence as never}
@@ -82,11 +83,9 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
         />
       </div>
 
-      {/* Decision snapshots (Part B spec 4.9). Absent unless the
-          administrator configured a snapshot directory *and* this session has
-          reached a decision, because a panel that appeared empty would read as
-          "this analysis produced none" rather than "this installation does not
-          take them". */}
+      {/* Decision snapshots (Part B spec 4.9). Absent unless the administrator
+          configured a snapshot directory. The summary remains expandable at
+          zero so capture failures and the not-yet-captured state stay visible. */}
       <SnapshotList sessionId={currentSession.id} isZh={language === 'zh'} />
 
       {/* Header - Compact */}

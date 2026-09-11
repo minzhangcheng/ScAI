@@ -5,6 +5,7 @@ import { getToken } from '../../../utils/authStorage'
 import { WS_AUTH_SUBPROTOCOL } from '../../../constants/auth'
 import { WS_CONNECT_TIMEOUT_MS, ApiError } from '../client'
 import { loadRealtimeMessageHistory, mergeRealtimeMessages } from '../realtimeHistory'
+import { notifySnapshotListingChanged } from '../snapshots'
 import { handleWebSocketMessage } from './messageHandlers'
 import { reloadSessionState } from './sessionReload'
 import type { ConnectionContext, ConnectionRefs } from './types'
@@ -100,6 +101,11 @@ export function connectWebSocket(ctx: ConnectionContext): void {
     setConnected(true)
     setWsConnected(true)
     devLog('WebSocket: Connected successfully')
+
+    // Capture invalidations are intentionally not durable messages. Refresh
+    // immediately on reconnect so an unrelated state/history reload failure
+    // cannot leave a missed snapshot event stale until the tab is hidden.
+    if (isReconnect) notifySnapshotListingChanged(session.id)
 
     // Use fresh state to avoid stale closure
     const freshSession = useAppStore.getState().currentSession

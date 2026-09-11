@@ -17,7 +17,7 @@ export interface SnapshotRow {
   created_at: string
   bytes_total: number
   capture_seconds: number
-  /** 1 keeps longest; 4 is given up first. Set at capture, never recomputed. */
+  /** Importance rank: 1 is highest and 4 is lowest. Set at capture, never recomputed. */
   retention_rank: number
   /** 1 goes first. Computed by the server so every client agrees. */
   deletion_order: number
@@ -49,6 +49,23 @@ export interface SnapshotListing {
   bytes_total: number
   /** snapshot id -> the sessions it was forked into. */
   restored_sessions?: Record<string, string[]>
+}
+
+type SnapshotListingChangedListener = (sessionId: string) => void
+
+const snapshotListingChangedListeners = new Set<SnapshotListingChangedListener>()
+
+/** Publish the transport-only invalidation sent after a capture finishes. */
+export function notifySnapshotListingChanged(sessionId: string): void {
+  for (const listener of snapshotListingChangedListeners) listener(sessionId)
+}
+
+/** Subscribe without putting an internal invalidation into the message stream. */
+export function subscribeSnapshotListingChanged(
+  listener: SnapshotListingChangedListener,
+): () => void {
+  snapshotListingChangedListeners.add(listener)
+  return () => snapshotListingChangedListeners.delete(listener)
 }
 
 export async function listSnapshots(sessionId: string): Promise<SnapshotListing> {

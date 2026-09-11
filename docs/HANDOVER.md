@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.5 · **Last updated**: 2026-09-10
+**Version**: 0.56.6 · **Last updated**: 2026-09-11
 
 ## 1. Runtime Architecture
 
@@ -268,8 +268,8 @@ exact graph-node continuation. Reports and logs are not carried, and every path
 naming them is stripped from the restored state.
 
 Nothing is deleted automatically unless `SCAI_SNAPSHOT_FREE_SPACE_RESERVE_GB`
-is set. The order is fixed at capture as `retention_rank` and surfaced as
-`deletion_order`, so the browser, the CLI and the prune cannot disagree.
+is set. Importance is fixed at capture as `retention_rank`; the browser labels
+that rank, while the API, CLI and prune use the derived `deletion_order`.
 
 ## 9. Request & Data Flow
 
@@ -346,6 +346,19 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.56.x — (2026-09-08 onward)**
+
+- `0.56.6` — Refines runtime-persistence and decision-snapshot feedback. A
+  live kernel that is normally between successful save points no longer shows
+  a persistent warning; failed saves, inconsistent generations, and non-live
+  stale sessions still show the non-blocking warning with the last successful
+  save. The snapshot panel is expandable even before the first capture or when
+  captures fail, reports its count and disk usage, and presents the stable
+  importance rank while the API, CLI, and optional prune retain the exact
+  deletion order. A transport-only WebSocket invalidation refreshes the
+  listing after successful or failed capture, reconnect, and foregrounding,
+  without polling the recursive storage listing; a failed refresh keeps the
+  last known listing and operation message. Focused backend checks passed
+  `85/85`, and the isolated frontend suite passed `329/329`.
 
 - `0.56.5` — Fixes Docker bind-mounted decision-snapshot storage for the
   non-root production process. When `SCAI_SNAPSHOT_DIR` is an absolute path,

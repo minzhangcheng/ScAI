@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useWebSocket } from '../useApi'
+import { subscribeSnapshotListingChanged } from '../api/snapshots'
 import { useAppStore } from '../../stores/appStore'
 
 describe('useWebSocket', () => {
@@ -111,6 +112,36 @@ describe('useWebSocket', () => {
 
     expect(result.current.connected).toBe(true)
     expect(wsInstances.length).toBe(2)
+  })
+
+  it('routes snapshot invalidation without adding an internal message', async () => {
+    const session = {
+      id: 'session-snapshot',
+      name: 'Snapshot session',
+      status: 'running' as const,
+      currentRound: 1,
+      createdAt: new Date().toISOString(),
+      instruction: '',
+      treatmentGroups: [],
+      dataFiles: [],
+      biochemistryIndicators: [],
+      roundResults: [],
+    }
+    useAppStore.getState().setCurrentSession(session)
+    const invalidated = vi.fn()
+    const unsubscribe = subscribeSnapshotListingChanged(invalidated)
+    const { result } = renderHook(() => useWebSocket())
+    await act(async () => result.current.connect())
+
+    act(() => {
+      wsInstances[0].onmessage?.({
+        data: JSON.stringify({ type: 'snapshot_listing_changed' }),
+      } as MessageEvent)
+    })
+
+    expect(invalidated).toHaveBeenCalledWith(session.id)
+    expect(useAppStore.getState().messages).toEqual([])
+    unsubscribe()
   })
 
   it('closes old socket and opens new on session switch', async () => {

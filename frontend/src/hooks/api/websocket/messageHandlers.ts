@@ -6,6 +6,7 @@ import type { ChatMessage } from '../../../types'
 import { reconcileChatHistory, upsertChatMessage } from '../../../utils/chatMessages'
 import { apiFetch, generateId } from '../client'
 import { mergeRealtimeMessages } from '../realtimeHistory'
+import { notifySnapshotListingChanged } from '../snapshots'
 import { reloadSessionState } from './sessionReload'
 import type { MessageHandlerContext } from './types'
 
@@ -217,6 +218,13 @@ export function handleWebSocketMessage(
     // Handle error messages that indicate session/config issues
     if (data.error) {
       console.error('WebSocket: Server error:', data.error)
+      return
+    }
+
+    // Snapshot listings recursively account for filesystem occupancy, so the
+    // capture producer invalidates them once instead of every browser polling.
+    if (data.type === 'snapshot_listing_changed') {
+      notifySnapshotListingChanged(session.id)
       return
     }
 

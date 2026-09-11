@@ -104,6 +104,31 @@ class SnapshotPrecondition(RuntimeError):
         super().__init__(f"snapshot precondition unmet: {reason}")
 
 
+async def _notify_snapshot_listing_changed(session_id: str) -> None:
+    """Tell the active browser to invalidate its expensive snapshot listing.
+
+    This is deliberately an ephemeral transport event, not a durable analysis
+    message. Reconnect and foreground refreshes recover a notification that was
+    sent while no browser owned the analysis WebSocket.
+    """
+    from backend.models.schemas import WebSocketMessage
+    from backend.utils.websocket_delivery import send_analysis_json
+
+    try:
+        event = WebSocketMessage(
+            type="snapshot_listing_changed",
+            content={"session_id": session_id},
+        )
+        await send_analysis_json(session_id, event.model_dump(mode="json"))
+    except Exception:
+        # A UI invalidation must never turn a completed capture into a failure.
+        logger.debug(
+            "[%s] could not notify the snapshot listing consumer",
+            session_id,
+            exc_info=True,
+        )
+
+
 # --------------------------------------------------------------- copy helpers
 
 
@@ -704,8 +729,9 @@ async def capture_decision_snapshot(
     attempt = uuid.uuid4().hex
     progress = {"bytes": 0}
     _LIVE_ATTEMPTS.add(attempt)
+    captured: str | None = None
     try:
-        return await _capture(
+        captured = await _capture(
             workflow=workflow, sandbox=sandbox, analysis_state=analysis_state,
             session_id=session_id, gate=gate, workflow_state=workflow_state,
             prepare=prepare, attempt=attempt, progress=progress,
@@ -734,7 +760,8 @@ async def capture_decision_snapshot(
     finally:
         _LIVE_ATTEMPTS.discard(attempt)
         _reclaim_session(session_id)
-    return None
+        await _notify_snapshot_listing_changed(session_id)
+    return captured
 
 
 async def _capture(
