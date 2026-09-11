@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.6 · **Last updated**: 2026-09-11
+**Version**: 0.56.7 · **Last updated**: 2026-09-11
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,22 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.56.x — (2026-09-08 onward)**
+
+- `0.56.7` — Protects the accepted Stage 1 AnnData atlas as a technical
+  integrity boundary. The live canonical `adata` is fingerprinted and sealed
+  before downstream work; rebinding it or mutating its protected components is
+  rejected, while explicit derived copies and append-only result keys remain
+  available. Cross-cell derived-object bindings are tracked, post-execution
+  fingerprints detect content drift (including sparse storage changes), and a
+  confirmed drift or unverifiable foundation is surfaced as a technical error
+  without silently restoring or replacing the user's object. Cohort and
+  expression-representation changes no longer mark existing figures or tables
+  out of date for report/gallery selection: those artifacts remain linked and
+  visible, with a warning under their description identifying the recorded
+  cohort or analysis generation. Report lineage retains the source execution
+  needed by historical artifacts while preserving objective execution-linkage
+  checks. Focused backend checks passed `179/179`; no image build, registry
+  push, deployment, or live-session mutation was performed.
 
 - `0.56.6` — Refines runtime-persistence and decision-snapshot feedback. A
   live kernel that is normally between successful save points no longer shows

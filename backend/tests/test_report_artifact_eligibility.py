@@ -3,9 +3,15 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 
-from backend.models.schemas import FigureReviewStatus, PublicationFigure, PublicationTable
+from backend.models.schemas import (
+    AnalysisState,
+    FigureReviewStatus,
+    PublicationFigure,
+    PublicationTable,
+)
 from backend.services.report.artifacts import (
     archival_render_available,
+    description_with_data_drift_warning,
     eligible_artifacts,
     gallery_artifacts,
     has_frozen_publication_pair,
@@ -164,6 +170,62 @@ def test_gallery_keeps_report_blocked_renders_as_badged_output():
     assert eligible_artifacts([
         pending, rejected, layout_blocked, failed, invalidated,
     ]) == []
+
+
+def test_historical_data_drift_invalidation_is_now_advisory():
+    figure = _figure(
+        "historical-drift", FigureReviewStatus.APPROVED,
+        is_current=False,
+        invalidated_at=datetime.now(),
+        invalidation_reason=(
+            "Expression representation changed in round 2; derived artifact "
+            "generation 1 is stale."
+        ),
+    )
+
+    assert is_gallery_eligible(figure)
+    assert is_report_eligible(figure)
+    assert "recorded analysis generation" in (
+        description_with_data_drift_warning(figure)
+    )
+
+
+def test_old_data_warning_does_not_waive_a_later_unrelated_invalidation():
+    figure = _figure(
+        "abandoned-after-drift", FigureReviewStatus.APPROVED,
+        is_current=False,
+        invalidated_at=datetime.now(),
+        invalidation_reason="Producer transaction was abandoned.",
+        expression_provenance={
+            "representation_change_warning": "Historical data context."
+        },
+    )
+
+    assert is_gallery_eligible(figure) is False
+    assert is_report_eligible(figure) is False
+
+
+def test_session_load_payload_includes_historical_data_warning():
+    payload = valid_image_bytes("JPEG")
+    figure = _figure(
+        "historical-load", FigureReviewStatus.APPROVED,
+        png_path="/missing/historical-load.jpg",
+        png_base64=base64.b64encode(payload).decode(),
+        preview_sha256=hashlib.sha256(payload).hexdigest(),
+        is_current=False,
+        invalidated_at=datetime.now(),
+        invalidation_reason=(
+            "Canonical analysis cohort changed; artifact belongs to an earlier "
+            "cohort."
+        ),
+    )
+
+    serialized = AnalysisState._serialize_publication_figures([
+        figure.model_dump(mode="json")
+    ])
+
+    assert len(serialized) == 1
+    assert "recorded cohort identity" in serialized[0]["description"]
 
 
 def test_hashless_legacy_publication_review_is_not_report_eligible():

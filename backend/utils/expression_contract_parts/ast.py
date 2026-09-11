@@ -224,7 +224,9 @@ def _value_makes_fresh_object(value: ast.AST | None, local: set[str]) -> bool:
     return False
 
 
-def mutates_expression_representation(code: str) -> bool:
+def mutates_expression_representation(
+    code: str, *, derived_names: set[str] | None = None,
+) -> bool:
     """Detect normalization/scaling or matrix replacement of the *canonical*
     expression matrix.
 
@@ -288,7 +290,7 @@ def mutates_expression_representation(code: str) -> bool:
                     (_mutation_target_root(node), _call_module_root(node), name),
                 ))
 
-    local: set[str] = set()
+    local: set[str] = set(derived_names or ())
     table_names: set[str] = set()
     for _pos, _tie, kind, data in sorted(events, key=lambda e: (e[0], e[1])):
         if kind == "assign":

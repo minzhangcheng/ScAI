@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any, Dict, Optional
 
 
@@ -84,17 +83,24 @@ def active_cohort_identity(state) -> Dict[str, Any]:
     return dict(identity) if isinstance(identity, dict) else {}
 
 
-def _invalidate_prior_cohort_artifacts(state, active: Dict[str, Any]) -> int:
+def _annotate_prior_cohort_artifacts(state, active: Dict[str, Any]) -> int:
+    """Attach a cohort warning without changing artifact eligibility.
+
+    The compatibility name remains because this helper is part of the existing
+    transition path. Cohort identity still advances for evidence provenance,
+    while figures and tables remain visible in results and reports.
+    """
     active_digest = str(active.get("cohort_digest") or "")
     active_generation = int(active.get("cohort_generation", 0) or 0)
     active_lineage = getattr(state, "restore_branch_id", None) or "main"
-    invalidated = 0
-    invalidated_figure_ids: set[str] = set()
-    now = datetime.now()
+    annotated = 0
+    warning = (
+        "Warning: the canonical AnnData cohort changed after this artifact was "
+        "generated; the artifact remains included and should be interpreted "
+        "against its recorded cohort identity."
+    )
     for collection_name in ("publication_figures", "publication_tables"):
         for artifact in getattr(state, collection_name, None) or []:
-            if not getattr(artifact, "is_current", True):
-                continue
             if (getattr(artifact, "lineage_id", None) or "main") != active_lineage:
                 continue
             artifact_digest = str(getattr(artifact, "cohort_digest", None) or "")
@@ -106,26 +112,16 @@ def _invalidate_prior_cohort_artifacts(state, active: Dict[str, Any]) -> int:
                 and artifact_generation == active_generation
             ):
                 continue
-            artifact.is_current = False
-            artifact.invalidated_at = now
-            artifact.invalidation_reason = (
-                "Canonical analysis cohort changed; artifact belongs to "
-                f"cohort {artifact_digest or 'legacy-unverifiable'}, not {active_digest}."
+            provenance = dict(
+                getattr(artifact, "expression_provenance", None) or {}
             )
-            if collection_name == "publication_figures":
-                invalidated_figure_ids.add(str(artifact.id))
-            invalidated += 1
-    for task in getattr(state, "figure_revision_tasks", None) or []:
-        if task.status not in {
-            "pending", "in_progress", "blocked", "exhausted_excluded",
-        }:
-            continue
-        if str(task.current_figure_id) not in invalidated_figure_ids:
-            continue
-        task.status = "abandoned"
-        task.reason = "cohort_changed"
-        task.updated_at = now
-    return invalidated
+            provenance["cohort_change_warning"] = warning
+            artifact.expression_provenance = provenance
+            description = str(getattr(artifact, "description", "") or "")
+            if warning not in description:
+                artifact.description = (description + "\n\n" + warning).strip()
+            annotated += 1
+    return annotated
 
 
 def record_cohort_transition(
@@ -133,7 +129,7 @@ def record_cohort_transition(
     before: Optional[Dict[str, Any]],
     after: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Persist the active cohort and invalidate artifacts when its digest changes."""
+    """Persist active cohort identity and annotate older artifacts on change."""
     sandbox_state = dict(getattr(state, "sandbox_state", None) or {})
     stored = active_cohort_identity(state)
     baseline = stored or (before if before and before.get("present") else {})
@@ -162,7 +158,7 @@ def record_cohort_transition(
                 "identity": identity,
             }
             state.sandbox_state = sandbox_state
-            _invalidate_prior_cohort_artifacts(state, identity)
+            _annotate_prior_cohort_artifacts(state, identity)
             return identity
         return stored
 
@@ -186,5 +182,5 @@ def record_cohort_transition(
         }
     state.sandbox_state = sandbox_state
     if changed and baseline_digest:
-        _invalidate_prior_cohort_artifacts(state, identity)
+        _annotate_prior_cohort_artifacts(state, identity)
     return identity

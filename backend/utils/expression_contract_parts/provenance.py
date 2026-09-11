@@ -7,8 +7,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.services.report.artifacts import invalidate_current_artifacts
-
 from .ast import mutates_expression_representation
 from .constants import _MARKER
 
@@ -63,32 +61,42 @@ def record_expression_contract(state: Any, contracts: list[dict[str, Any]]) -> N
     state.sandbox_state = sandbox_state
 
 
-def record_representation_change(state: Any, code: str) -> int:
-    """Bump provenance generation and invalidate same-round derived artifacts."""
-    if not mutates_expression_representation(code):
-        return 0
+_REPRESENTATION_WARNING = (
+    "Warning: the canonical expression representation changed after this artifact "
+    "was generated; the artifact remains included and should be interpreted against "
+    "its recorded analysis generation."
+)
+
+
+def _record_detected_representation_change(state: Any) -> None:
+    """Advance provenance without changing artifact report/gallery eligibility."""
     sandbox_state = state.sandbox_state or {}
     generation = int(sandbox_state.get("analysis_generation", 0) or 0) + 1
     sandbox_state["analysis_generation"] = generation
     sandbox_state.pop("expression_contract_v1", None)
     state.sandbox_state = sandbox_state
-    reason = (
-        f"Expression representation changed in round {state.current_round}; "
-        f"derived artifact generation {generation - 1} is stale."
-    )
-    return (
-        invalidate_current_artifacts(
-            state.publication_figures,
-            round_number=int(state.current_round or 0),
-            reason=reason,
-            lineage_id=(getattr(state, "restore_branch_id", None) or "main"),
-        )
-        + invalidate_current_artifacts(
-            state.publication_tables,
-            round_number=int(state.current_round or 0),
-            reason=reason,
-        )
-    )
+    current_round = int(getattr(state, "current_round", 0) or 0)
+    current_lineage = getattr(state, "restore_branch_id", None) or "main"
+    for collection_name in ("publication_figures", "publication_tables"):
+        for artifact in getattr(state, collection_name, None) or []:
+            if int(getattr(artifact, "round_number", 0) or 0) not in (0, current_round):
+                continue
+            if (getattr(artifact, "lineage_id", None) or "main") != current_lineage:
+                continue
+            provenance = dict(getattr(artifact, "expression_provenance", None) or {})
+            provenance["representation_change_warning"] = _REPRESENTATION_WARNING
+            artifact.expression_provenance = provenance
+            description = str(getattr(artifact, "description", "") or "")
+            if _REPRESENTATION_WARNING not in description:
+                artifact.description = (description + "\n\n" + _REPRESENTATION_WARNING).strip()
+
+
+def record_representation_change(state: Any, code: str) -> int:
+    """Bump provenance while retaining all existing artifacts."""
+    if not mutates_expression_representation(code):
+        return 0
+    _record_detected_representation_change(state)
+    return 0
 
 
 def record_executed_representation_change(
@@ -98,29 +106,30 @@ def record_executed_representation_change(
     before: dict[str, int],
     *,
     execution_started: bool,
+    representation_mutated: bool | None = None,
 ) -> tuple[int, set[str], str]:
-    """Invalidate derived artifacts after a dispatched, non-transactional cell.
+    """Record representation drift after a dispatched, non-transactional cell.
 
     A Jupyter cell can mutate ``adata.X`` and then fail.  A failed result is
     therefore not evidence that the canonical representation stayed intact.
-    Once the user's cell has actually been dispatched, conservatively apply the
-    same generation and file-stem invalidation used for successful cells.  The
-    explicit flag keeps failures in trusted setup helpers from invalidating
-    anything when the user's cell never ran.
+    Provenance generation still advances, but previously generated artifacts
+    remain eligible for report and gallery use with an attached warning.
     """
-    if not execution_started or not mutates_expression_representation(code):
-        return 0, set(), ""
-    invalidated_count = record_representation_change(state, code)
-    stale_stems = unchanged_artifact_stems(
-        working_dir,
-        before,
-        since_ns=round_start_ns(state),
+    detected = (
+        mutates_expression_representation(code)
+        if representation_mutated is None else representation_mutated
     )
-    record_invalidated_file_stems(state, stale_stems)
+    if not execution_started or not detected:
+        return 0, set(), ""
+    if representation_mutated is None:
+        record_representation_change(state, code)
+    else:
+        _record_detected_representation_change(state)
     return (
-        invalidated_count,
-        stale_stems,
-        describe_invalidated_artifacts(stale_stems, invalidated_count),
+        0,
+        set(),
+        "[Provenance] The expression representation changed. Existing figures "
+        "and tables remain eligible and carry an analysis-generation warning.",
     )
 
 

@@ -273,6 +273,44 @@ async def test_publication_figures_hide_invalidated_records():
     assert response["total"] == 0
 
 
+@pytest.mark.asyncio
+async def test_publication_figures_include_historical_data_drift_with_warning(
+    tmp_path,
+):
+    png_path = tmp_path / "historical.png"
+    png_payload = write_valid_image(png_path, min_bytes=2200)
+    state = AnalysisState(
+        id="session-figures", name="Figures", user_id="user-1",
+        publication_figures=[PublicationFigure(
+            name="historical", description="Original caption",
+            figure_type="other", png_path=str(png_path), pdf_path="",
+            render_sha256=hashlib.sha256(png_payload).hexdigest(),
+            review_status=FigureReviewStatus.APPROVED,
+            source_execution_id="old-execution",
+            is_current=False, invalidated_at=datetime.now(),
+            invalidation_reason=(
+                "Expression representation changed in round 2; derived "
+                "artifact generation 1 is stale."
+            ),
+        )],
+    )
+    request = SimpleNamespace(state=SimpleNamespace(user_id="user-1"))
+
+    async def fake_owner(**_kwargs):
+        return state
+
+    with patch_facade(
+        "backend.routes.reports",
+        "require_session_ownership",
+        side_effect=fake_owner,
+    ):
+        response = await get_publication_figures("session-figures", request)
+
+    assert response["total"] == 1
+    assert "recorded analysis generation" in response["figures"][0]["description"]
+    assert response["figures"][0]["source_execution_id"] == "old-execution"
+
+
 def _download_state(figure: PublicationFigure) -> AnalysisState:
     state = AnalysisState(id="session-download", name="Downloads", user_id="user-1")
     state.publication_figures = [figure]

@@ -755,7 +755,7 @@ def test_runtime_contract_marker_and_persisted_record_exclude_raw_extrema():
     }
 
 
-def test_representation_change_invalidates_same_round_artifacts_only():
+def test_representation_change_retains_artifacts_with_warning():
     state = AnalysisState(id="expr", user_id="u", current_round=2)
     state.publication_figures = [
         PublicationFigure(
@@ -770,9 +770,10 @@ def test_representation_change_invalidates_same_round_artifacts_only():
         ),
     ]
     count = record_representation_change(state, "sc.pp.log1p(adata)")
-    assert count == 1
-    assert not state.publication_figures[0].is_current
-    assert state.publication_figures[0].invalidated_at is not None
+    assert count == 0
+    assert state.publication_figures[0].is_current
+    assert state.publication_figures[0].invalidated_at is None
+    assert "remains included" in state.publication_figures[0].description
     assert state.publication_figures[1].is_current
     assert state.sandbox_state["analysis_generation"] == 1
 
@@ -796,7 +797,7 @@ def _state_with_current_expression_artifact(tmp_path, name):
     return state, workspace_artifact_versions(tmp_path)
 
 
-def test_failed_sensitive_call_after_mutation_invalidates_artifacts(tmp_path):
+def test_failed_sensitive_call_after_mutation_retains_artifacts(tmp_path):
     state, before = _state_with_current_expression_artifact(
         tmp_path, "before_contract_failure"
     )
@@ -832,14 +833,15 @@ def test_failed_sensitive_call_after_mutation_invalidates_artifacts(tmp_path):
     )
 
     assert score_calls == []
-    assert count == 1
-    assert stems == {"before_contract_failure"}
-    assert "withheld from the report" in note
-    assert not state.publication_figures[0].is_current
+    assert count == 0
+    assert stems == set()
+    assert "remain eligible" in note
+    assert state.publication_figures[0].is_current
+    assert "remains included" in state.publication_figures[0].description
     assert state.sandbox_state["analysis_generation"] == 1
 
 
-def test_failed_statement_after_mutation_invalidates_artifacts(tmp_path):
+def test_failed_statement_after_mutation_retains_artifacts(tmp_path):
     state, before = _state_with_current_expression_artifact(
         tmp_path, "before_runtime_failure"
     )
@@ -865,9 +867,9 @@ def test_failed_statement_after_mutation_invalidates_artifacts(tmp_path):
         execution_started=True,
     )
 
-    assert count == 1
-    assert stems == {"before_runtime_failure"}
-    assert not state.publication_figures[0].is_current
+    assert count == 0
+    assert stems == set()
+    assert state.publication_figures[0].is_current
 
 
 def test_setup_failure_before_user_cell_does_not_invalidate_artifacts(tmp_path):
@@ -976,6 +978,13 @@ def test_canonical_mutation_still_detected_alongside_local_copies():
         "adata = load_shared()\n"
         "sc.pp.normalize_total(adata)"
     )
+
+
+def test_cross_cell_derived_ledger_shields_only_registered_copy():
+    assert not mutates_expression_representation(
+        "sc.pp.log1p(work)", derived_names={"work"}
+    )
+    assert mutates_expression_representation("sc.pp.log1p(other)", derived_names={"work"})
 
 
 # --- Numeric-library calls are not expression mutations -----------------------

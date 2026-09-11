@@ -1,6 +1,58 @@
 """Artifact selection, event payload, and invalidation owners."""
 from __future__ import annotations
 
+
+_REPRESENTATION_CHANGE_WARNING = (
+    "Warning: the canonical expression representation changed after this artifact "
+    "was generated; the artifact remains included and should be interpreted against "
+    "its recorded analysis generation."
+)
+_COHORT_CHANGE_WARNING = (
+    "Warning: the canonical AnnData cohort changed after this artifact was "
+    "generated; the artifact remains included and should be interpreted "
+    "against its recorded cohort identity."
+)
+_DATA_DRIFT_INVALIDATION_PREFIXES = (
+    "Expression representation changed in round ",
+    "Canonical analysis cohort changed;",
+)
+
+
+def _direct_artifact_value(artifact: Any, key: str, default: Any = None) -> Any:
+    if isinstance(artifact, dict):
+        return artifact.get(key, default)
+    return getattr(artifact, key, default)
+
+
+def is_data_drift_invalidation(artifact: Any) -> bool:
+    reason = str(_direct_artifact_value(artifact, "invalidation_reason", "") or "")
+    return reason.startswith(_DATA_DRIFT_INVALIDATION_PREFIXES)
+
+
+def data_drift_warning(artifact: Any) -> str | None:
+    """Return the explicit warning for current and pre-migration records."""
+    provenance = _direct_artifact_value(artifact, "expression_provenance", {}) or {}
+    if isinstance(provenance, dict):
+        for key in ("cohort_change_warning", "representation_change_warning"):
+            warning = str(provenance.get(key) or "").strip()
+            if warning:
+                return warning
+    reason = str(_direct_artifact_value(artifact, "invalidation_reason", "") or "")
+    if reason.startswith("Canonical analysis cohort changed;"):
+        return _COHORT_CHANGE_WARNING
+    if reason.startswith("Expression representation changed in round "):
+        return _REPRESENTATION_CHANGE_WARNING
+    return None
+
+
+def description_with_data_drift_warning(artifact: Any) -> str:
+    description = str(_direct_artifact_value(artifact, "description", "") or "")
+    warning = data_drift_warning(artifact)
+    if not warning or warning in description:
+        return description
+    return (description + "\n\n" + warning).strip()
+
+
 def compact_figure_event_payload(figure: Any, *, review_status: str | None=None, pi_feedback: str | None=None, bindings) -> dict[str, Any]:
     """Serialize a live figure event without its potentially large preview."""
     Any = getattr(bindings, 'Any')
@@ -13,7 +65,7 @@ def compact_figure_event_payload(figure: Any, *, review_status: str | None=None,
     return {
         "id": getattr(figure, "id", ""),
         "name": getattr(figure, "name", ""),
-        "description": getattr(figure, "description", ""),
+        "description": description_with_data_drift_warning(figure),
         "figure_type": getattr(figure, "figure_type", "other"),
         "png_path": getattr(figure, "png_path", ""),
         "pdf_path": getattr(figure, "pdf_path", ""),
@@ -62,9 +114,10 @@ def is_report_eligible(artifact: Any, *, bindings) -> bool:
     layout_was_measured = getattr(bindings, 'layout_was_measured')
     if str(_artifact_value(artifact, "producer_status", "published") or "published") != "published":
         return False
-    if not _artifact_value(artifact, "is_current", True):
+    data_drift_advisory = is_data_drift_invalidation(artifact)
+    if not _artifact_value(artifact, "is_current", True) and not data_drift_advisory:
         return False
-    if _artifact_value(artifact, "invalidated_at", None):
+    if _artifact_value(artifact, "invalidated_at", None) and not data_drift_advisory:
         return False
     is_figure = (
         "figure_type" in artifact or "png_path" in artifact
@@ -204,14 +257,21 @@ def is_gallery_eligible(artifact: Any, *, bindings) -> bool:
     """
     Any = getattr(bindings, 'Any')
     _artifact_value = getattr(bindings, '_artifact_value')
+    data_drift_advisory = is_data_drift_invalidation(artifact)
     return bool(
         str(
             _artifact_value(artifact, "producer_status", "published")
             or "published"
         )
         == "published"
-        and _artifact_value(artifact, "is_current", True)
-        and not _artifact_value(artifact, "invalidated_at", None)
+        and (
+            _artifact_value(artifact, "is_current", True)
+            or data_drift_advisory
+        )
+        and (
+            not _artifact_value(artifact, "invalidated_at", None)
+            or data_drift_advisory
+        )
     )
 
 def gallery_artifacts(artifacts: Iterable[Any] | None, *, bindings) -> list[Any]:

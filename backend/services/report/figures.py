@@ -14,6 +14,7 @@ from PIL import Image
 from backend.services.report.artifacts import (
     artifact_stems,
     copy_verified_artifact,
+    description_with_data_drift_warning,
     eligible_artifacts,
     excluded_artifact_stems,
     resolve_archival_pdf,
@@ -213,7 +214,7 @@ class FiguresMixin:
             existing_figures.append({
                 "filename": source.name,
                 "name": getattr(pf, "name", "") or stem.replace("_", " ").title(),
-                "description": getattr(pf, "description", "") or "",
+                "description": description_with_data_drift_warning(pf),
                 "png_path": str(dest_png),
                 "pdf_path": str(dest_pdf) if dest_pdf and dest_pdf.exists() else None,
                 "inferred_type": self._infer_figure_type(

@@ -11,6 +11,7 @@ from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...agents.bioinformatics_agent import count_saved_figures
 from ..helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS
 from ...utils.blob_store import BLOB_REF_PREFIX
+from ...services.foundation_integrity import seal_foundation
 from ..retry import with_retry
 
 if TYPE_CHECKING:
@@ -143,6 +144,10 @@ IMPORTANT: After completing steps 1-10, call report_findings with a summary of:
 - Annotation results (cell types identified)
 
 These Stage 1 findings will be used by PI to plan Stage 2 downstream analysis.
+
+FOUNDATION HANDOFF: The final accepted annotated atlas must remain bound to the
+live canonical variable `adata`. Include `adata` in `persistent_outputs` for the
+last Stage 1 execution that establishes it. Do not hand Stage 2 a guessed filename.
 """
 
 
@@ -286,12 +291,15 @@ def _build_stage2_instruction(
         "selected in the PI-approved plan, at the claim level chosen by the PI; "
         "consult the PI if measured design facts require a scientific choice"
     )
-    stage1_state = """Stage 1 (QC, clustering, cell type annotation) is COMPLETE. The annotated data
-(adata with a 'cell_type' column, saved as adata_annotated.h5ad) is already in
-the kernel / working directory.
+    stage1_state = """Stage 1 (QC, clustering, cell type annotation) is COMPLETE. Its
+accepted annotated atlas is already available as the live, sealed canonical
+variable `adata` in the kernel.
 
-Do NOT re-run QC, clustering, or cell type annotation. Load the Stage 1 results
-and proceed to downstream analysis ONLY:"""
+Do NOT re-run QC, clustering, or cell type annotation. Do NOT reload or rebind `adata`,
+and do NOT repeat normalization or embedding. For transformations or subset-specific work,
+create an explicit derived object such as `work = adata[mask].copy()` and mutate
+only that object. Append downstream outputs under new, uniquely named keys and
+proceed to downstream analysis ONLY:"""
     downstream_menu = """2. The downstream analyses the PI-approved plan calls for. Where the plan leaves the
    method open, these are available and appropriate to single-cell data — pick from
    them by what the question needs, not by working down the list:

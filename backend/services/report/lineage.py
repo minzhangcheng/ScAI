@@ -19,6 +19,7 @@ from backend.models.schemas import AnalysisState
 from backend.services.execution_evidence import execution_is_current_receipt
 from backend.services.report.artifacts import (
     artifact_stems,
+    description_with_data_drift_warning,
     eligible_artifacts,
     has_frozen_publication_pair,
     resolve_archival_pdf,
@@ -551,6 +552,11 @@ def build_lineage_report_state(
         for table in report_state.publication_tables
         if (getattr(table, "lineage_id", None) or "main") == target
     ]
+    for artifact in (
+        *report_state.publication_figures,
+        *report_state.publication_tables,
+    ):
+        artifact.description = description_with_data_drift_warning(artifact)
     active_cohort = (
         (report_state.sandbox_state or {}).get("cohort_identity_v1") or {}
     )
@@ -562,23 +568,6 @@ def build_lineage_report_state(
         (report_state.sandbox_state or {}).get("analysis_generation", 0) or 0
     )
     if active_cohort_generation or active_analysis_generation:
-        if active_cohort_generation:
-            report_state.publication_figures = [
-                figure
-                for figure in report_state.publication_figures
-                if str(getattr(figure, "cohort_digest", None) or "")
-                == active_cohort_digest
-                and int(getattr(figure, "cohort_generation", 0) or 0)
-                == active_cohort_generation
-            ]
-            report_state.publication_tables = [
-                table
-                for table in report_state.publication_tables
-                if str(getattr(table, "cohort_digest", None) or "")
-                == active_cohort_digest
-                and int(getattr(table, "cohort_generation", 0) or 0)
-                == active_cohort_generation
-            ]
         eligible_execution_by_id = {
             str(execution.id): execution
             for execution in report_state.code_history
@@ -594,27 +583,77 @@ def build_lineage_report_state(
                 ),
             )
         }
+        artifact_execution_by_id = {
+            str(execution.id): execution
+            for execution in report_state.code_history
+            if execution_is_current_receipt(
+                execution,
+                lineage_id=target,
+            )
+        }
         current_execution_ids = set(eligible_execution_by_id)
-        report_state.code_history = [
-            execution for execution in report_state.code_history
-            if str(execution.id) in current_execution_ids
-        ]
+
+        def _linked_artifact_execution_id(artifact: Any) -> str | None:
+            source_id = str(
+                getattr(artifact, "source_execution_id", "") or ""
+            )
+            execution = artifact_execution_by_id.get(source_id)
+            if execution is None:
+                return None
+            if int(getattr(execution, "round_number", 0) or 0) != int(
+                getattr(artifact, "round_number", 0) or 0
+            ):
+                return None
+            artifact_plan_id = str(getattr(artifact, "plan_id", "") or "")
+            if artifact_plan_id and str(
+                getattr(execution, "plan_id", "") or ""
+            ) != artifact_plan_id:
+                return None
+            artifact_analysis_generation = int(
+                getattr(artifact, "analysis_generation", 0) or 0
+            )
+            if artifact_analysis_generation and int(
+                getattr(execution, "analysis_generation", 0) or 0
+            ) != artifact_analysis_generation:
+                return None
+            artifact_cohort_generation = int(
+                getattr(artifact, "cohort_generation", 0) or 0
+            )
+            if artifact_cohort_generation and int(
+                getattr(execution, "cohort_generation", 0) or 0
+            ) != artifact_cohort_generation:
+                return None
+            artifact_cohort_digest = str(
+                getattr(artifact, "cohort_digest", "") or ""
+            )
+            if artifact_cohort_digest and str(
+                getattr(execution, "cohort_digest", "") or ""
+            ) != artifact_cohort_digest:
+                return None
+            return source_id
+
+        # Artifact visibility is independent of later AnnData generations.
+        # Preserve the objective source/round/plan linkage check, but do not
+        # discard a table merely because its cohort or expression generation
+        # predates the active canonical object.
         report_state.publication_tables = [
             table for table in report_state.publication_tables
-            if (
-                (source_id := str(
-                    getattr(table, "source_execution_id", "") or ""
-                )) in current_execution_ids
-                and int(getattr(
-                    eligible_execution_by_id[source_id], "round_number", 0,
-                ) or 0) == int(getattr(table, "round_number", 0) or 0)
-                and (
-                    not str(getattr(table, "plan_id", "") or "")
-                    or str(getattr(
-                        eligible_execution_by_id[source_id], "plan_id", "",
-                    ) or "") == str(getattr(table, "plan_id", "") or "")
-                )
+            if _linked_artifact_execution_id(table) is not None
+        ]
+        retained_artifact_execution_ids = {
+            source_id
+            for artifact in (
+                *report_state.publication_figures,
+                *report_state.publication_tables,
             )
+            if (source_id := _linked_artifact_execution_id(artifact)) is not None
+        }
+        report_execution_ids = (
+            current_execution_ids | retained_artifact_execution_ids
+        )
+        report_state.code_history = [
+            execution for execution in report_state.code_history
+            if str(execution.id) in report_execution_ids
         ]
         report_state.method_decisions = [
             decision for decision in report_state.method_decisions
@@ -627,7 +666,7 @@ def build_lineage_report_state(
                 or (
                     step.step_type == "execute_code"
                     and str(getattr(step, "execution_id", "") or "")
-                    in current_execution_ids
+                    in report_execution_ids
                 )
                 or (
                     step.step_type == "report_findings"

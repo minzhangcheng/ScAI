@@ -9,6 +9,8 @@ def test_stage1_forbids_deg():
     assert "Do NOT run condition-level differential expression" in txt
     # Doublet detection and HVG selection are batch-aware where the design says so.
     assert "batch_key" in txt
+    assert "live canonical variable `adata`" in txt
+    assert "Include `adata` in `persistent_outputs`" in txt
 
 
 def test_stage2_is_downstream_only():
@@ -21,6 +23,17 @@ def test_stage2_is_downstream_only():
     assert "get_pseudobulk" in txt
     assert "by_sample" in txt
     assert "df_to_lr" in txt
+
+
+def test_stage2_uses_live_sealed_adata_not_a_guessed_file():
+    txt = build_phase_instruction(
+        planning_stage="stage2", analysis_phase="exploration",
+        has_bulk=False, has_scrna=True, direction="",
+    )
+    assert "live, sealed canonical" in txt
+    assert "Do NOT reload or rebind `adata`" in txt
+    assert "work = adata[mask].copy()" in txt
+    assert "adata_annotated.h5ad" not in txt
 
 
 def test_innovation_branch_unaffected():

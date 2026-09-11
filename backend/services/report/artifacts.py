@@ -358,6 +358,18 @@ def compact_figure_event_payload(
 
 
 
+def data_drift_warning(artifact: Any) -> str | None:
+    """Return the recorded or compatibility warning for a data-drift artifact."""
+    return artifact_selection.data_drift_warning(artifact)
+
+
+
+def description_with_data_drift_warning(artifact: Any) -> str:
+    """Return an artifact description that discloses its historical data context."""
+    return artifact_selection.description_with_data_drift_warning(artifact)
+
+
+
 def is_report_eligible(artifact: Any) -> bool:
     """Return whether a reviewed artifact is current enough for final reports."""
     return artifact_selection.is_report_eligible(artifact, bindings=sys.modules[__name__])

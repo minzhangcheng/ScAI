@@ -45,6 +45,7 @@ from backend.utils.asyncio_tasks import (
 )
 from backend.services.report.artifacts import (
     archival_render_available,
+    description_with_data_drift_warning,
     gallery_artifact_by_id,
     gallery_artifacts,
     has_blocking_layout_defects,
@@ -513,8 +514,6 @@ async def get_publication_figures(
         else getattr(state, "restore_branch_id", None)
     )
     for fig in gallery_artifacts(state.publication_figures):
-        if not getattr(fig, "is_current", True) or getattr(fig, "invalidated_at", None):
-            continue
         if (getattr(fig, "lineage_id", None) or "main") != target_lineage:
             continue
         if not archival_render_available(fig):
@@ -525,7 +524,7 @@ async def get_publication_figures(
         figures.append({
             "id": fig.id,
             "name": fig.name,
-            "description": fig.description,
+            "description": description_with_data_drift_warning(fig),
             "figure_type": fig.figure_type,
             "png_path": fig.png_path,
             "pdf_path": fig.pdf_path,
@@ -544,6 +543,7 @@ async def get_publication_figures(
             "revision_count": fig.revision_count,
             "plan_step_id": fig.plan_step_id,
             "plan_id": getattr(fig, "plan_id", None),
+            "source_execution_id": getattr(fig, "source_execution_id", None),
             "purpose": fig.purpose,
             "logical_figure_id": getattr(fig, "logical_figure_id", None),
             "render_attempt_id": getattr(fig, "render_attempt_id", None),
@@ -584,7 +584,7 @@ async def get_publication_tables(
         {
             "id": tbl.id,
             "name": tbl.name,
-            "description": tbl.description,
+            "description": description_with_data_drift_warning(tbl),
             "csv_path": tbl.csv_path,
             "columns": tbl.columns,
             "preview_data": tbl.preview_data,

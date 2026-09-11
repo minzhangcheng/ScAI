@@ -8,6 +8,15 @@ from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
 
 from backend.services.cohort_identity import active_cohort_identity
+from backend.services.foundation_integrity import (
+    accept_foundation_extensions,
+    classify_foundation_signature,
+    clear_foundation_bindings,
+    commit_foundation_bindings,
+    foundation_is_sealed,
+    foundation_write_guard,
+    mark_foundation_drift,
+)
 from backend.services.sample_design import (
     infer_execution_modalities,
     samples_per_group_by_modality,
@@ -194,6 +203,8 @@ async def _execute_supplementary_pass(
             return "continue"
 
         unsafe = agent._supplementary_code_is_safe(code, var_name)
+        state = agent._current_analysis_state
+        unsafe = unsafe or foundation_write_guard(code, state)
         if unsafe:
             transcript.append(
                 f"[rejected] {unsafe}. Add derived results without re-running "
@@ -212,7 +223,6 @@ async def _execute_supplementary_pass(
             error = compact_traceback(error, max_chars=3000)
         exec_figures = list(getattr(exec_result, "figures", None) or [])
 
-        state = agent._current_analysis_state
         cohort = active_cohort_identity(state)
         plan = getattr(state, "current_plan", None)
         record = CodeExecution(
@@ -272,6 +282,45 @@ async def _execute_supplementary_pass(
             f"[stdout]\n{output[:6000]}\n[error]\n{error or 'none'}")
 
         post_sig = await agent.capture_main_object_signature(var_name, cluster_key)
+        if foundation_is_sealed(state):
+            foundation_status, foundation_changes = classify_foundation_signature(
+                state, post_sig
+            )
+            if foundation_status == "unavailable":
+                clear_foundation_bindings(state)
+                verification_error = (
+                    "FoundationIntegrityVerificationError: the sealed Stage 1 "
+                    "atlas could not be fingerprinted after the supplementary "
+                    "cell; no foundation drift was recorded."
+                )
+                record.error = f"{record.error or ''}\n{verification_error}".strip()
+                record.execution_status = "failed"
+                record.evidence_eligible = False
+                abort_envelope = envelope(
+                    "failed", verification_error,
+                    ["sealed Stage 1 foundation could not be verified"],
+                )
+                return "abort"
+            if foundation_status == "drift":
+                integrity_error = (
+                    "FoundationIntegrityError: supplementary cell changed the "
+                    "sealed Stage 1 atlas (" + ", ".join(foundation_changes[:12]) + ")."
+                )
+                mark_foundation_drift(state, integrity_error)
+                clear_foundation_bindings(state)
+                record.error = f"{record.error or ''}\n{integrity_error}".strip()
+                record.execution_status = "failed"
+                record.evidence_eligible = False
+                abort_envelope = envelope(
+                    "failed", integrity_error,
+                    ["sealed Stage 1 foundation changed"],
+                )
+                return "abort"
+            if error:
+                clear_foundation_bindings(state)
+            else:
+                accept_foundation_extensions(state, post_sig)
+                commit_foundation_bindings(state, code)
         ok, changed = signatures_match(baseline, post_sig)
         if not ok:
             fatal = agent._supplementary_fatal_signature_changes(changed)
@@ -311,6 +360,38 @@ async def _execute_supplementary_pass(
                 f"[{getattr(agent, 'session_id', '?')}] supplementary step "
                 f"exceeded its {step_timeout}s budget")
             agent._interrupt_kernel_after_timeout()
+            state = agent._current_analysis_state
+            if foundation_is_sealed(state):
+                clear_foundation_bindings(state)
+                try:
+                    post_timeout_sig = await asyncio.wait_for(
+                        agent.capture_main_object_signature(var_name, cluster_key),
+                        timeout=min(float(step_timeout), 30.0),
+                    )
+                except asyncio.TimeoutError:
+                    post_timeout_sig = {}
+                timeout_status, timeout_changes = classify_foundation_signature(
+                    state, post_timeout_sig
+                )
+                if timeout_status == "unavailable":
+                    return envelope(
+                        "failed",
+                        "FoundationIntegrityVerificationError: the sealed Stage 1 "
+                        "atlas could not be fingerprinted after the interrupted "
+                        "cell; no foundation drift was recorded.",
+                        ["sealed Stage 1 foundation could not be verified after timeout"],
+                    )
+                if timeout_status == "drift":
+                    integrity_error = (
+                        "FoundationIntegrityError: interrupted supplementary "
+                        "cell changed the sealed Stage 1 atlas ("
+                        + ", ".join(timeout_changes[:12]) + ")."
+                    )
+                    mark_foundation_drift(state, integrity_error)
+                    return envelope(
+                        "failed", integrity_error,
+                        ["sealed Stage 1 foundation changed after timeout"],
+                    )
             warnings.append(
                 f"A supplementary step exceeded its {step_timeout}s budget and "
                 f"was interrupted.")

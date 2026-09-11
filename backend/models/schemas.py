@@ -928,6 +928,7 @@ class AnalysisState(BaseModel):
         from backend.services.figure_layout import blocking_violations
         from backend.services.report.artifacts import (
             archival_render_available,
+            description_with_data_drift_warning,
             gallery_artifacts,
         )
 
@@ -945,7 +946,8 @@ class AnalysisState(BaseModel):
             if (figure.get("lineage_id") or "main") == target
         ])
         return [
-            {"id": f["id"], "name": f["name"], "description": f["description"],
+            {"id": f["id"], "name": f["name"],
+             "description": description_with_data_drift_warning(f),
              "figure_type": f["figure_type"], "png_path": f["png_path"],
              "pdf_path": f["pdf_path"], "png_base64": f["png_base64"],
              "review_status": f["review_status"], "review_unavailable": bool(f.get("review_unavailable", False)),
@@ -975,8 +977,13 @@ class AnalysisState(BaseModel):
 
     @staticmethod
     def _serialize_publication_tables(tables, *, lineage_id: str = "main"):
+        from backend.services.report.artifacts import (
+            description_with_data_drift_warning,
+        )
+
         return [
-            {"id": t["id"], "name": t["name"], "description": t["description"],
+            {"id": t["id"], "name": t["name"],
+             "description": description_with_data_drift_warning(t),
              "csv_path": t["csv_path"], "columns": t["columns"],
              "preview_data": t["preview_data"],
              "review_status": t["review_status"],

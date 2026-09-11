@@ -62,6 +62,9 @@ _EXCLUDED_FIELDS = {
     # session API, exactly like score_definitions above.
     "scoring_plans",
     "data_driven_mechanism_programs",
+    # Durable PI guidance is consumed by backend figure follow-up/review. The
+    # browser has no consumer for the raw question, context, and response records.
+    "pi_decision_records",
     # Plan-audit / supplementary-pass records. Live progress is pushed as a
     # `post_execution_review` websocket message and the durable form reaches the
     # user through the report; no frontend consumer reads it back off the session

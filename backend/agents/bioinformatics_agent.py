@@ -56,6 +56,16 @@ from ..services.cohort_identity import (
     probe_canonical_cohort,
     record_cohort_transition,
 )
+from ..services.foundation_integrity import (
+    accept_foundation_extensions,
+    classify_foundation_signature,
+    clear_foundation_bindings,
+    commit_foundation_bindings,
+    foundation_is_sealed,
+    foundation_write_guard,
+    mark_foundation_drift,
+    registered_derived_names,
+)
 from .bioinformatics.executor_collaboration import (
     handle_annotate_clusters,
     handle_consult_pi,

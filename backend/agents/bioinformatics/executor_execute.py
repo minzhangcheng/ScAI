@@ -416,6 +416,29 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
             code_description=description, code_step_type=step_type,
         ))
         return ToolAction.CONTINUE
+    foundation_error = foundation_write_guard(code, state)
+    if foundation_error:
+        logger.warning("[Bioinformatics] %s", foundation_error)
+        await self._notify("error", foundation_error)
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": (
+                f"Execution blocked: {foundation_error} The accepted Stage 1 "
+                "atlas remains available as live `adata`. Use an explicit "
+                "derived copy such as `work = adata[mask].copy()` and operate "
+                "on `work`, or append a new uniquely named result key."
+            ),
+        })
+        analysis_log.append(AnalysisStep(
+            step_number=step_count, step_type="execute_code",
+            agent_reasoning=agent_reasoning, code=code,
+            code_error=foundation_error, code_description=description,
+            code_step_type=step_type,
+        ))
+        context.consecutive_errors += 1
+        context.total_errors += 1
+        return ToolAction.CONTINUE
     await self._notify("status", f"[{step_type.upper()}] {description}")
     await self._notify("code", code)
     instrumented_code, sensitive_call_count = (
@@ -449,11 +472,14 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
             compact_traceback(str(cohort_error), max_chars=1000),
         )
         cohort_before = None
-    representation_will_change = mutates_expression_representation(code)
-    preexisting_artifact_versions = (
-        workspace_artifact_versions(self.sandbox.working_dir)
-        if representation_will_change else {}
+    sealed_foundation = foundation_is_sealed(state)
+    derived_names = registered_derived_names(state)
+    representation_will_change = mutates_expression_representation(
+        code, derived_names=derived_names,
     )
+    # Representation changes retain prior artifacts; no file-stem snapshot is
+    # needed because report/gallery eligibility is no longer revoked.
+    preexisting_artifact_versions = {}
     execution_started = time.perf_counter()
     user_code_execution_started = False
     invalidated_count = 0
@@ -491,6 +517,7 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
                 self.sandbox.working_dir,
                 preexisting_artifact_versions,
                 execution_started=user_code_execution_started,
+                representation_mutated=representation_will_change,
             )
         except Exception as provenance_error:
             logger.warning(
@@ -506,14 +533,47 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
                 "after expression representation change",
                 invalidated_count,
             )
-    await self.sandbox.execute(
-        "import anndata as _ad\n"
-        "for _name, _obj in list(globals().items()):\n"
-        "    if isinstance(_obj, _ad.AnnData):\n"
-        "        _obj.obs_names_make_unique()\n"
-        "        _obj.var_names_make_unique()\n"
-        "del _ad\n", skip_safety_check=True
-    )
+    if sealed_foundation:
+        post_signature = await self.capture_main_object_signature("adata", None)
+        foundation_status, foundation_changes = classify_foundation_signature(
+            state, post_signature
+        )
+        if foundation_status == "unavailable":
+            clear_foundation_bindings(state)
+            verification_error = (
+                "FoundationIntegrityVerificationError: the sealed Stage 1 atlas "
+                "could not be fingerprinted after this cell. The execution is "
+                "not eligible as evidence, but no foundation drift was recorded."
+            )
+            result.success = False
+            result.error = f"{result.error or ''}\n{verification_error}".strip()
+        elif foundation_status == "drift":
+            clear_foundation_bindings(state)
+            integrity_error = (
+                "FoundationIntegrityError: dispatched cell changed the sealed "
+                "Stage 1 atlas (" + ", ".join(foundation_changes[:12]) + "). "
+                "The execution is not eligible as evidence; stop downstream "
+                "analysis and start an explicit new foundation lineage."
+            )
+            result.success = False
+            result.error = f"{result.error or ''}\n{integrity_error}".strip()
+            mark_foundation_drift(state, integrity_error)
+        elif not result.error:
+            accept_foundation_extensions(state, post_signature)
+            commit_foundation_bindings(state, code)
+        else:
+            # A failed Jupyter cell may have partially rebound aliases. Do not
+            # trust cross-cell derived-object provenance after that boundary.
+            clear_foundation_bindings(state)
+    else:
+        await self.sandbox.execute(
+            "import anndata as _ad\n"
+            "for _name, _obj in list(globals().items()):\n"
+            "    if isinstance(_obj, _ad.AnnData):\n"
+            "        _obj.obs_names_make_unique()\n"
+            "        _obj.var_names_make_unique()\n"
+            "del _ad\n", skip_safety_check=True
+        )
     try:
         cohort_after = await probe_canonical_cohort(self.sandbox)
         cohort_identity = record_cohort_transition(

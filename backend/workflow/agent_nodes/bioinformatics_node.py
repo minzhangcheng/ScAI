@@ -679,6 +679,33 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
         "bioinformatics_result": final_result
     }
 
+    should_seal_foundation = (
+        action == "stage1_complete"
+        or (
+            action == "complete"
+            and planning_stage == "full"
+            and int(analysis_state.current_round or 0) == 1
+        )
+    )
+    foundation_error = None
+    if should_seal_foundation:
+        foundation_signature = await self.bioinformatics_agent.capture_main_object_signature(
+            "adata", None
+        )
+        foundation_error = seal_foundation(
+            analysis_state, foundation_signature, canonical_name="adata"
+        )
+        if foundation_error:
+            gate_observations.append(_evidence_gate_record(
+                gate="stage1-foundation-integrity",
+                rule_id="scai-native/stage1-foundation-integrity",
+                subject="adata",
+                detail=foundation_error,
+                severity="error",
+            ))
+            final_result["status"] = "failed"
+            cache_invalidate(analysis_state, AgentType.BIOINFORMATICS)
+
     if action in ("revision", "incomplete"):
         # Stay in the current stage and keep current_plan intact: after the
         # revision is approved the agent resumes this same plan from its
@@ -705,7 +732,7 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
         # not installed that output yet, so the workflow-level pointer still
         # names the input; move it forward for everything that reads it.
         self._current_graph_state = result_state
-    elif action == "stage1_complete":
+    elif action == "stage1_complete" and not foundation_error:
         # Stage transition: stage1 genuinely completed → set up for stage2.
         # Don't cache the stage1 result — stage2 re-enters this node and must
         # run fresh. Biochem/pathology/literature cache survives so stage2
@@ -723,11 +750,19 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
         }
         analysis_state.current_plan = None
         cache_invalidate(analysis_state, AgentType.BIOINFORMATICS)
-    else:  # "complete"
+    elif not foundation_error:  # "complete"
         cache_store(analysis_state, AgentType.BIOINFORMATICS, final_result)
         if planning_stage == "stage2":
             result_state["planning_stage"] = "full"
             result_state["planning_context"] = None  # Clear stage1 context after stage2 completes
+
+    if foundation_error:
+        result_state["plan_revision_needed"] = True
+        result_state["plan_revision_context"] = {
+            "reason": foundation_error,
+            "technical_invariant": "stage1_foundation_integrity",
+        }
+        self._current_graph_state = result_state
 
     return result_state
 

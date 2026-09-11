@@ -1,6 +1,7 @@
 """Active-cohort identity and stale-artifact invalidation contracts."""
 
 from backend.models.schemas import (
+    AnalysisStep,
     AnalysisState,
     CodeExecution,
     PublicationFigure,
@@ -45,7 +46,7 @@ def test_parse_cohort_probe_accepts_only_structured_digest_marker():
     ) is None
 
 
-def test_cohort_transition_invalidates_prior_current_artifacts():
+def test_cohort_transition_retains_prior_artifacts_with_warning():
     old_digest = "a" * 64
     new_digest = "b" * 64
     state = AnalysisState(id="cohort-session", user_id="user", current_round=2)
@@ -93,16 +94,15 @@ def test_cohort_transition_invalidates_prior_current_artifacts():
 
     assert identity["cohort_generation"] == 2
     assert identity["cohort_digest"] == new_digest
-    assert state.publication_figures[0].is_current is False
-    assert state.publication_tables[0].is_current is False
-    assert "Canonical analysis cohort changed" in (
-        state.publication_figures[0].invalidation_reason or ""
-    )
-    assert old_task.status == "abandoned"
-    assert old_task.reason == "cohort_changed"
+    assert state.publication_figures[0].is_current is True
+    assert state.publication_tables[0].is_current is True
+    assert "remains included" in state.publication_figures[0].description
+    assert "remains included" in state.publication_tables[0].description
+    assert old_task.status == "exhausted_excluded"
+    assert old_task.reason == "attempts_exhausted"
     assert find_figure_revision_task(
         state, plan_id=None, plan_requirement_key=None
-    ) is None
+    ) is old_task
 
 
 def test_current_cohort_report_retains_legacy_findings_as_pi_observations():
@@ -233,6 +233,23 @@ def test_report_requires_current_cohort_generation_even_for_same_digest():
             }
         },
         code_history=[old_execution, current_execution],
+        publication_figures=[PublicationFigure(
+            name="old generation figure", description="historical render",
+            figure_type="other", png_path="old.png", pdf_path="old.pdf",
+            round_number=1, lineage_id="main", cohort_generation=1,
+            cohort_digest=digest, source_execution_id=old_execution.id,
+        )],
+        publication_tables=[PublicationTable(
+            name="old generation table", description="historical table",
+            csv_path="old.csv", round_number=1, lineage_id="main",
+            cohort_generation=1, cohort_digest=digest,
+            source_execution_id=old_execution.id,
+            is_current=False,
+            invalidation_reason=(
+                "Canonical analysis cohort changed; artifact belongs to an "
+                "earlier cohort."
+            ),
+        )],
         round_results=[RoundResult(
             round_number=1,
             lineage_id="main",
@@ -246,7 +263,7 @@ def test_report_requires_current_cohort_generation_even_for_same_digest():
     report_state = build_lineage_report_state(state, "main")
 
     assert [item.id for item in report_state.code_history] == [
-        current_execution.id
+        old_execution.id, current_execution.id,
     ]
     assert report_state.round_results[0].bioinformatics_findings == [
         "Current generation finding."
@@ -255,9 +272,76 @@ def test_report_requires_current_cohort_generation_even_for_same_digest():
     assert report_state.round_results[0].evidence_execution_ids == [
         current_execution.id
     ]
+    assert [figure.name for figure in report_state.publication_figures] == [
+        "old generation figure"
+    ]
+    assert [table.name for table in report_state.publication_tables] == [
+        "old generation table"
+    ]
     assert state.round_results[0].bioinformatics_findings == [
         "Old generation finding.", "Current generation finding.",
     ]
+
+
+def test_report_keeps_historical_figure_execution_without_a_table():
+    from backend.services.report.lineage import build_lineage_report_state
+
+    digest = "7" * 64
+    old_execution = CodeExecution(
+        id="old-figure-execution", code="draw_old_figure()", round_number=1,
+        evidence_schema_version=2, execution_status="succeeded",
+        lineage_id="main", analysis_generation=1, cohort_generation=1,
+        cohort_digest=digest,
+    )
+    current_execution = old_execution.model_copy(update={
+        "id": "current-execution", "code": "current_analysis()",
+        "analysis_generation": 2, "cohort_generation": 2,
+    })
+    state = AnalysisState(
+        id="historical-figure-receipt", user_id="user",
+        sandbox_state={
+            "analysis_generation": 2,
+            "cohort_identity_v1": {
+                **_probe(digest), "cohort_generation": 2,
+                "lineage_id": "main",
+            },
+        },
+        code_history=[old_execution, current_execution],
+        analysis_log=[
+            AnalysisStep(
+                step_number=1, step_type="execute_code",
+                execution_id=old_execution.id, round_number=1,
+            ),
+            AnalysisStep(
+                step_number=2, step_type="execute_code",
+                execution_id=current_execution.id, round_number=1,
+            ),
+        ],
+        publication_figures=[PublicationFigure(
+            name="historical figure", description="original caption",
+            figure_type="other", png_path="old.png", pdf_path="old.pdf",
+            round_number=1, lineage_id="main", analysis_generation=1,
+            cohort_generation=1, cohort_digest=digest,
+            source_execution_id=old_execution.id,
+            is_current=False,
+            invalidation_reason=(
+                "Canonical analysis cohort changed; artifact belongs to an "
+                "earlier cohort."
+            ),
+        )],
+    )
+
+    report_state = build_lineage_report_state(state, "main")
+
+    assert [item.id for item in report_state.code_history] == [
+        old_execution.id, current_execution.id,
+    ]
+    assert [item.execution_id for item in report_state.analysis_log] == [
+        old_execution.id, current_execution.id,
+    ]
+    assert "recorded cohort identity" in (
+        report_state.publication_figures[0].description
+    )
 
 
 def test_report_rejects_failed_and_cross_plan_execution_links():
