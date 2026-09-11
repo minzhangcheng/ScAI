@@ -289,6 +289,48 @@ def test_html_matches_registered_metadata_by_stem_when_record_path_is_empty(tmp_
     assert "Authoritative planned-result description." in html
 
 
+def test_html_deterministically_discloses_registered_figure_reservation(tmp_path):
+    agent = _agent()
+    agent.session_id = "s"
+    fig = _png(tmp_path / "workspace" / "figures" / "reserved.png")
+    state = AnalysisState(id="s", user_id="u", name="T")
+    reserved = PublicationFigure(
+        name="reserved",
+        description="Reserved panel.",
+        figure_type="heatmap",
+        png_path=str(fig),
+        pdf_path="",
+        render_sha256=hashlib.sha256(fig.read_bytes()).hexdigest(),
+        pdf_sha256="2" * 64,
+        review_status=FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS,
+        pi_degraded_acceptance=True,
+        pi_degraded_acceptance_reason="A & B < C labels remain crowded.",
+        unresolved_must_fix=["Separate A & B < C labels."],
+    )
+    state.publication_figures = [reserved]
+    sections = [{
+        "id": "direction_1", "title": "Direction", "analysis_type": "specific",
+        "content": "[FIGURE: reserved.png]", "figures": [], "tables": [],
+    }]
+    out = tmp_path / "reports"
+    out.mkdir(parents=True, exist_ok=True)
+
+    html_path = agent._generate_html_report(
+        {"title": "T", "figures": [], "tables": [], "_analysis_state": state},
+        sections, "abstract", "conclusions",
+        [{"filename": "reserved.png", "path": str(fig), "category": "heatmap"}],
+        {"reserved.png": fig},
+        {"total_steps_monitored": 0, "steps_with_technical_issues": 0,
+         "pi_escalations": 0},
+        "en", out, tmp_path / "workspace",
+    )
+    rendered = Path(html_path).read_text(encoding="utf-8")
+
+    assert rendered.count("figure-reservation-notice") == 1
+    assert "A &amp; B &lt; C labels remain crowded" in rendered
+    assert "&amp;amp;" not in rendered
+
+
 def test_html_does_not_guess_same_stem_pdf_for_download_or_package(tmp_path):
     agent = _agent()
     agent.session_id = "s"

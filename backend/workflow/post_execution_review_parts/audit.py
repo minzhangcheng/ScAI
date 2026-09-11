@@ -822,10 +822,13 @@ def sanitize_review_plan(
     """Bound the PI's review output. The task cap is the cost ceiling: an LLM PI
     asked what else could be done answers with 1-15 items every single time, so
     the number of tasks admitted is a hard constant here, not the PI's choice."""
+    from backend.services.supplementary_contract import SUPPLEMENTARY_CONTRACT_VERSION
+
     if not isinstance(plan, dict):
         return {"gaps": [], "requested_tasks": [], "supplementary_tasks": [], "out_of_scope": [],
                 "step_decisions": [], "verdict": "no_action",
-                "rationale": "Review returned no structured plan.", "followups": []}
+                "rationale": "Review returned no structured plan.", "followups": [],
+                "supplementary_contract_version": SUPPLEMENTARY_CONTRACT_VERSION}
     cap = max(0, int(max_tasks))
     requested_tasks = _clean_list(
         plan.get("supplementary_tasks"), _MAX_LIST, _MAX_TASK_LEN,
@@ -878,6 +881,7 @@ def sanitize_review_plan(
         "verdict": verdict,
         "rationale": str(plan.get("rationale", "") or "")[:2000],
         "followups": followups,
+        "supplementary_contract_version": SUPPLEMENTARY_CONTRACT_VERSION,
     }
 
 
@@ -1026,6 +1030,9 @@ def sanitize_review_result(result: Any) -> Dict[str, Any]:
             _MAX_GAP_LEN,
             diagnostic=True,
         )
+    selection = result.get("active_object_selection")
+    if not isinstance(selection, dict):
+        selection = {}
     return {
         "status": str(result.get("status", "completed") or "completed"),
         "summary": str(result.get("summary", "") or "Supplementary analysis completed.")[:4000],
@@ -1036,6 +1043,15 @@ def sanitize_review_result(result: Any) -> Dict[str, Any]:
         "figures": [],
         "warnings": warnings,
         "evidence_records": _sanitize_evidence_records(result.get("evidence_records")),
+        "active_object_selection": {
+            "name": str(selection.get("name") or "")[:100],
+            "selection_source": str(selection.get("selection_source") or "")[:100],
+            "canonical_verified": selection.get("canonical_verified") is True,
+            "candidate_names": _clean_list(
+                selection.get("candidate_names"), 20, 100,
+            ),
+            "selection_error": str(selection.get("selection_error") or "")[:500],
+        },
     }
 
 

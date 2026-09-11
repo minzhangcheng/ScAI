@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.7 · **Last updated**: 2026-09-11
+**Version**: 0.56.8 · **Last updated**: 2026-09-11
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,20 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.56.x — (2026-09-08 onward)**
+
+- `0.56.8` — Makes Bioinformatics input selection and restricted supplementary
+  execution follow one durable technical contract. Each model turn receives a
+  request-local authoritative registry of registered input paths while output
+  paths remain rooted in the session workspace; validation prefers the sealed
+  canonical AnnData object and refuses ambiguous or drifted candidates. The PI
+  planner and supplementary executor now share a versioned capability boundary,
+  record object-selection and foundation-verification observations, and retain
+  objective review snapshots before and after figure follow-up without rewriting
+  the PI assessment. Publication figures accepted with reservations carry bounded,
+  escaped notices through discovery, reports, regenerated HTML, and Supervisor
+  views, including the distinction between the figure state at review time and
+  the final technical state. Focused backend checks passed `134/134`; no image
+  build, registry push, deployment, or live-session mutation was performed.
 
 - `0.56.7` — Protects the accepted Stage 1 AnnData atlas as a technical
   integrity boundary. The live canonical `adata` is fingerprinted and sealed

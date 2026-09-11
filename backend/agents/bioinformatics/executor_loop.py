@@ -154,12 +154,20 @@ async def start_turn(context) -> TurnStart:
             f"[Bioinformatics] Escalating tool_choice to 'required' "
             f"after {context.empty_response_count} empty response(s)"
         )
+    request_messages = list(context.messages)
+    state = getattr(context.agent, "_current_analysis_state", None)
+    if state is not None:
+        input_anchor = context.agent._build_authoritative_input_anchor(state)
+        if input_anchor:
+            # Request-only: every turn receives the freshest registry without
+            # duplicating the reminder in history or checkpoint transcripts.
+            request_messages.append({"role": "user", "content": input_anchor})
     try:
         response = await context.agent._budgeted_text_call(
             context.agent.llm_client.chat_with_tools,
-            messages=context.messages,
+            messages=request_messages,
             max_tokens=NO_OUTPUT_TOKEN_CAP,
-            anchor_count=context.agent._context_anchor_count(context.messages),
+            anchor_count=context.agent._context_anchor_count(request_messages),
             summarize=context.agent._summarize_dropped_messages,
             model=context.agent.model,
             tools=TOOLS,

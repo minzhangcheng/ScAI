@@ -373,7 +373,9 @@ def _executor_prompt_workspace() -> str:
 The notebook's first cells define `_WORKSPACE_DIR` (a pathlib.Path) and change
 into it. That definition is part of the notebook, so code rooted at
 `_WORKSPACE_DIR` runs anywhere the notebook is replayed; a hard-coded path runs
-only on the machine that produced it. Never write an absolute path into code.
+only on the machine that produced it. Never hard-code an absolute OUTPUT path.
+Exact absolute INPUT paths from the registered upload inventory are authoritative
+and are the required exception; never replace them with a guessed workspace path.
 The literal value is deliberately not given to you here -- you do not need it,
 and code that contains it is not reproducible.
 All output files MUST be saved using `_WORKSPACE_DIR` as the root. NEVER use relative paths like './' or '../'.
@@ -384,7 +386,7 @@ When writing files, ALWAYS use the `_WORKSPACE_DIR` variable for the path:
   (_WORKSPACE_DIR / 'tables').mkdir(exist_ok=True)
   df.to_csv(_WORKSPACE_DIR / 'tables' / 'filename.csv')
   adata.write(_WORKSPACE_DIR / 'output.h5ad')
-Do NOT use string literals for paths (e.g., './output.csv', '/workspace/results/').
+Do NOT use string literals for OUTPUT paths (e.g., './output.csv', '/workspace/results/').
 Do NOT call open('filename', 'w') with bare filenames — use open(_WORKSPACE_DIR / 'tables' / 'filename', 'w').
 
 **MISSING DEPENDENCIES**:

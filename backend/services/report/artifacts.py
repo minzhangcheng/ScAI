@@ -369,6 +369,13 @@ def description_with_data_drift_warning(artifact: Any) -> str:
     return artifact_selection.description_with_data_drift_warning(artifact)
 
 
+def figure_reservation_notice(artifact: Any) -> dict[str, Any]:
+    """Return the report-visible PI reservation disclosure for one figure."""
+    return artifact_selection.figure_reservation_notice(
+        artifact, bindings=sys.modules[__name__]
+    )
+
+
 
 def is_report_eligible(artifact: Any) -> bool:
     """Return whether a reviewed artifact is current enough for final reports."""

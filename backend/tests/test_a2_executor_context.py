@@ -38,6 +38,7 @@ def test_main_and_supplementary_executors_receive_registered_nested_upload(tmp_p
     render_inventory = getattr(agent, "_render_registered_data_files", None)
     assert callable(render_inventory), "executor must expose registered upload inventory"
     inventory = render_inventory(state)
+    input_anchor = agent._build_authoritative_input_anchor(state)
     main_context = agent._build_data_context(state)
     prompt = agent._build_supplementary_executor_prompt(
         ["Run replicate-aware bulk differential expression"],
@@ -55,6 +56,8 @@ def test_main_and_supplementary_executors_receive_registered_nested_upload(tmp_p
     assert "nested-note-1" in main_context
     assert "REGISTERED UPLOAD INVENTORY IS AUTHORITATIVE" in main_context
     assert str(bulk_path) in prompt
+    assert str(bulk_path) in input_anchor
+    assert "_WORKSPACE_DIR is an output root only" in input_anchor
     assert "PYDESEQ2" not in prompt.upper()
     assert "package missing" in prompt
 
@@ -122,3 +125,4 @@ async def test_supplementary_real_entry_receives_registered_inventory(tmp_path):
     assert "counts-1" in prompt
     assert str(upload) in prompt
     assert "Registered uploaded data files (authoritative)" in prompt
+    assert "SUPPLEMENTARY TECHNICAL CONTRACT v1" in prompt

@@ -280,31 +280,65 @@ class IntrospectionMixin:
 
         return (None, None)
 
-    async def introspect_validation_metadata(self, cluster_key_hint: Optional[str]) -> Dict[str, Any]:
+    async def introspect_validation_metadata(
+        self,
+        cluster_key_hint: Optional[str],
+        preferred_var_name: Optional[str] = None,
+        *,
+        require_preferred: bool = False,
+    ) -> Dict[str, Any]:
+        """Inspect one active AnnData without depending on globals insertion order.
+
+        Existing callers that do not name a preferred variable retain the legacy
+        first-available behavior. Supplementary execution supplies the durable
+        foundation name (or the legacy ``adata`` convention) and can require an
+        exact match when the session has a sealed canonical object.
+        """
         if not self.sandbox:
             return {}
         hint_repr = repr(cluster_key_hint)
+        preferred_repr = repr(preferred_var_name)
         code = (
             "import json as _json, os as _os, anndata as _ad\n"
             "import pandas as _pd\n"
             f"_hint = {hint_repr}\n"
+            f"_preferred = {preferred_repr}\n"
+            f"_require_preferred = {bool(require_preferred)!r}\n"
             "_qc = ('n_genes','n_counts','total_counts','pct_counts','percent','mito','ribo','hb',"
             "'hemoglobin','doublet','scrublet','ambient','cycle','phase','s_score','g2m')\n"
             "_cond = ('condition','treatment','genotype','disease','status','group','arm','cohort')\n"
             "_samp = ('sample','donor','patient','subject')\n"
             "_batch = ('batch','lane','run','library')\n"
-            "_out = {}\n"
-            "for _name, _o in list(globals().items()):\n"
-            "    if not isinstance(_o, _ad.AnnData) or _name.startswith('_'): continue\n"
-            "    _cols = [str(_c) for _c in _o.obs.columns]; _low = {_c: _c.lower() for _c in _cols}\n"
+            "def _cluster_key(_o):\n"
+            "    _cols = [str(_c) for _c in _o.obs.columns]\n"
             "    _cand = [_c for _c in _cols if _c.startswith('leiden') or _c.startswith('louvain') or _c=='cluster']\n"
             "    _key = _hint if (_hint and _hint in _cols) else None\n"
             "    if _key is None:\n"
             "        for _k in ['leiden', 'louvain', 'cluster']:\n"
             "            if _k in _cols: _key = _k; break\n"
-            "    if _key is None:\n"
-            "        _key = _cand[0] if _cand else None\n"
-            "    if _key is None: continue\n"
+            "    if _key is None: _key = _cand[0] if _cand else None\n"
+            "    return _key, _cand\n"
+            "_candidates = {}\n"
+            "for _name, _o in list(globals().items()):\n"
+            "    if not isinstance(_o, _ad.AnnData) or _name.startswith('_'): continue\n"
+            "    _key, _cand = _cluster_key(_o)\n"
+            "    if _key is not None: _candidates[_name] = (_key, _cand)\n"
+            "_selected = None; _selection_source = None; _selection_error = None\n"
+            "if _preferred and _preferred in _candidates:\n"
+            "    _selected = _preferred; _selection_source = 'preferred'\n"
+            "elif _preferred and _require_preferred:\n"
+            "    _selection_error = 'preferred AnnData is unavailable or has no clustering key'\n"
+            "elif _preferred and len(_candidates) == 1:\n"
+            "    _selected = next(iter(_candidates)); _selection_source = 'sole_candidate'\n"
+            "elif _preferred and len(_candidates) > 1:\n"
+            "    _selection_error = 'multiple AnnData candidates and no authoritative preferred object'\n"
+            "elif _candidates:\n"
+            "    _selected = next(iter(_candidates)); _selection_source = 'first_available'\n"
+            "_out = {'candidate_names': list(_candidates), 'selection_source': _selection_source, 'selection_error': _selection_error}\n"
+            "if _selected is not None:\n"
+            "    _name = _selected; _o = globals()[_name]\n"
+            "    _cols = [str(_c) for _c in _o.obs.columns]; _low = {_c: _c.lower() for _c in _cols}\n"
+            "    _key, _cand = _candidates[_name]\n"
             "    _summ = {}\n"
             "    for _c in _cols:\n"
             "        try:\n"
@@ -315,7 +349,7 @@ class IntrospectionMixin:
             "        except Exception: pass\n"
             "    try: _writable = _os.access('workspace', _os.W_OK)\n"
             "    except Exception: _writable = False\n"
-            "    _out = {'var': _name, 'cluster_key': _key, 'candidate_cluster_keys': _cand,\n"
+            "    _out.update({'var': _name, 'cluster_key': _key, 'candidate_cluster_keys': _cand,\n"
             "            'obs_columns': _cols,\n"
             "            'qc_like': [_c for _c in _cols if any(_p in _low[_c] for _p in _qc)],\n"
             "            'condition_like': [_c for _c in _cols if any(_p in _low[_c] for _p in _cond)],\n"
@@ -324,8 +358,7 @@ class IntrospectionMixin:
             "            'obs_summaries': _summ,\n"
             "            'layers': [str(_l) for _l in list(_o.layers.keys())],\n"
             "            'n_obs': int(_o.n_obs), 'n_vars': int(_o.n_vars),\n"
-            "            'has_raw': _o.raw is not None, 'output_dir_writable': bool(_writable)}\n"
-            "    break\n"
+            "            'has_raw': _o.raw is not None, 'output_dir_writable': bool(_writable)})\n"
             "print(_json.dumps(_out))\n"
         )
         try:
@@ -333,7 +366,9 @@ class IntrospectionMixin:
             out = (getattr(result, "output", "") or "").strip()
             line = next((ln for ln in out.splitlines()[::-1] if ln.strip().startswith("{")), None)
             parsed = json.loads(line) if line else {}
-            return parsed if isinstance(parsed, dict) and parsed.get("var") else {}
+            if not isinstance(parsed, dict):
+                return {}
+            return parsed if parsed.get("var") or parsed.get("selection_error") else {}
         except Exception as e:
             logger.warning(f"[{getattr(self, 'session_id', '?')}] validation metadata introspection failed: {e}")
             return {}

@@ -53,6 +53,56 @@ def description_with_data_drift_warning(artifact: Any) -> str:
     return (description + "\n\n" + warning).strip()
 
 
+def figure_reservation_notice(artifact: Any, *, bindings) -> dict[str, Any]:
+    """Build a bounded, deterministic disclosure for a retained figure."""
+    _artifact_value = getattr(bindings, "_artifact_value")
+    _status_value = getattr(bindings, "_status_value")
+    blocking_violations = getattr(bindings, "blocking_violations")
+    status = _status_value(artifact)
+    degraded = bool(_artifact_value(artifact, "pi_degraded_acceptance", False))
+    if status != "accepted_with_reservations" and not degraded:
+        return {}
+
+    details: list[str] = []
+
+    def _add(value: Any, limit: int = 600) -> None:
+        text = " ".join(str(value or "").split()).strip()[:limit]
+        if text and text not in details:
+            details.append(text)
+
+    _add(_artifact_value(artifact, "pi_degraded_acceptance_reason", None))
+    unresolved = list(_artifact_value(artifact, "unresolved_must_fix", None) or [])
+    if unresolved:
+        _add("Unresolved PI must-fix observations: " + "; ".join(
+            " ".join(str(item).split())[:240] for item in unresolved[:8]
+        ), 1200)
+    blocking = list(blocking_violations(
+        _artifact_value(artifact, "layout_violations", None) or []
+    ))
+    if blocking:
+        kinds = sorted({
+            str(item.get("kind") or "unspecified")[:100]
+            for item in blocking if isinstance(item, dict)
+        })
+        _add(
+            f"Renderer measured {len(blocking)} blocking layout observation(s): "
+            + ", ".join(kinds),
+            600,
+        )
+    _add(_artifact_value(artifact, "pi_feedback", None))
+    if not details:
+        details.append("No detailed reservation reason was retained.")
+    return {
+        "status": "accepted_with_reservations",
+        "pi_degraded_acceptance": degraded,
+        "summary": (
+            "PI retained this figure with reservations after the bounded revision process."
+            if degraded else "PI accepted this figure with reservations."
+        ),
+        "details": details[:12],
+    }
+
+
 def compact_figure_event_payload(figure: Any, *, review_status: str | None=None, pi_feedback: str | None=None, bindings) -> dict[str, Any]:
     """Serialize a live figure event without its potentially large preview."""
     Any = getattr(bindings, 'Any')

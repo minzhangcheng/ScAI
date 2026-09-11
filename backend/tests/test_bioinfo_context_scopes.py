@@ -18,6 +18,7 @@ from backend.models.schemas import (
     AgentType,
     AnalysisPlan,
     AnalysisState,
+    DataFile,
     PlanStep,
 )
 from backend.tests.split_facade import setattr_facade
@@ -387,6 +388,14 @@ async def test_checkpoint_restores_current_step_and_replaced_transcript(
     )
     executor_loop.bind_facade(bioinformatics_facade)
     state = AnalysisState(id="test-session", user_id="test-user")
+    registered_path = tmp_path / "uploads" / "merged_counts.csv"
+    state.data_files = [DataFile(
+        id="counts-1",
+        filename="merged_counts.csv",
+        file_path=str(registered_path),
+        data_type="bulk RNA-seq",
+        section="sequencing",
+    )]
     context = await executor_loop.prepare_loop_context(
         agent,
         state,
@@ -411,6 +420,24 @@ async def test_checkpoint_restores_current_step_and_replaced_transcript(
     assert trimmed_messages != original_messages
 
     await executor_loop.start_turn(context)
+
+    for call in fake_client.chat_with_tools.await_args_list:
+        request_messages = call.kwargs["messages"]
+        anchors = [
+            message for message in request_messages
+            if str(message.get("content") or "").startswith(
+                "[Authoritative Registered Inputs]"
+            )
+        ]
+        assert len(anchors) == 1
+        assert str(registered_path) in anchors[0]["content"]
+        assert request_messages[-1] == anchors[0]
+    assert not any(
+        str(message.get("content") or "").startswith(
+            "[Authoritative Registered Inputs]"
+        )
+        for message in context.messages
+    )
 
     assert saved_payload is not None
     assert saved_payload["step_number"] == context.step_count == 2

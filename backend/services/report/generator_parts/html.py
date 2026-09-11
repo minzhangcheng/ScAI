@@ -143,6 +143,9 @@ def _render_primary_sections(
             # Get interpretation if available
             fig_interpretation = figure.get("interpretation", "")
             fig_interpretation_html = bindings.markdown_to_html(fig_interpretation) if fig_interpretation else ""
+            reservation_html = bindings.render_figure_reservation_notice_html(
+                figure.get("reservation_notice")
+            )
             legacy_note = (
                 '<p class="artifact-provenance legacy-unreviewed">'
                 "Legacy unregistered artifact; no publication review record is available."
@@ -170,6 +173,7 @@ def _render_primary_sections(
                             <h4>{bindings.html_module.escape(fig_label)}: {bindings.html_module.escape(fig_name)}</h4>
                             {legacy_note}
                             {"<p><em>" + fig_caption_html + "</em></p>" if fig_caption_html else ""}
+                            {reservation_html}
                             {interpretation_section}
                             <div class="figure-actions">
                                 <a href="figures/{png_filename}" download class="download-btn png">

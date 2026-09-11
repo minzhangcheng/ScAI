@@ -15,6 +15,9 @@ from ...utils.direction_payload import (
     build_direction_projection,
     build_direction_projection_block,
 )
+from ...services.supplementary_contract import (
+    render_supplementary_capability_contract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +126,7 @@ useful increment remains. These are PI decisions, not host keyword verdicts.
         )
         findings_block = self._format_review_items(findings) or "None reported."
         suggestions_block = self._format_review_items(agent_suggestions) or "None."
+        supplementary_contract = render_supplementary_capability_contract()
         # Mirror sanitize_review_plan's own clamp so the prompt never advertises a
         # budget the caller will then trim away.
         cap = max(0, int(max_tasks or 0))
@@ -181,8 +185,11 @@ validate step IDs and status syntax.
 {direction_context_section}
 ## What may become a supplementary task
 A supplementary task is handed to a restricted code generator that runs against THE DATA
-ALREADY LOADED IN THIS SESSION'S KERNEL, in this round, with no new inputs of any kind.
+ALREADY AVAILABLE TO THIS SESSION, in this round. Registered session inputs may be read;
+unregistered or external inputs may not be acquired.
 Only work satisfiable that way may enter `supplementary_tasks`.
+
+{supplementary_contract}
 
 {direction_guidance}
 

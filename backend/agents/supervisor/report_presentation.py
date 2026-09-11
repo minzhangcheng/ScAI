@@ -55,6 +55,7 @@ async def build_report_figures(self, ctx, analysis_state):
                 "is_published_head": bool(
                     getattr(record, "is_published_head", False)
                 ),
+                "reservation_notice": figure_reservation_notice(record),
             }
         fig_entry = {
             "filename": fig_name,
@@ -71,6 +72,7 @@ async def build_report_figures(self, ctx, analysis_state):
             "revision_of_id": metadata.get("revision_of_id"),
             "supersedes_id": metadata.get("supersedes_id"),
             "is_published_head": bool(metadata.get("is_published_head")),
+            "reservation_notice": metadata.get("reservation_notice") or {},
             "provenance_kind": (
                 "registered_publication"
                 if record is not None
@@ -351,6 +353,7 @@ def prepare_html_render(
                 "figure_type": pf.figure_type or "other",
                 "description": pf.description or "",
                 "interpretation": pf.interpretation or "",
+                "reservation_notice": figure_reservation_notice(pf),
             }
             if fname:
                 pub_fig_descriptions[fname] = metadata
@@ -396,6 +399,9 @@ def prepare_html_render(
         display_name = fig_desc.get("name", fig_name.replace("_", " ").rsplit(".", 1)[0].title())
         description = fig_desc.get("description", "")
         interpretation = fig_desc.get("interpretation", "")
+        reservation_html = render_figure_reservation_notice_html(
+            fig_desc.get("reservation_notice")
+        )
         if not description and not interpretation:
             interpretation = caption
 
@@ -446,6 +452,7 @@ def prepare_html_render(
                     <h4>{html_module.escape(display_name)}</h4>
                     {legacy_html}
                     {desc_html}
+                    {reservation_html}
                     {interp_html}
                     <div class="figure-actions">
                         {img_btn}

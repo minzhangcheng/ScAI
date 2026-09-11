@@ -713,6 +713,7 @@ async def _generate_section_from_existing_figures_impl(
                     "is_published_head": bool(fig.get("is_published_head")),
                     "review_status": fig.get("review_status") or "",
                     "review_unavailable": bool(fig.get("review_unavailable")),
+                    "reservation_notice": fig.get("reservation_notice") or {},
                     "is_publication": bool(fig.get("is_publication", False)),
                     "section": section_id,
                     "analysis_type": analysis_type
@@ -821,6 +822,7 @@ async def _generate_section_from_existing_figures_impl(
             "is_published_head": bool(fig.get("is_published_head")),
             "review_status": fig.get("review_status") or "",
             "review_unavailable": bool(fig.get("review_unavailable")),
+            "reservation_notice": fig.get("reservation_notice") or {},
             "is_publication": bool(fig.get("is_publication", False)),
             "section": section_id,
             "analysis_type": analysis_type

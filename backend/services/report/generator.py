@@ -57,6 +57,7 @@ from backend.services.report.quality import (
     build_report_partial_fields,
     build_quality_disclosures,
     render_report_limitations_html,
+    render_figure_reservation_notice_html,
     render_report_status_line_html,
     render_technical_review_notice_html,
 )

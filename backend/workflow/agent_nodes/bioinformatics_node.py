@@ -497,6 +497,13 @@ async def collect_bioinformatics_results(self, ctx, result):
         planning_stage=planning_stage,
     )
     result["figure_contract"] = figure_contract.summary()
+    review_meta = await self._finalize_review_technical_snapshots(
+        analysis_state,
+        review_meta,
+        figure_contract_at_review=preliminary_figure_contract.summary(),
+        final_figure_contract=figure_contract.summary(),
+        figure_followup=figure_followup,
+    )
 
     ctx.update(
         all_findings=all_findings, all_figures=all_figures,

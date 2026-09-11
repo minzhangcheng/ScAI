@@ -24,6 +24,7 @@ from backend.services.report.score_section import build_score_definitions_sectio
 from backend.services.report.literature_files import render_literature_download_li
 from backend.services.report.interaction_records import render_direction_selection_history_html
 from backend.services.report.quality import (
+    render_figure_reservation_notice_html,
     render_report_limitations_html,
     render_report_status_line_html,
     render_technical_review_notice_html,
@@ -733,6 +734,9 @@ def _render_regenerated_sections(
 
             fig_interpretation = figure.get("interpretation", "")
             fig_interpretation_html = markdown_to_html(fig_interpretation) if fig_interpretation else ""
+            reservation_html = render_figure_reservation_notice_html(
+                figure.get("reservation_notice")
+            )
 
             img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else "<p>Image not available</p>"
 
@@ -752,6 +756,7 @@ def _render_regenerated_sections(
                     <div class="figure-caption">
                         <h4>{html_module.escape(fig_label)}: {html_module.escape(fig_name)}</h4>
                         {"<p>" + fig_caption_html + "</p>" if fig_caption_html else ""}
+                        {reservation_html}
                         {interpretation_section}
                         <div class="figure-actions">
                             <a href="figures/{png_filename}" download class="download-btn png">

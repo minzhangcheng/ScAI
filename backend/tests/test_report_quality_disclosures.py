@@ -17,6 +17,7 @@ from backend.services.report.generator import (
 )
 from backend.services.report.quality import (
     build_quality_disclosures,
+    render_figure_reservation_notice_html,
     render_report_limitations_html,
     render_technical_review_notice_html,
 )
@@ -502,6 +503,55 @@ def test_technical_review_notice_is_selective_and_escaped():
     assert "Persistence &lt;error &amp; retry&gt;" in notice
     assert "Scientific evidence is partial" not in notice
     assert "<script" not in notice
+
+
+def test_figure_reservation_notice_is_deterministic_and_escaped_once():
+    rendered = render_figure_reservation_notice_html({
+        "summary": "PI accepted A & B < C with reservations.",
+        "details": ["Labels A & B < C still overlap."],
+    })
+
+    assert "figure-reservation-notice" in rendered
+    assert "A &amp; B &lt; C" in rendered
+    assert "&amp;amp;" not in rendered
+    assert "&amp;lt;" not in rendered
+
+
+def test_quality_disclosure_separates_review_time_and_final_figure_state():
+    state = AnalysisState(id="session", user_id="owner")
+    state.post_execution_reviews = [{
+        "review_attempt_id": "attempt-1",
+        "round_number": 9,
+        "review_status": "completed",
+        "review_result": {"status": "completed", "warnings": []},
+        "review_plan": {"step_decisions": []},
+        "assessment": {
+            "verdict": "partial",
+            "remaining_gaps": ["A scientific limitation remains."],
+        },
+        "plan_audit": {"n_figure_unmet": 1},
+        "technical_snapshots": {
+            "at_review": {
+                "figure_contract": {
+                    "passed": False, "n_requirements": 1, "n_missing": 1,
+                },
+            },
+            "after_figure_followup": {
+                "figure_contract": {
+                    "passed": True, "n_requirements": 1, "n_missing": 0,
+                    "eligible_figure_names": ["round9_umap"],
+                },
+            },
+        },
+    }]
+
+    review = build_quality_disclosures(state)["post_execution_reviews"][0]
+
+    assert review["plan_audit"]["n_figure_unmet"] == 1
+    assert review["figure_contract_at_review"]["passed"] is False
+    assert review["final_figure_contract"]["passed"] is True
+    assert review["figure_gap_status"] == "fulfilled"
+    assert review["final_gap_status"] == "unresolved"
 
 
 def test_technical_notice_ignores_legacy_graphic_metadata_and_generic_partial():

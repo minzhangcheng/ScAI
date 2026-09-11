@@ -370,6 +370,10 @@ def test_registered_metadata_retains_plan_provenance(tmp_path):
     assert metadata["pi_degraded_acceptance_reason"] == (
         "PI retained the best candidate."
     )
+    assert metadata["reservation_notice"]["pi_degraded_acceptance"] is True
+    assert "PI retained the best candidate" in " ".join(
+        metadata["reservation_notice"]["details"]
+    )
 
 
 def test_annotation_diagnostic_exception_is_context_only(tmp_path):

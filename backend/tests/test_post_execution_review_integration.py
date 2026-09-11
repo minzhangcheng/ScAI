@@ -288,7 +288,10 @@ async def test_real_agents_complete_the_review_and_merge_back():
 
     # The PI actually saw the audit, and its prompt named the unmet step.
     assert "Pathway activity" in pi.prompts_seen[0]
+    assert "SUPPLEMENTARY TECHNICAL CONTRACT v1" in pi.prompts_seen[0]
+    assert "may not re-run filtering, normalization, scaling, clustering" in pi.prompts_seen[0]
     assert meta["review_status"] in ("completed", "partial")
+    assert meta["review_plan"]["supplementary_contract_version"] == 1
     assert meta["assessment"]["verdict"] == "resolved"
     assert bio.executed_code and "run_ulm" in bio.executed_code[0]
 
@@ -702,3 +705,40 @@ async def test_no_active_object_fails_the_pass_not_the_round():
     assert meta["review_status"] == "failed"
     assert bio.executed_code == []
     assert merge["findings"] == []
+
+
+@pytest.mark.asyncio
+async def test_final_figure_snapshot_updates_same_review_without_rewriting_pi_assessment():
+    state = _state_and_plan()
+    harness = _Harness(_pi_agent([_REVIEW_JSON]), _bio_agent([]))
+    original = {
+        "review_attempt_id": "attempt-1",
+        "review_status": "completed",
+        "plan_audit": {"n_figure_unmet": 1},
+        "assessment": {
+            "verdict": "partial",
+            "remaining_gaps": ["PI still considers the comparison limited."],
+        },
+    }
+    state.post_execution_reviews = [dict(original)]
+
+    updated = await harness._finalize_review_technical_snapshots(
+        state,
+        dict(original),
+        figure_contract_at_review={
+            "passed": False, "n_requirements": 1, "n_missing": 1,
+            "missing": [{"figure_type": "umap"}], "eligible_figure_names": [],
+        },
+        final_figure_contract={
+            "passed": True, "n_requirements": 1, "n_missing": 0,
+            "missing": [], "eligible_figure_names": ["round9_umap"],
+        },
+        figure_followup={"status": "completed", "figures": ["round9_umap"]},
+    )
+
+    assert len(state.post_execution_reviews) == 1
+    assert updated["assessment"] == original["assessment"]
+    snapshots = updated["technical_snapshots"]
+    assert snapshots["at_review"]["figure_contract"]["passed"] is False
+    assert snapshots["after_figure_followup"]["figure_contract"]["passed"] is True
+    assert snapshots["after_figure_followup"]["persistence_status"] == "acknowledged"

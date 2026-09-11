@@ -485,10 +485,21 @@ class PostExecutionReviewMixin:
             if records is None:
                 return
             stable_id = str(meta.get("direction_pass_id") or "").strip()
-            if stable_id:
+            attempt_id = str(meta.get("review_attempt_id") or "").strip()
+            if stable_id or attempt_id:
                 for index in range(len(records) - 1, -1, -1):
                     existing = records[index]
-                    if isinstance(existing, dict) and existing.get("direction_pass_id") == stable_id:
+                    if not isinstance(existing, dict):
+                        continue
+                    same_direction = bool(
+                        stable_id and existing.get("direction_pass_id") == stable_id
+                    )
+                    same_attempt = bool(
+                        not stable_id
+                        and attempt_id
+                        and existing.get("review_attempt_id") == attempt_id
+                    )
+                    if same_direction or same_attempt:
                         records[index] = meta
                         return
             records.append(meta)
@@ -522,6 +533,59 @@ class PostExecutionReviewMixin:
                 f"[{self.session_id}] Could not persist post-execution review lifecycle: {exc}"
             )
             return False
+
+    async def _finalize_review_technical_snapshots(
+        self,
+        analysis_state,
+        review_meta: Dict[str, Any],
+        *,
+        figure_contract_at_review: Dict[str, Any],
+        final_figure_contract: Dict[str, Any],
+        figure_followup: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Attach final objective figure state without rewriting PI judgement."""
+        if not isinstance(review_meta, dict) or not review_meta:
+            return review_meta
+        updated = dict(review_meta)
+        snapshots = dict(updated.get("technical_snapshots") or {})
+        snapshots.setdefault("at_review", {
+            "plan_audit": self._serialize_review_record(
+                updated.get("plan_audit") or {}
+            ),
+            "figure_contract": self._serialize_review_record(
+                figure_contract_at_review or {}
+            ),
+        })
+        snapshots["after_figure_followup"] = {
+            "figure_contract": self._serialize_review_record(
+                final_figure_contract or {}
+            ),
+            "figure_followup": self._serialize_review_record({
+                "status": figure_followup.get("status"),
+                "remaining_task_ids": list(
+                    figure_followup.get("remaining_task_ids") or []
+                )[:40],
+                "targeted_task_ids": list(
+                    figure_followup.get("targeted_task_ids") or []
+                )[:40],
+                "redraw_status": figure_followup.get("redraw_status"),
+                "figures": list(figure_followup.get("figures") or [])[:40],
+            }),
+            "persistence_status": "acknowledged",
+            "finalized_at": datetime.now().isoformat(),
+        }
+        updated["technical_snapshots"] = snapshots
+        if not (
+            str(updated.get("direction_pass_id") or "").strip()
+            or str(updated.get("review_attempt_id") or "").strip()
+        ):
+            return updated
+        self._store_review(analysis_state, updated)
+        if not await self._persist_review_state(analysis_state):
+            snapshots["after_figure_followup"]["persistence_status"] = "pending"
+            updated["technical_snapshots"] = snapshots
+            self._store_review(analysis_state, updated)
+        return updated
 
     @staticmethod
     def _serialize_review_record(value: Any) -> Any:
@@ -1142,6 +1206,9 @@ class PostExecutionReviewMixin:
                 "warnings": supplementary.get("warnings", []),
                 "evidence_records": supplementary.get("evidence_records", []),
                 "finding_records": supplementary.get("finding_records", []),
+                "active_object_selection": supplementary.get(
+                    "active_object_selection", {}
+                ),
             },
             "plan_audit": audit_summary,
             "supplementary_findings": supplementary.get("findings", []),

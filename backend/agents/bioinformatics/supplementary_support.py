@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from typing import Any, Dict, List, Optional, Set
@@ -14,6 +15,7 @@ from backend.services.foundation_integrity import (
     clear_foundation_bindings,
     commit_foundation_bindings,
     foundation_is_sealed,
+    foundation_manifest,
     foundation_write_guard,
     mark_foundation_drift,
 )
@@ -533,6 +535,7 @@ async def run_supplementary_tasks(
     produced: List[CodeExecution] = []
     analysis_log: List[AnalysisStep] = []
     warnings: List[str] = []
+    active_object_selection: Dict[str, Any] = {}
     image_versions_before = agent._supplementary_image_versions(
         getattr(agent.sandbox, "working_dir", None)
     )
@@ -575,20 +578,71 @@ async def run_supplementary_tasks(
             "code_history": list(produced),
             "analysis_log": list(analysis_log),
             "evidence_records": evidence_records,
+            "active_object_selection": dict(active_object_selection),
         }
 
     if not clean_tasks:
         return _envelope("completed", "No supplementary tasks were requested.", [])
 
-    metadata = await agent.introspect_validation_metadata(None)
+    manifest = foundation_manifest(state) if state is not None else None
+    preferred_var_name = str((manifest or {}).get("canonical_name") or "adata")
+    introspect = agent.introspect_validation_metadata
+    try:
+        parameters = inspect.signature(introspect).parameters.values()
+        supports_preferred = (
+            "preferred_var_name" in inspect.signature(introspect).parameters
+            or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+        )
+    except (TypeError, ValueError):
+        supports_preferred = True
+    metadata = await (
+        introspect(
+            None,
+            preferred_var_name=preferred_var_name,
+            require_preferred=manifest is not None,
+        )
+        if supports_preferred else introspect(None)
+    )
     var_name = metadata.get("var")
     cluster_key = metadata.get("cluster_key")
+    active_object_selection.update({
+        "name": str(var_name or ""),
+        "selection_source": (
+            "foundation"
+            if manifest is not None and var_name == preferred_var_name
+            else str(metadata.get("selection_source") or "unresolved")
+        ),
+        "canonical_verified": False,
+        "candidate_names": [
+            str(name)[:100] for name in (metadata.get("candidate_names") or [])[:20]
+        ],
+        "selection_error": str(metadata.get("selection_error") or "")[:500],
+    })
     if not var_name:
+        reason = active_object_selection["selection_error"] or "no active analysis object"
         return _envelope(
             "failed",
-            "No active analysis object in the kernel; supplementary tasks cannot run.",
-            ["no active analysis object"],
+            "No unambiguous active analysis object is available; supplementary tasks cannot run.",
+            [reason],
         )
+    if manifest is not None:
+        current_signature = await agent.capture_main_object_signature(var_name, cluster_key)
+        foundation_status, foundation_changes = classify_foundation_signature(
+            state, current_signature
+        )
+        if foundation_status != "verified":
+            detail = (
+                "sealed canonical object fingerprint is unavailable"
+                if foundation_status == "unavailable"
+                else "sealed canonical object drifted: " + ", ".join(foundation_changes[:12])
+            )
+            active_object_selection["selection_error"] = detail
+            return _envelope(
+                "failed",
+                "The sealed canonical analysis object could not be verified; supplementary execution was not started.",
+                [detail],
+            )
+        active_object_selection["canonical_verified"] = True
     round_number = int(getattr(agent._current_analysis_state, "current_round", 0) or 0)
 
     try:

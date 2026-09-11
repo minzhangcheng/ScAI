@@ -458,6 +458,33 @@ class BioinformaticsAgent(
             lines.append("- (none)")
         return "\n".join(lines)
 
+    @staticmethod
+    def _build_authoritative_input_anchor(state: AnalysisState) -> str:
+        """Build the bounded, request-local reminder for registered inputs."""
+        data_files = list(getattr(state, "data_files", None) or [])
+        if not data_files:
+            return ""
+        lines = [
+            "[Authoritative Registered Inputs]",
+            "Use these exact paths for inputs. _WORKSPACE_DIR is an output root only; "
+            "never derive an input path by joining it with a filename.",
+        ]
+        for data_file in data_files[:40]:
+            path = str(getattr(data_file, "file_path", "") or "").strip()
+            if not path:
+                continue
+            lines.append(
+                "- id={id}; filename={filename}; data_type={data_type}; path={path}".format(
+                    id=str(getattr(data_file, "id", "") or "")[:100],
+                    filename=str(getattr(data_file, "filename", "") or "")[:200],
+                    data_type=str(getattr(data_file, "data_type", "") or "")[:100],
+                    path=path[:600],
+                )
+            )
+        if len(data_files) > 40:
+            lines.append(f"- ({len(data_files) - 40} additional registered inputs omitted)")
+        return "\n".join(lines) if len(lines) > 2 else ""
+
     def _build_data_context(self, state: AnalysisState) -> str:
         """Build context about available data"""
         data_parts = ["=== Available Data ===\n"]

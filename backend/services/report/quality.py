@@ -232,6 +232,37 @@ def _review_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Li
         audit_unmet = _integer(audit.get("n_unmet", 0))
         audit_unverifiable = _integer(audit.get("n_unverifiable", 0))
         audit_steps = _integer(audit.get("n_steps", 0))
+        technical_snapshots = (
+            raw.get("technical_snapshots")
+            if isinstance(raw.get("technical_snapshots"), dict)
+            else {}
+        )
+        review_snapshot = (
+            technical_snapshots.get("at_review")
+            if isinstance(technical_snapshots.get("at_review"), dict)
+            else {}
+        )
+        final_snapshot = (
+            technical_snapshots.get("after_figure_followup")
+            if isinstance(technical_snapshots.get("after_figure_followup"), dict)
+            else {}
+        )
+        figure_at_review = (
+            review_snapshot.get("figure_contract")
+            if isinstance(review_snapshot.get("figure_contract"), dict)
+            else {}
+        )
+        final_figure = (
+            final_snapshot.get("figure_contract")
+            if isinstance(final_snapshot.get("figure_contract"), dict)
+            else {}
+        )
+        if final_figure:
+            figure_gap_status = (
+                "fulfilled" if final_figure.get("passed") is True else "missing"
+            )
+        else:
+            figure_gap_status = "unverifiable"
         review_plan = (
             raw.get("review_plan")
             if isinstance(raw.get("review_plan"), dict)
@@ -341,6 +372,20 @@ def _review_disclosures(state: Any) -> tuple[List[Dict[str, Any]], List[str], Li
             "persistence_status": str(raw.get("persistence_status") or ""),
             "persistence_failure": str(raw.get("persistence_failure") or "")[:4000],
             "final_gap_status": final_gap_status,
+            "figure_gap_status": figure_gap_status,
+            "figure_contract_at_review": {
+                "passed": figure_at_review.get("passed"),
+                "n_requirements": _integer(figure_at_review.get("n_requirements", 0)),
+                "n_missing": _integer(figure_at_review.get("n_missing", 0)),
+            },
+            "final_figure_contract": {
+                "passed": final_figure.get("passed"),
+                "n_requirements": _integer(final_figure.get("n_requirements", 0)),
+                "n_missing": _integer(final_figure.get("n_missing", 0)),
+                "eligible_figure_names": _texts(
+                    final_figure.get("eligible_figure_names"), limit=100
+                ),
+            },
             "plan_audit": {
                 "n_steps": audit_steps,
                 "n_completed": _integer(audit.get("n_completed", 0)),
@@ -623,8 +668,25 @@ def render_report_limitations_html(report: Dict[str, Any] | None) -> str:
     return ""
 
 
+def render_figure_reservation_notice_html(notice: Any) -> str:
+    """Render one persisted reservation without relying on LLM-authored prose."""
+    if not isinstance(notice, dict) or not notice:
+        return ""
+    summary = " ".join(str(notice.get("summary") or "").split()).strip()
+    details = _texts(notice.get("details"), limit=12)
+    if not summary and not details:
+        return ""
+    body = "".join(f"<li>{html_module.escape(item)}</li>" for item in details)
+    detail_html = f"<ul>{body}</ul>" if body else ""
+    return (
+        '<div class="figure-reservation-notice" role="note">'
+        f"<strong>{html_module.escape(summary or 'PI accepted this figure with reservations.')}</strong>"
+        f"{detail_html}</div>"
+    )
+
+
 def render_technical_review_notice_html(report: Dict[str, Any] | None) -> str:
-    """Render only explicit technical review-availability observations.
+    """Render explicit technical-review and retained-reservation observations.
 
     This presentation notice deliberately reads retained report metadata rather
     than scientific cautions or the generic report status.  Missing/legacy
@@ -659,6 +721,18 @@ def render_technical_review_notice_html(report: Dict[str, Any] | None) -> str:
         seen_figures.add(identity)
         review_status = str(figure.get("review_status") or "").lower()
         review_unavailable = figure.get("review_unavailable") is True
+        reservation = figure.get("reservation_notice")
+        if isinstance(reservation, dict) and reservation:
+            label = str(
+                figure.get("filename")
+                or figure.get("name")
+                or "selected publication figure"
+            ).strip()[:160]
+            summary = " ".join(str(reservation.get("summary") or "").split())
+            observations.append(
+                f"Figure review for {label}: "
+                f"{summary or 'PI accepted this figure with reservations.'}"
+            )
         if review_unavailable or review_status == "pending":
             label = str(
                 figure.get("filename")
@@ -763,13 +837,14 @@ def render_technical_review_notice_html(report: Dict[str, Any] | None) -> str:
         rendered.append(f"<li>{html_module.escape(observation)}</li>")
     if len(observations) > 8:
         rendered.append(
-            "<li>Additional technical review availability observations: "
+            "<li>Additional technical review observations: "
             f"{len(observations) - 8}.</li>"
         )
     return (
         '<div class="technical-review-notice" role="note">'
-        "<strong>Technical review availability:</strong>"
+        "<strong>Technical review observations:</strong>"
         "<ul>"
         + "".join(rendered)
-        + "</ul><p>Report generation continued; this notice records technical availability only.</p></div>"
+        + "</ul><p>Report generation continued; these notices disclose technical "
+        "review state and retained figure reservations only.</p></div>"
     )

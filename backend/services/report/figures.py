@@ -17,6 +17,7 @@ from backend.services.report.artifacts import (
     description_with_data_drift_warning,
     eligible_artifacts,
     excluded_artifact_stems,
+    figure_reservation_notice,
     resolve_archival_pdf,
     resolve_archival_render,
 )
@@ -233,6 +234,7 @@ class FiguresMixin:
                     or ""
                 ),
                 "review_unavailable": bool(getattr(pf, "review_unavailable", False)),
+                "reservation_notice": figure_reservation_notice(pf),
                 "is_publication": True,
                 "provenance_kind": "registered_publication",
                 "is_legacy": False,
@@ -297,6 +299,7 @@ class FiguresMixin:
                 "is_published_head": bool(candidate.get("is_published_head")),
                 "review_status": candidate.get("review_status") or "",
                 "review_unavailable": bool(candidate.get("review_unavailable")),
+                "reservation_notice": candidate.get("reservation_notice") or {},
                 "is_publication": bool(candidate.get("is_publication", False)),
                 "provenance_kind": candidate.get("provenance_kind") or "unregistered",
                 "is_legacy": bool(candidate.get("is_legacy")),

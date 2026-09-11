@@ -416,6 +416,9 @@ class SupplementaryMixin:
             GENE_INDEX_ALIGNMENT_GUIDANCE,
             LIANA_RUNTIME_GUIDANCE,
         )
+        from backend.services.supplementary_contract import (
+            render_supplementary_capability_contract,
+        )
         main_var = metadata.get("var")
         task_list = "\n".join(f"{i}. {t}" for i, t in enumerate(tasks, start=1))
         return f"""You are a RESTRICTED SUPPLEMENTARY code generator. This round's analysis has
@@ -441,6 +444,9 @@ Use these exact registered paths before inspecting guessed kernel variable names
 workspace globs. A file that is not currently loaded into the kernel is NOT missing.
 Do not report an uploaded modality as absent until every matching registered path has
 been checked.
+
+## Shared capability boundary
+{render_supplementary_capability_contract()}
 
 ## Installed-runtime guidance
 {LIANA_RUNTIME_GUIDANCE}

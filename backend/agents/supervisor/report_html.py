@@ -26,6 +26,7 @@ from ...services.report.artifacts import (
     artifact_stems,
     eligible_artifacts,
     excluded_artifact_stems,
+    figure_reservation_notice,
     resolve_archival_render,
     verified_artifact_bytes,
 )
@@ -35,6 +36,7 @@ from ...services.report.figure_discovery import (
     prepare_discovered_figures,
 )
 from ...services.report.quality import (
+    render_figure_reservation_notice_html,
     render_report_limitations_html,
     render_report_status_line_html,
 )

@@ -19,6 +19,7 @@ from backend.services.report.artifacts import (
     description_with_data_drift_warning,
     eligible_artifacts,
     excluded_artifact_stems,
+    figure_reservation_notice,
     gallery_artifacts,
     image_file_sha256,
     pdf_file_sha256,
@@ -325,6 +326,7 @@ def publication_figure_metadata(
             "pi_degraded_acceptance_reason": getattr(
                 figure, "pi_degraded_acceptance_reason", None
             ),
+            "reservation_notice": figure_reservation_notice(figure),
             "plan_step_id": getattr(figure, "plan_step_id", None),
             "plan_id": getattr(figure, "plan_id", None),
             "purpose": getattr(figure, "purpose", "result") or "result",
