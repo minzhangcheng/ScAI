@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.9 · **Last updated**: 2026-09-12
+**Version**: 0.56.10 · **Last updated**: 2026-09-12
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,25 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.56.x — (2026-09-08 onward)**
+
+- `0.56.10` — Applies the bounded review-follow-up repairs. A third supervisor
+  force-skip now logs a degraded terminal settlement instead of claiming
+  `report_findings` was injected, preserves earlier `evidence_gate_findings`
+  observations, and appends the `supervisor-force-stop` record once without
+  adding a synthetic scientific finding. Representation-change warnings now
+  annotate retained earlier-round artifacts by lineage, round, and generation
+  while leaving current-generation artifacts and eligibility untouched.
+  Oversized PubMed E-utilities queries switch to POST with a separately
+  throttled 414 fallback, short queries keep GET, and a 414-switched request
+  stays POST across 429 retries without spending their budget. Supervisor
+  verdict normalisation accepts string-typed `issues` (trimmed, bounded) and
+  drops a redundant `plan_requirement_key` from `supplementary`/`reject`
+  bindings with a bounded warning. Figureless report warnings now name the
+  owning round(s). The review evidence's 0.56.7→0.56.9 file-history claim was
+  corrected. Focused repair checks plus structural guards passed `211/211`;
+  expanded literature checks passed `145/145` and report/Bioinformatics/
+  executor regressions passed `428/428`; no image build, deployment, or
+  live-session mutation was performed.
 
 - `0.56.9` — Restores stop-and-summarize after Snapshot V2 removal left a stale
   snapshot-failure guard in the lifecycle resume route, where it raised an

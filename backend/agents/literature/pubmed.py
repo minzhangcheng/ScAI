@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 import weakref
 import xml.etree.ElementTree as ET
 
@@ -41,6 +42,11 @@ NCBI_RATE_LIMIT_PER_SECOND = 3.0
 NCBI_RATE_LIMIT_PER_SECOND_WITH_KEY = 10.0
 NCBI_RATE_LIMIT_RETRIES = 3
 NCBI_RATE_LIMIT_BACKOFF_SECONDS = 1.0
+# Two audited session queries prepared GET URLs of 7,679 and 33,218 characters;
+# both were retried unchanged and degraded to LLM-only knowledge. The threshold
+# is deliberately below both measurements and is retunable if NCBI's limits
+# change.
+NCBI_MAX_GET_URI_CHARS = 4000
 
 
 class _EntrezThrottle:
@@ -1242,11 +1248,35 @@ IMPORTANT:
             if self._entrez_api_key()
             else NCBI_RATE_LIMIT_PER_SECOND
         )
+        encoded_length = len(url) + 1 + len(urllib.parse.urlencode(params))
+        use_post = encoded_length >= NCBI_MAX_GET_URI_CHARS
+        if use_post:
+            logger.warning(
+                "[Literature] NCBI E-utilities URI for %s is %d characters; using POST",
+                url,
+                encoded_length,
+            )
         last_error: Optional[Exception] = None
         for attempt in range(NCBI_RATE_LIMIT_RETRIES + 1):
             await _entrez_throttle.acquire(rate)
             async with httpx.AsyncClient(**client_kwargs) as client:
-                resp = await client.get(url, params=params)
+                if use_post:
+                    resp = await client.post(url, data=params)
+                else:
+                    resp = await client.get(url, params=params)
+                    if resp.status_code == 414:
+                        # The 414->POST switch is an in-attempt transport
+                        # correction, not a new 429 retry iteration. It still
+                        # spends a second request, so take another throttle slot.
+                        await _entrez_throttle.acquire(rate)
+                        logger.warning(
+                            "[Literature] NCBI E-utilities GET for %s was %d "
+                            "characters and returned 414; retrying as POST",
+                            url,
+                            encoded_length,
+                        )
+                        use_post = True
+                        resp = await client.post(url, data=params)
             if resp.status_code != 429:
                 resp.raise_for_status()
                 return resp

@@ -4,11 +4,21 @@ Also tests force_skip flag: when stuck AND PI already intervened, the supervisor
 signals that the current step must be force-skipped.
 """
 from datetime import datetime
+import inspect
+import logging
+from types import SimpleNamespace
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from backend.agents.bioinformatics import executor_loop
+from backend.agents.bioinformatics.executor_auxiliary import LoopExit, TurnEffects
+from backend.agents.bioinformatics.executor_context import ExecutorLoopContext
+from backend.agents.bioinformatics.executor_report_gates import evidence_gate_record
 from backend.agents.supervisor_agent import SupervisorAgent, SupervisorEvalResult
 from backend.agents.supervisor.shared import SupervisorRecord
 from backend.models.schemas import AnalysisStep
+from backend.utils.error_parsing import extract_error_type
 
 
 STUCK_ERROR = "SyntaxError: unterminated string literal (Cell In[18], line 124)"
@@ -251,3 +261,135 @@ async def test_platform_fault_force_skips_immediately_with_failure_class():
     result = await sup.evaluate_step(step, [])
     assert result.force_skip is True
     assert result.failure_class == "platform_fault"
+
+
+def _force_stop_context(*, prior_gates, findings):
+    """Minimal loop context for the third force-skip terminal-settlement path."""
+    agent = SimpleNamespace(
+        _recent_sup_feedback=set(),
+        _force_skip_error_type="RepeatedExecutionError",
+        _force_skip_counter=2,
+    )
+    return ExecutorLoopContext(
+        agent=agent,
+        analysis_state=None,
+        messages=[],
+        findings=findings,
+        figures=[],
+        analysis_log=[
+            SimpleNamespace(
+                code_error="RepeatedExecutionError: repeated execution requested",
+            )
+        ],
+        mechanism_programs=[],
+        checkpoint_manager=None,
+        save_checkpoint=AsyncMock(),
+        review_callback=None,
+        supervisor_callback=AsyncMock(
+            return_value=SimpleNamespace(feedback="", force_skip=True)
+        ),
+        planning_stage="full",
+        max_steps=10,
+        attempt_start_step=0,
+        step_count=1,
+        evidence_gate_findings=list(prior_gates),
+    ), agent
+
+
+@pytest.mark.asyncio
+async def test_force_skip_truthfully_settles_degraded_without_polluting_findings(
+    monkeypatch, caplog,
+):
+    """The third ignored force-skip settles the loop; it must not claim or make
+    a report_findings call, and the only durable trace is the structured gate."""
+    monkeypatch.setattr(
+        executor_loop, "extract_error_type", extract_error_type, raising=False,
+    )
+    monkeypatch.setattr(
+        executor_loop, "_evidence_gate_record", evidence_gate_record,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        executor_loop, "logger", logging.getLogger("test.executor.force_stop"),
+        raising=False,
+    )
+    caplog.set_level(logging.WARNING, logger="test.executor.force_stop")
+
+    prior_gate = {
+        "gate": "prior-evidence-gate",
+        "rule_id": "scai-native/prior-gate",
+        "detail": "A prior observation that must survive.",
+        "severity": "advise",
+        "forced_release": False,
+    }
+    findings: list = []
+    context, agent = _force_stop_context(prior_gates=[prior_gate], findings=findings)
+    effects = TurnEffects(
+        response=None,
+        step_figures=[],
+        has_substantive_work=False,
+        has_figure_work=False,
+        has_register_score=False,
+    )
+
+    exit_status = await executor_loop.finish_turn(context, effects)
+
+    assert exit_status is LoopExit.TERMINAL
+    assert context.findings is findings
+    assert context.findings == [], (
+        "the forced stop must not inject a technical note into scientific findings"
+    )
+    assert context.evidence_gate_degraded is True
+    assert context.force_break is True
+    assert context.completed is True
+    assert context.evidence_gate_findings[0] == prior_gate
+    forced = [
+        record for record in context.evidence_gate_findings
+        if record.get("gate") == "supervisor-force-stop"
+    ]
+    assert len(forced) == 1
+    assert forced[0]["rule_id"] == "scai-native/supervisor-force-stop"
+    assert forced[0]["detail"] == (
+        "Analysis was forcibly stopped after repeated execution failures."
+    )
+    assert "forcing a degraded terminal settlement" in caplog.text
+    assert "report_findings was not invoked" in caplog.text
+    assert "forcing report_findings" not in caplog.text
+    system_messages = [
+        message["content"] for message in context.messages
+        if message["role"] == "user" and message["content"].startswith("[System]")
+    ]
+    assert len(system_messages) == 1
+    assert "You MUST call report_findings now" in system_messages[0]
+
+    # Re-entering the same branch must not duplicate the forced-stop record or
+    # alter scientific findings, while preserving the prior observation.
+    agent._force_skip_counter = 2
+    agent._force_skip_error_type = "RepeatedExecutionError"
+    context.force_break = False
+    second_exit = await executor_loop.finish_turn(context, effects)
+
+    assert second_exit is LoopExit.TERMINAL
+    assert context.findings == []
+    assert context.evidence_gate_findings.count(prior_gate) == 1
+
+    # Existing scientific findings are equally untouched.
+    existing_context, _agent = _force_stop_context(
+        prior_gates=[], findings=["existing scientific finding"]
+    )
+    await executor_loop.finish_turn(existing_context, effects)
+    assert existing_context.findings == ["existing scientific finding"]
+    forced_after = [
+        record for record in existing_context.evidence_gate_findings
+        if record.get("gate") == "supervisor-force-stop"
+    ]
+    assert len(forced_after) == 1
+    assert len(existing_context.evidence_gate_findings) == 1
+
+    # Source-level supplements: the old false claim is gone and the
+    # transcript-only nature of the [System] message is documented.
+    source = inspect.getsource(executor_loop.finish_turn)
+    assert "by injecting report_findings and breaking" not in source
+    assert "forcing report_findings" not in source
+    assert "all_findings.append" not in source
+    assert "transcript-only" in source

@@ -79,9 +79,11 @@ def _record_detected_representation_change(state: Any) -> None:
     current_lineage = getattr(state, "restore_branch_id", None) or "main"
     for collection_name in ("publication_figures", "publication_tables"):
         for artifact in getattr(state, collection_name, None) or []:
-            if int(getattr(artifact, "round_number", 0) or 0) not in (0, current_round):
-                continue
             if (getattr(artifact, "lineage_id", None) or "main") != current_lineage:
+                continue
+            if int(getattr(artifact, "round_number", 0) or 0) > current_round:
+                continue
+            if int(getattr(artifact, "analysis_generation", 0) or 0) >= generation:
                 continue
             provenance = dict(getattr(artifact, "expression_provenance", None) or {})
             provenance["representation_change_warning"] = _REPRESENTATION_WARNING

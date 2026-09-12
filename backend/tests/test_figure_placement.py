@@ -1,5 +1,6 @@
 """Placement enforcement: a figure sits in the section owning its round,
 appears once, and is never silently dropped."""
+import logging
 import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -223,6 +224,25 @@ def test_missing_ordinary_section_is_reported_figureless():
     )
 
     assert "direction_1" in report.figureless_sections
+    integration = next(s for s in outline if s.kind == "integration_final")
+    assert integration.id not in report.figureless_sections
+
+
+def test_figureless_warning_names_owning_rounds_without_changing_payload(caplog):
+    outline = _outline()
+    sections = _sections(outline)
+    with caplog.at_level(
+        logging.WARNING,
+        logger="backend.services.report.figure_placement",
+    ):
+        report = enforce_figure_placement(sections, outline, {}, [])
+
+    assert report.figureless_sections == [
+        "exploration_findings", "direction_1", "direction_2",
+    ]
+    assert "exploration_findings (round 1)" in caplog.text
+    assert "direction_1 (round 2)" in caplog.text
+    assert "direction_2 (round 3)" in caplog.text
     integration = next(s for s in outline if s.kind == "integration_final")
     assert integration.id not in report.figureless_sections
 

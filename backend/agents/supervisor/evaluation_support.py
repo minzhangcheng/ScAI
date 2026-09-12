@@ -479,6 +479,25 @@ def _validate_supervisor_result(
             normalized_value[field] = list(default) if isinstance(default, list) else default
     value = normalized_value
 
+    # Provider tool calls occasionally return a lone string instead of the
+    # schema's single-item list. Accept that one mechanical shape mismatch, trim
+    # and bound the entries, but leave every non-string-typed value for the
+    # strict checks below.
+    issues = value["issues"]
+    if isinstance(issues, str):
+        issues = [issues]
+    if isinstance(issues, list) and all(isinstance(item, str) for item in issues):
+        normalized_issues: List[str] = []
+        for item in issues:
+            item = item.strip()
+            if not item:
+                continue
+            normalized_issues.append(item[:2000])
+            if len(normalized_issues) >= 20:
+                break
+        issues = normalized_issues
+    value["issues"] = issues
+
     enums = {
         "severity": {"none", "info", "warning", "critical"},
         "action": {"none", "warn", "redirect"},

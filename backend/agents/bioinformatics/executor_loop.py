@@ -478,7 +478,6 @@ async def finish_turn(context, effects) -> LoopExit:
     agent_reasoning = None
     text_response_count = context.text_response_count
     force_break = context.force_break
-    all_findings = context.findings
     evidence_gate_degraded = context.evidence_gate_degraded
     evidence_gate_findings = context.evidence_gate_findings
     completed = context.completed
@@ -533,12 +532,20 @@ async def finish_turn(context, effects) -> LoopExit:
                     })
                 else:
                     # 3rd force-skip on same error type: the agent has ignored
-                    # two mandatory-skip instructions. Force a hard exit from
-                    # the tool-call loop by injecting report_findings and breaking.
+                    # two mandatory-skip instructions. Exit the tool-call loop
+                    # with a degraded terminal settlement: evidence_gate_degraded
+                    # is set below and LoopExit.TERMINAL is returned. No
+                    # report_findings call is made.
                     logger.warning(
                         f"[Bioinformatics] Force-skip ignored after {self._force_skip_counter} "
-                        f"attempts for {current_err_type}; forcing report_findings"
+                        f"attempts for {current_err_type}; forcing a degraded terminal "
+                        "settlement (report_findings was not invoked)"
                     )
+                    # This [System] message is transcript-only: force_break
+                    # returns LoopExit.TERMINAL, and run_turn_loop breaks before
+                    # the next start_turn() LLM call, so the model never
+                    # receives this message. The text below is unchanged and is
+                    # not a live instruction.
                     messages.append({
                         "role": "user",
                         "content": (
@@ -553,30 +560,38 @@ async def finish_turn(context, effects) -> LoopExit:
         except Exception as e:
             logger.warning(f"[Bioinformatics] Supervisor callback error: {e}")
     # === END SUPERVISOR ===
-    # Force-break: supervisor force-skip was ignored 3 times; the loop
-    # must exit now. Mark completed so the return path produces a valid
-    # status rather than falling through to max_steps_reached with empty findings.
+    # Force-break: supervisor force-skip was ignored 3 times. Enter a degraded
+    # terminal settlement with no report_findings call. Mark completed so the
+    # return path produces a valid status rather than falling through to
+    # max_steps_reached with empty findings.
     if force_break:
         logger.info("[Bioinformatics] Force-break triggered by supervisor force-skip")
-        if not all_findings:
-            all_findings.append(
-                "[Supervisor] Analysis was forcibly stopped: the agent was stuck "
-                "on a repeated error despite mandatory-skip instructions and "
-                "PI guidance. Results below are partial."
-            )
-        # A forced stop is not a clean completion.  Reuse the existing
-        # degraded-evidence channel so the workflow cannot advance a
-        # stage or report the round as fully verified.
+        # A forced stop is not a clean completion. Reuse the existing
+        # degraded-evidence channel so the workflow cannot advance a stage or
+        # report the round as fully verified. The termination state is carried
+        # by evidence_gate_degraded, the structured supervisor-force-stop record,
+        # and the forced_stop result field; do not add it to scientific findings.
         evidence_gate_degraded = True
-        evidence_gate_findings = [
-            _evidence_gate_record(
-                gate="supervisor-force-stop",
-                rule_id="scai-native/supervisor-force-stop",
-                detail="Analysis was forcibly stopped after repeated execution failures.",
-                severity="block",
-                forced_release=True,
-            )
-        ]
+        evidence_gate_findings = list(evidence_gate_findings or [])
+        forced_stop_record = _evidence_gate_record(
+            gate="supervisor-force-stop",
+            rule_id="scai-native/supervisor-force-stop",
+            detail="Analysis was forcibly stopped after repeated execution failures.",
+            severity="block",
+            forced_release=True,
+        )
+        forced_stop_key = (
+            forced_stop_record.get("gate"),
+            forced_stop_record.get("rule_id"),
+            forced_stop_record.get("detail"),
+        )
+        existing_gate_keys = {
+            (record.get("gate"), record.get("rule_id"), record.get("detail"))
+            for record in evidence_gate_findings
+            if isinstance(record, dict)
+        }
+        if forced_stop_key not in existing_gate_keys:
+            evidence_gate_findings.append(forced_stop_record)
         completed = True
         context.force_break = True
         context.evidence_gate_degraded = evidence_gate_degraded

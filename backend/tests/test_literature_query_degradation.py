@@ -1,10 +1,203 @@
+import urllib.parse
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from backend.agents.literature_agent import LiteratureAgent
+from backend.agents.literature import pubmed as pubmed_module
 from backend.agents.literature import query_builders
 from backend.utils.llm_client import UpstreamExhaustedError
+
+
+_PUBMED_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+
+
+class _RecordingThrottle:
+    def __init__(self):
+        self.rates = []
+
+    async def acquire(self, rate_per_second):
+        self.rates.append(rate_per_second)
+
+
+class _RecordingAsyncClient:
+    responses = []
+    calls = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def get(self, url, *, params=None):
+        type(self).calls.append(("get", url, dict(params or {})))
+        return type(self).responses.pop(0)
+
+    async def post(self, url, *, data=None):
+        type(self).calls.append(("post", url, dict(data or {})))
+        return type(self).responses.pop(0)
+
+
+def _search_params(term: str) -> dict:
+    return {
+        "db": "pubmed",
+        "term": term,
+        "retmax": "20",
+        "retmode": "json",
+        "sort": "relevance",
+        "tool": "ScAI",
+        "email": "tester@example.org",
+    }
+
+
+def _prepared_get_uri_length(url: str, params: dict) -> int:
+    return len(url) + 1 + len(urllib.parse.urlencode(params))
+
+
+def _new_pubmed_agent() -> LiteratureAgent:
+    agent = LiteratureAgent.__new__(LiteratureAgent)
+    agent.pubmed_email = "tester@example.org"
+    agent.pubmed_api_key = ""
+    return agent
+
+
+def _install_pubmed_transport(monkeypatch, responses, *, sleep_mock=None):
+    _RecordingAsyncClient.responses = list(responses)
+    _RecordingAsyncClient.calls = []
+    throttle = _RecordingThrottle()
+    monkeypatch.setattr(pubmed_module, "_entrez_throttle", throttle)
+    monkeypatch.setattr(pubmed_module.httpx, "AsyncClient", _RecordingAsyncClient)
+    if sleep_mock is not None:
+        monkeypatch.setattr(pubmed_module.asyncio, "sleep", sleep_mock)
+    return throttle
+
+
+def test_prepared_get_uri_length_matches_httpx_url():
+    params = _search_params("metallothionein AND copper deficiency")
+    params["api_key"] = "test-api-key"
+    assert _prepared_get_uri_length(_PUBMED_URL, params) == len(
+        str(httpx.URL(_PUBMED_URL, params=params))
+    )
+
+
+@pytest.mark.asyncio
+async def test_oversized_pubmed_query_uses_post_with_identical_params(monkeypatch):
+    monkeypatch.delenv("NCBI_API_KEY", raising=False)
+    term = " OR ".join(f"Mtm{n}" for n in range(3000))
+    params = _search_params(term)
+    assert (
+        _prepared_get_uri_length(_PUBMED_URL, params)
+        >= pubmed_module.NCBI_MAX_GET_URI_CHARS
+    )
+    expected = httpx.Response(
+        200,
+        json={"esearchresult": {"idlist": []}},
+        request=httpx.Request("POST", _PUBMED_URL),
+    )
+    throttle = _install_pubmed_transport(monkeypatch, [expected])
+
+    response = await _new_pubmed_agent()._entrez_get(_PUBMED_URL, params, {})
+
+    assert response is expected
+    assert _RecordingAsyncClient.calls == [("post", _PUBMED_URL, params)]
+    assert throttle.rates == [3.0]
+
+
+@pytest.mark.asyncio
+async def test_below_threshold_pubmed_query_keeps_get_transport(monkeypatch):
+    monkeypatch.delenv("NCBI_API_KEY", raising=False)
+    params = _search_params("ferroptosis AND liver")
+    assert (
+        _prepared_get_uri_length(_PUBMED_URL, params)
+        < pubmed_module.NCBI_MAX_GET_URI_CHARS
+    )
+    expected = httpx.Response(
+        200,
+        json={"esearchresult": {"idlist": []}},
+        request=httpx.Request("GET", _PUBMED_URL),
+    )
+    throttle = _install_pubmed_transport(monkeypatch, [expected])
+
+    response = await _new_pubmed_agent()._entrez_get(_PUBMED_URL, params, {})
+
+    assert response is expected
+    assert _RecordingAsyncClient.calls == [("get", _PUBMED_URL, params)]
+    assert throttle.rates == [3.0]
+
+
+@pytest.mark.asyncio
+async def test_get_414_retries_once_as_post_with_second_throttle_slot(monkeypatch):
+    monkeypatch.delenv("NCBI_API_KEY", raising=False)
+    params = _search_params("copper AND Complex-IV")
+    too_long = httpx.Response(
+        414,
+        text="Request-URI Too Long",
+        request=httpx.Request("GET", _PUBMED_URL),
+    )
+    expected = httpx.Response(
+        200,
+        json={"esearchresult": {"idlist": ["123"]}},
+        request=httpx.Request("POST", _PUBMED_URL),
+    )
+    throttle = _install_pubmed_transport(monkeypatch, [too_long, expected])
+
+    response = await _new_pubmed_agent()._entrez_get(_PUBMED_URL, params, {})
+
+    assert response is expected
+    assert _RecordingAsyncClient.calls == [
+        ("get", _PUBMED_URL, params),
+        ("post", _PUBMED_URL, params),
+    ]
+    # Fallback POST is a second request and must take its own throttle slot.
+    assert throttle.rates == [3.0, 3.0]
+
+
+@pytest.mark.asyncio
+async def test_414_transport_switch_stays_post_after_429(monkeypatch):
+    monkeypatch.delenv("NCBI_API_KEY", raising=False)
+    sleep_mock = AsyncMock()
+    params = _search_params("retained below-threshold GET params")
+    responses = [
+        httpx.Response(
+            414,
+            text="Request-URI Too Long",
+            request=httpx.Request("GET", _PUBMED_URL),
+        ),
+        *[
+            httpx.Response(
+                429,
+                text="Too Many Requests",
+                request=httpx.Request("POST", _PUBMED_URL),
+            )
+            for _ in range(3)
+        ],
+        httpx.Response(
+            200,
+            json={"esearchresult": {"idlist": ["456"]}},
+            request=httpx.Request("POST", _PUBMED_URL),
+        ),
+    ]
+    throttle = _install_pubmed_transport(
+        monkeypatch, responses, sleep_mock=sleep_mock
+    )
+
+    response = await _new_pubmed_agent()._entrez_get(_PUBMED_URL, params, {})
+
+    assert response.status_code == 200
+    assert [call[0] for call in _RecordingAsyncClient.calls] == [
+        "get", "post", "post", "post", "post",
+    ]
+    assert all(call[2] == params for call in _RecordingAsyncClient.calls)
+    # One top-level slot for the GET, one fallback slot, and one slot for each
+    # of the three remaining outer attempts. The 414 switch consumed none of
+    # the configured 429 retry budget.
+    assert throttle.rates == [3.0, 3.0, 3.0, 3.0, 3.0]
+    assert sleep_mock.await_count == 3
 
 
 @pytest.mark.asyncio

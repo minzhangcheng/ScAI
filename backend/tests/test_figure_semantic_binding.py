@@ -1,5 +1,7 @@
 """Supervisor semantic binding and durable figure-repair contracts."""
 
+import logging
+
 from backend.agents.supervisor.figure_binding import validate_figure_binding
 from backend.models.schemas import AnalysisState, PublicationFigure
 from backend.services.figure_contract import RequiredFigure, _matches
@@ -27,7 +29,7 @@ def _figure(**overrides) -> PublicationFigure:
     return PublicationFigure(**values)
 
 
-def test_supervisor_binding_validator_is_closed_and_requires_exact_key():
+def test_supervisor_binding_validator_is_closed_and_requires_exact_key(caplog):
     accepted, error = validate_figure_binding({
         "decision": "rebind",
         "plan_requirement_key": "plan.2.1",
@@ -42,11 +44,33 @@ def test_supervisor_binding_validator_is_closed_and_requires_exact_key():
         "plan_requirement_key": None,
         "reason": "missing key",
     })[0] is None
-    assert validate_figure_binding({
-        "decision": "supplementary",
-        "plan_requirement_key": "plan.2.1",
-        "reason": "must not claim a key",
-    })[0] is None
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="backend.agents.supervisor.figure_binding",
+    ):
+        supplementary, supplementary_error = validate_figure_binding({
+            "decision": "supplementary",
+            "plan_requirement_key": "plan.2.1",
+            "reason": "the candidate is additional context",
+        })
+        rejected, rejected_error = validate_figure_binding({
+            "decision": "reject",
+            "plan_requirement_key": "k" * 150,
+            "reason": "does not match the visual requirement",
+        })
+
+    assert supplementary_error == ""
+    assert supplementary["decision"] == "supplementary"
+    assert supplementary["plan_requirement_key"] is None
+
+    assert rejected_error == ""
+    assert rejected["decision"] == "reject"
+    assert rejected["plan_requirement_key"] is None
+
+    assert "plan.2.1" in caplog.text
+    assert "k" * 120 in caplog.text
+    assert "k" * 121 not in caplog.text
 
 
 def test_exact_requirement_key_prevents_cross_step_figure_credit():

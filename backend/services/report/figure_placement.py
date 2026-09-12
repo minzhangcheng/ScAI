@@ -240,6 +240,7 @@ def enforce_figure_placement(
     # (integration gates/final syntheses), are excluded. Those sections may own a
     # workflow round for ordering without claiming that the round produced a new
     # visual result.
+    figureless_rounds: List[Tuple[str, Tuple[int, ...]]] = []
     for osec in outline:
         sid = osec.id
         expects_figures = getattr(osec, "expects_figures", None)
@@ -256,10 +257,18 @@ def enforce_figure_placement(
             section.get("content", "") or ""
         ):
             report.figureless_sections.append(sid)
+            figureless_rounds.append(
+                (sid, tuple(int(r) for r in (getattr(osec, "rounds", ()) or ())))
+            )
     if report.figureless_sections:
         logger.warning(
             "Report sections own a round but show no figure: %s",
-            ", ".join(report.figureless_sections),
+            ", ".join(
+                f"{sid} (round {', '.join(str(r) for r in rounds)})"
+                if rounds
+                else sid
+                for sid, rounds in figureless_rounds
+            ),
         )
 
     if report.relocated or report.duplicates_removed or report.appended:

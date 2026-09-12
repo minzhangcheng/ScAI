@@ -12,6 +12,7 @@ import pytest
 
 from backend.models.schemas import (
     AnalysisState, AnalysisStep, PublicationFigure, FigureReviewStatus,
+    PublicationTable,
 )
 from backend.utils.expression_contract import (
     build_expression_runtime_code,
@@ -776,6 +777,66 @@ def test_representation_change_retains_artifacts_with_warning():
     assert "remains included" in state.publication_figures[0].description
     assert state.publication_figures[1].is_current
     assert state.sandbox_state["analysis_generation"] == 1
+
+
+def test_representation_change_warning_tracks_round_and_generation():
+    state = AnalysisState(id="expr-generation-aware", user_id="u", current_round=3)
+    state.sandbox_state["analysis_generation"] = 4
+
+    def artifact(name, *, round_number, analysis_generation, lineage_id="main"):
+        return PublicationFigure(
+            name=name,
+            description=name,
+            figure_type="umap",
+            png_path=f"{name}.png",
+            pdf_path=f"{name}.pdf",
+            round_number=round_number,
+            analysis_generation=analysis_generation,
+            lineage_id=lineage_id,
+        )
+
+    retained_old = artifact(
+        "retained-old", round_number=2, analysis_generation=2
+    )
+    new_generation = artifact(
+        "new-generation", round_number=3, analysis_generation=5
+    )
+    future_round = artifact(
+        "future-round", round_number=4, analysis_generation=2
+    )
+    other_lineage = artifact(
+        "other-lineage", round_number=2, analysis_generation=2,
+        lineage_id="branch-2",
+    )
+    retained_table = PublicationTable(
+        name="retained-table",
+        description="retained-table",
+        csv_path="retained-table.csv",
+        round_number=1,
+        analysis_generation=2,
+    )
+    state.publication_figures = [
+        retained_old, new_generation, future_round, other_lineage,
+    ]
+    state.publication_tables = [retained_table]
+
+    assert record_representation_change(state, "sc.pp.log1p(adata)") == 0
+
+    assert "remains included" in retained_old.description
+    assert retained_old.expression_provenance["representation_change_warning"]
+    assert retained_old.is_current is True
+    assert "remains included" in retained_table.description
+    assert retained_table.expression_provenance["representation_change_warning"]
+    assert retained_table.is_current is True
+
+    # Artifacts already at the new generation, beyond the current round, or
+    # from another lineage are retained but untouched.
+    assert "remains included" not in new_generation.description
+    assert "representation_change_warning" not in new_generation.expression_provenance
+    for untouched in (future_round, other_lineage):
+        assert "remains included" not in untouched.description
+        assert not untouched.expression_provenance
+        assert untouched.is_current is True
 
 
 def _state_with_current_expression_artifact(tmp_path, name):

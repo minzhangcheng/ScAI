@@ -84,7 +84,7 @@ class _SupervisorHarness(EvaluationMixin):
 async def test_structured_evaluation_retries_schema_failure_with_forced_tool():
     client = _FakeClient(
         [
-            _tool_response(_valid_verdict(issues="not-a-list")),
+            _tool_response(_valid_verdict(issues=[1])),
             _tool_response(_valid_verdict()),
         ]
     )
@@ -100,6 +100,53 @@ async def test_structured_evaluation_retries_schema_failure_with_forced_tool():
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == _SUPERVISOR_REQUIRED_FIELDS
     assert "previous response was rejected" in client.calls[1]["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_string_issues_are_normalized_without_spending_a_review_turn():
+    client = _FakeClient([
+        _tool_response(_valid_verdict(issues="  The legend is unreadable  ")),
+    ])
+    supervisor = _SupervisorHarness(client)
+
+    result = await supervisor._request_structured_evaluation("system", "step")
+
+    assert result["issues"] == ["The legend is unreadable"]
+    assert len(client.calls) == 1
+
+
+def test_issue_strings_are_trimmed_bounded_and_leave_bad_types_rejected():
+    normalized, error = EvaluationMixin._validate_supervisor_result(
+        _valid_verdict(issues=["  first  ", "", "   ", "second"])
+    )
+    assert error == ""
+    assert normalized["issues"] == ["first", "second"]
+
+    normalized, error = EvaluationMixin._validate_supervisor_result(
+        _valid_verdict(issues="one issue")
+    )
+    assert error == ""
+    assert normalized["issues"] == ["one issue"]
+
+    normalized, error = EvaluationMixin._validate_supervisor_result(
+        _valid_verdict(issues="")
+    )
+    assert error == ""
+    assert normalized["issues"] == []
+
+    many = [f"issue-{index}-" + "x" * 3000 for index in range(25)]
+    normalized, error = EvaluationMixin._validate_supervisor_result(
+        _valid_verdict(issues=many)
+    )
+    assert error == ""
+    assert len(normalized["issues"]) == 20
+    assert all(len(issue) == 2000 for issue in normalized["issues"])
+
+    rejected, rejection = EvaluationMixin._validate_supervisor_result(
+        _valid_verdict(issues=[1])
+    )
+    assert rejected is None
+    assert rejection == "issues must be a bounded list of strings"
 
 
 @pytest.mark.asyncio

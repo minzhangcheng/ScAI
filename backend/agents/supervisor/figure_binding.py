@@ -94,7 +94,12 @@ def validate_figure_binding(value: Any) -> tuple[Dict[str, Any] | None, str]:
     if decision in {"accept", "rebind"} and key is None:
         return None, f"{decision} requires plan_requirement_key"
     if decision in {"supplementary", "reject"} and key is not None:
-        return None, f"{decision} must not claim plan_requirement_key"
+        logger.warning(
+            "Dropping redundant plan_requirement_key for %s decision: %s",
+            decision,
+            key[:120],
+        )
+        key = None
     reason = str(value.get("reason") or "").strip()
     if not reason:
         return None, "reason is required"
