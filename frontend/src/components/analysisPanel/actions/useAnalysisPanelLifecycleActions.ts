@@ -253,10 +253,26 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
       options.setShowFeedbackDialog(false)
     } catch (error) {
       console.error('Failed to stop:', error)
+      const detail = error instanceof Error ? error.message : String(error)
+      options.addMessage({
+        id: generateId(),
+        type: 'error',
+        content: options.language === 'zh'
+          ? `停止分析失败：${detail}`
+          : `Failed to stop analysis: ${detail}`,
+        timestamp: new Date().toISOString(),
+      })
     } finally {
       options.setStopping(false)
     }
-  }, [options.stopAnalysis])
+  }, [
+    options.stopAnalysis,
+    options.setShowStopDialog,
+    options.setShowFeedbackDialog,
+    options.setStopping,
+    options.addMessage,
+    options.language,
+  ])
 
   return { blockForwardResume, handleDialogSend, handleDialogSkip, handlePause, handleResume, handleRerun, handleStop }
 }

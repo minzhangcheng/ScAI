@@ -7,6 +7,7 @@ is answered by an explicit re-run rather than a dialog.
 from __future__ import annotations
 
 import pathlib
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -96,6 +97,42 @@ def test_stopping_the_kernel_after_a_failed_save_does_not_raise_a_gate():
     text = split_source("backend.utils.sandbox")
     assert "RuntimePersistenceShutdownBlocked" not in text
     assert "runtime_persistence_gate" not in text
+
+
+@pytest.mark.asyncio
+async def test_stop_and_summarize_does_not_call_retired_snapshot_gate(monkeypatch):
+    """Ordinary report generation remains available after Snapshot V2 removal."""
+    from backend.models.api_requests import StopAnalysisRequest
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.routes import lifecycle
+
+    state = AnalysisState(
+        id="stop-summary",
+        user_id="user-one",
+        status=TaskStatus.RUNNING,
+    )
+    update_cache = AsyncMock()
+    save_session = AsyncMock()
+    monkeypatch.setattr(
+        lifecycle,
+        "require_session_ownership",
+        AsyncMock(return_value=state),
+    )
+    monkeypatch.setattr(lifecycle, "_update_session_cache", update_cache)
+    monkeypatch.setattr(lifecycle, "async_save_session", save_session)
+    lifecycle._run_tasks.pop(state.id, None)
+
+    response = await lifecycle._stop_analysis_locked(
+        state.id,
+        state.user_id,
+        StopAnalysisRequest(action="summarize"),
+    )
+
+    assert response.success is True
+    assert response.message == "Generating report..."
+    assert state.status == TaskStatus.GENERATING_REPORT
+    update_cache.assert_awaited_once_with(state.id, state)
+    save_session.assert_awaited_once_with(state.id, state)
 
 
 @pytest.mark.asyncio

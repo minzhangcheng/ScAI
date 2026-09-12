@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.8 · **Last updated**: 2026-09-11
+**Version**: 0.56.9 · **Last updated**: 2026-09-12
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,14 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.56.x — (2026-09-08 onward)**
+
+- `0.56.9` — Restores stop-and-summarize after Snapshot V2 removal left a stale
+  snapshot-failure guard in the lifecycle resume route, where it raised an
+  `AttributeError` instead of starting report generation. The frontend now keeps
+  the confirmation dialog open and reports an actionable error when stopping
+  fails. The stop-and-summarize regression and all eight version-consistency
+  checks passed; the isolated frontend suite passed `330/330` tests across `141`
+  suites. No image build, deployment, or live-session mutation was performed.
 
 - `0.56.8` — Makes Bioinformatics input selection and restricted supplementary
   execution follow one durable technical contract. Each model turn receives a

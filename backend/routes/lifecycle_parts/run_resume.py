@@ -668,19 +668,6 @@ async def _stop_analysis_locked(session_id: str, user_id: str, req: StopAnalysis
         return APIResponse(success=True, message="Analysis terminated")
 
     elif req.action == "summarize":
-        # Snapshot-failure gate: stop-and-summarize must not skip or advance.
-        if bindings.is_snapshot_failure_blocked(state):
-            return APIResponse(
-                success=False,
-                message=(
-                    "Session is blocked on a required snapshot failure. "
-                    "Stop-and-summarize is refused until Retry, Manage, or Terminate."
-                ),
-                data={
-                    "snapshot_failure": getattr(state, "snapshot_failure", None),
-                    "wait_input_reason": getattr(state, "wait_input_reason", None),
-                },
-            )
         if state.status == TaskStatus.WAITING_INPUT:
             skip_target = resolve_hitl_skip_target(state)
             if skip_target is not None:

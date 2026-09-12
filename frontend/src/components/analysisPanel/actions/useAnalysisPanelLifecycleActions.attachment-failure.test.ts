@@ -104,4 +104,25 @@ describe('manual-input attachment uploads', () => {
     expect(order).toEqual(['upload', 'input', 'resume', 'close'])
     expect(lifecycle.addMessage).not.toHaveBeenCalled()
   })
+
+  it('keeps the stop dialog open and reports a stop failure', async () => {
+    const lifecycle = options({
+      language: 'zh',
+      stopAnalysis: vi.fn().mockRejectedValue(new Error('server failure')),
+    })
+    const { result } = renderHook(() => useAnalysisPanelLifecycleActions(lifecycle))
+
+    await act(async () => {
+      await result.current.handleStop('summarize')
+    })
+
+    expect(lifecycle.setStopping).toHaveBeenNthCalledWith(1, true)
+    expect(lifecycle.setStopping).toHaveBeenLastCalledWith(false)
+    expect(lifecycle.setShowStopDialog).not.toHaveBeenCalled()
+    expect(lifecycle.setShowFeedbackDialog).not.toHaveBeenCalled()
+    expect(lifecycle.addMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'error',
+      content: '停止分析失败：server failure',
+    }))
+  })
 })
