@@ -4,6 +4,7 @@ import { ValidationDialog } from '../ValidationDialog'
 import { RuntimePersistenceBanner } from '../runtime/RuntimePersistenceBanner'
 import { RuntimeWarningBanner } from '../runtime/RuntimeWarningBanner'
 import { SnapshotList } from '../runtime/SnapshotList'
+import { chatOwnerKey } from '../../utils/chatOwnership'
 import type { AnalysisPanelController } from './useAnalysisPanelController'
 
 interface AnalysisControlsProps {
@@ -12,7 +13,8 @@ interface AnalysisControlsProps {
 
 export function AnalysisControls({ controller }: AnalysisControlsProps) {
   const {
-    currentSession, handleIgnoreValidationError, handlePause, handleReconfigureFromValidation,
+    currentSession, gateContinuationPending,
+    handleIgnoreValidationError, handlePause, handleReconfigureFromValidation,
     handleReopenDialog, handleRerun, handleResume, handleStart, isForwardResumeBlocked,
     isRerunEnabled, language, llmFailureInfo, readMode, runtimeRestoreStatus,
     runtimeRestoreWarning, setShowLlmTimeoutDialog, setShowStopDialog,
@@ -25,6 +27,13 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
   const isRunning = currentSession.status === 'running'
   const isCompleted = currentSession.status === 'completed'
   const isFailed = currentSession.status === 'failed'
+  const currentOwnerKey = chatOwnerKey(
+    currentSession.id, currentSession.restoreBranchId,
+  )
+  const gatePending = Boolean(
+    gateContinuationPending
+    && gateContinuationPending.ownerKey === currentOwnerKey,
+  )
 
   return (
     <>
@@ -160,29 +169,40 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
 
           {isPaused && (
             <div className="flex items-center gap-2">
-              <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-lg">
-                <Pause className="w-4 h-4" />
-                <span className="font-medium">
-                  {language === 'zh' ? '已暂停' : 'Paused'}
-                </span>
-              </div>
-              <button
-                onClick={handleResume}
-                disabled={isForwardResumeBlocked()}
-                className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-sm font-medium transition-colors ${
-                  isForwardResumeBlocked()
-                    ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
-                    : 'bg-green-100 dark:bg-green-900/60 hover:bg-green-200 dark:hover:bg-green-800/70 text-green-700 dark:text-green-300'
-                }`}
-                title={
-                  isForwardResumeBlocked()
-                    ? (language === 'zh' ? '运行时不可用，无法继续' : 'Resume blocked — runtime unavailable')
-                    : undefined
-                }
-              >
-                <Play className="w-3.5 h-3.5" />
-                {language === 'zh' ? '继续' : 'Resume'}
-              </button>
+              {gatePending ? (
+                <div className="flex items-center gap-2 px-3 py-1 bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 rounded-lg">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span className="font-medium">
+                    {language === 'zh' ? '正在重新启动…' : 'Restarting…'}
+                  </span>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-lg">
+                    <Pause className="w-4 h-4" />
+                    <span className="font-medium">
+                      {language === 'zh' ? '已暂停' : 'Paused'}
+                    </span>
+                  </div>
+                  <button
+                    onClick={handleResume}
+                    disabled={isForwardResumeBlocked()}
+                    className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-sm font-medium transition-colors ${
+                      isForwardResumeBlocked()
+                        ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
+                        : 'bg-green-100 dark:bg-green-900/60 hover:bg-green-200 dark:hover:bg-green-800/70 text-green-700 dark:text-green-300'
+                    }`}
+                    title={
+                      isForwardResumeBlocked()
+                        ? (language === 'zh' ? '运行时不可用，无法继续' : 'Resume blocked — runtime unavailable')
+                        : undefined
+                    }
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    {language === 'zh' ? '继续' : 'Resume'}
+                  </button>
+                </>
+              )}
             </div>
           )}
 

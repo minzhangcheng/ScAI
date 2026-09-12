@@ -4,7 +4,7 @@ import {
 } from 'lucide-react'
 
 import { resultIdentityKey } from '../../utils/roundKey'
-import { reportBranchQuery } from '../../utils/reportBranch'
+import { reportBranchQuery, withReportBranch } from '../../utils/reportBranch'
 import { DownloadButtons, FigureGallery, GraphicAbstract, IntegratedReport } from '../analysis'
 import type { ResultsController } from './useResultsController'
 
@@ -257,9 +257,9 @@ interface ResultsViewProps {
 
 export function ResultsView({ controller }: ResultsViewProps) {
   const {
-    currentSession, curatedCount, downloadReport, expandedRounds, graphicAbstract,
-    integratedReport, language, loading, orderedFigures, publicationFigures,
-    publicationTables, t, toggleRound,
+    currentSession, curatedCount, downloadReport, error, expandedRounds,
+    graphicAbstract, integratedReport, language, loadReport, loading,
+    orderedFigures, publicationFigures, publicationTables, t, toggleRound,
   } = controller
   if (!currentSession) {
     return (
@@ -295,6 +295,28 @@ export function ResultsView({ controller }: ResultsViewProps) {
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200"
+        >
+          <span>
+            {language === 'zh'
+              ? `报告加载失败：${error}`
+              : `Failed to load the report: ${error}`}
+          </span>
+          <button
+            type="button"
+            onClick={() => void loadReport()}
+            disabled={loading}
+            className="rounded-lg bg-red-600 px-3 py-1.5 font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {loading
+              ? (language === 'zh' ? '重试中…' : 'Retrying…')
+              : (language === 'zh' ? '重试' : 'Retry')}
+          </button>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -307,7 +329,10 @@ export function ResultsView({ controller }: ResultsViewProps) {
         <div className="flex items-center gap-3">
           {currentSession.explorationReportUrl && (
             <a
-              href={currentSession.explorationReportUrl}
+              href={withReportBranch(
+                currentSession.explorationReportUrl,
+                currentSession.restoreBranchId,
+              )}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 px-4 py-2 bg-accent-50 dark:bg-accent-900/40 text-accent-700 dark:text-accent-300 rounded-xl font-medium hover:bg-accent-100 dark:hover:bg-accent-900/60 transition-colors"
@@ -318,7 +343,10 @@ export function ResultsView({ controller }: ResultsViewProps) {
           )}
           {currentSession.integrationReportUrl && (
             <a
-              href={currentSession.integrationReportUrl}
+              href={withReportBranch(
+                currentSession.integrationReportUrl,
+                currentSession.restoreBranchId,
+              )}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 px-4 py-2 bg-accent-50 dark:bg-accent-900/40 text-accent-700 dark:text-accent-300 rounded-xl font-medium hover:bg-accent-100 dark:hover:bg-accent-900/60 transition-colors"

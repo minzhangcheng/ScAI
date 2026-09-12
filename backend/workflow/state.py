@@ -60,6 +60,13 @@ class WorkflowState(TypedDict, total=False):
     # this on every invocation, so the router never reads a stale plan, and no
     # other node consults it.
     _restore_entry_plan: Dict[str, Any]
+    # One-shot same-round control for an explicit Start on an idle/manual
+    # restore. Declared because LangGraph only carries schema channels between
+    # a node and its router/next node; `restore_entry` writes this False on
+    # every ordinary entry, and `initialize_round` consumes it by returning
+    # False in its own state update. It must never be part of a persisted
+    # continuation capsule.
+    _preserve_round_on_initialize: bool
 
 
 def make_initial_workflow_state(analysis_state: AnalysisState, current_round: int = 0) -> "WorkflowState":

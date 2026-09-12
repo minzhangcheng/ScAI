@@ -69,3 +69,11 @@ def test_an_explicit_finalize_still_wins():
     )
 
     assert ws._needs_report_only(state, 2, False) is True
+
+
+def test_explicit_start_dispatches_to_fresh_run_even_after_rounds_exist():
+    """The WebSocket runner must not send a fresh intent into resume()."""
+    from backend.routes.websockets import should_resume_workflow
+
+    state = _final_round_state(restore_start_intent="explicit_start")
+    assert should_resume_workflow(state) is False

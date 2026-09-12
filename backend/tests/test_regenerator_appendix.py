@@ -135,3 +135,72 @@ def test_fallback_report_reports_persisted_session_scai_version(
 
     assert "ScAI Version (Session Created With)" in html
     assert "0.49.9" in html
+
+
+def test_regenerator_renders_restore_source_version_only_when_present():
+    from backend.services.report.regenerator import _build_appendix_from_report
+
+    restored = _build_appendix_from_report(
+        {
+            "appendix": {
+                "project_name": "Restored analysis",
+                "scai_version": VERSION,
+                "restore_source_scai_version": "0.55.0",
+            },
+        },
+        "en",
+    )
+    assert "ScAI Version (Session Created With)" in restored
+    assert "ScAI Version (Restore Source Snapshot)" in restored
+    assert VERSION in restored
+    assert "0.55.0" in restored
+
+    ordinary = _build_appendix_from_report(
+        {"appendix": {"project_name": "Ordinary analysis", "scai_version": VERSION}},
+        "en",
+    )
+    assert "ScAI Version (Restore Source Snapshot)" not in ordinary
+    assert "Unknown (legacy session)" not in ordinary
+
+
+def test_fallback_report_renders_restore_source_version_only_when_present(
+    tmp_path, monkeypatch,
+):
+    from backend.models.schemas import AnalysisState
+    from backend.services.report.sections import SectionsMixin
+
+    monkeypatch.setattr(
+        "backend.services.report.sections.get_session_workspace",
+        lambda _session_id: tmp_path,
+    )
+    monkeypatch.setattr(
+        "backend.services.report.regenerator.get_agent_llm_stats",
+        lambda _session_id: {},
+    )
+
+    restored_state = AnalysisState(
+        id="restored-fallback-session",
+        name="Restored",
+        initial_instruction="Test",
+        user_id="u1",
+        scai_version=VERSION,
+        restore_source_scai_version="0.55.0",
+    )
+    restored_html = SectionsMixin()._build_appendix_html(
+        restored_state, {"generated_at": "2026-08-31T12:00:00"}, "en",
+    )
+    assert "ScAI Version (Restore Source Snapshot)" in restored_html
+    assert "0.55.0" in restored_html
+
+    ordinary_state = AnalysisState(
+        id="ordinary-fallback-session",
+        name="Ordinary",
+        initial_instruction="Test",
+        user_id="u1",
+        scai_version=VERSION,
+    )
+    ordinary_html = SectionsMixin()._build_appendix_html(
+        ordinary_state, {"generated_at": "2026-08-31T12:00:00"}, "en",
+    )
+    assert "ScAI Version (Restore Source Snapshot)" not in ordinary_html
+    assert "Unknown (legacy session)" not in ordinary_html

@@ -22,6 +22,27 @@ def _restored_terminal_task_status(state: AnalysisState) -> TaskStatus:
     }.get(str(raw_status or "").lower(), TaskStatus.COMPLETED)
 
 
+def _has_idle_restore_identity(state) -> bool:
+    """Whether an idle/manual restore has a branch to hold.
+
+    ``restore_branch_id`` is the current restore identity and the primary
+    signal. ``last_restored_snapshot_id`` is accepted only as a compatibility
+    fallback for sessions written before branch identity existed; durable
+    origin never determines round arithmetic, plan resets, or cache resets.
+    """
+    if getattr(state, "restore_branch_id", None):
+        return True
+    return bool(getattr(state, "last_restored_snapshot_id", None))
+
+
+def _has_fresh_start_intent(state) -> bool:
+    """Whether lifecycle routing explicitly requested a new graph invocation."""
+    return getattr(state, "restore_start_intent", None) in {
+        "explicit_start",
+        "completed_reanalysis",
+    }
+
+
 def _recursion_limit_for(self, analysis_state) -> int:
     """Size one invocation's superstep ceiling from the run's round budget.
 
@@ -82,7 +103,10 @@ async def run(
         return initial_state
 
     # Guard: terminal restore → no workflow, preserve its exact outcome.
-    if initial_state.restore_resume_kind == "terminal":
+    if (
+        initial_state.restore_resume_kind == "terminal"
+        and not _has_fresh_start_intent(initial_state)
+    ):
         terminal_status = _restored_terminal_task_status(initial_state)
         logger.info(
             f"[{self.session_id}] Terminal restore — preserving "
@@ -100,11 +124,8 @@ async def run(
     # Start — let the graph run (restore_entry will preserve round/plan).
     if (
         initial_state.restore_resume_kind is None
-        and (
-            initial_state.restore_branch_id
-            or initial_state.last_restored_snapshot_id
-        )
-        and getattr(initial_state, "restore_start_intent", None) != "explicit_start"
+        and _has_idle_restore_identity(initial_state)
+        and not _has_fresh_start_intent(initial_state)
     ):
         logger.info(
             f"[{self.session_id}] Idle restore — no auto-start "
@@ -421,7 +442,11 @@ async def resume(
         return analysis_state
 
     # Terminal restore → no workflow, preserve its exact outcome.
-    if analysis_state is not None and analysis_state.restore_resume_kind == "terminal":
+    if (
+        analysis_state is not None
+        and analysis_state.restore_resume_kind == "terminal"
+        and not _has_fresh_start_intent(analysis_state)
+    ):
         terminal_status = _restored_terminal_task_status(analysis_state)
         logger.info(
             f"[{self.session_id}] Terminal restore in resume — preserving "
@@ -577,7 +602,7 @@ async def resume(
         )
         return analysis_state
 
-    if getattr(analysis_state, "restore_start_intent", None) == "explicit_start":
+    if _has_fresh_start_intent(analysis_state):
         return await self._invoke_restore_entry(analysis_state, thread_id)
 
     # Idle / unknown: do not invent a fresh initialize_round run.

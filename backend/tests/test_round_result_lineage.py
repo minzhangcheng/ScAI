@@ -1,4 +1,9 @@
-from backend.models.schemas import AnalysisState, RoundResult
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from backend.models.schemas import AnalysisPhase, AnalysisState, RoundResult
 from backend.workflow.integration import IntegrationMixin
 from backend.workflow.direction_coverage import clone_round_results_for_branch
 from backend.workflow.direction_coverage import normalize_legacy_round_result
@@ -118,6 +123,116 @@ def test_upsert_replaces_same_lineage_identity():
     assert len(results) == 1
     assert results[0].pi_summary == "new"
     assert results[0].result_identity_key == "main:innovation:3:direction a"
+
+
+def test_upsert_preserves_first_restore_origin_and_does_not_move_it():
+    first = RoundResult(
+        round_number=3,
+        phase="innovation",
+        direction="Direction A",
+        pi_summary="first",
+        restored_from_snapshot_id="source/r001",
+    )
+    retry = RoundResult(
+        round_number=3,
+        phase="innovation",
+        direction="Direction A",
+        pi_summary="retry",
+    )
+    later = RoundResult(
+        round_number=4,
+        phase="innovation",
+        direction="Direction B",
+        pi_summary="later",
+    )
+    results = []
+
+    _upsert_round_result(
+        results, first, lineage_id="main", branch_id=None,
+        branch_label=None, restored_from_snapshot_id="source/r001",
+    )
+    _upsert_round_result(
+        results, retry, lineage_id="main", branch_id=None,
+        branch_label=None, restored_from_snapshot_id=None,
+    )
+    _upsert_round_result(
+        results, later, lineage_id="main", branch_id=None,
+        branch_label=None, restored_from_snapshot_id="source/r001",
+    )
+
+    assert len(results) == 2
+    assert results[0].pi_summary == "retry"
+    assert results[0].restored_from_snapshot_id == "source/r001"
+    assert results[1].restored_from_snapshot_id is None
+    assert sum(
+        result.restored_from_snapshot_id == "source/r001"
+        for result in results
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_synthesis_persist_preserves_restore_origin_on_same_identity_retry():
+    """The production synthesis writer keeps branch provenance immutable."""
+    from backend.workflow import synthesis
+    from backend.workflow.synthesis_parts import phases
+
+    origin = "source/r001"
+    state = AnalysisState(
+        id="restored-child",
+        user_id="owner",
+        current_round=3,
+        analysis_phase=AnalysisPhase.INNOVATION,
+        restore_branch_id="restore-source-r001",
+        restore_branch_label="Restored direction",
+        last_restored_snapshot_id=origin,
+        restore_provenance_snapshot_id=origin,
+    )
+    graph_state = {
+        "analysis_state": state,
+        "pathology_result": {"status": "completed", "findings": ["p"]},
+        "bioinformatics_result": {"status": "completed", "findings": ["b"]},
+        "biochemistry_result": {"status": "completed", "findings": ["c"]},
+        "literature_result": {"status": "completed", "findings": ["l"]},
+    }
+    writer = SimpleNamespace(
+        session_id=state.id,
+        state_callback=None,
+        _build_and_save_detailed_segment=AsyncMock(),
+    )
+    phases.bind_facade(synthesis)
+
+    async def persist(round_number, direction, summary):
+        result = RoundResult(
+            round_number=round_number,
+            phase="innovation",
+            direction=direction,
+            pi_summary=summary,
+            bioinformatics_findings=[summary],
+        )
+        await phases.persist_round_result(writer, {
+            "state": graph_state,
+            "analysis_state": state,
+            "round_result": result,
+            "bioinformatics_result": graph_state["bioinformatics_result"],
+        })
+        return result
+
+    first = await persist(3, "Direction A", "first")
+    retry = await persist(3, "Direction A", "retry")
+    later = await persist(4, "Direction B", "later")
+
+    assert first.restored_from_snapshot_id == origin
+    assert retry.restored_from_snapshot_id == origin
+    assert later.restored_from_snapshot_id is None
+    assert state.restore_provenance_snapshot_id is None
+    assert len(state.round_results) == 2
+    assert state.round_results[0].pi_summary == "retry"
+    assert state.round_results[0].lineage_id == state.restore_branch_id
+    assert state.round_results[0].branch_id == state.restore_branch_id
+    assert sum(
+        result.restored_from_snapshot_id == origin
+        for result in state.round_results
+    ) == 1
 
 
 def test_upsert_keeps_branch_and_main_separate():

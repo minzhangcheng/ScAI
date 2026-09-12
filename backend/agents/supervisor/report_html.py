@@ -175,6 +175,9 @@ class ReportHtmlMixin:
             "project_description": state.initial_instruction[:500],
             "created_at": datetime.now().isoformat(),
             "scai_version": state.scai_version,
+            "restore_source_scai_version": getattr(
+                state, "restore_source_scai_version", None,
+            ),
             "agent_models": agent_models,
             "agent_temperatures": agent_temperatures,
             "treatment_groups": [
@@ -226,6 +229,11 @@ class ReportHtmlMixin:
                      f'<td>{esc(appendix.get("project_name", "-"))}</td></tr>')
         parts.append(f'<tr><td><strong>ScAI Version (Session Created With)</strong></td>'
                      f'<td>{esc(appendix.get("scai_version") or "Unknown (legacy session)")}</td></tr>')
+        if appendix.get("restore_source_scai_version"):
+            parts.append(
+                f'<tr><td><strong>ScAI Version (Restore Source Snapshot)</strong></td>'
+                f'<td>{esc(appendix.get("restore_source_scai_version"))}</td></tr>'
+            )
         if appendix.get("created_at"):
             parts.append(f'<tr><td><strong>Created At</strong></td>'
                          f'<td>{esc(appendix.get("created_at", "-"))}</td></tr>')

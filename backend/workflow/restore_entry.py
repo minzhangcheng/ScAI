@@ -33,6 +33,10 @@ class RestoreEntryPlan(BaseModel):
       entry needed.
     * ``idle`` — restored from a manual snapshot with no continuation
       target; do not start the graph.
+
+    The lifecycle-only ``completed_reanalysis`` start request is normalized to
+    ``normal`` here because it needs a fresh invocation with ordinary next-round
+    initialization, not snapshot same-round preservation.
     """
 
     intent: Literal["normal", "explicit_start", "graph_node",
@@ -58,6 +62,16 @@ def build_restore_entry_plan(
     start_intent = restore_start_intent or getattr(
         analysis_state, "restore_start_intent", None,
     )
+
+    # Completed re-analysis needs a fresh graph invocation, but unlike an
+    # idle/manual snapshot start it advances to a new round and resets the
+    # previous round's plan/cache in initialize_round.
+    if start_intent == "completed_reanalysis":
+        return RestoreEntryPlan(
+            intent="normal",
+            target_node="initialize_round",
+            preserve_round_on_initialize=False,
+        )
 
     # explicit_start from lifecycle POST /run on idle-restored sessions
     if start_intent == "explicit_start":

@@ -29,6 +29,16 @@ _NOTEBOOK_TRACEBACK_OMISSION = "[... traceback omitted ...]"
 # cell and the next start prepends a second copy.
 BOOTSTRAP_CELL_METADATA_KEY = "scai_bootstrap"
 
+#: Bounded save-profile fields. They belong to exactly one committed
+#: generation and are cleared at the metadata commit boundary that makes a
+#: newer generation current.
+SAVE_TELEMETRY_KEYS = (
+    "last_save_phases_seconds",
+    "last_save_end_to_end_seconds",
+    "last_save_staged_bytes",
+    "last_save_committed_bytes",
+)
+
 logger = logging.getLogger("backend.utils.sandbox_parts.shared")
 
 
@@ -128,6 +138,9 @@ class NotebookState:
             "source": "notebook_state",
             "lifecycle_generation": self.lifecycle_generation,
             "metadata_updated_at": None,
+            # Bounded successful-save telemetry (last_save_*_seconds/bytes) is
+            # projected here after a committed save, never as a default: a
+            # legacy metadata file must serialize byte-for-byte as before.
         }
         self._load_runtime_persistence_metadata()
         persisted_generation = int(
@@ -571,6 +584,11 @@ class NotebookState:
                 # would accumulate into the permanent warning 0.55.4 removed.
                 "pair_restore": None,
             })
+            # A new generation owns a new profile. Until its post-commit
+            # profile is recorded, the phase fields must be absent rather than
+            # the previous generation's numbers.
+            for telemetry_key in SAVE_TELEMETRY_KEYS:
+                self.runtime_persistence.pop(telemetry_key, None)
             if save_seconds is not None:
                 # Spec B3-2. How long the generation that just reached disk
                 # took to write. It is the number the decision to keep N at 30
@@ -592,6 +610,204 @@ class NotebookState:
         if persist:
             self.save_metadata()
         return dict(self.runtime_persistence)
+
+    def record_runtime_save_telemetry(
+        self,
+        *,
+        last_save_phases_seconds: Optional[Dict[str, Any]] = None,
+        last_save_end_to_end_seconds: Optional[float] = None,
+        last_save_staged_bytes: Optional[int] = None,
+        last_save_committed_bytes: Optional[int] = None,
+        expected_revision: Optional[int] = None,
+        expected_generation_identity: Optional[Dict[str, Any]] = None,
+        expected_lifecycle_generation: Optional[int] = None,
+        persist: bool = True,
+    ) -> Dict[str, Any]:
+        """Project bounded phase telemetry onto an already committed save.
+
+        Copy-on-write: the authoritative in-memory mapping is not mutated until
+        the candidate sidecar write succeeds. The candidate is refused when it
+        no longer names the expected committed generation, so a late profile
+        writer for generation N cannot overwrite generation N+1.
+        """
+        from .runtime_save import (
+            SAVE_PHASE_NAMES,
+            _MAX_SAVE_END_TO_END_SECONDS,
+        )
+
+        allowed = {name: name for name in SAVE_PHASE_NAMES}
+        phases: Dict[str, float] = {}
+        for name, seconds in (last_save_phases_seconds or {}).items():
+            key = str(name)
+            if key not in allowed and key != "unattributed_overhead":
+                continue
+            if isinstance(seconds, bool):
+                continue
+            try:
+                value = float(seconds)
+            except (TypeError, ValueError):
+                continue
+            if value != value or value in (float("inf"), float("-inf")):
+                continue
+            if value < 0 or value > 86_400.0:
+                continue
+            phases[key] = round(value, 6)
+
+        end_to_end: Optional[float] = None
+        if last_save_end_to_end_seconds is not None and not isinstance(
+            last_save_end_to_end_seconds, bool
+        ):
+            try:
+                candidate = float(last_save_end_to_end_seconds)
+            except (TypeError, ValueError):
+                candidate = -1.0
+            if (
+                candidate == candidate
+                and candidate not in (float("inf"), float("-inf"))
+                and 0 <= candidate <= 604_800.0
+            ):
+                end_to_end = round(candidate, 6)
+
+        # Phase values are exclusive intervals. Reject a material over-count
+        # instead of normalising it into a plausible-looking profile; this is
+        # telemetry-only, so the committed generation remains usable without
+        # a profile when the producer violates the contract. The aggregate is
+        # bounded even when the producer omits the outer interval.
+        phase_total = round(sum(phases.values()), 6)
+        if phase_total > _MAX_SAVE_END_TO_END_SECONDS:
+            logger.warning(
+                "[%s] runtime save telemetry rejected: phase durations "
+                "exceed telemetry bound",
+                self.session_id,
+            )
+            return dict(self.runtime_persistence)
+        if end_to_end is not None:
+            if phase_total > end_to_end + 0.001:
+                logger.warning(
+                    "[%s] runtime save telemetry rejected: phase durations "
+                    "exceed end-to-end duration",
+                    self.session_id,
+                )
+                return dict(self.runtime_persistence)
+
+        def _bounded_bytes(value) -> Optional[int]:
+            if value is None or isinstance(value, bool):
+                return None
+            try:
+                number = int(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if number < 0 or number > 1 << 50:
+                return None
+            return number
+
+        candidate = dict(self.runtime_persistence)
+        candidate.update({
+            "last_save_phases_seconds": phases,
+            "last_save_end_to_end_seconds": end_to_end,
+            "last_save_staged_bytes": _bounded_bytes(last_save_staged_bytes),
+            "last_save_committed_bytes": _bounded_bytes(last_save_committed_bytes),
+        })
+
+        authoritative_revision = self._persistence_generation_revision(
+            self.runtime_persistence,
+        )
+        candidate_revision = self._persistence_generation_revision(candidate)
+        if expected_revision is not None:
+            expected = max(0, int(expected_revision))
+            if (
+                candidate_revision != expected
+                or authoritative_revision != expected
+            ):
+                return dict(self.runtime_persistence)
+        elif candidate_revision != authoritative_revision:
+            return dict(self.runtime_persistence)
+
+        # Keep the disk generation check, sidecar replace, and in-memory
+        # publication under one lifecycle lock. Otherwise a competing save can
+        # commit N+1 immediately after ``save_metadata`` releases its lock and
+        # this late writer can then publish N's profile in memory.
+        from backend.services.session_lifecycle import lifecycle_file_lock
+
+        try:
+            with lifecycle_file_lock(self.session_id):
+                from backend.services.session_lifecycle import (
+                    assert_session_generation_active,
+                )
+
+                assert_session_generation_active(
+                    self.session_id,
+                    expected_generation=expected_lifecycle_generation,
+                )
+                if expected_generation_identity is not None:
+                    expected_identity = copy.deepcopy(
+                        expected_generation_identity
+                    )
+                    if self._persistence_generation_identity(
+                        self.runtime_persistence
+                    ) != expected_identity:
+                        return dict(self.runtime_persistence)
+                    persisted = self._persisted_runtime_persistence()
+                    if (
+                        persisted is None
+                        or self._persistence_generation_identity(persisted)
+                        != expected_identity
+                    ):
+                        return dict(self.runtime_persistence)
+                if persist:
+                    published = self.save_metadata(
+                        persistence_override=candidate,
+                        # Always bind the sidecar write to the candidate's
+                        # committed generation. Production callers pass their
+                        # expected revision explicitly, while direct callers
+                        # still need the disk-side generation check so a late
+                        # profile cannot overwrite a newer save.
+                        expected_revision=candidate_revision,
+                    )
+                    if not published:
+                        return dict(self.runtime_persistence)
+
+                self.runtime_persistence = candidate
+                return dict(self.runtime_persistence)
+        except Exception:
+            logger.warning(
+                "[%s] runtime save telemetry publication failed; "
+                "generation remains committed without a profile",
+                self.session_id,
+                exc_info=True,
+            )
+            return dict(self.runtime_persistence)
+
+    @staticmethod
+    def _persistence_generation_identity(
+        persistence: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Existing committed facts that uniquely identify one save boundary."""
+        return {
+            "lifecycle_generation": max(
+                0, int(persistence.get("lifecycle_generation") or 0)
+            ),
+            "committed_revision": NotebookState._persistence_generation_revision(
+                persistence
+            ),
+            "committed_digest": persistence.get("committed_digest"),
+            "committed_pairing": copy.deepcopy(
+                persistence.get("committed_pairing")
+            ),
+            "last_saved_at": persistence.get("last_saved_at"),
+        }
+
+    @staticmethod
+    def _persistence_generation_revision(persistence: Dict[str, Any]) -> int:
+        raw = (
+            persistence.get("committed_revision")
+            if persistence.get("committed_revision") is not None
+            else persistence.get("current_revision")
+        )
+        try:
+            return max(0, int(raw or 0))
+        except (TypeError, ValueError):
+            return 0
 
     def record_runtime_restored(
         self,
@@ -643,10 +859,27 @@ class NotebookState:
         self.save_metadata()
         return dict(self.runtime_persistence)
 
-    def _metadata_payload(self) -> Dict[str, Any]:
-        persistence = dict(self.runtime_persistence)
-        self._migrate_committed_runtime_metadata()
-        persistence = dict(self.runtime_persistence)
+    def _metadata_payload(
+        self,
+        persistence_override: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        persistence = dict(
+            persistence_override
+            if persistence_override is not None
+            else self.runtime_persistence
+        )
+        previous_persistence = self.runtime_persistence
+        if persistence_override is not None:
+            # The migration helper reads and writes ``self.runtime_persistence``;
+            # apply it to a temporary copy so a candidate write can never mutate
+            # the authoritative in-memory mapping.
+            self.runtime_persistence = persistence
+        try:
+            self._migrate_committed_runtime_metadata()
+            persistence = dict(self.runtime_persistence)
+        finally:
+            if persistence_override is not None:
+                self.runtime_persistence = previous_persistence
         runtime_digest = persistence.get("committed_digest")
         # Derived from the committed record, not by re-verifying the file. The
         # verification form ran an HMAC pass and a SHA-256 pass over the whole
@@ -674,9 +907,14 @@ class NotebookState:
             "runtime_persistence": persistence,
         }
 
-    def save_metadata(self):
-        """Save state metadata atomically."""
-        state_data = self._metadata_payload()
+    def save_metadata(
+        self,
+        *,
+        persistence_override: Optional[Dict[str, Any]] = None,
+        expected_revision: Optional[int] = None,
+    ) -> bool:
+        """Save state metadata atomically; return whether it was published."""
+        state_data = self._metadata_payload(persistence_override)
         tmp_path = self.state_path.with_name(
             f"{self.state_path.name}.{os.getpid()}.tmp"
         )
@@ -688,15 +926,52 @@ class NotebookState:
         try:
             with lifecycle_file_lock(self.session_id):
                 assert_session_generation_active(self.session_id)
+                if expected_revision is not None:
+                    disk_revision = self._persisted_generation_revision()
+                    if (
+                        disk_revision is None
+                        and int(expected_revision) != 0
+                    ) or (
+                        disk_revision is not None
+                        and int(disk_revision) != int(expected_revision)
+                    ):
+                        return False
                 with open(tmp_path, 'w', encoding='utf-8') as f:
                     json.dump(state_data, f, indent=2)
                     f.flush()
                     os.fsync(f.fileno())
                 assert_session_generation_active(self.session_id)
                 os.replace(tmp_path, self.state_path)
+            return True
         except BaseException:
             tmp_path.unlink(missing_ok=True)
             raise
+
+    def _persisted_generation_revision(self) -> Optional[int]:
+        """Read the committed generation recorded in the sidecar, or None."""
+        persistence = self._persisted_runtime_persistence()
+        if persistence is None:
+            return None
+        raw = (
+            persistence.get("committed_revision")
+            if persistence.get("committed_revision") is not None
+            else persistence.get("current_revision")
+        )
+        try:
+            return max(0, int(raw or 0))
+        except (TypeError, ValueError):
+            return None
+
+    def _persisted_runtime_persistence(self) -> Optional[Dict[str, Any]]:
+        """Read the runtime-persistence mapping currently stored on disk."""
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        persistence = payload.get("runtime_persistence")
+        if not isinstance(persistence, dict):
+            return None
+        return persistence
 
     def save(self):
         """Save notebook and metadata"""

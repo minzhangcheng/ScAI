@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
@@ -57,6 +58,40 @@ _CHUNK = 4 * 1024 * 1024
 #: Channels the capsule never carries. The analysis state is restored from
 #: ``session.json`` and the message list is rebuilt by the graph.
 _UNCARRIED_CHANNELS = frozenset({"analysis_state", "messages"})
+
+#: Transient graph channels that have a reviewed, non-carried duplicate in the
+#: canonical AnalysisState. ``round_result`` is the one such channel today:
+#: AnalysisState.round_results is authoritative, and the post-action targets do
+#: not need the transient copy. Any other non-JSON channel is a refusal rather
+#: than a silent drop.
+_KNOWN_REDUNDANT_GRAPH_CHANNELS = frozenset({"round_result"})
+
+#: The complete set of report URL fields the workflow writes into persisted
+#: messages or top-level API shapes. Kept in one place so a new producer has to
+#: update the census test rather than silently bypassing restore sanitation.
+_REPORT_URL_FIELDS = frozenset({
+    "html_url",
+    "report_html_url",
+    "detailed_report_url",
+    "exploration_report_url",
+    "annotation_report_url",
+    "integration_report_url",
+})
+
+#: Relative local report endpoints whose backing report/log was deliberately
+#: not copied into the restored child. The session id segment is intentionally
+#: not restricted to the source or child: whatever a snapshot happens to embed,
+#: the new session cannot serve it until it generates that report itself.
+#:
+#: Only relative paths are local. An absolute URL with the same path shape
+#: belongs to some external origin and must survive sanitization; production
+#: emits these paths relatively, so accepting every host would delete a
+#: legitimate citation.
+_LOCAL_REPORT_URL = re.compile(
+    r"^/api/session/[^/?#\s]+/"
+    r"(?:report|exploration-report|annotation-report|integration-report|"
+    r"detailed-report)(?:/|$|[?#])"
+)
 
 
 class SnapshotRestoreError(RuntimeError):
@@ -236,6 +271,39 @@ def _strip_report_paths(payload: Any, roots: tuple[str, ...]) -> Any:
     return payload
 
 
+def _is_unavailable_local_report_url(value: Any) -> bool:
+    """Whether a field value is a local report endpoint the child cannot serve."""
+    return bool(
+        isinstance(value, str)
+        and value
+        and _LOCAL_REPORT_URL.match(value.strip())
+    )
+
+
+def _strip_unavailable_report_urls(payload: Any) -> Any:
+    """Null report URL fields that point at an uncopied local report.
+
+    Applied only at the field boundary: the message, list, decision content,
+    external citations, and arbitrary prose that merely mentions a session id
+    all survive. A top-level report path is handled by ``_strip_report_paths``;
+    this covers URLs embedded inside retained messages, which path removal
+    cannot see.
+    """
+    if isinstance(payload, dict):
+        return {
+            key: (
+                None
+                if key in _REPORT_URL_FIELDS
+                and _is_unavailable_local_report_url(value)
+                else _strip_unavailable_report_urls(value)
+            )
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_strip_unavailable_report_urls(item) for item in payload]
+    return payload
+
+
 def _rebound_state(source_session_id: str, session_id: str, user_id: str):
     """The source's state, rewritten to belong to the new session."""
     from backend.config import (
@@ -261,6 +329,10 @@ def _rebound_state(source_session_id: str, session_id: str, user_id: str):
         payload,
         (str(get_session_reports(session_id)), str(get_session_logs(session_id))),
     )
+    # After path remapping and identity rebinding (so top-level source ids have
+    # already become the child's) and before validation: no source/child report
+    # endpoint may survive inside a retained message.
+    payload = _strip_unavailable_report_urls(payload)
     try:
         state = AnalysisState.model_validate(payload)
     except Exception as exc:
@@ -298,7 +370,9 @@ def _jsonable(value: Any) -> Any | None:
     routing context, so dropping one costs a hint rather than a fact.
     """
     try:
-        json.dumps(value)
+        # Python's default encoder accepts NaN/Infinity even though they are
+        # not valid JSON and would be rejected by strict consumers later.
+        json.dumps(value, allow_nan=False)
     except (TypeError, ValueError):
         return None
     return value
@@ -347,21 +421,43 @@ def _continuation_channels(
         )
 
     carried: dict[str, Any] = {}
-    dropped: list[str] = []
+    intentionally_skipped: set[str] = set()
+    redundant: list[str] = []
     for key, value in values.items():
-        if key in _UNCARRIED_CHANNELS or str(key).startswith("_"):
+        name = str(key)
+        if name in _UNCARRIED_CHANNELS or name.startswith("_"):
+            # The analysis state is restored from session.json, messages are
+            # rebuilt by the graph, and underscore channels are one-shot
+            # routing internals that must never enter a persisted capsule.
+            intentionally_skipped.add(name)
+            continue
+        if name in _KNOWN_REDUNDANT_GRAPH_CHANNELS:
+            # Reviewed transient duplicate: the canonical value lives in
+            # AnalysisState (round_results), and the post-action target does
+            # not need the live model object that cannot survive JSON.
+            intentionally_skipped.add(name)
+            if value is not None:
+                redundant.append(name)
             continue
         safe = _jsonable(value)
         if safe is None and value is not None:
-            dropped.append(str(key))
-            continue
-        carried[str(key)] = safe
-    if dropped:
+            # A future channel holding a live object is not a hint to drop.
+            # Refuse before the child is published so the lifecycle tombstone
+            # path leaves nothing behind.
+            raise _refuse(
+                "continuation_unreadable",
+                f"graph channel {name!r} holds a value that cannot be "
+                "persisted; restore cannot continue",
+            )
+        carried[name] = safe
+    if redundant:
         logger.info(
-            "Snapshot restore dropped %d graph channel(s) that cannot be "
-            "persisted: %s", len(dropped), ", ".join(sorted(dropped)),
+            "Snapshot restore omitted known redundant graph channel(s) that "
+            "cannot be persisted: %s", ", ".join(sorted(redundant)),
         )
-    missing = sorted(set(capsule["workflow_state_keys"]) - set(carried) - set(dropped))
+    missing = sorted(
+        set(capsule["workflow_state_keys"]) - set(carried) - intentionally_skipped
+    )
     if missing:
         raise _refuse(
             "continuation_unreadable",
@@ -389,7 +485,9 @@ def _arm(state, capsule: dict, source_session_id: str, snapshot: str, channels: 
     state.restore_branch_id = stable_restore_branch_id(
         f"{source_session_id[:8]}-{snapshot}", None,
     )
-    state.last_restored_snapshot_id = f"{source_session_id}/{snapshot}"
+    origin = f"{source_session_id}/{snapshot}"
+    state.last_restored_snapshot_id = origin
+    state.restore_provenance_snapshot_id = origin
     state.status = TaskStatus(capsule["restored_status"])
     state.wait_input_reason = None
     state.waiting_input_started_at = datetime.now(timezone.utc)
@@ -609,6 +707,13 @@ async def restore_snapshot_into_new_session(
             _materialise_uploads, source_session_id, manifest, session_id, progress,
         )
         state = _rebound_state(source_session_id, session_id, user_id)
+        # ``scai_version`` means the application version that created *this*
+        # session. The signed snapshot version is provenance only and must not
+        # select compatibility behavior; reports render it separately.
+        from backend.constants import VERSION
+
+        state.scai_version = VERSION
+        state.restore_source_scai_version = manifest["scai_version"]
         state.name = restored_session_name(
             manifest["source_session_name"], manifest["round"], manifest["gate"],
             ambiguous=_round_holds_more_than_one_decision(source_session_id, manifest),

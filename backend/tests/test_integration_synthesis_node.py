@@ -128,6 +128,46 @@ def test_integration_creates_round_result():
     assert rr.direction_coverage_eligible is None
 
 
+def test_integration_retry_preserves_restore_origin_on_same_identity():
+    """The production integration node keeps first-result branch provenance."""
+    h = _Harness([])
+    s = _state_with_batch()
+    origin = "source/r001"
+    s.restore_branch_id = "restore-source-r001"
+    s.restore_branch_label = "Restored direction"
+    s.last_restored_snapshot_id = origin
+    s.restore_provenance_snapshot_id = origin
+
+    with patch(
+        "backend.services.report.generate_integration_report_html",
+        return_value="/tmp/integration.html",
+    ):
+        asyncio.run(h._integration_synthesis({"analysis_state": s}))
+        first = next(rr for rr in s.round_results if rr.phase == "integration")
+        assert first.round_number == 4
+        assert first.restored_from_snapshot_id == origin
+        assert first.lineage_id == s.restore_branch_id
+
+        # Model a replay of the same integration identity after the one-shot
+        # origin has already been consumed and the prior result was retained.
+        s.current_round = 3
+        s.integration_cycle = 0
+        s.pending_integration = True
+        asyncio.run(h._integration_synthesis({"analysis_state": s}))
+        retries = [rr for rr in s.round_results if rr.phase == "integration"]
+        assert len(retries) == 1
+        assert retries[0].restored_from_snapshot_id == origin
+
+        asyncio.run(h._integration_synthesis({"analysis_state": s}))
+
+    integration_results = [rr for rr in s.round_results if rr.phase == "integration"]
+    assert [rr.round_number for rr in integration_results] == [4, 5]
+    assert integration_results[1].restored_from_snapshot_id is None
+    assert sum(
+        rr.restored_from_snapshot_id == origin for rr in integration_results
+    ) == 1
+
+
 def test_partial_direction_inputs_are_retained_and_mark_integration_partial():
     h = _Harness([{"direction": "NEW", "direction_id": "int_001"}])
     s = _state_with_batch()
@@ -198,6 +238,8 @@ def test_integration_complete_payload_includes_html_url():
     complete_msgs = [c for t, c in h.sent if t == "integration_complete"]
     assert len(complete_msgs) == 1
     assert complete_msgs[0].get("html_url") == "/api/session/sess/integration-report/html"
+    from backend.services.round_snapshots.restore import _strip_unavailable_report_urls
+    assert _strip_unavailable_report_urls(complete_msgs[0])["html_url"] is None
 
 
 def test_integration_gate_payload_includes_html_url():
@@ -210,3 +252,5 @@ def test_integration_gate_payload_includes_html_url():
     gate_msgs = [c for t, c in h.sent if t == "integration_gate"]
     assert len(gate_msgs) == 1
     assert gate_msgs[0].get("html_url") == "/api/session/sess/integration-report/html"
+    from backend.services.round_snapshots.restore import _strip_unavailable_report_urls
+    assert _strip_unavailable_report_urls(gate_msgs[0])["html_url"] is None

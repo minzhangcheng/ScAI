@@ -4,6 +4,7 @@ import { useAppStore } from '../../stores/appStore'
 import { devLog } from '../../utils/logger'
 import { transformRawMessage } from '../../utils/messageTransform'
 import { ApiError, apiFetch } from './client'
+import { chatOwnerKey } from '../../utils/chatOwnership'
 
 export const INITIAL_REALTIME_MESSAGE_PAGE_SIZE = 100
 export const RECONNECT_REALTIME_MESSAGE_PAGE_SIZE = 20
@@ -12,6 +13,8 @@ export const REALTIME_MESSAGE_PAGE_SIZE = RECONNECT_REALTIME_MESSAGE_PAGE_SIZE
 interface HistoryOptions {
   signal?: AbortSignal
   ownsResponse?: () => boolean
+  /** Normalized owner captured when the request began. */
+  ownerKey?: string | null
   stopWhenOverlapping?: boolean
   onInitialFailure?: (error: unknown) => void
   onFailure?: (error: unknown) => void
@@ -28,10 +31,15 @@ export class RealtimeHistoryIncompleteError extends Error {
 }
 
 function ownsSession(sessionId: string, options: HistoryOptions): boolean {
+  const current = useAppStore.getState().currentSession
   return (
     !options.signal?.aborted
     && (!options.ownsResponse || options.ownsResponse())
-    && useAppStore.getState().currentSession?.id === sessionId
+    && current?.id === sessionId
+    && (
+      options.ownerKey === undefined
+      || chatOwnerKey(current.id, current.restoreBranchId) === options.ownerKey
+    )
   )
 }
 

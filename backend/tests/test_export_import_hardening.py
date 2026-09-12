@@ -1439,3 +1439,26 @@ def test_runtime_export_fails_if_verified_checkpoint_snapshot_cannot_be_added(
         arcname for _path, arcname in attempted
     }
     assert not list(temp_dir.glob(".checkpoint-export-*"))
+
+
+def test_archive_round_trip_preserves_restore_version_provenance(tmp_path):
+    """A restored session keeps its own version and its source version apart."""
+    from backend.constants import VERSION
+    from backend.routes.export_import import _build_session_tar, _import_tar_gz
+
+    session_id = str(uuid.uuid4())
+    archive = tmp_path / "restore-version.tar.gz"
+    _build_session_tar(
+        str(archive),
+        session_id,
+        state_payload=_session_json(
+            session_id,
+            scai_version=VERSION,
+            restore_source_scai_version="0.55.0",
+        ),
+    )
+
+    state = _import_tar_gz(str(archive), user_id="owner")
+
+    assert state.scai_version == VERSION
+    assert state.restore_source_scai_version == "0.55.0"

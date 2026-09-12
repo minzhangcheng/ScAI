@@ -1,8 +1,5 @@
-import { useState } from 'react'
 import { useAppStore, PublicationFigure, PublicationTable } from '../../stores/appStore'
 import { useTranslation } from '../../i18n/translations'
-import { fetchAndDownload, FetchError } from '../../utils/download'
-import { useSelfClearingError } from '../../hooks/useSelfClearingError'
 import { ErrorBanner } from '../shared/ErrorBanner'
 import {
   Download,
@@ -13,129 +10,40 @@ import {
   CheckCircle2
 } from 'lucide-react'
 
-import { API_BASE } from '../../constants/api'
-import { reportBranchQuery } from '../../utils/reportBranch'
+import { useOwnedDownloads } from './useOwnedDownloads'
 
 interface DownloadButtonsProps {
   figures: PublicationFigure[]
   tables?: PublicationTable[]
 }
 
+function getButtonContent(
+  type: string,
+  label: string,
+  icon: React.ReactNode,
+  downloading: string | null,
+  downloadComplete: string | null,
+  language: string,
+) {
+  if (downloading === type) {
+    return <><Loader2 className="w-4 h-4 animate-spin" />{language === 'zh' ? '下载中...' : 'Downloading...'}</>
+  }
+  if (downloadComplete === type) {
+    return <><CheckCircle2 className="w-4 h-4 text-green-500" />{language === 'zh' ? '完成!' : 'Done!'}</>
+  }
+  return <>{icon}{label}</>
+}
+
 export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) {
   const { currentSession, language } = useAppStore()
   const { t } = useTranslation(language)
-  const [downloading, setDownloading] = useState<string | null>(null)
-  const [downloadComplete, setDownloadComplete] = useState<string | null>(null)
-  const [downloadError, setDownloadError] = useSelfClearingError()
-  const branchQuery = reportBranchQuery(currentSession?.restoreBranchId)
+  const {
+    downloading, downloadComplete, downloadError, dismissDownloadError,
+    downloadAll, downloadAllFigures, downloadAllTables,
+  } = useOwnedDownloads(currentSession, figures)
 
   if (figures.length === 0 && tables.length === 0) {
     return null
-  }
-
-  const showSuccess = (type: string) => {
-    setDownloadComplete(type)
-    setTimeout(() => setDownloadComplete(null), 2000)
-  }
-
-  const downloadType = async (
-    type: string,
-    url: string,
-    filename: string,
-    options?: RequestInit,
-  ) => {
-    if (!currentSession) return
-    setDownloadError(null)
-    setDownloading(type)
-    try {
-      await fetchAndDownload(url, filename, options)
-      showSuccess(type)
-    } catch (e) {
-      setDownloadError(e instanceof Error ? e.message : `Failed to download ${type}`)
-    } finally {
-      setDownloading(null)
-    }
-  }
-
-  const downloadAllFigures = () => {
-    if (!currentSession) return
-    return downloadType(
-      'figures',
-      `${API_BASE}/session/${currentSession.id}/report/download-all-figures${branchQuery}`,
-      `figures_${currentSession.id}.zip`,
-      { method: 'POST' },
-    )
-  }
-
-  const downloadAllTables = () => {
-    if (!currentSession) return
-    return downloadType(
-      'tables',
-      `${API_BASE}/session/${currentSession.id}/report/download-all-tables${branchQuery}`,
-      `tables_${currentSession.id}.zip`,
-      { method: 'POST' },
-    )
-  }
-
-  const downloadAll = async () => {
-    if (!currentSession) return
-    setDownloadError(null)
-    setDownloading('all')
-    try {
-      const downloads: Promise<void>[] = []
-      if (figures.length > 0) {
-        downloads.push(
-          fetchAndDownload(
-            `${API_BASE}/session/${currentSession.id}/report/download-all-figures${branchQuery}`,
-            `figures_${currentSession.id}.zip`,
-            { method: 'POST' },
-          ),
-        )
-      }
-      // Always attempt the tables zip — it includes score_definitions.csv even
-      // when there are no publication tables. Ignore 404 (no tables directory).
-      downloads.push(
-        fetchAndDownload(
-          `${API_BASE}/session/${currentSession.id}/report/download-all-tables${branchQuery}`,
-          `tables_${currentSession.id}.zip`,
-          { method: 'POST' },
-        ).catch((e) => {
-          if (e instanceof FetchError && e.status === 404) return
-          throw e
-        }),
-      )
-      await Promise.all(downloads)
-      showSuccess('all')
-    } catch (e) {
-      setDownloadError(e instanceof Error ? e.message : 'Failed to download')
-    } finally {
-      setDownloading(null)
-    }
-  }
-
-  const getButtonContent = (type: string, label: string, icon: React.ReactNode) => {
-    if (downloading === type) {
-      return (
-        <>
-          <Loader2 className="w-4 h-4 animate-spin" />
-          {language === 'zh' ? '下载中...' : 'Downloading...'}
-        </>
-      )
-    }
-    if (downloadComplete === type) {
-      return (
-        <>
-          <CheckCircle2 className="w-4 h-4 text-green-500" />
-          {language === 'zh' ? '完成!' : 'Done!'}
-        </>
-      )
-    }
-    return (
-      <>
-        {icon}
-        {label}
-      </>
-    )
   }
 
   return (
@@ -156,7 +64,8 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
             {getButtonContent(
               'figures',
               `${t('downloadAllFigures')} (${figures.length})`,
-              <FileImage className="w-4 h-4 text-violet-500" />
+              <FileImage className="w-4 h-4 text-violet-500" />,
+              downloading, downloadComplete, language,
             )}
           </button>
         )}
@@ -171,7 +80,8 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
             {getButtonContent(
               'tables',
               `${language === 'zh' ? '下载所有表格' : 'Download All Tables'} (${tables.length})`,
-              <Table2 className="w-4 h-4 text-green-500" />
+              <Table2 className="w-4 h-4 text-green-500" />,
+              downloading, downloadComplete, language,
             )}
           </button>
         )}
@@ -186,7 +96,8 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
             {getButtonContent(
               'all',
               language === 'zh' ? '下载全部' : 'Download All',
-              <Package className="w-4 h-4" />
+              <Package className="w-4 h-4" />,
+              downloading, downloadComplete, language,
             )}
           </button>
         )}
@@ -199,7 +110,10 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
           : `Total ${figures.length} figures${tables.length > 0 ? `, ${tables.length} tables` : ''}. PDF format suitable for publication.`}
       </p>
       {downloadError && (
-        <ErrorBanner message={downloadError} onDismiss={() => setDownloadError(null)} />
+        <ErrorBanner
+          message={downloadError}
+          onDismiss={dismissDownloadError}
+        />
       )}
     </div>
   )

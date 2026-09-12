@@ -3,6 +3,7 @@ import { useCallback } from 'react'
 import { apiFetch } from '../../../hooks/useApi'
 import { useAppStore, type Session } from '../../../stores/appStore'
 import type { AnnotationData } from '../../../utils/annotationGate'
+import { chatOwnerKey } from '../../../utils/chatOwnership'
 import type { ExplorationReportData } from '../types'
 import type { RoundSummary } from '../../../types'
 
@@ -28,104 +29,142 @@ interface InterventionActionOptions {
   maxExplorationRound: number
 }
 
+function ownerForSession(session: Session | null): string | null {
+  return chatOwnerKey(session?.id, session?.restoreBranchId)
+}
+
+function currentOwner(): string | null {
+  const session = useAppStore.getState().currentSession
+  return ownerForSession(session)
+}
+
 export function useAnalysisPanelInterventionActions(options: InterventionActionOptions) {
   const handleExplorationFailedGoToData = useCallback(() => {
+    const owner = ownerForSession(options.currentSession)
+    if (!owner || currentOwner() !== owner) return
     options.clearExplorationFailedState()
     useAppStore.getState().setActiveTab('data')
-  }, [options.clearExplorationFailedState])
+  }, [options.currentSession, options.clearExplorationFailedState])
 
   const handleExplorationFailedContinue = useCallback(() => {
+    const owner = ownerForSession(options.currentSession)
+    if (!owner || currentOwner() !== owner) return
     options.clearExplorationFailedState()
-  }, [options.clearExplorationFailedState])
+  }, [options.currentSession, options.clearExplorationFailedState])
 
   const handleExplorationFailedStop = useCallback(() => {
+    const owner = ownerForSession(options.currentSession)
+    if (!owner || currentOwner() !== owner) return
     options.clearExplorationFailedState()
     options.handleStop('immediate')
-  }, [options.clearExplorationFailedState, options.handleStop])
+  }, [options.currentSession, options.clearExplorationFailedState, options.handleStop])
 
   const handleLlmSkip = useCallback(async () => {
     const info = useAppStore.getState().llmFailureInfo
-    if (!options.currentSession || !info) return
+    const session = options.currentSession
+    const owner = ownerForSession(session)
+    if (!session || !owner || currentOwner() !== owner || !info) return
     try {
-      await apiFetch(`/session/${options.currentSession.id}/llm-failure-action`, {
+      await apiFetch(`/session/${session.id}/llm-failure-action`, {
         method: 'POST',
         body: JSON.stringify({ action: 'skip', node_name: info.nodeName, generation: info.generation }),
       })
-      options.setShowLlmTimeoutDialog(false)
+      if (currentOwner() === owner) options.setShowLlmTimeoutDialog(false)
     } catch (error) {
       console.error('Failed to signal LLM skip:', error)
     }
-  }, [options.currentSession])
+  }, [options.currentSession, options.setShowLlmTimeoutDialog])
 
   const handleLlmRetry = useCallback(async () => {
     const info = useAppStore.getState().llmFailureInfo
-    if (!options.currentSession || !info) return
+    const session = options.currentSession
+    const owner = ownerForSession(session)
+    if (!session || !owner || currentOwner() !== owner || !info) return
     try {
-      await apiFetch(`/session/${options.currentSession.id}/llm-failure-action`, {
+      await apiFetch(`/session/${session.id}/llm-failure-action`, {
         method: 'POST',
         body: JSON.stringify({ action: 'retry', node_name: info.nodeName, generation: info.generation }),
       })
-      options.setShowLlmTimeoutDialog(false)
+      if (currentOwner() === owner) options.setShowLlmTimeoutDialog(false)
     } catch (error) {
       console.error('Failed to signal LLM retry:', error)
     }
-  }, [options.currentSession])
+  }, [options.currentSession, options.setShowLlmTimeoutDialog])
 
   const handleSpeciesInput = useCallback(async (input: string) => {
-    if (!options.currentSession) return
+    const session = options.currentSession
+    const owner = ownerForSession(session)
+    // Capture and validate the exact owner before issuing the request. A
+    // callback retained by the source dialog must not post to the source (or
+    // clear the child) after a branch-only session switch.
+    if (!session || !owner || currentOwner() !== owner) return
     try {
-      await apiFetch(`/session/${options.currentSession.id}/species-input`, {
+      await apiFetch(`/session/${session.id}/species-input`, {
         method: 'POST', body: JSON.stringify({ input }),
       })
-      options.clearSpeciesInputState()
+      if (currentOwner() === owner) options.clearSpeciesInputState()
     } catch (error) {
       console.error('Failed to submit species input:', error)
     }
   }, [options.currentSession, options.clearSpeciesInputState])
 
   const handleLlmModifyAgent = useCallback(() => {
+    const owner = ownerForSession(options.currentSession)
+    if (!owner || currentOwner() !== owner) return
     options.setShowLlmTimeoutDialog(false)
     useAppStore.getState().setLlmModifyPending(true)
     useAppStore.getState().setLlmModifySaved(false)
     useAppStore.getState().setActiveTab('prompts')
-  }, [])
+  }, [options.currentSession, options.setShowLlmTimeoutDialog])
 
   const handleLlmTerminate = useCallback(async () => {
     const info = useAppStore.getState().llmFailureInfo
-    if (!options.currentSession || !info) return
+    const session = options.currentSession
+    const owner = ownerForSession(session)
+    if (!session || !owner || currentOwner() !== owner || !info) return
     try {
-      await apiFetch(`/session/${options.currentSession.id}/llm-failure-action`, {
+      await apiFetch(`/session/${session.id}/llm-failure-action`, {
         method: 'POST',
         body: JSON.stringify({ action: 'terminate', node_name: info.nodeName, generation: info.generation }),
       })
-      options.setShowLlmTimeoutDialog(false)
+      if (currentOwner() === owner) options.setShowLlmTimeoutDialog(false)
     } catch (error) {
       console.error('Failed to signal LLM terminate:', error)
     }
-  }, [options.currentSession])
+  }, [options.currentSession, options.setShowLlmTimeoutDialog])
 
   const handleStopDialogCancel = useCallback(() => {
+    const owner = ownerForSession(options.currentSession)
+    if (!owner || currentOwner() !== owner) return
     options.setShowStopDialog(false)
     if (useAppStore.getState().llmFailureInfo) options.setShowLlmTimeoutDialog(true)
-  }, [])
+  }, [options.currentSession, options.setShowStopDialog, options.setShowLlmTimeoutDialog])
 
   const handleLlmResumeAfterModify = useCallback(() => {
+    const owner = ownerForSession(options.currentSession)
+    if (!owner || currentOwner() !== owner) return
     useAppStore.getState().setLlmModifyPending(false)
     useAppStore.getState().setLlmModifySaved(false)
     useAppStore.getState().setActiveTab('analysis')
     handleLlmRetry()
-  }, [handleLlmRetry])
+  }, [options.currentSession, handleLlmRetry])
 
   const handleLlmReturnToSettings = useCallback(() => {
+    const owner = ownerForSession(options.currentSession)
+    if (!owner || currentOwner() !== owner) return
     useAppStore.getState().setLlmModifySaved(false)
-  }, [])
+  }, [options.currentSession])
 
   const handleLlmReturnToTimeout = useCallback(() => {
+    const owner = ownerForSession(options.currentSession)
+    if (!owner || currentOwner() !== owner) return
     useAppStore.getState().setLlmModifySaved(false)
     useAppStore.getState().setShowLlmTimeoutDialog(true)
-  }, [])
+  }, [options.currentSession])
 
   const handleReopenDialog = useCallback(() => {
+    const owner = ownerForSession(options.currentSession)
+    if (!owner || currentOwner() !== owner) return
     if (options.currentSession?.status === 'waiting_annotation') {
       if (!options.annotationData && options.annotationGateData) {
         options.setAnnotationData(options.annotationGateData)

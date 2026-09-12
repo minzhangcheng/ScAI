@@ -7,6 +7,7 @@ import { useTranslation } from '../../i18n/translations'
 import { useAppStore, type Message, type Session } from '../../stores/appStore'
 import type { RoundSummary } from '../../types'
 import { resultIdentityKey } from '../../utils/roundKey'
+import { chatOwnerKey } from '../../utils/chatOwnership'
 import type { AnnotationData } from '../../utils/annotationGate'
 import { useAnalysisPanelGateActions } from './actions/useAnalysisPanelGateActions'
 import { useAnalysisPanelInterventionActions } from './actions/useAnalysisPanelInterventionActions'
@@ -18,6 +19,42 @@ import type { ExplorationReportData, PlanReviewData, RoundSummaryContent } from 
 import { useAnalysisPanelEffects } from './useAnalysisPanelEffects'
 
 const MAX_EXPLORATION_ROUND = 1
+
+/** Transient UI state owned by one exact session/branch pair. */
+function useOwnedValue<T>(initialValue: T, ownerKey: string | null) {
+  const initialRef = useRef(initialValue)
+  const [entry, setEntry] = useState<{ ownerKey: string | null; value: T }>(
+    () => ({ ownerKey, value: initialValue }),
+  )
+  // Replace the state owner after a session/branch transition. The render
+  // boundary below hides the old value immediately; this effect makes the
+  // next owner's setter usable once the transition has committed, while an
+  // old callback retained by the previous owner remains rejected.
+  useEffect(() => {
+    setEntry(previous => (
+      previous.ownerKey === ownerKey
+        ? previous
+        : { ownerKey, value: initialValue }
+    ))
+  }, [ownerKey, initialValue])
+  const setValue = useCallback((update: T | ((previous: T) => T)) => {
+    setEntry(previous => {
+      // The setter itself is owner-bound. A callback retained by the source
+      // dialog must become inert after a branch/session switch, even after
+      // the replacement owner's state has been installed.
+      if (previous.ownerKey !== ownerKey) return previous
+      const base = previous.value
+      const value = typeof update === 'function'
+        ? (update as (previous: T) => T)(base)
+        : update
+      return { ownerKey, value }
+    })
+  }, [ownerKey])
+  return [
+    entry.ownerKey === ownerKey ? entry.value : initialRef.current,
+    setValue,
+  ] as const
+}
 
 function buildRoundSummaries(messages: Message[], currentSession: Session | null): RoundSummary[] {
   const summaries = new Map<string, RoundSummary>()
@@ -126,31 +163,57 @@ export function useAnalysisPanelController() {
   const llmModifySaved = useAppStore(state => state.llmModifySaved)
   const roundWaitSeconds = useAppStore(state => state.roundWaitSeconds)
   const maxRounds = useAppStore(state => state.maxRounds)
-  const annotationGateData = useAppStore(state => state.annotationGateData)
+  const annotationGateDataRaw = useAppStore(state => state.annotationGateData)
+  const annotationGateOwnerKey = useAppStore(state => state.annotationGateOwnerKey)
   const speciesInputInfo = useAppStore(state => state.speciesInputInfo)
+  const speciesInputOwnerKey = useAppStore(state => state.speciesInputOwnerKey)
   const showSpeciesInputDialog = useAppStore(state => state.showSpeciesInputDialog)
   const clearSpeciesInputState = useAppStore(state => state.clearSpeciesInputState)
   const explorationFailedInfo = useAppStore(state => state.explorationFailedInfo)
+  const explorationFailedOwnerKey = useAppStore(state => state.explorationFailedOwnerKey)
   const showExplorationFailedDialog = useAppStore(state => state.showExplorationFailedDialog)
   const clearExplorationFailedState = useAppStore(state => state.clearExplorationFailedState)
 
-  const [expandedRound, setExpandedRound] = useState<string | null>(null)
-  const [showFeedbackDialog, setShowFeedbackDialog] = useState(false)
-  const [feedbackRoundData, setFeedbackRoundData] = useState<RoundSummary | null>(null)
+  const gateOwnerKey = chatOwnerKey(
+    store.currentSession?.id, store.currentSession?.restoreBranchId,
+  )
+  // Gate-derived values kept in the global store are still scoped to the
+  // exact session/branch owner. The owner check happens during render, before
+  // any cleanup effect can run, so a branch switch cannot briefly expose the
+  // source dialog or submit its payload under the child owner.
+  const annotationGateData = annotationGateOwnerKey === gateOwnerKey
+    ? annotationGateDataRaw
+    : null
+  const ownedSpeciesInputInfo = speciesInputOwnerKey === gateOwnerKey
+    ? speciesInputInfo
+    : null
+  const ownedShowSpeciesInputDialog = speciesInputOwnerKey === gateOwnerKey
+    && showSpeciesInputDialog
+  const ownedExplorationFailedInfo = explorationFailedOwnerKey === gateOwnerKey
+    ? explorationFailedInfo
+    : null
+  const ownedShowExplorationFailedDialog = explorationFailedOwnerKey === gateOwnerKey
+    && showExplorationFailedDialog
+
+  const [expandedRound, setExpandedRound] = useOwnedValue<string | null>(
+    null, gateOwnerKey,
+  )
+  const [showFeedbackDialog, setShowFeedbackDialog] = useOwnedValue(false, gateOwnerKey)
+  const [feedbackRoundData, setFeedbackRoundData] = useOwnedValue<RoundSummary | null>(null, gateOwnerKey)
   const lastDialogRoundRef = useRef(-1)
-  const [showAnnotationDialog, setShowAnnotationDialog] = useState(false)
-  const [annotationData, setAnnotationData] = useState<AnnotationData | null>(null)
-  const [showPlanReviewDialog, setShowPlanReviewDialog] = useState(false)
-  const [planReviewData, setPlanReviewData] = useState<PlanReviewData | null>(null)
+  const [showAnnotationDialog, setShowAnnotationDialog] = useOwnedValue(false, gateOwnerKey)
+  const [annotationData, setAnnotationData] = useOwnedValue<AnnotationData | null>(null, gateOwnerKey)
+  const [showPlanReviewDialog, setShowPlanReviewDialog] = useOwnedValue(false, gateOwnerKey)
+  const [planReviewData, setPlanReviewData] = useOwnedValue<PlanReviewData | null>(null, gateOwnerKey)
   const lastAnnotationMsgRef = useRef('')
   const lastPlanReviewMsgRef = useRef('')
-  const [showExplorationDialog, setShowExplorationDialog] = useState(false)
-  const [explorationReportData, setExplorationReportData] = useState<ExplorationReportData | null>(null)
+  const [showExplorationDialog, setShowExplorationDialog] = useOwnedValue(false, gateOwnerKey)
+  const [explorationReportData, setExplorationReportData] = useOwnedValue<ExplorationReportData | null>(null, gateOwnerKey)
   const lastExplorationMsgRef = useRef('')
-  const [integrationGateData, setIntegrationGateData] = useState<any>(null)
-  const [showIntegrationGateDialog, setShowIntegrationGateDialog] = useState(false)
+  const [integrationGateData, setIntegrationGateData] = useOwnedValue<any>(null, gateOwnerKey)
+  const [showIntegrationGateDialog, setShowIntegrationGateDialog] = useOwnedValue(false, gateOwnerKey)
   const lastIntegrationMsgRef = useRef('')
-  const [isSupplementaryRunning, setIsSupplementaryRunning] = useState(false)
+  const [isSupplementaryRunning, setIsSupplementaryRunning] = useOwnedValue(false, gateOwnerKey)
   const roundSupplementaryPendingRef = useRef(false)
   const runtimeRestoreStatus = useAppStore(state => state.runtimeRestoreStatus)
   const runtimeRestoreWarning = useAppStore(state => state.runtimeRestoreWarning)
@@ -160,15 +223,19 @@ export function useAnalysisPanelController() {
   const isRerunEnabled = useAppStore(state => state.isRerunEnabled)
   useEffect(() => {
     lastAnnotationMsgRef.current = ''
+    lastPlanReviewMsgRef.current = ''
     lastExplorationMsgRef.current = ''
-  }, [store.currentSession?.id])
+    lastIntegrationMsgRef.current = ''
+    lastDialogRoundRef.current = -1
+    roundSupplementaryPendingRef.current = false
+  }, [gateOwnerKey])
 
-  const [showStopDialog, setShowStopDialog] = useState(false)
-  const [stopping, setStopping] = useState(false)
-  const [validating, setValidating] = useState(false)
-  const [showValidationDialog, setShowValidationDialog] = useState(false)
-  const [validationMessage, setValidationMessage] = useState('')
-  const [validationUncertain, setValidationUncertain] = useState(false)
+  const [showStopDialog, setShowStopDialog] = useOwnedValue(false, gateOwnerKey)
+  const [stopping, setStopping] = useOwnedValue(false, gateOwnerKey)
+  const [validating, setValidating] = useOwnedValue(false, gateOwnerKey)
+  const [showValidationDialog, setShowValidationDialog] = useOwnedValue(false, gateOwnerKey)
+  const [validationMessage, setValidationMessage] = useOwnedValue('', gateOwnerKey)
+  const [validationUncertain, setValidationUncertain] = useOwnedValue(false, gateOwnerKey)
   const agents = [
     { id: 'pi', name: t('piAgent'), icon: Users, color: 'violet' },
     { id: 'pathology', name: t('pathologyAgent'), icon: Microscope, color: 'red' },
@@ -190,12 +257,24 @@ export function useAnalysisPanelController() {
   }, [store.language, store.addMessage])
 
   const gateActions = useAnalysisPanelGateActions({
-    currentSession: store.currentSession, wsConnected: store.wsConnected, wsConnect: store.wsConnect,
+    currentSession: store.currentSession,
+    stateVersion: store.stateVersion,
+    wsConnected: store.wsConnected, wsConnect: store.wsConnect,
     setShowAnnotationDialog, setShowPlanReviewDialog, setShowExplorationDialog,
     setShowIntegrationGateDialog, setIntegrationGateData, setIsSupplementaryRunning,
     roundSupplementaryPendingRef,
+    onGateActionError: (error, action) => {
+      const detail = error instanceof Error ? error.message : String(error)
+      store.addMessage({
+        id: generateId(),
+        type: 'error',
+        content: `${action}: ${detail}`,
+        timestamp: new Date().toISOString(),
+      })
+    },
   })
   const startActions = useAnalysisPanelStartActions({
+    ownerKey: gateOwnerKey,
     readMode: store.readMode, translatedReadModeRestriction: t('readModeRestriction'),
     translatedApiKeyInvalid: t('apiKeyInvalid'), authRole: store.authUser?.role,
     showConfigPanel: store.showConfigPanel, checkStatus: config.checkStatus,
@@ -242,8 +321,11 @@ export function useAnalysisPanelController() {
 
   return {
     ...store, t, llmFailureInfo, showLlmTimeoutDialog, llmModifySaved, roundWaitSeconds, maxRounds,
-    annotationGateData, speciesInputInfo, showSpeciesInputDialog, explorationFailedInfo,
-    showExplorationFailedDialog, expandedRound, setExpandedRound, showFeedbackDialog,
+    annotationGateData, speciesInputInfo: ownedSpeciesInputInfo,
+    showSpeciesInputDialog: ownedShowSpeciesInputDialog,
+    explorationFailedInfo: ownedExplorationFailedInfo,
+    showExplorationFailedDialog: ownedShowExplorationFailedDialog,
+    expandedRound, setExpandedRound, showFeedbackDialog,
     setShowFeedbackDialog, feedbackRoundData, showAnnotationDialog, setShowAnnotationDialog,
     annotationData, showPlanReviewDialog, setShowPlanReviewDialog, planReviewData,
     showExplorationDialog, setShowExplorationDialog, explorationReportData,

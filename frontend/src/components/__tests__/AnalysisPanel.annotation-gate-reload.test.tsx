@@ -86,9 +86,9 @@ describe('AnalysisPanel — annotation gate survives a reload', () => {
       // A restarted browser starts with an empty stream: realtime messages are
       // never persisted, and the backend may no longer replay the gate message.
       messages: [],
-      annotationGateData: gateFromServer,
       readMode: false,
     })
+    useAppStore.getState().setAnnotationGateData(gateFromServer)
   })
 
   it('opens the dialog from the server annotation state when no gate message is in the stream', async () => {
@@ -115,8 +115,8 @@ describe('AnalysisPanel — annotation gate survives a reload', () => {
     useAppStore.setState({
       currentSession: makeSession('running'),
       messages: [],
-      annotationGateData: null,
     })
+    useAppStore.getState().setAnnotationGateData(null)
 
     render(<AnalysisPanel />)
 

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.10 · **Last updated**: 2026-09-12
+**Version**: 0.56.11 · **Last updated**: 2026-09-13
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,28 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.56.x — (2026-09-08 onward)**
+
+- `0.56.11` — Repairs decision-snapshot continuation and exact branch ownership.
+  Durable restore origin, one-shot result provenance, graph routing, and
+  same-round explicit-start state now have separate lifetimes: a restored
+  direction decision advances and replans the next round, while an explicit
+  start preserves only the captured round. Completed-session re-analysis starts
+  a fresh graph invocation, and a stale `/resume` while running is rejected
+  before mutating round limits. Restore now refuses unknown non-JSON graph
+  channels, removes only unavailable local report URLs, preserves immutable
+  result lineage across same-identity replacements, and records the child and
+  source-snapshot ScAI versions separately through generated and regenerated
+  report appendices. Frontend results, figures, downloads, gates, session loads,
+  history, and WebSocket settlements are owned by the exact session/branch pair,
+  preventing stale source-session content or actions from crossing into a
+  restored child while keeping current-owner failures visible. Runtime saves now
+  publish bounded, generation-bound phase and byte telemetry after the existing
+  signed crash-recoverable commit; malformed, stale, or failed telemetry cannot
+  replace a newer generation or turn a successful save into a failure. Focused
+  restore, lifecycle, archive, persistence, telemetry, and version checks passed
+  `280/280`; the isolated frontend suite passed `346/346` tests across `147`
+  suites. No image build, deployment, live-session mutation, or historical-
+  session rewrite was performed.
 
 - `0.56.10` — Applies the bounded review-follow-up repairs. A third supervisor
   force-skip now logs a degraded terminal settlement instead of claiming

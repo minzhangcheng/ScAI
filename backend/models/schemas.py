@@ -139,6 +139,9 @@ class AnalysisState(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     lifecycle_generation: int = 0
     scai_version: Optional[str] = None
+    # For a restored session: the signed source snapshot's application version.
+    # Provenance only; it never selects compatibility behavior.
+    restore_source_scai_version: Optional[str] = None
     name: str = "Untitled Analysis"
     user_id: str = Field(..., min_length=1)  # Owner user ID (required, non-empty)
     created_at: datetime = Field(default_factory=datetime.now)
@@ -215,7 +218,9 @@ class AnalysisState(BaseModel):
     # the canonical RoundResult records it (then consume_restore_provenance).
     restore_provenance_snapshot_id: Optional[str] = None
     last_snapshot_id: Optional[str] = None  # Lineage head: id of the most recently created/restored snapshot, used as the forward parent
-    restore_start_intent: Optional[Literal["explicit_start"]] = None
+    restore_start_intent: Optional[
+        Literal["explicit_start", "completed_reanalysis"]
+    ] = None
     restore_resume_phase: Optional[str] = None
     restore_resume_kind: Optional[Literal["graph_node", "semantic_gate", "terminal"]] = None
     restore_resume_node: Optional[str] = None

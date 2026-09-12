@@ -195,10 +195,14 @@ export interface AppState {
   // persisted (see partialize) — the annotation_confirmation realtime message
   // is too lossy to be the dialog's only source.
   annotationGateData: AnnotationData | null
+  /** Exact session/branch owner of annotationGateData. */
+  annotationGateOwnerKey: string | null
   setAnnotationGateData: (data: AnnotationData | null) => void
 
   // Species input user intervention
   speciesInputInfo: SpeciesInputInfo | null
+  /** Exact session/branch owner of speciesInputInfo. */
+  speciesInputOwnerKey: string | null
   showSpeciesInputDialog: boolean
   setSpeciesInputInfo: (info: SpeciesInputInfo | null) => void
   setShowSpeciesInputDialog: (show: boolean) => void
@@ -206,6 +210,8 @@ export interface AppState {
 
   // Exploration failed user intervention (likely a data problem — prompt user)
   explorationFailedInfo: ExplorationFailedInfo | null
+  /** Exact session/branch owner of explorationFailedInfo. */
+  explorationFailedOwnerKey: string | null
   showExplorationFailedDialog: boolean
   setExplorationFailedInfo: (info: ExplorationFailedInfo | null) => void
   setShowExplorationFailedDialog: (show: boolean) => void

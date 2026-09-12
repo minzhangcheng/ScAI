@@ -22,6 +22,8 @@ export type MessageHandlerContext = {
   ws: WebSocket
   isCurrentAttempt: () => boolean
   ownsSocketSession: () => boolean
+  /** Normalized owner captured for this connection attempt. */
+  ownerKey?: string | null
   stateSyncEpochRef: MutableRefObject<number>
   addMessage: (message: Message) => void
 }

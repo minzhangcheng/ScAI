@@ -352,10 +352,15 @@ def _upsert_round_result(
     branch_label: Optional[str],
     restored_from_snapshot_id: Optional[str],
 ) -> None:
+    # Keep the caller's object synchronized with the canonical record. The
+    # normalizer returns a deep copy, but synthesis/integration continue to use
+    # their local ``RoundResult`` when building the following websocket payload.
+    # Provenance must therefore be visible on both objects, not only in the
+    # list entry.
+    caller_result = result
     result.lineage_id = lineage_id or "main"
     result.branch_id = branch_id
     result.branch_label = branch_label
-    result.restored_from_snapshot_id = restored_from_snapshot_id
     result.direction_key = normalize_direction_key(result.direction)
     result.result_identity_key = build_result_identity_key(
         result.lineage_id,
@@ -364,11 +369,28 @@ def _upsert_round_result(
         result.direction_key,
     )
     result = normalize_legacy_round_result(result)
+
+    # Restore provenance is immutable lineage for one logical result identity.
+    # A retry/review replacement of that identity may update its content, but
+    # must not erase the origin the first successful writer established.
+    existing_origin = None
+    other_origins: set[str] = set()
     normalized: list[RoundResult] = []
     identity_indexes: dict[str, int] = {}
     for raw in results:
         existing = normalize_legacy_round_result(raw)
         key = existing.result_identity_key
+        if (
+            key == result.result_identity_key
+            and isinstance(existing.restored_from_snapshot_id, str)
+            and existing.restored_from_snapshot_id
+        ):
+            existing_origin = existing.restored_from_snapshot_id
+        elif (
+            isinstance(existing.restored_from_snapshot_id, str)
+            and existing.restored_from_snapshot_id
+        ):
+            other_origins.add(existing.restored_from_snapshot_id)
         if key in identity_indexes:
             # A retry written before identity-aware upsert may have appended a
             # second legacy record. Keep the later retained value in the first
@@ -377,6 +399,20 @@ def _upsert_round_result(
             continue
         identity_indexes[key] = len(normalized)
         normalized.append(existing)
+    provenance = restored_from_snapshot_id or existing_origin or None
+    # A stale caller may carry the one-shot origin after another logical result
+    # has already claimed it. Do not move that origin to this identity (or make
+    # two canonical results claim the same snapshot); the established target
+    # lineage, when present, remains authoritative.
+    if (
+        isinstance(restored_from_snapshot_id, str)
+        and restored_from_snapshot_id
+        and restored_from_snapshot_id in other_origins
+        and restored_from_snapshot_id != existing_origin
+    ):
+        provenance = existing_origin or None
+    result.restored_from_snapshot_id = provenance
+    caller_result.restored_from_snapshot_id = provenance
     target_index = identity_indexes.get(result.result_identity_key)
     if target_index is None:
         normalized.append(result)

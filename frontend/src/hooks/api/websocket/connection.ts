@@ -4,13 +4,14 @@ import { devLog } from '../../../utils/logger'
 import { getToken } from '../../../utils/authStorage'
 import { WS_AUTH_SUBPROTOCOL } from '../../../constants/auth'
 import { WS_CONNECT_TIMEOUT_MS, ApiError } from '../client'
+import { chatOwnerKey } from '../../../utils/chatOwnership'
 import { loadRealtimeMessageHistory, mergeRealtimeMessages } from '../realtimeHistory'
 import { notifySnapshotListingChanged } from '../snapshots'
 import { handleWebSocketMessage } from './messageHandlers'
 import { reloadSessionState } from './sessionReload'
 import type { ConnectionContext, ConnectionRefs } from './types'
 
-const RECONNECTABLE_SESSION_STATUSES = new Set([
+export const RECONNECTABLE_SESSION_STATUSES = new Set([
   'running', 'waiting_input', 'waiting_annotation', 'waiting_plan_review',
   'waiting_species_input', 'generating_report',
 ])
@@ -53,6 +54,7 @@ export function connectWebSocket(ctx: ConnectionContext): void {
   setConnected(false)
   setWsConnected(false)
   const isReconnect = reconnectCountRef.current > 0
+  const ownerKey = chatOwnerKey(session.id, session.restoreBranchId)
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const wsUrl = `${protocol}//${window.location.host}/ws/${session.id}`
@@ -66,10 +68,12 @@ export function connectWebSocket(ctx: ConnectionContext): void {
   const isCurrentAttempt = () => (
     connectionAttemptRef.current === attempt && wsRef.current === ws
   )
-  const ownsSocketSession = () => (
-    isCurrentAttempt()
-    && useAppStore.getState().currentSession?.id === session.id
-  )
+  const ownsSocketSession = () => {
+    const current = useAppStore.getState().currentSession
+    return isCurrentAttempt()
+      && current?.id === session.id
+      && chatOwnerKey(current.id, current.restoreBranchId) === ownerKey
+  }
   const clearCurrentConnectTimeout = () => {
     if (!isCurrentAttempt()) return
     if (connectTimeoutRef.current) {
@@ -115,15 +119,19 @@ export function connectWebSocket(ctx: ConnectionContext): void {
     if (isReconnect && freshSession) {
       const loadingSessionId = freshSession.id
       const reconnectLoadEpoch = stateSyncEpochRef.current
-      const ownsReconnectStateLoad = () => (
-        isCurrentAttempt()
-        && useAppStore.getState().currentSession?.id === loadingSessionId
-        && stateSyncEpochRef.current === reconnectLoadEpoch
-      )
-      const ownsReconnectSocket = () => (
-        isCurrentAttempt()
-        && useAppStore.getState().currentSession?.id === loadingSessionId
-      )
+      const ownsReconnectStateLoad = () => {
+        const current = useAppStore.getState().currentSession
+        return isCurrentAttempt()
+          && current?.id === loadingSessionId
+          && chatOwnerKey(current.id, current.restoreBranchId) === ownerKey
+          && stateSyncEpochRef.current === reconnectLoadEpoch
+      }
+      const ownsReconnectSocket = () => {
+        const current = useAppStore.getState().currentSession
+        return isCurrentAttempt()
+          && current?.id === loadingSessionId
+          && chatOwnerKey(current.id, current.restoreBranchId) === ownerKey
+      }
       try {
         devLog('WebSocket: Reconnect detected, reloading session state...')
         const data = await reloadSessionState(
@@ -147,6 +155,7 @@ export function connectWebSocket(ctx: ConnectionContext): void {
           }
         }
         await loadRealtimeMessageHistory(loadingSessionId, {
+          ownerKey,
           ownsResponse: ownsReconnectSocket,
           stopWhenOverlapping: true,
           onInitialFailure: reportHistoryFailure,
@@ -183,7 +192,7 @@ export function connectWebSocket(ctx: ConnectionContext): void {
   }
 
   ws.onmessage = (event) => handleWebSocketMessage(event, {
-    session, attempt, ws, isCurrentAttempt, ownsSocketSession,
+    session, attempt, ws, isCurrentAttempt, ownsSocketSession, ownerKey,
     stateSyncEpochRef, addMessage,
   })
 
@@ -201,13 +210,21 @@ export function connectWebSocket(ctx: ConnectionContext): void {
     wsRef.current = null
     devLog('WebSocket: Disconnected, code:', event.code, 'reason:', event.reason)
 
-    // The selected session may have changed before this old socket closed.
-    // Do not let A schedule a reconnect whose fresh connect() targets B.
-    if (useAppStore.getState().currentSession?.id !== session.id) return
+    // The selected owner may have changed before this old socket closed. A
+    // same-id branch switch is a different owner: do not clear or reconnect
+    // the new owner's socket from an old attempt.
+    const ownerAtClose = chatOwnerKey(
+      useAppStore.getState().currentSession?.id,
+      useAppStore.getState().currentSession?.restoreBranchId,
+    )
+    if (ownerAtClose !== ownerKey) return
 
     if (event.code === 4404 || event.code === 4410) {
       const store = useAppStore.getState()
-      if (store.currentSession?.id === session.id) {
+      const currentOwner = chatOwnerKey(
+        store.currentSession?.id, store.currentSession?.restoreBranchId,
+      )
+      if (currentOwner === ownerKey) {
         store.setCurrentSession(null)
         store.clearMessages()
       }
@@ -236,7 +253,11 @@ export function connectWebSocket(ctx: ConnectionContext): void {
             || reconnectTimerRef.current !== reconnectTimer
           ) return
           reconnectTimerRef.current = null
-          if (!wsRef.current) {
+          const reconnectOwner = chatOwnerKey(
+            useAppStore.getState().currentSession?.id,
+            useAppStore.getState().currentSession?.restoreBranchId,
+          )
+          if (reconnectOwner === ownerKey && !wsRef.current) {
             connectWebSocket(ctx)
           }
         }, delay)

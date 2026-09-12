@@ -181,3 +181,34 @@ def test_supervisor_html_omits_deterministic_qualification_blocks(tmp_path):
     assert report["status"] == "partial"
     assert report["partial_reasons"] == ["approved_partial"]
     assert report["quality_disclosures"]["cautions"] == ["Qualification retained."]
+
+
+def test_appendix_renders_restore_source_version_only_for_restored_sessions():
+    restored = AnalysisState(
+        id="restored-session",
+        name="t",
+        initial_instruction="x",
+        user_id="u1",
+        scai_version="0.56.10",
+        restore_source_scai_version="0.55.0",
+    )
+    sup = _make_supervisor(restored)
+    appendix = sup._build_appendix(restored, stats={})
+    html = sup._build_appendix_html_section({"appendix": appendix})
+
+    assert appendix["restore_source_scai_version"] == "0.55.0"
+    assert "ScAI Version (Session Created With)" in html
+    assert "ScAI Version (Restore Source Snapshot)" in html
+    assert "0.55.0" in html
+
+    ordinary = AnalysisState(
+        id="ordinary-session",
+        name="t",
+        initial_instruction="x",
+        user_id="u1",
+        scai_version="0.56.10",
+    )
+    ordinary_html = _make_supervisor(ordinary)._build_appendix_html_section({
+        "appendix": _make_supervisor(ordinary)._build_appendix(ordinary, stats={}),
+    })
+    assert "ScAI Version (Restore Source Snapshot)" not in ordinary_html

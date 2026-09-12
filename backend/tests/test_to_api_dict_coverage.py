@@ -121,6 +121,10 @@ _EXCLUDED_FIELDS = {
     # recorded for export/import and support, and no client reads it. Move it
     # to _API_KEY_MAP instead if a client ever needs to display it.
     "scai_version",
+    # Host-side provenance for a restored session: the signed source snapshot's
+    # ScAI version. Render report appendices from state directly; no client
+    # consumer reads this off the session API.
+    "restore_source_scai_version",
 }
 
 _COMPUTED_FIELDS = {

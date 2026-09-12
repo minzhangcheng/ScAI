@@ -4,6 +4,7 @@ import type { AgentSettingsResponse, SessionLoadResponse } from '../../../types'
 import { useAppStore, type Session } from '../../../stores/appStore'
 import { restoreAgentErrors, transformRawMessage } from '../../../utils/messageTransform'
 import { transformAgentSettings, transformLoadResponse } from '../../../utils/transformLoadResponse'
+import { chatOwnerKey } from '../../../utils/chatOwnership'
 import { apiFetch, applyStoreUpdates } from '../client'
 import { loadRealtimeMessageHistory } from '../realtimeHistory'
 import type { ActiveSessionHistory, ActiveSessionLoad, SessionLoadingOwnership } from './types'
@@ -21,24 +22,32 @@ export function useSessionLoading(store: SessionLoadingStore) {
   const activeLoadRef = useRef<ActiveSessionLoad | null>(null)
   const activeHistoryRef = useRef<ActiveSessionHistory | null>(null)
 
-  const startHistoryPaging = useCallback((sessionId: string, generation: number) => {
+  const startHistoryPaging = useCallback((
+    sessionId: string,
+    ownerKey: string | null,
+    generation: number,
+  ) => {
     activeHistoryRef.current?.controller.abort()
     const controller = new AbortController()
-    activeHistoryRef.current = { sessionId, generation, controller }
+    activeHistoryRef.current = { sessionId, ownerKey, generation, controller }
     const ownsHistory = () => {
       const active = activeHistoryRef.current
+      const current = useAppStore.getState().currentSession
       return Boolean(
         active
         && active.sessionId === sessionId
+        && active.ownerKey === ownerKey
         && active.generation === generation
         && active.controller === controller
         && !controller.signal.aborted
-        && useAppStore.getState().currentSession?.id === sessionId
+        && current?.id === sessionId
+        && chatOwnerKey(current.id, current.restoreBranchId) === ownerKey
       )
     }
     useAppStore.getState().setRealtimeHistoryError(null)
     void loadRealtimeMessageHistory(sessionId, {
       signal: controller.signal,
+      ownerKey,
       ownsResponse: ownsHistory,
       onFailure: error => {
         if (ownsHistory()) {
@@ -69,8 +78,16 @@ export function useSessionLoading(store: SessionLoadingStore) {
     const generation = loadGenerationRef.current + 1
     loadGenerationRef.current = generation
     const controller = new AbortController()
-    activeLoadRef.current = { generation, controller }
-    const previousSessionId = useAppStore.getState().currentSession?.id ?? null
+    const previousSession = useAppStore.getState().currentSession
+    const previousOwnerKey = chatOwnerKey(
+      previousSession?.id, previousSession?.restoreBranchId,
+    )
+    activeLoadRef.current = {
+      generation,
+      controller,
+      ownerKey: previousOwnerKey,
+      requestedSessionId: sessionId,
+    }
     const ownsRequest = () => {
       const activeLoad = activeLoadRef.current
       return (
@@ -80,8 +97,18 @@ export function useSessionLoading(store: SessionLoadingStore) {
       )
     }
     const ownsResponse = () => {
-      const selectedSessionId = useAppStore.getState().currentSession?.id ?? null
-      return ownsRequest() && (selectedSessionId === previousSessionId || selectedSessionId === sessionId)
+      const selected = useAppStore.getState().currentSession
+      const selectedOwnerKey = chatOwnerKey(
+        selected?.id, selected?.restoreBranchId,
+      )
+      const selectedIsPreviousOwner = selectedOwnerKey === previousOwnerKey
+
+      // The response is allowed to install the target only while the owner
+      // selected at request start is still selected. If another path has
+      // already installed the target (or a different branch of it), this
+      // request is stale even when the session id matches; the newer
+      // transition owns the store and its messages/settings.
+      return ownsRequest() && selectedIsPreviousOwner
     }
 
     setLoading(true)
@@ -118,6 +145,8 @@ export function useSessionLoading(store: SessionLoadingStore) {
       }
 
       store.setCurrentSession(session)
+      // The owner is installed in the same store transaction that clears any
+      // previous owner's messages; only then may this load's messages land.
       applyStoreUpdates({ ...storeUpdates, ...transformAgentSettings(agentSettings) })
       if (data.agent_errors && Array.isArray(data.agent_errors)) restoreAgentErrors(data.agent_errors)
       if (data.messages && Array.isArray(data.messages)) {
@@ -125,7 +154,12 @@ export function useSessionLoading(store: SessionLoadingStore) {
       } else {
         store.clearMessages()
       }
-      startHistoryPaging(sessionId, generation)
+      const installedOwnerKey = chatOwnerKey(session.id, session.restoreBranchId)
+      const activeLoad = activeLoadRef.current
+      if (activeLoad && activeLoad.generation === generation) {
+        activeLoad.ownerKey = installedOwnerKey
+      }
+      startHistoryPaging(sessionId, installedOwnerKey, generation)
       return session
     } catch (e) {
       if (ownsResponse()) setError(e instanceof Error ? e.message : 'Failed to load session')
@@ -140,9 +174,13 @@ export function useSessionLoading(store: SessionLoadingStore) {
   }, [store.setCurrentSession, store.setMessages, store.clearMessages, startHistoryPaging])
 
   const retryRealtimeHistory = useCallback(() => {
-    const sessionId = useAppStore.getState().currentSession?.id
-    if (!sessionId) return
-    startHistoryPaging(sessionId, loadGenerationRef.current)
+    const current = useAppStore.getState().currentSession
+    if (!current?.id) return
+    startHistoryPaging(
+      current.id,
+      chatOwnerKey(current.id, current.restoreBranchId),
+      loadGenerationRef.current,
+    )
   }, [startHistoryPaging])
 
   const ownership: SessionLoadingOwnership = {

@@ -1,4 +1,5 @@
 import { useAppStore, Message, Session, AgentType, RoundResult } from '../../../stores/appStore'
+import { chatOwnerKey } from '../../../utils/chatOwnership'
 import { transformRoundResults } from '../../../utils/transformLoadResponse'
 import { devLog } from '../../../utils/logger'
 import { resultIdentityKey } from '../../../utils/roundKey'
@@ -11,6 +12,19 @@ import { reloadSessionState } from './sessionReload'
 import type { MessageHandlerContext } from './types'
 
 const contextRefreshes = new WeakMap<WebSocket, Map<AgentType, symbol>>()
+
+function ownsHandlerSession(
+  context: MessageHandlerContext,
+  sessionId: string,
+): boolean {
+  const current = useAppStore.getState().currentSession
+  return context.isCurrentAttempt()
+    && current?.id === sessionId
+    && (
+      context.ownerKey === undefined
+      || chatOwnerKey(current.id, current.restoreBranchId) === context.ownerKey
+    )
+}
 
 function refreshContextBudget(agent: AgentType, context: MessageHandlerContext): void {
   const store = useAppStore.getState()
@@ -51,7 +65,7 @@ function chatIdentityFields(value: any): Pick<ChatMessage, 'followup_id' | 'bran
 }
 
 function handleStateSync(data: any, context: MessageHandlerContext): void {
-  const { isCurrentAttempt, stateSyncEpochRef } = context
+  const { stateSyncEpochRef } = context
   // Normalise: some backend paths nest fields under `content`
   // while others place them at the top level of the message.
   const syncContent = data.content ?? data
@@ -79,8 +93,7 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
     if (sessionId) {
       const reloadEpoch = stateSyncEpochRef.current
       const ownsReload = () => (
-        isCurrentAttempt()
-        && useAppStore.getState().currentSession?.id === sessionId
+        ownsHandlerSession(context, sessionId)
         && stateSyncEpochRef.current === reloadEpoch
       )
       void reloadSessionState(sessionId, ownsReload).catch(reloadErr => {
@@ -183,7 +196,7 @@ export function handleWebSocketMessage(
   context: MessageHandlerContext,
 ): void {
   const {
-    session, ws, isCurrentAttempt, ownsSocketSession,
+    session, ws, ownsSocketSession,
   } = context
   // A store selection can move from A to B before B creates its socket.
   // Socket-attempt ownership alone still regards A as current in that
@@ -283,10 +296,7 @@ export function handleWebSocketMessage(
       // Refresh full chat history from backend to ensure consistency
       const sessionId = useAppStore.getState().currentSession?.id
       if (sessionId) {
-        const ownsChatRefresh = () => (
-          isCurrentAttempt()
-          && useAppStore.getState().currentSession?.id === sessionId
-        )
+        const ownsChatRefresh = () => ownsHandlerSession(context, sessionId)
         apiFetch<{ messages: ChatMessage[] }>(
           `/session/${sessionId}/chat`,
           undefined,

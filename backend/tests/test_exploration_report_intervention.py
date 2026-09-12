@@ -89,6 +89,15 @@ async def test_report_intervention_holds_boundary_and_retries_only_failed_step(
             assert calls[failed_step].await_count == 2
             assert all(c.await_count == 1 for k, c in calls.items() if k != failed_step)
             assert sum(c.args[0] == "exploration_report" for c in wf._send_message.call_args_list) == 1
+            produced = next(
+                c.args[1] for c in wf._send_message.call_args_list
+                if c.args[0] == "exploration_report"
+            )
+            from backend.services.round_snapshots.restore import (
+                _strip_unavailable_report_urls,
+            )
+            assert produced["html_url"] == "/api/session/s/exploration-report/html"
+            assert _strip_unavailable_report_urls(produced)["html_url"] is None
         else:
             assert state.exploration_report is None
             assert state.analysis_phase == AnalysisPhase.EXPLORATION

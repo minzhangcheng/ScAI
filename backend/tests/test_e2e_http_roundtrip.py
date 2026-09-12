@@ -344,9 +344,15 @@ def test_export_import_continue(
     from backend.routes.websockets import should_resume_workflow
     from backend.workflow.restore_entry import build_restore_entry_plan
 
-    assert should_resume_workflow(after) is True, (
-        "a session that has already run must continue, not start over"
-    )
+    if after.restore_start_intent == "explicit_start":
+        assert should_resume_workflow(after) is False, (
+            "an explicit re-run must enter a fresh graph even when the imported "
+            "state has already reached a later round"
+        )
+    else:
+        assert should_resume_workflow(after) is True, (
+            "a session with a paired checkpoint must continue, not start over"
+        )
     if not kernel_present:
         plan = build_restore_entry_plan(after)
         assert plan.target_node == "initialize_round", (

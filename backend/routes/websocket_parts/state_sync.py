@@ -53,19 +53,17 @@ def _needs_report_only(state, effective_max_rounds: int, in_integration_loop: bo
 
     Scoped to a session that completed its analysis and was interrupted during
     report generation — not to a user-initiated run. An armed
-    ``restore_start_intent`` is exactly that ask: ``POST /run`` sets it as the
-    "re-run from your data" the blocked-resume message promises, and import arms it
-    for a checkpoint-less session. Answering it with a report fabricated a final
-    report out of the imported rounds, cleared the runtime warning on the way in,
-    and left ``runtime_recompute_pending`` unconsumed — only the bioinformatics
-    node clears it — so the finished session's one remaining trace of an empty
-    kernel was that flag.
+    ``restore_start_intent`` is exactly that ask: ``POST /run`` and completed
+    ``POST /resume`` arm their distinct fresh-start forms, while import arms the
+    former for a checkpoint-less session. Answering either with a report would
+    fabricate a final report out of the retained rounds and bypass the requested
+    analysis work.
 
-    Suppressing report-only is sufficient on its own: ``_should_continue`` tests
-    ``current_round >= max_rounds`` only *after* a round body runs, so the
-    preserved round re-executes and then routes to the report exactly once.
-    Bumping ``max_rounds`` instead would run an extra round, because
-    ``preserve_round_on_initialize`` keeps ``current_round`` where it is.
+    Suppressing report-only is sufficient on its own. An ``explicit_start``
+    re-executes the captured snapshot round; ``completed_reanalysis`` advances
+    into the one additional round armed by the lifecycle route. In both cases
+    ``_should_continue`` tests ``current_round >= max_rounds`` only after the
+    requested round body runs.
 
     ``final_report_requested`` keeps precedence: that is the explicit
     "write the report" intent, and it is already exempt from the integration-loop
@@ -73,7 +71,7 @@ def _needs_report_only(state, effective_max_rounds: int, in_integration_loop: bo
     """
     if getattr(state, "final_report_requested", False):
         return True
-    if getattr(state, "restore_start_intent", None) == "explicit_start":
+    if getattr(state, "restore_start_intent", None):
         return False
     return (
         state.status in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT,
@@ -106,6 +104,13 @@ def should_resume_workflow(state) -> bool:
     must take the former even after a runtime-less import, and one that never
     got past round 0 must take the latter, or it holds without executing.
     """
+    # Both start intents are fresh graph invocations even when the state has
+    # already reached a later round. ``explicit_start`` preserves the captured
+    # snapshot round; ``completed_reanalysis`` initializes the next round.
+    # Dispatching either to ``resume()`` would replay an END checkpoint or
+    # refuse to invent the missing initialize_round path.
+    if getattr(state, "restore_start_intent", None):
+        return False
     return state.current_round > 0 or state.status in (
         TaskStatus.PAUSED, TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION
     )

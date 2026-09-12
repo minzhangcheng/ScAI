@@ -1,6 +1,8 @@
 """Lifecycle run resume action owners."""
 from __future__ import annotations
 
+from backend.models.schemas import TaskStatus
+
 _OWNED_NAMES = frozenset({'resume_analysis', '_pause_analysis_locked', '_resume_analysis_locked', 'run_analysis', '_run_analysis_locked', 'stop_analysis', 'pause_analysis', '_stop_analysis_locked'})
 
 bindings = None
@@ -347,8 +349,33 @@ def _remedies_for_an_unusable_runtime(session_id: str, state=None) -> str:
     )
 
 
+_LEGAL_RESUME_STATUSES = frozenset({
+    TaskStatus.PAUSED,
+    TaskStatus.WAITING_INPUT,
+    TaskStatus.WAITING_ANNOTATION,
+    TaskStatus.WAITING_PLAN_REVIEW,
+    TaskStatus.WAITING_SPECIES_INPUT,
+    TaskStatus.GENERATING_REPORT,
+    TaskStatus.FAILED,
+    TaskStatus.COMPLETED,
+})
+
+
 async def _resume_analysis_locked(session_id: str, user_id: str):
     state = await bindings.require_session_ownership(session_id=session_id, user_id=user_id)
+
+    # Status validation is deliberately first and side-effect free. A stale
+    # /resume while the analysis is RUNNING must not refresh limits, sanitize
+    # state, replace workflow callbacks, or consume original_max_rounds: Stop &
+    # Summarize may depend on that pending cap for its final bounded round.
+    if state.status == TaskStatus.RUNNING:
+        raise HTTPException(status_code=400, detail="Analysis already running")
+    if state.status not in _LEGAL_RESUME_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail="Analysis not paused, waiting, or completed",
+        )
+
     from backend.utils.runtime_pairing import refresh_runtime_availability
 
     # Check the live owner before the cold-file probe. A paused workflow whose
@@ -421,8 +448,12 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         # Re-analysis: tear down the terminated checkpoint so the WS
         # reconnect triggers a fresh run (core.py "no checkpoint" path)
         # instead of resuming a graph already at END (infinite loop).
-        from backend.workflow.provenance import consume_restore_provenance
-
+        #
+        # Reaching COMPLETED is not provenance consumption. Durable origin
+        # (``last_restored_snapshot_id``) survives for the life of the child,
+        # and a still-pending one-shot provenance survives so the next
+        # canonical result is attributed exactly once. If it was already
+        # consumed, it stays None.
         recompute = is_forward_resume_blocked(
             state.runtime_restore_status, coherence=state_runtime_coherence(state),
         )
@@ -450,9 +481,11 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
             state.original_max_rounds = None
         state.status = TaskStatus.RUNNING
         state.max_rounds = state.current_round + 1
-        # Clear both durable restore fields so the next run cannot mis-tag
-        # plan/RoundResult from a prior restore (terminal/idle leave provenance).
-        consume_restore_provenance(state)
+        # Every completed re-analysis is a fresh start. Without this, a
+        # session with current_round > 0 is sent to workflow.resume(), which
+        # has no checkpoint after the teardown above and would demote the run
+        # back to PAUSED instead of executing anything.
+        state.restore_start_intent = "completed_reanalysis"
         # Same contract as POST /run: a re-analysis that is clearing an
         # unavailable runtime has to tell the agent its kernel is empty, or it
         # carries on as though adata were still loaded from the original run.
@@ -460,7 +493,6 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
             state.runtime_recompute_pending = True
             state.restore_resume_kind = None
             state.restore_resume_workflow_state = None
-            state.restore_start_intent = "explicit_start"
         state.runtime_restore_status = "complete"  # re-run recomputes kernel state
         state.runtime_restore_warning = None  # fresh rerun clears any restore warning
         await bindings._update_session_cache(session_id, state)
@@ -618,8 +650,6 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
             message="Resuming analysis",
             data={"needs_reconnect": True}
         )
-    else:
-        raise HTTPException(status_code=400, detail="Analysis not paused, waiting, or completed")
 
 async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequest):
     """Stop a running analysis - either immediately or with summary report"""

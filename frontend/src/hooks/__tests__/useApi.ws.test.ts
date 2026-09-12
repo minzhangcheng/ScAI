@@ -247,7 +247,7 @@ describe('useWebSocket', () => {
     })
 
     act(() => {
-      wsInstances[0].onmessage?.({
+      wsInstances[wsInstances.length - 1].onmessage?.({
         data: JSON.stringify({
           type: 'round_summary',
           agent: 'pi',
@@ -333,7 +333,7 @@ describe('useWebSocket', () => {
       result.current.connect()
     })
     act(() => {
-      wsInstances[0].onmessage?.({
+      wsInstances[wsInstances.length - 1].onmessage?.({
         data: JSON.stringify({
           type: 'round_summary',
           agent: 'pi',

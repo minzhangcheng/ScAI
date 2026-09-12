@@ -381,6 +381,12 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
     lbl_created = "Created At"
     lbl_report_time = "Report Generated At"
 
+    restore_source_version = appendix.get('restore_source_scai_version')
+    restore_source_version_row = (
+        f"<tr><td><strong>ScAI Version (Restore Source Snapshot)</strong></td>"
+        f"<td>{esc(restore_source_version)}</td></tr>"
+        if restore_source_version else ""
+    )
     project_html = f"""
     <h3>{proj_title}</h3>
     <table>
@@ -388,6 +394,7 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
             <tr><td><strong>{lbl_name}</strong></td><td>{esc(appendix.get('project_name', '-'))}</td></tr>
             <tr><td><strong>{lbl_desc}</strong></td><td>{esc((appendix.get('project_description') or '-')[:500])}</td></tr>
             <tr><td><strong>ScAI Version (Session Created With)</strong></td><td>{esc(appendix.get('scai_version') or 'Unknown (legacy session)')}</td></tr>
+            {restore_source_version_row}
             <tr><td><strong>{lbl_created}</strong></td><td>{esc(appendix.get('created_at', '-'))}</td></tr>
             <tr><td><strong>{lbl_report_time}</strong></td><td>{esc(report.get('generated_at', '-'))}</td></tr>
         </tbody>

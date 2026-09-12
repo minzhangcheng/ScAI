@@ -1,9 +1,10 @@
-import { useEffect, type MutableRefObject } from 'react'
+import { useEffect, useRef, type MutableRefObject } from 'react'
 
 import type { RoundSummary } from '../../types'
 import type { AnnotationData } from '../../utils/annotationGate'
 import { resultIdentityKey } from '../../utils/roundKey'
 import type { Message, Session } from '../../stores/appStore'
+import { chatOwnerKey } from '../../utils/chatOwnership'
 import type { ExplorationReportData, PlanReviewData } from './types'
 
 interface AnalysisPanelEffectsOptions {
@@ -41,7 +42,20 @@ interface AnalysisPanelEffectsOptions {
 }
 
 export function useAnalysisPanelEffects(options: AnalysisPanelEffectsOptions) {
+  // A mounted panel must not compete with useWebSocket's owner-transition
+  // effect, including when the panel itself first mounts for an active owner.
+  const previousOwnerRef = useRef<string | null>(null)
   useEffect(() => {
+    const owner = chatOwnerKey(
+      options.currentSession?.id,
+      options.currentSession?.restoreBranchId,
+    )
+    const ownerChanged = previousOwnerRef.current !== owner
+    previousOwnerRef.current = owner
+    // useWebSocket owns every branch/session owner transition and starts the
+    // single replacement connection. This effect only reconnects after a
+    // same-owner status/connectivity transition.
+    if (ownerChanged) return
     if (options.currentSession && (
       options.currentSession.status === 'running'
       || options.currentSession.status === 'waiting_input'
@@ -49,7 +63,13 @@ export function useAnalysisPanelEffects(options: AnalysisPanelEffectsOptions) {
       || options.currentSession.status === 'waiting_plan_review'
       || options.currentSession.status === 'waiting_species_input'
     ) && !options.wsConnected && options.wsConnect) options.wsConnect()
-  }, [options.currentSession?.id, options.currentSession?.status, options.wsConnected, options.wsConnect])
+  }, [
+    options.currentSession?.id,
+    options.currentSession?.restoreBranchId,
+    options.currentSession?.status,
+    options.wsConnected,
+    options.wsConnect,
+  ])
 
   useEffect(() => {
     if (options.roundSummaries.length > 0) {

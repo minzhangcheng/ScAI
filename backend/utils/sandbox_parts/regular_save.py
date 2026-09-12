@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -15,6 +16,23 @@ from backend.utils.crypto import get_integrity_secret, sign_hmac_sha256
 from .workspace_generation import publish_workspace_generation
 
 logger = logging.getLogger("backend.utils.sandbox_parts.shared")
+
+
+def _phase_begin(phase_recorder):
+    """Start one optional telemetry interval, or return None."""
+    if phase_recorder is None:
+        return None
+    return time.monotonic()
+
+
+def _phase_record(phase_recorder, name: str, started) -> None:
+    """Close one exclusive telemetry interval; never raises into the commit."""
+    if phase_recorder is None or started is None:
+        return
+    try:
+        phase_recorder.add(name, time.monotonic() - started)
+    except Exception:
+        logger.debug("runtime save phase telemetry %s failed", name, exc_info=True)
 
 def _sig_path(pkl: Path, integrity_dir: Path) -> Path:
     return integrity_dir / (pkl.name + ".sig")
@@ -547,6 +565,7 @@ def _commit_pkl_transaction(
     generation_root: Path | None = None,
     paired_sources: Dict[str, Path | None] | None = None,
     workspace_root: Path | None = None,
+    phase_recorder=None,
 ) -> None:
     """Install a runtime generation with crash-recoverable commit semantics.
 
@@ -564,6 +583,7 @@ def _commit_pkl_transaction(
     live_pkl.parent.mkdir(parents=True, exist_ok=True)
     live_sig = _sig_path(live_pkl, integrity_dir)
     staged_sig = live_sig.with_name(f"{live_sig.name}.regular-save.tmp")
+    _descriptors_started = _phase_begin(phase_recorder)
     component_records: List[Tuple[Dict[str, Any], Path]] = [
         (_regular_component(
             "pkl", live_pkl,
@@ -639,18 +659,26 @@ def _commit_pkl_transaction(
                 target,
             ))
 
+    _phase_record(
+        phase_recorder, "previous_generation_backup", _descriptors_started,
+    )
     journal_path = _regular_save_journal_path(live_pkl)
+    _digest_started = _phase_begin(phase_recorder)
     target_digest = _sha256_file(staged_pkl)
+    _phase_record(phase_recorder, "staged_digest_hmac", _digest_started)
 
     staged_sig_owned = True
     prejournal_backups: List[Path] = []
     journal = None
     try:
+        _hmac_started = _phase_begin(phase_recorder)
         staged_sig.write_text(_pkl_hmac_stream(staged_pkl), encoding="utf-8")
         with open(staged_sig, "r+", encoding="utf-8") as handle:
             handle.flush()
             os.fsync(handle.fileno())
+        _phase_record(phase_recorder, "staged_digest_hmac", _hmac_started)
         # Backups are complete and durable before the journal exposes a transaction.
+        _backup_started = _phase_begin(phase_recorder)
         for descriptor, component in component_records:
             backup = _regular_save_backup_path(component)
             backup.unlink(missing_ok=True)
@@ -663,6 +691,8 @@ def _commit_pkl_transaction(
                     raise RuntimeError(
                         f"regular runtime save backup failed verification: {backup.name}"
                     )
+
+        _phase_record(phase_recorder, "previous_generation_backup", _backup_started)
 
         journal = {
             "version": 2,
@@ -697,8 +727,14 @@ def _commit_pkl_transaction(
         fsync_directory(live_sig.parent)
         if fault_hook is not None:
             fault_hook("sig_replaced")
-        if not _verify_pkl_integrity(live_pkl, integrity_dir):
+        _target_hmac_started = _phase_begin(phase_recorder)
+        target_integrity_ok = _verify_pkl_integrity(live_pkl, integrity_dir)
+        _phase_record(
+            phase_recorder, "target_verification", _target_hmac_started,
+        )
+        if not target_integrity_ok:
             raise RuntimeError("new runtime pkl failed HMAC verification")
+        _metadata_started = _phase_begin(phase_recorder)
         commit_metadata()
         if fault_hook is not None:
             fault_hook("metadata_replaced")
@@ -728,9 +764,11 @@ def _commit_pkl_transaction(
             )
             if fault_hook is not None:
                 fault_hook("runtime_manifest_replaced")
+        _phase_record(phase_recorder, "metadata_publication", _metadata_started)
 
         # After `commit_metadata`, so the captured state is the one this
         # generation belongs to rather than the one it replaced.
+        _capture_started = _phase_begin(phase_recorder)
         if pair_targets or pair_removals:
             pair_dir.mkdir(parents=True, exist_ok=True)
             for kind, source, target in pair_targets:
@@ -745,7 +783,9 @@ def _commit_pkl_transaction(
             _fsync_dir(pair_dir)
             if fault_hook is not None:
                 fault_hook("pair_captured")
+        _phase_record(phase_recorder, "graph_workspace_capture", _capture_started)
 
+        _verify_started = _phase_begin(phase_recorder)
         if metadata_path is not None and not _regular_metadata_matches(
             metadata_path,
             revision=int(target_revision),
@@ -787,6 +827,7 @@ def _commit_pkl_transaction(
                     raise RuntimeError(
                         f"new runtime component failed digest verification: {path.name}"
                     )
+        _phase_record(phase_recorder, "target_verification", _verify_started)
         journal["components"] = [
             descriptor for descriptor, _path in component_records
         ]
@@ -816,18 +857,24 @@ def _commit_pkl_transaction(
             staged_pkl.unlink(missing_ok=True)
             staged_sig.unlink(missing_ok=True)
 
+    _cleanup_started = _phase_begin(phase_recorder)
     _cleanup_regular_save_transaction(
         journal_path,
         [path for _descriptor, path in component_records],
         fault_hook=fault_hook,
     )
+    _phase_record(phase_recorder, "cleanup", _cleanup_started)
     if pair_dir is not None and (pair_targets or pair_removals):
         if workspace_root is not None:
+            _workspace_started = _phase_begin(phase_recorder)
             publish_workspace_generation(
                 Path(workspace_root), pair_dir, Path(generation_root),
                 int(target_revision),
             )
+            _phase_record(phase_recorder, "graph_workspace_capture", _workspace_started)
+        _prune_started = _phase_begin(phase_recorder)
         _prune_older_generations(Path(generation_root), keep=int(target_revision))
+        _phase_record(phase_recorder, "cleanup", _prune_started)
 
 
 def _verify_pkl_integrity(pkl: Path, integrity_dir: Path) -> bool:

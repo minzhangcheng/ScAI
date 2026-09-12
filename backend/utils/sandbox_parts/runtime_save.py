@@ -14,6 +14,233 @@ class RuntimeCoverageError(RuntimeError):
     """The kernel did not report a usable coverage record for this generation."""
 
 
+#: Fixed phase vocabulary for bounded runtime-save telemetry. Both the host
+#: transaction and the generated kernel script report only these names, each
+#: interval is measured once, and ``unattributed_overhead`` closes the sum to
+#: the complete end-to-end interval.
+SAVE_PHASE_NAMES = (
+    "namespace_snapshot",
+    "dill_serialization",
+    "staged_write",
+    "staged_digest_hmac",
+    "previous_generation_backup",
+    "metadata_publication",
+    "graph_workspace_capture",
+    "target_verification",
+    "cleanup",
+)
+_SAVE_PHASE_ALLOWLIST = frozenset(SAVE_PHASE_NAMES)
+_SAVE_PHASE_MARKER = "__SCAI_SAVE_PHASE__:"
+_MAX_SAVE_PHASE_SECONDS = 86_400.0
+_MAX_SAVE_END_TO_END_SECONDS = 604_800.0
+
+
+def _nonnegative_finite(value: Any, *, maximum: float = _MAX_SAVE_PHASE_SECONDS):
+    """A bounded float, or None. Used at the telemetry metadata boundary."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    if number < 0 or number > maximum:
+        return None
+    return number
+
+
+class SavePhaseRecorder:
+    """In-memory, fixed-key phase durations for one successful save.
+
+    Durations are accumulated rather than overwritten, so a phase split across
+    a few non-contiguous intervals stays exclusive of the others. Unknown
+    names and non-finite or negative values are discarded, never persisted.
+    """
+
+    def __init__(self):
+        self._seconds: dict[str, float] = {}
+        self._bytes: dict[str, int] = {}
+
+    def add(self, name: str, seconds: Any, *, bytes_written: Any = None) -> None:
+        key = str(name)
+        if key not in _SAVE_PHASE_ALLOWLIST:
+            return
+        value = _nonnegative_finite(seconds)
+        if value is None:
+            return
+        self._seconds[key] = self._seconds.get(key, 0.0) + value
+        if bytes_written is not None:
+            byte_value = _nonnegative_int(bytes_written)
+            if byte_value is not None:
+                self._bytes[key] = max(
+                    self._bytes.get(key, 0), byte_value,
+                )
+
+    def measure(self, name: str):
+        """Context manager that records one exclusive interval."""
+        import contextlib
+
+        recorder = self
+
+        @contextlib.contextmanager
+        def _timer():
+            started = time.monotonic()
+            try:
+                yield
+            finally:
+                recorder.add(name, time.monotonic() - started)
+
+        return _timer()
+
+    def add_kernel_phases(self, phases) -> None:
+        for phase in phases or ():
+            if isinstance(phase, dict):
+                self.add(
+                    str(phase.get("name") or ""),
+                    phase.get("seconds"),
+                    bytes_written=phase.get("bytes"),
+                )
+
+    def snapshot(
+        self,
+        *,
+        end_to_end_seconds: Any,
+        staged_bytes: Any = None,
+        committed_bytes: Any = None,
+    ) -> dict[str, Any]:
+        """The bounded telemetry projection persisted with the committed save."""
+        complete = _nonnegative_finite(
+            end_to_end_seconds,
+            maximum=_MAX_SAVE_END_TO_END_SECONDS,
+        )
+        # Fixed key set, not just measured keys: a consumer can chart a phase
+        # across saves without treating an absent measurement as an unknown or
+        # overflowing schema.
+        phases = {}
+        for name in SAVE_PHASE_NAMES:
+            value = _nonnegative_finite(
+                self._seconds.get(name, 0.0),
+                maximum=_MAX_SAVE_END_TO_END_SECONDS,
+            )
+            if value is None:
+                raise ValueError(
+                    "runtime save phase duration exceeds telemetry bound"
+                )
+            phases[name] = round(value, 6)
+        if complete is None:
+            complete = round(sum(phases.values()), 6)
+        if complete > _MAX_SAVE_END_TO_END_SECONDS:
+            raise ValueError(
+                "runtime save end-to-end duration exceeds telemetry bound"
+            )
+        measured = round(sum(phases.values()), 6)
+        if measured > complete + _PHASE_SUM_TOLERANCE_SECONDS:
+            # The named timers are exclusive intervals inside the outer
+            # interval. A material over-count means the producer or its clock
+            # contract is invalid; scaling the values would hide that fact and
+            # produce telemetry that was never actually measured. Publication
+            # is observational, so the caller can omit the profile while the
+            # already-committed generation remains intact.
+            raise ValueError(
+                "runtime save phase durations exceed end-to-end duration"
+            )
+        # Permit only sub-millisecond clock/rounding jitter at the boundary;
+        # the remainder is deliberately bounded and never negative.
+        measured = min(measured, complete)
+        phases["unattributed_overhead"] = round(
+            max(0.0, complete - measured), 6,
+        )
+        result: dict[str, Any] = {
+            "last_save_phases_seconds": phases,
+            "last_save_end_to_end_seconds": round(complete, 6),
+            "last_save_staged_bytes": _nonnegative_int(staged_bytes),
+            "last_save_committed_bytes": _nonnegative_int(committed_bytes),
+        }
+        return result
+
+
+def _nonnegative_int(value: Any):
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if number < 0:
+        return None
+    # Bounded so a broken producer cannot place an unbounded integer into the
+    # committed metadata. 1 PiB is far above any real runtime dump.
+    return number if number <= 1 << 50 else None
+
+
+_KERNEL_SAVE_PHASE_NAMES = (
+    "namespace_snapshot",
+    "dill_serialization",
+    "staged_write",
+)
+_KERNEL_SAVE_PHASE_ALLOWLIST = frozenset(_KERNEL_SAVE_PHASE_NAMES)
+_PHASE_SUM_TOLERANCE_SECONDS = 0.001
+
+
+def _parse_save_phase_markers(
+    output: str,
+    *,
+    outer_elapsed_seconds: Any = None,
+) -> list[dict[str, Any]]:
+    """Read one trusted kernel marker group, or reject it as untrusted.
+
+    Kernel stdout is not a secret channel: a user-defined pickle reducer can
+    print arbitrary text during dill serialization. Telemetry therefore treats
+    the whole group as one proposal, accepts exactly one finite marker for each
+    expected kernel phase, rejects duplicates/unexpected/malformed values, and
+    rejects a total that exceeds the measured outer interval. A rejected group
+    simply leaves its time in ``unattributed_overhead``; it never fails a save.
+    """
+    found: dict[str, float] = {}
+    found_bytes: dict[str, int] = {}
+    for line in (output or "").splitlines():
+        if not line.startswith(_SAVE_PHASE_MARKER):
+            continue
+        try:
+            payload = json.loads(line[len(_SAVE_PHASE_MARKER):])
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(payload, dict):
+            return []
+        name = str(payload.get("name") or "")
+        if name not in _KERNEL_SAVE_PHASE_ALLOWLIST or name in found:
+            return []
+        seconds = _nonnegative_finite(payload.get("seconds"))
+        if seconds is None:
+            return []
+        found[name] = seconds
+        if payload.get("bytes") is not None:
+            byte_value = _nonnegative_int(payload.get("bytes"))
+            if byte_value is None:
+                return []
+            found_bytes[name] = byte_value
+    if set(found) != _KERNEL_SAVE_PHASE_ALLOWLIST:
+        return []
+    if outer_elapsed_seconds is not None:
+        elapsed = _nonnegative_finite(
+            outer_elapsed_seconds,
+            maximum=_MAX_SAVE_END_TO_END_SECONDS,
+        )
+        if elapsed is None or sum(found.values()) > (
+            elapsed + _PHASE_SUM_TOLERANCE_SECONDS
+        ):
+            return []
+    return [
+        {
+            "name": name,
+            "seconds": found[name],
+            **({"bytes": found_bytes[name]} if name in found_bytes else {}),
+        }
+        for name in _KERNEL_SAVE_PHASE_NAMES
+    ]
+
+
 _COVERAGE_MARKERS = {
     "saved_names": "__SCAI_SAVED_NAMES__:",
     "excluded_by_kind": "__SCAI_EXCLUDED_KIND__:",
@@ -484,6 +711,7 @@ import sys as _scai_sys
 import tempfile as _scai_tempfile
 import types as _scai_types
 import zstandard as _scai_zstd
+import time as _scai_time
 
 # A refusal that is a property of the value is coverage (spec 4.4); a machine
 # failure is not, and must abort rather than commit a generation that reports
@@ -553,6 +781,7 @@ def _scai_is_own_definition(_o):
         return False
 
 """ + PRIVATE_EXCLUSION_SCRIPT + """
+_scai_phase_namespace_start = _scai_time.perf_counter()
 _live = {_n: globals()[_n] for _n in _scai_snapshot if not _n.startswith('_')}
 
 # Every AnnData is required no matter what it is called. Matching canonical
@@ -680,6 +909,11 @@ for _scai_name in sorted(_live):
         continue
     _to_dump.append((_scai_name, _scai_obj))
 
+print("__SCAI_SAVE_PHASE__:" + _scai_json.dumps({
+    "name": "namespace_snapshot",
+    "seconds": _scai_time.perf_counter() - _scai_phase_namespace_start,
+}))
+
 _skipped_vars = []
 _saved_object_names = {}
 _saved_names = []
@@ -688,6 +922,8 @@ _saved_names = []
 # generation metadata; kernel code must never replace the authoritative pkl.
 _tmp_path = """ + context.escaped_path + """ + '.tmp'
 _saved_count = 0
+_scai_phase_dill_seconds = 0.0
+_scai_phase_write_seconds = 0.0
 _compression_magic = b"SCAI_ZSTD_DILL_V1\\n"
 try:
     with _scai_open(_tmp_path, 'wb') as _raw:
@@ -713,14 +949,22 @@ try:
                     with _scai_tempfile.SpooledTemporaryFile(
                         max_size=8 * 1024 * 1024, mode='w+b'
                     ) as _frame_file:
+                        _scai_phase_dill_start = _scai_time.perf_counter()
                         _scai_dill.dump(_frame, _frame_file)
+                        _scai_phase_dill_seconds += (
+                            _scai_time.perf_counter() - _scai_phase_dill_start
+                        )
                         _frame_file.seek(0)
                         _streamed = True
+                        _scai_phase_write_start = _scai_time.perf_counter()
                         while True:
                             _frame_chunk = _frame_file.read(1024 * 1024)
                             if not _frame_chunk:
                                 break
                             _f.write(_frame_chunk)
+                        _scai_phase_write_seconds += (
+                            _scai_time.perf_counter() - _scai_phase_write_start
+                        )
                 except Exception as _e:
                     _skipped_vars.append((
                         _var_name,
@@ -755,6 +999,15 @@ except Exception:
         pass
     raise
 
+print("__SCAI_SAVE_PHASE__:" + _scai_json.dumps({
+    "name": "dill_serialization",
+    "seconds": _scai_phase_dill_seconds,
+}))
+print("__SCAI_SAVE_PHASE__:" + _scai_json.dumps({
+    "name": "staged_write",
+    "seconds": _scai_phase_write_seconds,
+    "bytes": _scai_os.path.getsize(_tmp_path),
+}))
 print(f"Session saved: {_saved_count} variables")
 print("__SCAI_SAVED_NAMES__:" + _scai_json.dumps(sorted(_saved_names)))
 print("__SCAI_EXCLUDED_KIND__:" + _scai_json.dumps(
@@ -804,6 +1057,7 @@ async def _execute_save(
     from backend.config import get_session_workspace
 
     started = time.monotonic()
+    phase_recorder = SavePhaseRecorder()
     sandbox = context.sandbox
     result = await sandbox._execute_unlocked(
         save_code,
@@ -823,6 +1077,10 @@ async def _execute_save(
                     "msg": parts[4],
                 })
     sandbox._last_save_skipped = skipped
+    phase_recorder.add_kernel_phases(_parse_save_phase_markers(
+        result.output or "",
+        outer_elapsed_seconds=time.monotonic() - started,
+    ))
 
     # A coverage record describes a dump, so it is required exactly when a dump
     # was produced. The staged file is the same discriminator the commit below
@@ -834,6 +1092,12 @@ async def _execute_save(
     _staged_probe = bindings.Path(
         str(bindings.Path(sandbox.notebook_state.session_path)) + ".tmp"
     )
+    staged_bytes = None
+    try:
+        if _staged_probe.exists():
+            staged_bytes = _staged_probe.stat().st_size
+    except OSError:
+        staged_bytes = None
     try:
         coverage = (
             _parse_coverage_markers(result.output or "")
@@ -922,6 +1186,7 @@ async def _execute_save(
                 sandbox.session_id,
                 states_dir=sandbox.notebook_state.state_dir,
             )
+            _digest_started = time.monotonic()
             try:
                 target_digest = await bindings._run_durable_host_operation(
                     lambda: bindings._sha256_file(staged_path),
@@ -935,6 +1200,11 @@ async def _execute_save(
                     f"{type(exc).__name__}."
                 )
                 raise
+            finally:
+                phase_recorder.add(
+                    "staged_digest_hmac",
+                    time.monotonic() - _digest_started,
+                )
 
         # The sidecar manifest recorded which names the pkl is authoritative
         # for. A1's runtime_manifest.json carries exactly that in saved_names,
@@ -946,7 +1216,7 @@ async def _execute_save(
                 sandbox.notebook_state, "update_runtime_persistence", None
             )
             if callable(updater):
-                updater(
+                updated = updater(
                     "current",
                     current_revision=context.revision,
                     saved_revision=context.revision,
@@ -955,7 +1225,15 @@ async def _execute_save(
                     committed_pairing=context.pairing,
                     save_seconds=round(time.monotonic() - started, 3),
                 )
+                identity = getattr(
+                    sandbox.notebook_state,
+                    "_persistence_generation_identity",
+                    None,
+                )
+                if callable(identity) and isinstance(updated, dict):
+                    committed_generation_identity.update(identity(updated))
 
+        committed_generation_identity: Dict[str, Any] = {}
         commit_outcome: Dict[str, Any] = {
             "completed": False,
             "error": None,
@@ -1011,12 +1289,22 @@ async def _execute_save(
                                 fault_hook=getattr(
                                     sandbox, "_regular_save_fault_hook", None
                                 ),
+                                phase_recorder=phase_recorder,
                             )
                         else:
                             # Compatibility for test doubles and pre-transaction
                             # custom kernels. Production save code always leaves
                             # the staged path and never reaches this branch.
-                            bindings._write_pkl_signature(pkl_path, integrity_path)
+                            _compat_hmac_started = time.monotonic()
+                            try:
+                                bindings._write_pkl_signature(
+                                    pkl_path, integrity_path
+                                )
+                            finally:
+                                phase_recorder.add(
+                                    "staged_digest_hmac",
+                                    time.monotonic() - _compat_hmac_started,
+                                )
                             context.assert_session_generation_active(
                                 sandbox.session_id,
                                 expected_generation=context.expected_lifecycle_generation,
@@ -1033,6 +1321,48 @@ async def _execute_save(
                 session_id=sandbox.session_id,
                 description="runtime generation commit",
             )
+            # The complete profiled interval ends exactly here: the generated
+            # kernel code has returned and the signed transaction has
+            # committed. ``last_save_seconds`` keeps its historical
+            # commit-metadata boundary; this new field is the sum target for
+            # the fixed phase map.
+            end_to_end_seconds = time.monotonic() - started
+            committed_bytes = None
+            try:
+                committed_bytes = pkl_path.stat().st_size
+            except OSError:
+                committed_bytes = None
+            try:
+                telemetry = phase_recorder.snapshot(
+                    end_to_end_seconds=end_to_end_seconds,
+                    staged_bytes=staged_bytes,
+                    committed_bytes=committed_bytes,
+                )
+                record_telemetry = getattr(
+                    sandbox.notebook_state,
+                    "record_runtime_save_telemetry",
+                    None,
+                )
+                if callable(record_telemetry):
+                    record_telemetry(
+                        **telemetry,
+                        expected_revision=context.revision,
+                        expected_generation_identity=(
+                            committed_generation_identity or None
+                        ),
+                        expected_lifecycle_generation=(
+                            context.expected_lifecycle_generation
+                        ),
+                    )
+            except Exception:
+                # The generation is already committed. Telemetry is
+                # observational and must never turn a successful save into a
+                # failure or roll the generation back.
+                bindings.logger.warning(
+                    "[%s] runtime save telemetry publication failed",
+                    sandbox.session_id,
+                    exc_info=True,
+                )
             bindings.logger.info("Session saved successfully")
             await _publish_committed_projection(sandbox, bindings=bindings)
         except BaseException as exc:

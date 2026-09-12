@@ -1,12 +1,13 @@
 import type { StoreApi } from 'zustand'
 
 import type { AppState } from '../appState'
+import { chatOwnerKey } from '../../utils/chatOwnership'
 
 type SetState = StoreApi<AppState>['setState']
 type GetState = StoreApi<AppState>['getState']
 
 type RuntimeActionKeys =
-  | 'annotationGateData' | 'setAnnotationGateData'
+  | 'annotationGateData' | 'annotationGateOwnerKey' | 'setAnnotationGateData'
   | 'runtimeRestoreStatus' | 'setRuntimeRestoreStatus'
   | 'runtimeRestoreWarning' | 'setRuntimeRestoreWarning'
   | 'hydrateRuntimeRestoreFromSession' | 'isForwardResumeBlocked' | 'isRerunEnabled'
@@ -26,7 +27,16 @@ export function createRuntimeActions(
 ): Pick<AppState, RuntimeActionKeys> {
   return {
     annotationGateData: null,
-    setAnnotationGateData: annotationGateData => set({ annotationGateData }),
+    annotationGateOwnerKey: null,
+    setAnnotationGateData: annotationGateData => set(state => ({
+      annotationGateData,
+      annotationGateOwnerKey: annotationGateData
+        ? chatOwnerKey(
+            state.currentSession?.id,
+            state.currentSession?.restoreBranchId,
+          )
+        : null,
+    })),
     runtimeRestoreStatus: 'complete',
     setRuntimeRestoreStatus: runtimeRestoreStatus => set({ runtimeRestoreStatus }),
     runtimeRestoreWarning: null,

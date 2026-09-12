@@ -2,9 +2,12 @@ import { useCallback } from 'react'
 
 import { apiFetch, generateId } from '../../../hooks/useApi'
 import { useAppStore, type Session } from '../../../stores/appStore'
+import { chatOwnerKey } from '../../../utils/chatOwnership'
 import type { UploadedFileWithAgent } from '../../RoundFeedbackDialog'
 
 interface StartActionOptions {
+  /** Exact session/branch owner captured by the rendered controls. */
+  ownerKey: string | null
   readMode: boolean
   translatedReadModeRestriction: string
   translatedApiKeyInvalid: string
@@ -26,7 +29,14 @@ interface StartActionOptions {
 }
 
 export function useAnalysisPanelStartActions(options: StartActionOptions) {
+  const activeOwner = () => {
+    const session = useAppStore.getState().currentSession
+    return chatOwnerKey(session?.id, session?.restoreBranchId)
+  }
+
   const handleStart = async () => {
+    const ownerKey = options.ownerKey
+    if (!ownerKey || activeOwner() !== ownerKey) return
     if (options.readMode) {
       alert(options.translatedReadModeRestriction)
       return
@@ -37,13 +47,15 @@ export function useAnalysisPanelStartActions(options: StartActionOptions) {
       if (options.authRole === 'admin') {
         const { apiConfig, apiConfigured } = useAppStore.getState()
         if (!apiConfig.apiKey && !apiConfigured) {
-          options.setValidating(false)
+          if (activeOwner() === ownerKey) options.setValidating(false)
           options.showConfigPanel?.()
           return
         }
         if (apiConfig.apiKey) {
           const status = await options.checkStatus()
+          if (activeOwner() !== ownerKey) return
           if (!status.configured) await options.saveConfig()
+          if (activeOwner() !== ownerKey) return
           validation = await options.validateApiKey()
         } else {
           validation = await options.validateSavedConfig()
@@ -51,17 +63,23 @@ export function useAnalysisPanelStartActions(options: StartActionOptions) {
       } else {
         validation = await options.validateUserSavedConfig()
       }
+      if (activeOwner() !== ownerKey) return
       options.setValidating(false)
       if (validation.valid) {
         const failures = await options.startAnalysis()
+        if (activeOwner() !== ownerKey) return
         if (failures) options.notifySyncFailures(failures)
-        setTimeout(() => options.wsConnect?.(), 100)
+        setTimeout(() => {
+          if (activeOwner() === ownerKey) options.wsConnect?.()
+        }, 100)
       } else {
+        if (activeOwner() !== ownerKey) return
         options.setValidationMessage(validation.message || options.translatedApiKeyInvalid)
         options.setValidationUncertain(validation.uncertain || false)
         options.setShowValidationDialog(true)
       }
     } catch (error: any) {
+      if (activeOwner() !== ownerKey) return
       options.setValidating(false)
       console.error('Failed to start analysis:', error)
       options.addMessage({
@@ -74,12 +92,18 @@ export function useAnalysisPanelStartActions(options: StartActionOptions) {
   }
 
   const handleIgnoreValidationError = async () => {
+    const ownerKey = options.ownerKey
+    if (!ownerKey || activeOwner() !== ownerKey) return
     options.setShowValidationDialog(false)
     try {
       const failures = await options.startAnalysis()
+      if (activeOwner() !== ownerKey) return
       if (failures) options.notifySyncFailures(failures)
-      setTimeout(() => options.wsConnect?.(), 100)
+      setTimeout(() => {
+        if (activeOwner() === ownerKey) options.wsConnect?.()
+      }, 100)
     } catch (error: any) {
+      if (activeOwner() !== ownerKey) return
       console.error('Failed to start analysis:', error)
       options.addMessage({
         id: generateId(),
@@ -91,6 +115,7 @@ export function useAnalysisPanelStartActions(options: StartActionOptions) {
   }
 
   const handleReconfigureFromValidation = () => {
+    if (!options.ownerKey || activeOwner() !== options.ownerKey) return
     options.setShowValidationDialog(false)
     options.showConfigPanel?.()
   }
@@ -115,6 +140,11 @@ interface LifecycleActionOptions {
 }
 
 export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions) {
+  const activeOwner = () => {
+    const session = useAppStore.getState().currentSession
+    return chatOwnerKey(session?.id, session?.restoreBranchId)
+  }
+
   const blockForwardResume = useCallback((): boolean => {
     if (!options.isForwardResumeBlocked()) return false
     options.addMessage({
@@ -129,10 +159,13 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
   }, [options.isForwardResumeBlocked, options.addMessage, options.language])
 
   const handleDialogSend = useCallback(async (message: string, files: UploadedFileWithAgent[]) => {
-    if (!options.currentSession || blockForwardResume()) return
+    const session = options.currentSession
+    const ownerKey = chatOwnerKey(session?.id, session?.restoreBranchId)
+    if (!session || !ownerKey || activeOwner() !== ownerKey || blockForwardResume()) return
     const uploadedData: Array<{ type: string; filename: string; id?: string }> = []
     const rejected: Array<{ name: string; reason: string }> = []
     for (const { file, targetAgent, groupId, sampleNumber, dataType } of files) {
+      if (activeOwner() !== ownerKey) return
       try {
         const formData = new FormData()
         formData.append('file', file)
@@ -148,9 +181,9 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
             : 'user_upload'))
           if (groupId) formData.append('group_id', groupId)
           if (sampleNumber != null) formData.append('sample_number', String(sampleNumber))
-          endpoint = `/session/${options.currentSession.id}/upload/data`
+          endpoint = `/session/${session.id}/upload/data`
         } else {
-          endpoint = `/session/${options.currentSession.id}/upload/file`
+          endpoint = `/session/${session.id}/upload/file`
         }
         const response = await apiFetch<any>(endpoint, { method: 'POST', body: formData })
         if (response) {
@@ -168,6 +201,7 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
         })
       }
     }
+    if (activeOwner() !== ownerKey) return
     if (rejected.length > 0) {
       const detail = rejected.map(item => `- ${item.name}: ${item.reason}`).join('\n')
       options.addMessage({
@@ -181,16 +215,22 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
       return
     }
     try {
-      await apiFetch(`/session/${options.currentSession.id}/human-input`, {
+      if (activeOwner() !== ownerKey) return
+      await apiFetch(`/session/${session.id}/human-input`, {
         method: 'POST',
         body: JSON.stringify({ message, uploaded_files: uploadedData, target_agent: 'pi' }),
       })
+      if (activeOwner() !== ownerKey) return
       await options.resumeAnalysis()
-      if (!options.wsConnected) setTimeout(() => options.wsConnect?.(), 100)
+      if (activeOwner() === ownerKey && !options.wsConnected) {
+        setTimeout(() => {
+          if (activeOwner() === ownerKey) options.wsConnect?.()
+        }, 100)
+      }
     } catch (error) {
       console.error('Failed to send input:', error)
     }
-    options.setShowFeedbackDialog(false)
+    if (activeOwner() === ownerKey) options.setShowFeedbackDialog(false)
   }, [
     options.currentSession,
     options.resumeAnalysis,
@@ -200,72 +240,108 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
   ])
 
   const handleDialogSkip = useCallback(async () => {
+    const session = options.currentSession
+    const ownerKey = chatOwnerKey(session?.id, session?.restoreBranchId)
+    if (!session || !ownerKey || activeOwner() !== ownerKey) return
     if (blockForwardResume()) {
-      options.setShowFeedbackDialog(false)
+      if (activeOwner() === ownerKey) options.setShowFeedbackDialog(false)
       return
     }
     try {
+      if (activeOwner() !== ownerKey) return
       await options.continueRound()
-      if (!options.wsConnected) setTimeout(() => options.wsConnect?.(), 100)
+      if (activeOwner() === ownerKey && !options.wsConnected) {
+        setTimeout(() => {
+          if (activeOwner() === ownerKey) options.wsConnect?.()
+        }, 100)
+      }
     } catch (error) {
       console.error('Failed to continue round:', error)
     }
-    options.setShowFeedbackDialog(false)
+    if (activeOwner() === ownerKey) options.setShowFeedbackDialog(false)
   }, [options.continueRound, options.wsConnected, options.wsConnect, blockForwardResume])
 
   const handlePause = useCallback(async () => {
+    const session = options.currentSession
+    const ownerKey = chatOwnerKey(session?.id, session?.restoreBranchId)
+    if (!session || !ownerKey || activeOwner() !== ownerKey) return
     try { await options.pauseAnalysis() } catch (error) { console.error('Failed to pause:', error) }
-  }, [options.pauseAnalysis])
+  }, [options.currentSession, options.pauseAnalysis])
 
   const handleResume = useCallback(async () => {
+    const session = options.currentSession
+    const ownerKey = chatOwnerKey(session?.id, session?.restoreBranchId)
+    if (!session || !ownerKey || activeOwner() !== ownerKey) return
     if (blockForwardResume()) return
     try {
+      if (activeOwner() !== ownerKey) return
       await options.resumeAnalysis()
-      if (!options.wsConnected) setTimeout(() => options.wsConnect?.(), 100)
+      if (activeOwner() === ownerKey && !options.wsConnected) {
+        setTimeout(() => {
+          if (activeOwner() === ownerKey) options.wsConnect?.()
+        }, 100)
+      }
     } catch (error) {
       console.error('Failed to resume:', error)
     }
-  }, [options.resumeAnalysis, options.wsConnected, options.wsConnect, blockForwardResume])
+  }, [options.currentSession, options.resumeAnalysis, options.wsConnected, options.wsConnect, blockForwardResume])
 
   const handleRerun = useCallback(async () => {
-    if (!options.currentSession) return
+    const session = options.currentSession
+    const ownerKey = chatOwnerKey(session?.id, session?.restoreBranchId)
+    if (!session || !ownerKey || activeOwner() !== ownerKey) return
     try {
-      await apiFetch(`/session/${options.currentSession.id}/run`, { method: 'POST' })
+      await apiFetch(`/session/${session.id}/run`, { method: 'POST' })
+      if (activeOwner() !== ownerKey) return
       useAppStore.getState().setRuntimeRestoreStatus('complete')
       useAppStore.getState().setRuntimeRestoreWarning(null)
       useAppStore.getState().updateSession({ status: 'running' })
-      if (!options.wsConnected) setTimeout(() => options.wsConnect?.(), 100)
+      if (activeOwner() === ownerKey && !options.wsConnected) {
+        setTimeout(() => {
+          if (activeOwner() === ownerKey) options.wsConnect?.()
+        }, 100)
+      }
     } catch (error) {
       console.error('Failed to re-run analysis:', error)
-      options.addMessage({
-        id: generateId(), type: 'error',
-        content: `Failed to re-run analysis: ${error instanceof Error ? error.message : String(error)}`,
-        timestamp: new Date().toISOString(),
-      })
+      if (activeOwner() === ownerKey) {
+        options.addMessage({
+          id: generateId(), type: 'error',
+          content: `Failed to re-run analysis: ${error instanceof Error ? error.message : String(error)}`,
+          timestamp: new Date().toISOString(),
+        })
+      }
     }
   }, [options.currentSession, options.wsConnected, options.wsConnect, options.addMessage])
 
   const handleStop = useCallback(async (action: 'immediate' | 'summarize') => {
+    const session = options.currentSession
+    const ownerKey = chatOwnerKey(session?.id, session?.restoreBranchId)
+    if (!session || !ownerKey || activeOwner() !== ownerKey) return
     options.setStopping(true)
     try {
       await options.stopAnalysis(action)
-      options.setShowStopDialog(false)
-      options.setShowFeedbackDialog(false)
+      if (activeOwner() === ownerKey) {
+        options.setShowStopDialog(false)
+        options.setShowFeedbackDialog(false)
+      }
     } catch (error) {
       console.error('Failed to stop:', error)
       const detail = error instanceof Error ? error.message : String(error)
-      options.addMessage({
-        id: generateId(),
-        type: 'error',
-        content: options.language === 'zh'
-          ? `停止分析失败：${detail}`
-          : `Failed to stop analysis: ${detail}`,
-        timestamp: new Date().toISOString(),
-      })
+      if (activeOwner() === ownerKey) {
+        options.addMessage({
+          id: generateId(),
+          type: 'error',
+          content: options.language === 'zh'
+            ? `停止分析失败：${detail}`
+            : `Failed to stop analysis: ${detail}`,
+          timestamp: new Date().toISOString(),
+        })
+      }
     } finally {
-      options.setStopping(false)
+      if (activeOwner() === ownerKey) options.setStopping(false)
     }
   }, [
+    options.currentSession,
     options.stopAnalysis,
     options.setShowStopDialog,
     options.setShowFeedbackDialog,

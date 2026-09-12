@@ -76,7 +76,6 @@ describe('WebSocket async response ownership', () => {
       data: JSON.stringify({ type: 'chat_result' }),
     } as MessageEvent))
     act(() => useAppStore.getState().setCurrentSession(session('new')))
-    act(() => result.current.connect())
 
     await act(async () => {
       resolveOld(jsonResponse({
@@ -142,8 +141,8 @@ describe('WebSocket async response ownership', () => {
     const old = SocketMock.instances[0]
 
     act(() => useAppStore.getState().setCurrentSession(session('new')))
-    // Deliberately do not call connect(): this is the ownership gap that the
-    // previous test skipped by retiring the old socket immediately.
+    // Owner replacement retires the old socket immediately and atomically
+    // clears the old chat operation before the replacement socket opens.
     act(() => {
       old.onmessage?.({ data: JSON.stringify({ type: 'chat_result' }) } as MessageEvent)
       old.onmessage?.({ data: JSON.stringify({ type: 'chat_cancelled' }) } as MessageEvent)
@@ -154,10 +153,11 @@ describe('WebSocket async response ownership', () => {
 
     const store = useAppStore.getState()
     expect(fetchMock).not.toHaveBeenCalled()
-    expect(store.chatLoading).toBe(true)
-    expect(store.chatDelegationActive).toBe(true)
-    expect(store.chatDelegationPlan).toBe('old-session work')
-    expect(store.chatAbortController).toBe(controller)
+    expect(store.chatLoading).toBe(false)
+    expect(store.chatDelegationActive).toBe(false)
+    expect(store.chatDelegationPlan).toBeNull()
+    expect(store.chatAbortController).toBeNull()
+    expect(controller.signal.aborted).toBe(true)
     expect(store.chatMessages).toEqual([])
   })
 
@@ -602,6 +602,53 @@ describe('WebSocket async response ownership', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(useAppStore.getState().realtimeHistoryError).toContain('load unavailable')
+    vi.useRealTimers()
+  })
+
+  it('replaces an ordinary session owner with exactly one automatic socket', () => {
+    setToken('test-token')
+    const { result } = renderHook(() => useWebSocket())
+    act(() => result.current.connect())
+    const old = SocketMock.instances[0]
+
+    act(() => useAppStore.getState().setCurrentSession(session('new-owner')))
+
+    expect(old.readyState).toBe(SocketMock.CLOSED)
+    expect(SocketMock.instances).toHaveLength(2)
+    expect(String(SocketMock.instances[1].url)).toContain('/ws/new-owner')
+  })
+
+  it('starts one branch history flow when replacing an owner during backoff', async () => {
+    vi.useFakeTimers()
+    setToken('test-token')
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      messages: [], has_more: false, next_before: null,
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    useAppStore.setState({
+      currentSession: { ...session('same-owner'), restoreBranchId: 'source' },
+    })
+    const { result } = renderHook(() => useWebSocket())
+    act(() => result.current.connect())
+    const old = SocketMock.instances[0]
+    await act(async () => old.onopen?.(new Event('open')))
+    act(() => old.onclose?.({ code: 1006, reason: '' } as CloseEvent))
+
+    act(() => {
+      useAppStore.getState().updateSession({ restoreBranchId: 'child' })
+    })
+    expect(SocketMock.instances).toHaveLength(2)
+    const child = SocketMock.instances[1]
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+      await child.onopen?.(new Event('open'))
+      await Promise.resolve()
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      '/api/session/same-owner/messages',
+    )
     vi.useRealTimers()
   })
 })

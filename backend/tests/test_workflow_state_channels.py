@@ -18,9 +18,11 @@ too, so an undeclared key is equally invisible to them.
 
 Declaring a key is not free either: declared channels persist in the
 checkpoint, so a one-shot value has to be consumed by whoever reads it or every
-later round sees the old one. That is why two keys below are deliberately
-*not* declared, and why this file names them rather than leaving the next
-reader to wonder.
+later round sees the old one. ``_preserve_round_on_initialize`` is declared
+because explicit-start routing depends on it, and ``_initialize_round`` now
+returns it as ``False`` to consume it in the graph channel. The one remaining
+deliberately undeclared key below is named rather than left for the next reader
+to wonder about.
 """
 import ast
 from pathlib import Path
@@ -46,12 +48,6 @@ _DELIBERATELY_UNDECLARED = {
         "branch live, and a one-shot target that initialize_round does not "
         "consume would re-route every later round to it. The graph-node jump is "
         "performed by _route_from_restore_entry off _restore_entry_plan instead."
-    ),
-    "_preserve_round_on_initialize": (
-        "Set by restore_entry for explicit_start and read by _initialize_round, "
-        "which cannot see it. Harmless: preserve_restore in that node also tests "
-        "last_restored_snapshot_id, which every restored session carries, so the "
-        "round is preserved by the other half of the same condition."
     ),
 }
 

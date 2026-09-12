@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useAppStore, type PublicationFigure, type Session } from '../../stores/appStore'
@@ -55,6 +55,29 @@ describe('restored report downloads', () => {
       '/api/session/session-report/report/html?branch_id=restore%2Fa%20b',
       expect.objectContaining({ headers: expect.any(Object) }),
     ))
+  })
+
+  it('does not publish an old branch download failure under the new owner', async () => {
+    let rejectDownload!: (error: Error) => void
+    vi.mocked(fetchAndDownload).mockImplementationOnce(() => new Promise<void>(
+      (_resolve, reject) => { rejectDownload = reject },
+    ))
+    render(<DownloadButtons figures={[figure]} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Download All Figures (1)' }))
+    expect(screen.getByRole('button', { name: 'Downloading...' })).toBeDisabled()
+
+    act(() => {
+      useAppStore.getState().updateSession({ restoreBranchId: 'restore/new-owner' })
+    })
+    expect(screen.getByRole('button', { name: 'Download All Figures (1)' })).toBeEnabled()
+
+    await act(async () => {
+      rejectDownload(new Error('source branch download failed'))
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Download All Figures (1)' })).toBeEnabled()
   })
 
   it('renders GitHub-flavored Markdown tables', () => {

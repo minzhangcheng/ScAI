@@ -22,13 +22,11 @@ class InitializeMixin:
     async def _initialize_round(self, state: WorkflowState) -> WorkflowState:
         """Initialize a new analysis round, processing any pending user input"""
         analysis_state = state["analysis_state"]
-        # Restore semantics may arrive via last_restored_snapshot_id OR via the
-        # one-shot _preserve_round_on_initialize flag (set by restore_entry for
-        # explicit_start after the marker was already consumed at handoff).
-        preserve_restore = bool(
-            analysis_state.last_restored_snapshot_id
-            or state.get("_preserve_round_on_initialize")
-        )
+        # Only an explicit Start on an idle/manual restore preserves the round
+        # captured by the snapshot. Durable restore origin (`last_restored_*`)
+        # is lineage, never round arithmetic: a semantic direction action that
+        # routes through check_convergence must initialize the next round.
+        preserve_restore = bool(state.get("_preserve_round_on_initialize", False))
         # P1-1: commit the previously peeked direction. If current_round_direction
         # matches the head of the queue, the prior round completed successfully
         # (otherwise LangGraph would have replayed from checkpoint without
@@ -123,6 +121,7 @@ class InitializeMixin:
                 return {
                     **state,
                     "analysis_state": analysis_state,
+                    "_preserve_round_on_initialize": False,
                     "should_continue": False,
                     "human_stop_requested": True
                 }
@@ -186,23 +185,18 @@ class InitializeMixin:
             analysis_state.pending_human_input = None
             analysis_state.pending_uploaded_files = []
         
-        # Increment round counter (skip if resuming from snapshot restore,
-        # since current_round is already correct from the snapshot).
-        # Also skip when _preserve_round_on_initialize is True (explicit_start
-        # on an idle-restored session — the user clicked "Start" and we must
-        # not advance the round that was preserved during restore).
+        # Increment the round and reset the previous plan/cache boundary
+        # unless this is an explicit Start on an idle/manual restore, whose
+        # one-shot flag keeps the captured round in place.
         if not preserve_restore:
             analysis_state.current_round += 1
             # Clear the previous round's approved plan so the new round
             # actually runs planning_dialogue. Without this, _pi_planning's
             # "already approved" early-return short-circuits the next round.
-            # Skip on snapshot restore — the restored plan must be preserved.
+            # Both are cleared together: the next round must plan anew and
+            # must not replay a cached result from the round just completed.
             analysis_state.current_plan = None
-            # Snapshot-restore path preserves it by skipping this whole block.
             analysis_state.current_round_cache = None
-
-        # Consume the one-shot preserve_round flag after first use.
-        state.pop("_preserve_round_on_initialize", None)
 
         self._set_status(analysis_state, TaskStatus.RUNNING)
 
@@ -221,6 +215,11 @@ class InitializeMixin:
         result = {
             **state,
             "analysis_state": analysis_state,
+            # Read-and-consume in the returned channel itself. Popping the
+            # local state dict is not a graph channel update: LangGraph merges
+            # the node's return, so the explicit False is what consumes the
+            # one-shot flag for every later node and invocation.
+            "_preserve_round_on_initialize": False,
             "current_round": analysis_state.current_round,
             "human_guidance": human_guidance,
             "user_action": user_action,
@@ -241,8 +240,8 @@ class InitializeMixin:
             "planning_context": None,
             # Reset plan approval so the new round runs planning_dialogue;
             # paired with clearing analysis_state.current_plan above.
-            # On snapshot restore (marker or preserve flag after consume), keep
-            # plan_approved=True when the restored plan is already approved.
+            # An explicit Start restores an already-approved plan; every
+            # semantic continuation clears it so the new round plans afresh.
             "plan_approved": (
                 bool(
                     analysis_state.current_plan

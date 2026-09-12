@@ -1,7 +1,7 @@
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { Session } from '../../../stores/appStore'
+import { useAppStore, type Session } from '../../../stores/appStore'
 import { useAnalysisPanelLifecycleActions } from './useAnalysisPanelLifecycleActions'
 
 const currentSession: Session = {
@@ -47,6 +47,7 @@ describe('manual-input attachment uploads', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    useAppStore.setState({ currentSession })
   })
 
   it('keeps the dialog open and stops submission when an attachment fails', async () => {

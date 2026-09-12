@@ -64,13 +64,17 @@ def captured(monkeypatch, tmp_path):
 
     monkeypatch.setattr(_config, "SNAPSHOT_DIR", tmp_path / "snapshots")
 
-    async def _build(*, gate=GATE_ROUND_WAIT, round_number=3, revision=57):
+    async def _build(
+        *, gate=GATE_ROUND_WAIT, round_number=3, revision=57, prepare_state=None,
+    ):
         session_id = "src-" + uuid.uuid4().hex[:12]
         digest = _seed_session(session_id, revision=revision, round_number=round_number)
         workflow = _Workflow(
             _Sandbox(session_id, revision, digest, round_number=round_number)
         )
         state = _state(session_id, round_number=round_number)
+        if prepare_state is not None:
+            prepare_state(state)
         snapshot = await capture_decision_snapshot(
             workflow, state, gate=gate, workflow_state={"current_round": round_number},
         )
@@ -538,3 +542,213 @@ async def test_the_session_summary_carries_where_a_fork_came_from(captured):
     )
     summaries = {row["id"]: row for row in list_saved_sessions()}
     assert summaries[new_id]["last_restored_snapshot_id"] == f"{source}/{snapshot}"
+
+
+# ------------------------------------------------ report references and version
+
+
+@pytest.mark.asyncio
+async def test_unavailable_local_report_urls_are_removed_but_content_survives(captured):
+    """SR-2: a retained message may name a report the child did not produce.
+
+    The URL is dropped at the field boundary. The decision content around it and
+    every external citation survive, because those are still true for the child.
+    """
+    from backend.config import get_session_dir
+    from backend.models.schemas import WebSocketMessage
+    from backend.services.session_store import load_session_from_disk
+
+    def populate(state):
+        sid = state.id
+        state.realtime_messages = [
+            WebSocketMessage(type="annotation_confirmation", content={
+                "summary": "annotation review retained",
+                "html_url": f"/api/session/{sid}/annotation-report/html",
+                "report_html_url": f"/api/session/{sid}/exploration-report/html?branch=main",
+                "detailed_report_url": f"/api/session/{sid}/detailed-report/html",
+                "citation": "https://pubmed.ncbi.nlm.nih.gov/12345678/",
+                "prose": f"the source session {sid} remains readable prose",
+            }),
+            WebSocketMessage(type="exploration_report", content={
+                "direction": "Kupffer cell heterogeneity",
+                "exploration_report_url": f"/api/session/{sid}/exploration-report/html",
+                "annotation_report_url": f"/api/session/{sid}/annotation-report/html",
+                "integration_report_url": f"/api/session/{sid}/integration-report/html",
+                "detailed_report_url": f"/api/session/{sid}/detailed-report/html",
+                "doi": "https://doi.org/10.1038/s41586-020-0000-0",
+            }),
+        ]
+
+    source, snapshot = await captured(prepare_state=populate)
+    new_id = await restore_snapshot_into_new_session(
+        source_session_id=source, snapshot=snapshot, user_id=OWNER,
+    )
+    restored = load_session_from_disk(new_id)
+    generated = restored.model_dump(mode="json")
+    serialized = json.dumps(generated)
+
+    # No local report endpoint may survive, for either the source or the child.
+    assert f"/api/session/{source}" not in serialized
+    assert f"/api/session/{new_id}" not in serialized
+    assert generated["exploration_report_html_path"] is None
+    assert generated["annotation_report_html_path"] is None
+    assert generated["integration_report_html_path"] is None
+    assert generated["detailed_report_html_path"] is None
+    assert not any((get_session_dir(new_id) / "reports").iterdir())
+    assert not any((get_session_dir(new_id) / "logs").iterdir())
+
+    messages = {message.id: message for message in restored.realtime_messages}
+    annotation = messages[restored.realtime_messages[0].id].content
+    assert annotation["summary"] == "annotation review retained"
+    assert annotation["html_url"] is None
+    assert annotation["report_html_url"] is None
+    assert annotation["detailed_report_url"] is None
+    assert annotation["citation"] == "https://pubmed.ncbi.nlm.nih.gov/12345678/"
+    # Arbitrary prose that merely mentions the source id is not a URL and stays.
+    assert source in annotation["prose"]
+
+    exploration = restored.realtime_messages[1].content
+    assert exploration["direction"] == "Kupffer cell heterogeneity"
+    assert exploration["exploration_report_url"] is None
+    assert exploration["annotation_report_url"] is None
+    assert exploration["integration_report_url"] is None
+    assert exploration["detailed_report_url"] is None
+    assert exploration["doi"] == "https://doi.org/10.1038/s41586-020-0000-0"
+
+
+def test_report_url_sanitizer_covers_real_producer_payloads():
+    """Every persisted report-link shape is safe to retain in a restored child."""
+    from backend.models.schemas import AnalysisState
+    from backend.services.round_snapshots.restore import _strip_unavailable_report_urls
+    from backend.workflow.annotation import AnnotationMixin
+    from backend.workflow.helpers import build_integration_gate_payload
+
+    session_id = "producer-session"
+    state = AnalysisState(id=session_id, user_id="owner")
+    state.exploration_report_html_path = "/reports/exploration.html"
+    state.annotation_report_html_path = "/reports/annotation.html"
+    state.integration_report_html_path = "/reports/integration.html"
+    state.detailed_report_html_path = "/reports/detailed.html"
+
+    # Exercise the production builders that emit message URLs, rather than
+    # mirroring their field names in a census assertion.
+    api_payload = state.to_api_dict(include_messages=False)
+    integration_payload = build_integration_gate_payload(state, session_id)
+    annotation_payload = AnnotationMixin._build_annotation_confirmation_payload(
+        state, [], "liver", "mouse", "", "",
+        f"/api/session/{session_id}/annotation-report/html",
+        f"/api/session/{session_id}/detailed-report/html",
+    )
+    produced = {
+        "api": api_payload,
+        "integration": integration_payload,
+        "annotation": annotation_payload,
+    }
+    sanitized = _strip_unavailable_report_urls(produced)
+
+    assert sanitized["api"]["exploration_report_url"] is None
+    assert sanitized["api"]["annotation_report_url"] is None
+    assert sanitized["api"]["integration_report_url"] is None
+    assert sanitized["api"]["detailed_report_url"] is None
+    assert sanitized["integration"]["html_url"] is None
+    assert sanitized["integration"]["detailed_report_url"] is None
+    assert sanitized["annotation"]["report_html_url"] is None
+    assert sanitized["annotation"]["detailed_report_url"] is None
+
+    # An external citation is not a report owned by the child and must not be
+    # deleted merely because it has a similar path shape.
+    external = {
+        "html_url": "https://reports.example/api/session/source/exploration-report/html",
+        "report_html_url": "https://reports.example/api/session/source/annotation-report/html",
+        "detailed_report_url": "https://reports.example/api/session/source/detailed-report/html",
+        "exploration_report_url": "https://reports.example/api/session/source/exploration-report/html",
+        "annotation_report_url": "https://reports.example/api/session/source/annotation-report/html",
+        "integration_report_url": "https://reports.example/api/session/source/integration-report/html",
+    }
+    assert _strip_unavailable_report_urls(external) == external
+
+    # Query strings and fragments are still local endpoint references; neither
+    # may provide a way for a source-session report URL to survive restoration.
+    for suffix in ("?format=html", "#section-1"):
+        local = {
+            "html_url": f"/api/session/{session_id}/report/html{suffix}",
+        }
+        assert _strip_unavailable_report_urls(local)["html_url"] is None
+
+
+@pytest.mark.asyncio
+async def test_durable_origin_survives_first_result_and_parent_listing(captured):
+    """SR-4: durable origin is not workflow scratch state."""
+    from backend.models.schemas import RoundResult
+    from backend.routes.round_snapshots import _restored_from
+    from backend.services.session_store import async_save_session, load_session_from_disk
+    from backend.workflow.provenance import (
+        consume_restore_provenance,
+        restore_provenance_id,
+    )
+    from backend.workflow.synthesis import _upsert_round_result
+
+    source, snapshot = await captured(round_number=3)
+    new_id = await restore_snapshot_into_new_session(
+        source_session_id=source, snapshot=snapshot, user_id=OWNER,
+    )
+    state = load_session_from_disk(new_id)
+    origin = f"{source}/{snapshot}"
+    assert state.last_restored_snapshot_id == origin
+    assert state.restore_provenance_snapshot_id == origin
+    assert restore_provenance_id(state) == origin
+
+    # First new canonical branch result receives the origin once.
+    first = RoundResult(
+        round_number=4, phase="innovation", direction="New direction",
+        pi_summary="first", bioinformatics_findings=["x"],
+    )
+    _upsert_round_result(
+        state.round_results, first, lineage_id="main", branch_id=None,
+        branch_label=None, restored_from_snapshot_id=restore_provenance_id(state),
+    )
+    consume_restore_provenance(state)
+    assert state.last_restored_snapshot_id == origin, "durable origin was consumed"
+    assert state.restore_provenance_snapshot_id is None
+    assert restore_provenance_id(state) is None, "origin repeated after first result"
+
+    # A later result does not repeat the attribution.
+    second = RoundResult(
+        round_number=5, phase="innovation", direction="Second direction",
+        pi_summary="second", bioinformatics_findings=["y"],
+    )
+    _upsert_round_result(
+        state.round_results, second, lineage_id="main", branch_id=None,
+        branch_label=None, restored_from_snapshot_id=restore_provenance_id(state),
+    )
+    assert second.restored_from_snapshot_id is None
+    assert sum(
+        1 for result in state.round_results
+        if result.restored_from_snapshot_id == origin
+    ) == 1
+
+    # The parent still lists the child after the first canonical result.
+    await async_save_session(new_id, state, force=True)
+    assert _restored_from(source) == {snapshot: [new_id]}
+
+
+@pytest.mark.asyncio
+async def test_restored_child_records_creating_and_source_versions(captured):
+    """SR-5: child scai_version means the version that created the child."""
+    from backend.constants import VERSION
+    from backend.services.session_store import load_session_from_disk
+
+    source, snapshot = await captured()
+    from backend.services.round_snapshots.layout import snapshot_dir
+    from backend.services.round_snapshots.manifest import (
+        MANIFEST_NAME,
+        read_snapshot_manifest,
+    )
+
+    manifest = read_snapshot_manifest(snapshot_dir(source, snapshot) / MANIFEST_NAME)
+    new_id = await restore_snapshot_into_new_session(
+        source_session_id=source, snapshot=snapshot, user_id=OWNER,
+    )
+    restored = load_session_from_disk(new_id)
+    assert restored.scai_version == VERSION
+    assert restored.restore_source_scai_version == manifest["scai_version"]

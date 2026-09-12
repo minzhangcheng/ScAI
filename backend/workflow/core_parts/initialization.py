@@ -82,9 +82,13 @@ def _restore_entry(self, state: WorkflowState) -> WorkflowState:
         if key not in {"analysis_state", "messages"}:
             returned[key] = copy.deepcopy(value)
 
-    # Explicit-start restore: signal initialize to preserve the round.
-    if plan.preserve_round_on_initialize:
-        returned["_preserve_round_on_initialize"] = True
+    # Explicit-start restore controls same-round initialization. Emitted on
+    # every entry so an earlier invocation cannot leave a stale True behind in
+    # the declared channel. This is the only same-round control; durable
+    # restore origin must never decide round arithmetic.
+    returned["_preserve_round_on_initialize"] = bool(
+        plan.preserve_round_on_initialize
+    )
 
     # Store the plan for the routing method.
     returned["_restore_entry_plan"] = plan.model_dump(mode="json")

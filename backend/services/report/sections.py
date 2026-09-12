@@ -352,6 +352,12 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 
         created_str = state.created_at.strftime("%Y-%m-%d %H:%M:%S") if hasattr(state.created_at, 'strftime') else str(state.created_at)
         report_time = report.get("generated_at", "")
+        restore_source_version = getattr(state, "restore_source_scai_version", None)
+        restore_source_version_row = (
+            f"<tr><td><strong>ScAI Version (Restore Source Snapshot)</strong></td>"
+            f"<td>{esc(restore_source_version)}</td></tr>"
+            if restore_source_version else ""
+        )
 
         project_html = f"""
         <h3>{proj_title}</h3>
@@ -360,6 +366,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 <tr><td><strong>{lbl_name}</strong></td><td>{esc(state.name)}</td></tr>
                 <tr><td><strong>{lbl_desc}</strong></td><td>{esc(state.initial_instruction[:500]) if state.initial_instruction else '-'}</td></tr>
                 <tr><td><strong>ScAI Version (Session Created With)</strong></td><td>{esc(state.scai_version or 'Unknown (legacy session)')}</td></tr>
+                {restore_source_version_row}
                 <tr><td><strong>{lbl_created}</strong></td><td>{esc(created_str)}</td></tr>
                 <tr><td><strong>{lbl_report_time}</strong></td><td>{esc(report_time)}</td></tr>
             </tbody>

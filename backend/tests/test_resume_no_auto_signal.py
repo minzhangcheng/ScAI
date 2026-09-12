@@ -146,3 +146,51 @@ async def test_resume_from_pause_at_running_goes_to_running(monkeypatch):
     workflow.signal_continue.assert_not_called()
     workflow.signal_annotation_confirmed.assert_not_called()
     assert state.status == TaskStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_resume_while_running_is_rejected_without_mutating_state(monkeypatch):
+    """A stale duplicate /resume must not touch runtime or workflow state."""
+    from fastapi import HTTPException
+
+    from backend.routes import lifecycle
+
+    state = AnalysisState(user_id="u", initial_instruction="x")
+    state.status = TaskStatus.RUNNING
+    state.current_round = 3
+    state.max_rounds = 7
+    state.original_max_rounds = 11
+    state.runtime_restore_status = "stale"
+    state.runtime_restore_warning = "keep this warning"
+    state.skip_required_snapshot_phase = "round_start"
+    before = state.model_dump(mode="json")
+
+    request = SimpleNamespace(state=SimpleNamespace(user_id="u"))
+    require = AsyncMock(return_value=state)
+    monkeypatch.setattr(lifecycle, "require_session_ownership", require)
+    active_workflow = object()
+    workflow_map = {"s1": active_workflow}
+    monkeypatch.setattr(lifecycle, "workflows", workflow_map)
+
+    # These are the mutators/probes that the old implementation reached before
+    # discovering that the analysis was already running. None may be touched by
+    # a stale request; status validation is intentionally the first operation.
+    recovery = MagicMock(side_effect=AssertionError("recovery check called"))
+    update_cache = AsyncMock(side_effect=AssertionError("cache update called"))
+    save = AsyncMock(side_effect=AssertionError("session save called"))
+    monkeypatch.setattr(lifecycle, "assert_recovery_clear", recovery)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", update_cache)
+    monkeypatch.setattr(lifecycle, "async_save_session", save)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await lifecycle.resume_analysis("s1", request)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Analysis already running"
+    require.assert_awaited_once_with(session_id="s1", user_id="u")
+    recovery.assert_not_called()
+    update_cache.assert_not_awaited()
+    save.assert_not_awaited()
+    assert lifecycle.workflows is workflow_map
+    assert lifecycle.workflows["s1"] is active_workflow
+    assert state.model_dump(mode="json") == before
