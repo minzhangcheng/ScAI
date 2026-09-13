@@ -670,44 +670,28 @@ async def prepare_report_generation(
             report_content = self._fallback_report(narrative, stats, language)
             used_fallback = True
         else:
-            for attempt in range(2):  # Single retry on connection error
-                try:
-                    response = await self._budgeted_text_call(
-                        client.chat,
-                        model=report_model,
-                        messages=[
-                            {"role": "system", "content": self._get_report_system_prompt(language)},
-                            {"role": "user", "content": report_prompt},
-                        ],
-                        temperature=0.3,
-                        max_tokens=NO_OUTPUT_TOKEN_CAP,
-                        timeout=900.0,  # 15 min — large narratives need long generation time
-                        prefer_stream=True,
-                    )
-                    report_content = response.content or ""
-                    break
-                except UpstreamExhaustedError:
-                    raise  # propagate to caller for retry/user-intervention
-                except APIConnectionError:
-                    if attempt == 0:
-                        logger.warning(
-                            f"[{self.session_id}] Report generation connection error, "
-                            f"retrying in 5s"
-                        )
-                        await asyncio.sleep(5)
-                        continue
-                    logger.exception(
-                        f"[{self.session_id}] Report generation failed after retry"
-                    )
-                    report_content = self._fallback_report(narrative, stats, language)
-                    used_fallback = True
-                except Exception:
-                    logger.exception(
-                        f"[{self.session_id}] Report generation LLM call failed"
-                    )
-                    report_content = self._fallback_report(narrative, stats, language)
-                    used_fallback = True
-                    break
+            try:
+                response = await self._budgeted_text_call(
+                    client.chat,
+                    model=report_model,
+                    messages=[
+                        {"role": "system", "content": self._get_report_system_prompt(language)},
+                        {"role": "user", "content": report_prompt},
+                    ],
+                    temperature=0.3,
+                    max_tokens=NO_OUTPUT_TOKEN_CAP,
+                    timeout=900.0,  # 15 min — large narratives need long generation time
+                    prefer_stream=True,
+                )
+                report_content = response.content or ""
+            except UpstreamExhaustedError:
+                raise  # propagate to caller for retry/user-intervention
+            except Exception:
+                logger.exception(
+                    f"[{self.session_id}] Report generation LLM call failed"
+                )
+                report_content = self._fallback_report(narrative, stats, language)
+                used_fallback = True
     finally:
         # Restore supervisor context in case of subsequent LLM calls
         self._set_llm_context()

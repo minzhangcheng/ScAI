@@ -120,6 +120,7 @@ export interface SessionLoadResponse {
     error?: string
     node_name?: string
     generation?: number
+    wait_seconds?: number
     reason?: 'llm_failure' | 'marker_db_missing'
   } | null
   agent_disabled_info?: {

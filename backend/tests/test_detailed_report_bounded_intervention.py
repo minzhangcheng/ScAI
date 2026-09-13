@@ -29,7 +29,9 @@ def _report(status: str = "completed") -> dict:
     }
 
 
-def _state(session_id: str = "report-session") -> dict:
+def _state(
+    session_id: str = "report-session", *, round_wait_seconds: int = -1
+) -> dict:
     analysis_state = AnalysisState(
         id=session_id,
         user_id="user",
@@ -37,6 +39,7 @@ def _state(session_id: str = "report-session") -> dict:
         initial_instruction="Analyze",
     )
     analysis_state.current_round = 1
+    analysis_state.round_wait_seconds = round_wait_seconds
     analysis_state.analysis_log.append(
         AnalysisStep(step_number=1, step_type="execute_code", code="x = 1")
     )
@@ -117,16 +120,13 @@ async def test_unattended_report_gate_times_out_into_persisted_fallback(
     monkeypatch, tmp_path
 ):
     _patch_report_paths(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        final_report_module, "DETAILED_REPORT_INTERVENTION_WAIT_SECONDS", 0
-    )
     supervisor = MagicMock()
     supervisor.generate_detailed_report = AsyncMock(
         side_effect=[_upstream_error(), _report("partial")]
     )
     harness = _Harness(supervisor)
     _bind_real_intervention(harness)
-    state = _state()
+    state = _state(round_wait_seconds=0)
 
     result = await harness._generate_detailed_report(state)
 
@@ -174,7 +174,6 @@ async def test_report_retry_disarms_fallback_and_retries_upstream(
         ANY,
         "generate_detailed_report",
         ANY,
-        wait_seconds=final_report_module.DETAILED_REPORT_INTERVENTION_WAIT_SECONDS,
         # This gate's unattended answer is the deterministic fallback, not a
         # bounded re-run of the same exhausted upstream.
         auto_retry=False,

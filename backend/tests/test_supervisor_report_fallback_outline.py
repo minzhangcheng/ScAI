@@ -137,7 +137,7 @@ async def test_forced_fallback_never_calls_the_report_llm(tmp_path):
     (ws / "figures").mkdir(parents=True, exist_ok=True)
 
     report = await agent.generate_detailed_report(
-        _state_with_rounds(),
+        _state_with_complete_visual_coverage(tmp_path),
         "model-x",
         str(out),
         workspace_dir=str(ws),

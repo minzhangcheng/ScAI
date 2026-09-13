@@ -4,7 +4,6 @@ Moved verbatim out of backend/agents/supervisor_agent.py; composed into Supervis
 """
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Callable, Sequence
-import asyncio
 import json
 import logging
 import re
@@ -19,8 +18,6 @@ from . import report_presentation, report_prompt
 
 logger = logging.getLogger(__name__)
 
-from openai import APIConnectionError
-
 from ...models.schemas import AnalysisState, AnalysisStep
 from ...utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ...services.report.interaction_records import write_interaction_record_files
@@ -28,6 +25,7 @@ from ...services.report.artifacts import (
     artifact_stems,
     eligible_artifacts,
     excluded_artifact_stems,
+    figure_reservation_notice,
     publication_pdf_is_valid,
     resolve_archival_pdf,
     resolve_archival_render,

@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.56.13"
+VERSION = "0.56.14"
 
 
 # ── Authoritative graph node registry — single source of truth ─────
@@ -85,6 +85,8 @@ class WaitInputReason(str, Enum):
 class StateSyncChangeType(str, Enum):
     LLM_FAILURE = "llm_failure"
     LLM_RETRY = "llm_retry"
+    LLM_SKIP = "llm_skip"
+    LLM_TERMINATE = "llm_terminate"
     AGENT_DISABLED = "agent_disabled"
     AGENT_RESUMED = "agent_resumed"
     SPECIES_INPUT = "species_input"

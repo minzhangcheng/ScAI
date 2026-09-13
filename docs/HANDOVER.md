@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.13 · **Last updated**: 2026-09-13
+**Version**: 0.56.14 · **Last updated**: 2026-09-13
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,17 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.56.x — (2026-09-08 onward)**
+
+- `0.56.14` — Repairs LLM transport retry and detailed-report intervention
+  flow. Long report calls retain four independent `APIConnectionError` retries
+  without replaying `APITimeoutError` generations; the dead report-level retry
+  loop is removed. Detailed-report HITL now inherits the session's
+  `round_wait_seconds`, persists the effective wait, emits action-specific
+  Retry/Skip/Terminate state-sync events, and restores the correct dialog timing
+  after WebSocket delivery or reload. The deterministic report fallback also
+  restores its figure-reservation helper import. Focused backend evidence passed
+  `121/121` tests and the complete frontend suite passed `348/348`; no image
+  build, registry push, deployment, or historical-session mutation was performed.
 
 - `0.56.13` — Adds provider-neutral automatic prompt-cache negotiation for LLM
   calls. Anthropic-compatible and OpenRouter Anthropic requests send top-level

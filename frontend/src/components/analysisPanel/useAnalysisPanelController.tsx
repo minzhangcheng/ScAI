@@ -298,8 +298,9 @@ export function useAnalysisPanelController() {
     setShowExplorationDialog, feedbackRoundData, setShowFeedbackDialog,
     setShowPlanReviewDialog, wsConnect: store.wsConnect, maxExplorationRound: MAX_EXPLORATION_ROUND,
   })
+  const llmWaitSeconds = llmFailureInfo?.waitSeconds ?? roundWaitSeconds
   const { timeRemaining } = useCountdownTimer({
-    countdownSeconds: roundWaitSeconds > 0 ? roundWaitSeconds : 0,
+    countdownSeconds: llmWaitSeconds > 0 ? llmWaitSeconds : 0,
     onExpire: interventionActions.handleLlmSkip,
     resetKey: llmFailureInfo?.generation != null ? String(llmFailureInfo.generation) : undefined,
   })
@@ -320,7 +321,8 @@ export function useAnalysisPanelController() {
   })
 
   return {
-    ...store, t, llmFailureInfo, showLlmTimeoutDialog, llmModifySaved, roundWaitSeconds, maxRounds,
+    ...store, t, llmFailureInfo, showLlmTimeoutDialog, llmModifySaved,
+    roundWaitSeconds, llmWaitSeconds, maxRounds,
     annotationGateData, speciesInputInfo: ownedSpeciesInputInfo,
     showSpeciesInputDialog: ownedShowSpeciesInputDialog,
     explorationFailedInfo: ownedExplorationFailedInfo,

@@ -59,12 +59,6 @@ from .shared import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-# The common wait helper adds its standard 60-second delivery buffer, making
-# this a five-minute operator window. All non-report LLM gates keep their
-# existing unbounded default.
-DETAILED_REPORT_INTERVENTION_WAIT_SECONDS = 240
-
-
 def detailed_report_event_payload(report: Dict[str, Any]) -> Dict[str, Any]:
     """Build the terminal report event without rewriting a partial status."""
     return {
@@ -342,10 +336,9 @@ class FinalReportMixin:
                     e,
                     "generate_detailed_report",
                     analysis_state,
-                    wait_seconds=DETAILED_REPORT_INTERVENTION_WAIT_SECONDS,
-                    # This gate has its own unattended recovery: regenerate the
-                    # report with force_fallback. Auto-retrying first would
-                    # delay a fallback that is already the designed answer.
+                    # On an unattended timeout, use the deterministic fallback
+                    # instead of re-running the same exhausted report request.
+                    # Manual sessions remain parked until an explicit action.
                     auto_retry=False,
                 )
                 if action == LlmFailureAction.RETRY:

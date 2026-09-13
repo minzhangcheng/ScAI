@@ -30,7 +30,7 @@ export function AnalysisDialogs({ controller }: AnalysisDialogsProps) {
     handlePlanApprove, handlePlanModify, handlePlanSkip,
     handleSpeciesInput, handleStop, handleStopDialogCancel,
     handleSupplementaryAnalysis, integrationGateData, isCurrentIntegrationGate,
-    isSupplementaryRunning, language, llmFailureInfo, llmModifySaved, maxRounds,
+    isSupplementaryRunning, language, llmFailureInfo, llmModifySaved, llmWaitSeconds, maxRounds,
     planReviewData, roundWaitSeconds, setShowAnnotationDialog, setShowExplorationDialog,
     setShowIntegrationGateDialog, setShowLlmTimeoutDialog,
     showAnnotationDialog, showExplorationDialog,
@@ -157,7 +157,7 @@ export function AnalysisDialogs({ controller }: AnalysisDialogsProps) {
           open={showLlmTimeoutDialog}
           llmFailureInfo={llmFailureInfo}
           timeRemaining={timeRemaining}
-          hasCountdown={roundWaitSeconds > 0}
+          hasCountdown={llmWaitSeconds > 0}
           onRetry={handleLlmRetry}
           onModifyAgent={handleLlmModifyAgent}
           onTerminate={handleLlmTerminate}

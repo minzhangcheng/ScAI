@@ -359,6 +359,7 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
       error: typeof info.error === 'string' ? info.error : '',
       nodeName: info.node_name,
       generation: info.generation,
+      waitSeconds: typeof info.wait_seconds === 'number' ? info.wait_seconds : undefined,
       reason: data.wait_input_reason,
     }
   } else if (

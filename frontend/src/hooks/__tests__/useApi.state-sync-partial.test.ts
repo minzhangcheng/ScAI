@@ -63,6 +63,8 @@ describe('state_sync with a partial payload', () => {
       messages: [],
       wsConnected: false,
       stateVersion: 7,
+      llmFailureInfo: null,
+      showLlmTimeoutDialog: false,
     })
   })
 
@@ -113,5 +115,54 @@ describe('state_sync with a partial payload', () => {
     expect(state.currentSession?.status).toBe('waiting_input')
     expect(state.currentSession?.currentRound).toBe(4)
     expect(state.stateVersion).toBe(8)
+  })
+
+  it('opens the LLM gate with its effective wait and clears it on skip', async () => {
+    const { result } = renderHook(() => useWebSocket())
+
+    await act(async () => {
+      result.current.connect()
+    })
+
+    const ws = wsInstances[wsInstances.length - 1]
+    await act(async () => {
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: 'state_sync',
+          change_type: 'llm_failure',
+          version: 8,
+          status: 'waiting_input',
+          llm_failure_info: {
+            agent: 'report_generator',
+            model: 'test-model',
+            llm_server: 'https://llm.example/v1',
+            error: 'connection failed',
+            node_name: 'generate_detailed_report',
+            generation: 1,
+            wait_seconds: -1,
+          },
+        }),
+      } as MessageEvent)
+    })
+
+    expect(useAppStore.getState().llmFailureInfo).toMatchObject({
+      nodeName: 'generate_detailed_report',
+      waitSeconds: -1,
+    })
+    expect(useAppStore.getState().showLlmTimeoutDialog).toBe(true)
+
+    await act(async () => {
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: 'state_sync',
+          change_type: 'llm_skip',
+          version: 9,
+          status: 'running',
+        }),
+      } as MessageEvent)
+    })
+
+    expect(useAppStore.getState().llmFailureInfo).toBeNull()
+    expect(useAppStore.getState().showLlmTimeoutDialog).toBe(false)
   })
 })

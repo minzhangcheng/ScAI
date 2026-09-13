@@ -505,6 +505,7 @@ describe('transformLoadResponse — LLM intervention gate', () => {
         error: 'upstream exhausted',
         node_name: 'bioinformatics_analysis',
         generation: 4,
+        wait_seconds: -1,
       },
     })
 
@@ -515,6 +516,7 @@ describe('transformLoadResponse — LLM intervention gate', () => {
       error: 'upstream exhausted',
       nodeName: 'bioinformatics_analysis',
       generation: 4,
+      waitSeconds: -1,
       reason: 'llm_failure',
     })
   })

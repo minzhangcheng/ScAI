@@ -3,11 +3,12 @@ A preceding 5xx must NOT shift the first 429 off RATE_LIMIT_DELAYS[0] nor
 consume the rate-limit budget."""
 import httpx
 import pytest
-from openai import RateLimitError, InternalServerError
+from openai import APIConnectionError, APITimeoutError, RateLimitError, InternalServerError
 
 from backend.utils import llm_client
 from backend.utils.llm_client import (
     DEFAULT_REQUEST_TIMEOUT,
+    MAX_RETRIES,
     OpenAICompatibleClient,
     retry_with_backoff,
     compute_rate_limit_delay,
@@ -120,7 +121,7 @@ async def test_429_budget_survives_zero_ordinary_retries(captured_sleeps):
     assert captured_sleeps == [float(RATE_LIMIT_DELAYS[0])]
 
 
-def test_long_timeout_disables_ordinary_retries_but_keeps_429_budget():
+def test_long_timeout_disables_ordinary_retries_but_keeps_safe_budgets():
     client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
     client.agent_name = "literature"
     client.base_url = "https://example.invalid/v1"
@@ -135,5 +136,54 @@ def test_long_timeout_disables_ordinary_retries_but_keeps_429_budget():
     )
 
     assert kwargs["max_retries"] == 0
+    assert kwargs["connection_retries"] == MAX_RETRIES
     assert kwargs["rate_limit_retries"] == len(RATE_LIMIT_DELAYS)
     assert kwargs["before_retry"] is before_retry
+
+
+@pytest.mark.asyncio
+async def test_connection_failures_keep_independent_retry_budget(captured_sleeps):
+    attempts = 0
+
+    async def func():
+        nonlocal attempts
+        attempts += 1
+        if attempts <= MAX_RETRIES:
+            raise APIConnectionError(request=httpx.Request("POST", "http://x"))
+        return "ok"
+
+    result = await retry_with_backoff(
+        func,
+        max_retries=0,
+        connection_retries=MAX_RETRIES,
+        agent_name="report-generator",
+    )
+
+    assert result == "ok"
+    assert attempts == MAX_RETRIES + 1
+    assert captured_sleeps == [
+        RETRY_DELAY_BASE * attempt for attempt in range(1, MAX_RETRIES + 1)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_long_timeout_budget_does_not_replay_timeout(captured_sleeps):
+    attempts = 0
+
+    async def func():
+        nonlocal attempts
+        attempts += 1
+        raise APITimeoutError(request=httpx.Request("POST", "http://x"))
+
+    from backend.utils.llm_client import UpstreamExhaustedError
+
+    with pytest.raises(UpstreamExhaustedError, match="after 1 attempts"):
+        await retry_with_backoff(
+            func,
+            max_retries=0,
+            connection_retries=MAX_RETRIES,
+            agent_name="report-generator",
+        )
+
+    assert attempts == 1
+    assert captured_sleeps == []

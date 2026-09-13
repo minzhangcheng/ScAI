@@ -126,15 +126,14 @@ async def _drive_hitl_gate(
         payload = dict(info_payload)
         payload["node_name"] = node_name
         payload["generation"] = gen
+        payload["wait_seconds"] = effective_wait
         setattr(analysis_state, info_attr, payload)
         self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
         await self._send_state_sync(analysis_state, enter_change)
 
     try:
-        # Ordinary agent gates inherit the session's round_wait_seconds, so
-        # an automated run (0 = no wait) never parks on a dialog nobody will
-        # answer. Report content generation supplies a finite budget of its
-        # own so an unattended run can select its deterministic fallback.
+        # Gates inherit the session's round_wait_seconds unless the caller
+        # explicitly owns a different wait contract.
         signaled = await wait_with_skip_time(
             event, effective_wait, self.session_id, node_name,
         )
@@ -165,7 +164,13 @@ async def _drive_hitl_gate(
         analysis_state.wait_input_reason = None
         setattr(analysis_state, info_attr, None)
         self._set_status(analysis_state, TaskStatus.RUNNING)
-        await self._send_state_sync(analysis_state, exit_change)
+        resolved_exit_change = exit_change
+        if exit_change == StateSyncChangeType.LLM_RETRY.value:
+            if action == LlmFailureAction.TERMINATE.value:
+                resolved_exit_change = StateSyncChangeType.LLM_TERMINATE.value
+            elif action != LlmFailureAction.RETRY.value:
+                resolved_exit_change = StateSyncChangeType.LLM_SKIP.value
+        await self._send_state_sync(analysis_state, resolved_exit_change)
     except (asyncio.CancelledError, WorkflowSupersededError):
         # A superseding run unwinds through this gate the same way a
         # cancellation does, so it needs the same cleanup — otherwise the

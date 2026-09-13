@@ -341,6 +341,7 @@ export interface LlmFailureInfo {
   error: string
   nodeName: string
   generation: number
+  waitSeconds?: number
   reason?: 'llm_failure' | 'agent_disabled' | 'marker_db_missing'
 }
 

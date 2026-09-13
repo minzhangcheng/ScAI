@@ -122,6 +122,7 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
         error: info.error,
         nodeName: info.node_name,
         generation: info.generation,
+        waitSeconds: typeof info.wait_seconds === 'number' ? info.wait_seconds : undefined,
         reason: info.reason,
       })
       store.setShowLlmTimeoutDialog(true)
@@ -141,7 +142,11 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
         reason: 'agent_disabled',
       })
       store.setShowLlmTimeoutDialog(true)
-    } else if (syncContent.change_type === 'llm_retry') {
+    } else if (
+      syncContent.change_type === 'llm_retry' ||
+      syncContent.change_type === 'llm_skip' ||
+      syncContent.change_type === 'llm_terminate'
+    ) {
       useAppStore.getState().clearLlmFailureState()
     } else if (syncContent.change_type === 'agent_resumed') {
       useAppStore.getState().clearLlmFailureState()

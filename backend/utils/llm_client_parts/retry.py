@@ -204,6 +204,7 @@ async def retry_with_backoff(
     on_retry: Optional[Callable[[int, int, float, str, str], Awaitable[None]]] = None,
     non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
     rate_limit_retries: Optional[int] = None,
+    connection_retries: Optional[int] = None,
     before_retry: Optional[Callable[[], Awaitable[None]]] = None,
     on_context_overflow: Optional[Callable[[], Awaitable[bool]]] = None,
 ):
@@ -217,6 +218,9 @@ async def retry_with_backoff(
         agent_name: Agent name for logging
         request_timeout: Hard per-attempt timeout in seconds (asyncio-level deadline).
             Fires even if the HTTP client hangs during response body reading.
+        connection_retries: Optional retry budget dedicated to API connection
+            failures. This lets long-generation callers keep safe transport
+            retries while disabling replay of requests that may have started.
         on_retry: Optional async callback invoked before each retry sleep.
             Signature: (attempt, max_retries, delay, error_type, agent_name) -> None.
             Useful for sending progress updates to WebSocket clients during
@@ -239,6 +243,10 @@ async def retry_with_backoff(
 
     json_error_count = 0
     rate_limit_attempt = 0  # independent 429 counter (see compute_rate_limit_delay)
+    connection_retry_attempt = 0
+    connection_retry_budget = (
+        None if connection_retries is None else max(0, connection_retries)
+    )
     rate_limit_budget = min(
         max_retries if rate_limit_retries is None else max(0, rate_limit_retries),
         len(RATE_LIMIT_DELAYS),
@@ -269,8 +277,10 @@ async def retry_with_backoff(
             await before_retry()
 
     attempt = 0
+    total_attempts = 0
     while attempt <= effective_max:
         try:
+            total_attempts += 1
             return await asyncio.wait_for(func(), timeout=request_timeout)
         except json.JSONDecodeError as e:
             if non_retryable_predicate is not None and non_retryable_predicate(e):
@@ -381,6 +391,38 @@ async def retry_with_backoff(
             if non_retryable_predicate is not None and non_retryable_predicate(e):
                 raise
             last_exception = e
+            if (
+                isinstance(e, APIConnectionError)
+                and not isinstance(e, APITimeoutError)
+                and connection_retry_budget is not None
+            ):
+                # A connection error has no upstream response or partial
+                # completion to preserve, so it is safe to retry even when a
+                # long request disabled ordinary replay. Keep this counter
+                # independent for the same reason as the 429 budget above.
+                effective_max = caller_max
+                if connection_retry_attempt < connection_retry_budget:
+                    delay = retry_delay_base * (connection_retry_attempt + 1)
+                    logger.warning(
+                        f"[{agent_name}] Connection failed "
+                        f"(retry {connection_retry_attempt + 1}/"
+                        f"{connection_retry_budget}). Retrying in {delay:.1f}s..."
+                    )
+                    await _notify_retry(
+                        connection_retry_attempt,
+                        delay,
+                        "APIConnectionError",
+                        connection_retry_budget,
+                    )
+                    await asyncio.sleep(delay)
+                    connection_retry_attempt += 1
+                    await _await_before_retry()
+                    continue
+                logger.error(
+                    f"[{agent_name}] Connection failed after "
+                    f"{total_attempts} attempts: {str(e)}"
+                )
+                break
             is_5xx = isinstance(e, InternalServerError)
             # A 5xx episode gets its own enlarged budget.  The enlarged
             # budget must not leak into a later deterministic error, and a
@@ -411,7 +453,7 @@ async def retry_with_backoff(
 
     raise UpstreamExhaustedError(
         f"[{agent_name}] Upstream LLM exhausted after "
-        f"{attempt + 1 if is_context_overflow(last_exception) else effective_max + 1} attempts. "
+        f"{total_attempts} attempts. "
         f"Last error: {type(last_exception).__name__}: {last_exception}",
         agent_name=agent_name,
         model=model_name,

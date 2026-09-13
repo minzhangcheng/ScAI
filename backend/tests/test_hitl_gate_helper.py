@@ -13,9 +13,13 @@ def _bare_workflow():
     wf._llm_failure_generations = {}
     wf._unattended_gate_retries = {}
     wf._settings_provider = None
+    wf.state_syncs = []
     async def _noop(*a, **k): pass
+    async def _record_state_sync(state, change_type):
+        info = state.llm_failure_info or state.agent_disabled_info
+        wf.state_syncs.append((change_type, dict(info) if info else None))
     wf._send_message = _noop
-    wf._send_state_sync = _noop
+    wf._send_state_sync = _record_state_sync
     wf._set_status = lambda s, st: setattr(s, "status", st)
     return wf
 
@@ -47,6 +51,8 @@ async def test_gate_retry_clears_cache_when_requested():
         clear_cache_on_retry=True,
     )
     assert action == LlmFailureAction.RETRY
+    assert wf.state_syncs[0][1]["wait_seconds"] == -1
+    assert wf.state_syncs[-1][0] == "llm_retry"
 
 
 @pytest.mark.asyncio
@@ -85,6 +91,28 @@ async def test_gate_terminate_returns_terminate():
         clear_cache_on_retry=False,
     )
     assert action == LlmFailureAction.TERMINATE
+    assert wf.state_syncs[-1][0] == "llm_terminate"
+
+
+@pytest.mark.asyncio
+async def test_llm_gate_skip_emits_skip_instead_of_retry():
+    wf = _bare_workflow()
+    state = _State()
+
+    async def resolve():
+        await asyncio.sleep(0)
+        wf._llm_failure_actions["nodeSkip"] = LlmFailureAction.SKIP.value
+        wf._llm_failure_events["nodeSkip"].set()
+    asyncio.create_task(resolve())
+    action = await wf._drive_hitl_gate(
+        "nodeSkip", state, reason="llm_failure",
+        info_attr="llm_failure_info", info_payload={},
+        enter_change="llm_failure", exit_change="llm_retry",
+        clear_cache_on_retry=False,
+    )
+
+    assert action == LlmFailureAction.SKIP
+    assert wf.state_syncs[-1][0] == "llm_skip"
 
 
 @pytest.mark.asyncio
