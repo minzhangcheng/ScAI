@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.11 · **Last updated**: 2026-09-13
+**Version**: 0.56.12 · **Last updated**: 2026-09-13
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,11 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.56.x — (2026-09-08 onward)**
+
+- `0.56.12` — Removes the misleading live-session “No committed runtime”
+  warning shown before the first runtime save attempt, while retaining
+  actionable warnings for failed, inconsistent, and non-live persistence
+  states. Adds regression coverage for the initial live-save window.
 
 - `0.56.11` — Repairs decision-snapshot continuation and exact branch ownership.
   Durable restore origin, one-shot result provenance, graph routing, and

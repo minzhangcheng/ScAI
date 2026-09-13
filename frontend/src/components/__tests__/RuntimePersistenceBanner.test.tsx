@@ -160,8 +160,23 @@ describe('RuntimePersistenceBanner', () => {
     })
   })
 
-  /** A successful live save gap is expected and intentionally silent. */
+  /** An ordinary live save gap is expected and intentionally silent. */
   describe('while the analysis is still live', () => {
+    it('does not claim re-running is required before the first save attempt', () => {
+      const { container } = render(
+        <RuntimePersistenceBanner
+          record={{
+            coherence: 'unavailable',
+            status: 'live_dirty',
+            last_attempt_status: null,
+          }}
+          sessionStatus="running"
+        />,
+      )
+
+      expect(container).toBeEmptyDOMElement()
+    })
+
     it('does not report ordinary unsaved work', () => {
       const { container } = render(
         <RuntimePersistenceBanner

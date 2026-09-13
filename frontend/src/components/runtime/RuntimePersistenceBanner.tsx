@@ -117,13 +117,14 @@ export function RuntimePersistenceBanner({
 
   const since = formatSince(record?.exposure_since, isZh)
 
-  // A live kernel is "stale" by construction: `current_revision` advances on
-  // every cell while `committed_revision` advances only at a save point. This
-  // is expected between successful saves, so the ordinary live state stays
-  // silent. Save failures and inconsistent generations still reach the
-  // actionable warning below.
+  // A live kernel is ahead of disk by construction: before the first save it
+  // is `unavailable`, and after that `current_revision` can advance past the
+  // committed generation and make it `stale`. Both are expected between
+  // successful save points, so the ordinary live state stays silent. Save
+  // failures and inconsistent generations still reach the actionable warning
+  // below.
   const liveUnsavedWork =
-    coherence === 'stale' &&
+    (coherence === 'stale' || coherence === 'unavailable') &&
     record?.last_attempt_status !== 'failed' &&
     LIVE_STATUSES.has(sessionStatus ?? '')
 
