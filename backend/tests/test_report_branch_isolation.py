@@ -101,6 +101,87 @@ def test_report_target_lineage_does_not_depend_on_current_session_branch():
     assert resolve_report_target_lineage(branch_id="branch-a") == "branch-a"
 
 
+def test_pre_clone_restore_projects_its_unique_source_into_the_branch_report():
+    from backend.models.schemas import PublicationFigure, RoundResult
+    from backend.services.report.lineage import build_lineage_report_state
+
+    branch = "restore-source-r003"
+    state = AnalysisState(
+        id="pre-clone-child",
+        user_id="owner",
+        restore_branch_id=branch,
+        last_restored_snapshot_id="source/r003-integration-g277",
+        round_results=[RoundResult(
+            round_number=3,
+            lineage_id="main",
+            pi_summary="legacy inherited summary",
+        )],
+        publication_figures=[PublicationFigure(
+            id="legacy-main-figure",
+            name="legacy_main_figure",
+            description="Legacy inherited figure",
+            figure_type="other",
+            png_path="legacy_main_figure.jpg",
+            pdf_path="legacy_main_figure.pdf",
+            lineage_id="main",
+            round_number=3,
+        )],
+    )
+
+    report_state = build_lineage_report_state(state, branch)
+
+    assert [result.pi_summary for result in report_state.round_results] == [
+        "legacy inherited summary"
+    ]
+    assert report_state.round_results[0].lineage_id == branch
+    assert report_state.round_results[0].inherited_from_lineage_id == "main"
+    assert [figure.name for figure in report_state.publication_figures] == [
+        "legacy_main_figure"
+    ]
+    assert report_state.publication_figures[0].lineage_id == branch
+    assert report_state.publication_figures[0].inherited_from_lineage_id == "main"
+
+
+def test_legacy_projection_stops_once_the_branch_has_materialized():
+    from backend.models.schemas import PublicationFigure
+    from backend.services.report.lineage import build_lineage_report_state
+
+    branch = "restore-source-r003"
+    state = AnalysisState(
+        id="materialized-child",
+        user_id="owner",
+        restore_branch_id=branch,
+        restore_source_lineage_id="main",
+        last_restored_snapshot_id="source/r003-integration-g277",
+        publication_figures=[
+            PublicationFigure(
+                id="source-figure",
+                name="source_figure",
+                description="Source figure",
+                figure_type="other",
+                png_path="source_figure.jpg",
+                pdf_path="source_figure.pdf",
+                lineage_id="main",
+            ),
+            PublicationFigure(
+                id="branch-figure",
+                name="branch_figure",
+                description="Branch figure",
+                figure_type="other",
+                png_path="branch_figure.jpg",
+                pdf_path="branch_figure.pdf",
+                lineage_id=branch,
+            ),
+        ],
+    )
+
+    report_state = build_lineage_report_state(state, branch)
+
+    assert [figure.name for figure in report_state.publication_figures] == [
+        "branch_figure"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_detailed_html_prefers_published_main_and_keeps_branch_isolation(
     tmp_path,
@@ -421,6 +502,7 @@ def test_inherited_publication_figures_are_cloned_without_destroying_source(tmp_
     ]
     assert cloned[0].id == "fig-main"
     assert cloned[1].id != cloned[0].id
+    assert cloned[1].inherited_from_lineage_id == "main"
 
 
 def test_branch_clone_archives_full_pair_before_same_name_redraw(tmp_path):

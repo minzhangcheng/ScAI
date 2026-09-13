@@ -229,6 +229,9 @@ class AnalysisState(BaseModel):
     restore_resume_workflow_state: Optional[Dict[str, Any]] = None
     restore_branch_id: Optional[str] = None
     restore_branch_label: Optional[str] = None
+    # Immediate source lineage captured before a decision snapshot restore
+    # assigns the new child branch. Internal report provenance; not an API key.
+    restore_source_lineage_id: Optional[str] = None
 
     # Snapshot runtime consistency (Stage 1 foundation safety).
     # "complete": kernel runtime matches restored business state.
@@ -495,6 +498,7 @@ class AnalysisState(BaseModel):
         "literature_config": "literature_config",
         "runtime_restore_status": "runtime_restore_status",
         "runtime_restore_warning": "runtime_restore_warning",
+        "restore_branch_id": "restore_branch_id",
         "termination_reason": "termination_reason",
         "snapshot_failure": "snapshot_failure",
         "snapshot_transaction": "snapshot_transaction",
@@ -792,7 +796,18 @@ class AnalysisState(BaseModel):
             elif field_name == "detected_sample_counts":
                 result[api_key] = self._serialize_detected_sample_counts(val)
             elif field_name == "round_results":
-                result[api_key] = self._serialize_round_results(val)
+                lineage_id = self.restore_branch_id or "main"
+                if self.restore_branch_id and not any(
+                    (item.get("lineage_id") or "main") == lineage_id
+                    for item in val
+                ):
+                    legacy_source = self._legacy_restore_source_lineage()
+                    if legacy_source:
+                        lineage_id = legacy_source
+                result[api_key] = self._serialize_round_results(
+                    val,
+                    lineage_id=lineage_id,
+                )
             elif field_name == "agent_errors":
                 result[api_key] = self._serialize_agent_errors(val)
             elif field_name == "publication_figures":
@@ -833,6 +848,28 @@ class AnalysisState(BaseModel):
         )
         return result
 
+    def _legacy_restore_source_lineage(self) -> Optional[str]:
+        """Resolve only the unambiguous pre-clone restored-session shape."""
+        target = self.restore_branch_id or ""
+        if not target or not self.last_restored_snapshot_id:
+            return None
+        if self.restore_source_lineage_id:
+            return self.restore_source_lineage_id
+
+        lineages: set[str] = set()
+        for records in (
+            self.round_results,
+            self.publication_figures,
+            self.publication_tables,
+            self.code_history,
+        ):
+            for record in records or []:
+                lineage = str(getattr(record, "lineage_id", None) or "main")
+                if lineage == target:
+                    return None
+                lineages.add(lineage)
+        return next(iter(lineages)) if len(lineages) == 1 else None
+
     @staticmethod
     def _serialize_treatment_groups(groups):
         return [
@@ -871,7 +908,7 @@ class AnalysisState(BaseModel):
         ]
 
     @staticmethod
-    def _serialize_round_results(results):
+    def _serialize_round_results(results, *, lineage_id: str = "main"):
         def _simplify_candidates(cms):
             if not cms:
                 return []
@@ -915,6 +952,7 @@ class AnalysisState(BaseModel):
              "result_identity_key": r.get("result_identity_key", ""),
              "timestamp": r["timestamp"]}
             for r in results
+            if (r.get("lineage_id") or "main") == (lineage_id or "main")
         ]
 
     @staticmethod

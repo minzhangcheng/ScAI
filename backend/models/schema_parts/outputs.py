@@ -93,6 +93,10 @@ class RoundResult(BaseModel):
     branch_label: Optional[str] = None
     source_snapshot_id: Optional[str] = None
     restored_from_snapshot_id: Optional[str] = None
+    # The execution/finding records in an inherited branch result keep the
+    # lineage where they were actually produced.  This identifies that lineage
+    # without relabelling the immutable receipts as branch-native work.
+    inherited_from_lineage_id: Optional[str] = None
     direction_key: str = ""
     result_identity_key: str = ""
     # Version 1 means the completion/evidence fields below were derived from the
@@ -201,6 +205,9 @@ class PublicationFigure(BaseModel):
     # on this field just as it filters RoundResult; otherwise equal round numbers
     # from two restore branches can leak figures across reports.
     lineage_id: str = "main"
+    # A restored branch owns this figure record, while its source execution may
+    # still belong to the lineage where the frozen render was produced.
+    inherited_from_lineage_id: Optional[str] = None
     round_number: int = 0
     analysis_generation: int = 0
     cohort_generation: int = 0

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.14 · **Last updated**: 2026-09-13
+**Version**: 0.56.15 · **Last updated**: 2026-09-13
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,17 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.56.x — (2026-09-08 onward)**
+
+- `0.56.15` — Repairs decision-snapshot lineage compatibility across restore,
+  reporting, and execution evidence. Restores inline externalized blob values
+  before state rebinding, clone inherited rounds and publication figures into a
+  new branch, and preserve the source lineage for nested restores. Reports now
+  remain usable for pre-clone child sessions when their unique source lineage can
+  be proven, while materialized branches and ambiguous legacy lineages remain
+  isolated. Method decisions retain their matching current execution receipts
+  even when no finding or artifact cites them. Focused restore, report, lineage,
+  cohort, and version checks passed; no image build, registry push, deployment,
+  or historical-session mutation was performed.
 
 - `0.56.14` — Repairs LLM transport retry and detailed-report intervention
   flow. Long report calls retain four independent `APIConnectionError` retries

@@ -295,6 +295,9 @@ def clone_round_results_for_branch(
         clone.branch_label = branch_label
         clone.source_snapshot_id = source_snapshot_id
         clone.restored_from_snapshot_id = source_snapshot_id
+        clone.inherited_from_lineage_id = (
+            original.inherited_from_lineage_id or source_lineage_id
+        )
         clone.result_identity_key = build_result_identity_key(
             clone.lineage_id,
             clone.phase,

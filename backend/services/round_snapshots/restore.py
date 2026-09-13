@@ -317,8 +317,13 @@ def _rebound_state(source_session_id: str, session_id: str, user_id: str):
         _rebind_session_id_values,
         _remap_paths_in_text,
     )
+    from backend.utils.blob_store import inline_blobs
 
-    text = (get_session_dir(session_id) / "session.json").read_text(encoding="utf-8")
+    payload = json.loads(
+        (get_session_dir(session_id) / "session.json").read_text(encoding="utf-8")
+    )
+    payload = inline_blobs(payload, get_session_dir(session_id) / BLOBS_DIRNAME)
+    text = json.dumps(payload, ensure_ascii=False)
     text = _remap_paths_in_text(
         text, str(DATA_BASE_DIR), str(DATA_BASE_DIR), source_session_id, session_id,
     )
@@ -474,18 +479,54 @@ def _arm(state, capsule: dict, source_session_id: str, snapshot: str, channels: 
     workflow running a timeout here, and the person who restored it is the
     reason it exists.
     """
+    from backend.config import get_session_workspace
     from backend.models.schemas import TaskStatus
-    from backend.workflow.restore_targets import stable_restore_branch_id
+    from backend.services.report.lineage import clone_publication_figures_for_branch
+    from backend.workflow.direction_coverage import clone_round_results_for_branch
+    from backend.workflow.restore_targets import (
+        stable_restore_branch_id,
+        stable_restore_branch_label,
+    )
 
     state.restore_resume_kind = "semantic_gate"
     state.restore_resume_gate = capsule["gate"]
     state.restore_resume_node = None
     state.restore_resume_workflow_state = channels
     state.restore_start_intent = None
-    state.restore_branch_id = stable_restore_branch_id(
-        f"{source_session_id[:8]}-{snapshot}", None,
-    )
+    source_lineage_id = state.restore_branch_id or "main"
+    if state.restore_branch_id and not any(
+        (getattr(record, "lineage_id", None) or "main") == source_lineage_id
+        for records in (
+            state.round_results,
+            state.publication_figures,
+            state.publication_tables,
+            state.code_history,
+        )
+        for record in (records or [])
+    ):
+        source_lineage_id = (
+            state._legacy_restore_source_lineage() or source_lineage_id
+        )
+    state.restore_source_lineage_id = source_lineage_id
+    branch_seed = f"{source_session_id[:8]}-{snapshot}"
+    branch_id = stable_restore_branch_id(branch_seed, None)
+    branch_label = stable_restore_branch_label(branch_seed, None)
     origin = f"{source_session_id}/{snapshot}"
+    state.round_results = clone_round_results_for_branch(
+        state.round_results,
+        branch_id=branch_id,
+        branch_label=branch_label,
+        source_snapshot_id=origin,
+        source_lineage_id=source_lineage_id,
+    )
+    state.publication_figures = clone_publication_figures_for_branch(
+        state.publication_figures,
+        branch_id=branch_id,
+        source_lineage_id=source_lineage_id,
+        workspace_path=get_session_workspace(state.id),
+    )
+    state.restore_branch_id = branch_id
+    state.restore_branch_label = branch_label
     state.last_restored_snapshot_id = origin
     state.restore_provenance_snapshot_id = origin
     state.status = TaskStatus(capsule["restored_status"])

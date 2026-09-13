@@ -227,6 +227,41 @@ async def test_the_restore_brings_the_notebook_workspace_and_inputs(captured):
 
 
 @pytest.mark.asyncio
+async def test_restore_inlines_blob_state_before_caching_and_path_rebinding(captured):
+    from backend.config import get_session_dir
+    from backend.services.session_store import ensure_session_loaded_for_read
+    from backend.utils.blob_store import BLOB_REF_PREFIX, MIN_BLOB_LEN
+
+    expected = {}
+
+    def populate(state):
+        source_path = str(get_session_dir(state.id) / "workspace" / "table.csv")
+        instruction = ("Long restored objective. " * 60) + source_path
+        assert len(instruction) >= MIN_BLOB_LEN
+        state.initial_instruction = instruction
+        expected["source"] = instruction
+
+    source, snapshot = await captured(prepare_state=populate)
+    snapshot_payload = json.loads(
+        (layout.snapshot_dir(source, snapshot) / "session.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert snapshot_payload["initial_instruction"].startswith(BLOB_REF_PREFIX)
+
+    new_id = await restore_snapshot_into_new_session(
+        source_session_id=source, snapshot=snapshot, user_id=OWNER,
+    )
+    restored = await ensure_session_loaded_for_read(new_id)
+    rebound = expected["source"].replace(source, new_id)
+
+    assert restored is not None
+    assert restored.initial_instruction == rebound
+    assert not restored.initial_instruction.startswith(BLOB_REF_PREFIX)
+    assert restored.to_api_dict(include_messages=False)["initial_instruction"] == rebound
+
+
+@pytest.mark.asyncio
 async def test_no_report_or_log_path_survives_into_the_restored_state(captured):
     """A dangling path renders as a broken link rather than as an absence."""
     from backend.config import get_session_dir
@@ -519,6 +554,285 @@ async def test_a_refusal_does_not_tell_the_caller_where_the_bundle_lives(capture
 
 
 # ------------------------------------------------------------------ lineage
+
+
+@pytest.mark.asyncio
+async def test_restore_inherits_rounds_and_frozen_figures_into_its_branch(captured):
+    from backend.config import get_session_workspace
+    from backend.models.schemas import (
+        AnalysisStep,
+        CodeExecution,
+        FigureReviewStatus,
+        MethodDecision,
+        PublicationFigure,
+        RoundResult,
+    )
+    from backend.services.report.lineage import build_lineage_report_state
+    from backend.services.session_store import ensure_session_loaded_for_read
+    from backend.tests.figure_image_helpers import valid_pdf_bytes, write_valid_image
+
+    def populate(state):
+        cohort_digest = "d" * 64
+        execution = CodeExecution(
+            id="execution-main",
+            code="print('inherited')",
+            output="inherited",
+            round_number=3,
+            evidence_schema_version=2,
+            plan_id="plan-main",
+            plan_binding_status="confirmed",
+            execution_status="succeeded",
+            lineage_id="main",
+            analysis_generation=1,
+            cohort_generation=3,
+            cohort_digest=cohort_digest,
+        )
+        unrelated_execution = execution.model_copy(update={
+            "id": "execution-unrelated",
+            "lineage_id": "branch-unrelated",
+        })
+        method_execution = execution.model_copy(update={
+            "id": "execution-method-only",
+        })
+        finding_record = {
+            "id": "finding-main",
+            "text": "inherited finding",
+            "round_number": 3,
+            "lineage_id": "main",
+            "plan_id": "plan-main",
+            "analysis_generation": 1,
+            "cohort_generation": 3,
+            "cohort_digest": cohort_digest,
+            "evidence_status": "verified",
+            "semantic_status": "evidenced",
+            "evidence_execution_ids": [execution.id],
+        }
+        state.sandbox_state = {
+            "analysis_generation": 1,
+            "cohort_identity_v1": {
+                "cohort_generation": 3,
+                "cohort_digest": cohort_digest,
+            },
+        }
+        unrelated_record = {
+            **finding_record,
+            "id": "finding-unrelated",
+            "text": "unrelated branch finding",
+            "lineage_id": "branch-unrelated",
+            "evidence_execution_ids": [unrelated_execution.id],
+        }
+        state.code_history = [execution, method_execution, unrelated_execution]
+        state.analysis_log = [
+            AnalysisStep(
+                step_number=1,
+                step_type="execute_code",
+                execution_id=execution.id,
+                round_number=3,
+            ),
+            AnalysisStep(
+                step_number=2,
+                step_type="execute_code",
+                execution_id=method_execution.id,
+                round_number=3,
+            ),
+            AnalysisStep(
+                step_number=3,
+                step_type="report_findings",
+                finding_records=[finding_record],
+                evidence_execution_ids=[execution.id],
+                round_number=3,
+            ),
+        ]
+        state.method_decisions = [MethodDecision(
+            input_profile_id="profile-main",
+            claim_level="descriptive",
+            method="Inherited method",
+            rationale="Inherited rationale",
+            execution_id=method_execution.id,
+            round_number=3,
+        )]
+        state.post_execution_reviews = [{
+            "review_attempt_id": "review-main",
+            "round_number": 3,
+            "direction": "Inherited direction",
+            "direction_key": "inherited direction",
+            "lineage_id": "main",
+        }]
+        workspace = get_session_workspace(state.id)
+        render = workspace / "figures" / "inherited_result.jpg"
+        pdf = render.with_suffix(".pdf")
+        render_payload = write_valid_image(render, min_bytes=2200)
+        pdf_payload = valid_pdf_bytes()
+        pdf.write_bytes(pdf_payload)
+        state.round_results = [
+            RoundResult(
+                round_number=3,
+                phase="innovation",
+                direction="Inherited direction",
+                pi_summary="inherited summary",
+                bioinformatics_findings=[
+                    "inherited finding", "unrelated branch finding",
+                ],
+                bioinformatics_finding_records=[finding_record, unrelated_record],
+                evidence_schema_version=1,
+                evidence_status="substantive",
+                evidence_execution_ids=[execution.id],
+                bioinformatics_evidence_verified=True,
+            )
+        ]
+        state.publication_figures = [
+            PublicationFigure(
+                id="figure-main",
+                name="inherited_result",
+                description="Inherited result",
+                figure_type="heatmap",
+                png_path=str(render),
+                pdf_path=str(pdf),
+                render_sha256=hashlib.sha256(render_payload).hexdigest(),
+                pdf_sha256=hashlib.sha256(pdf_payload).hexdigest(),
+                review_status=FigureReviewStatus.APPROVED,
+                lineage_id="main",
+                logical_figure_id="logical-inherited-result",
+                round_number=3,
+                plan_id="plan-main",
+                analysis_generation=1,
+                cohort_generation=3,
+                cohort_digest=cohort_digest,
+                source_execution_id=execution.id,
+            )
+        ]
+
+    source, snapshot = await captured(prepare_state=populate)
+    new_id = await restore_snapshot_into_new_session(
+        source_session_id=source, snapshot=snapshot, user_id=OWNER,
+    )
+    restored = await ensure_session_loaded_for_read(new_id)
+
+    assert restored is not None
+    branch = restored.restore_branch_id
+    assert branch
+    assert [result.lineage_id for result in restored.round_results] == [
+        "main", branch,
+    ]
+    assert restored.restore_source_lineage_id == "main"
+    assert restored.round_results[1].inherited_from_lineage_id == "main"
+    assert [figure.lineage_id for figure in restored.publication_figures] == [
+        "main", branch,
+    ]
+    assert restored.publication_figures[1].inherited_from_lineage_id == "main"
+
+    report_state = build_lineage_report_state(restored, branch)
+    assert [result.pi_summary for result in report_state.round_results] == [
+        "inherited summary"
+    ]
+    assert [figure.name for figure in report_state.publication_figures] == [
+        "inherited_result"
+    ]
+    assert report_state.round_results[0].bioinformatics_findings == [
+        "inherited finding"
+    ]
+    assert report_state.round_results[0].bioinformatics_evidence_verified is True
+    assert report_state.round_results[0].evidence_execution_ids == [
+        "execution-main"
+    ]
+    assert [(item.id, item.lineage_id) for item in report_state.code_history] == [
+        ("execution-main", "main"),
+        ("execution-method-only", "main"),
+    ]
+    assert [step.step_type for step in report_state.analysis_log] == [
+        "execute_code", "execute_code", "report_findings"
+    ]
+    assert [item.execution_id for item in report_state.method_decisions] == [
+        "execution-method-only"
+    ]
+    assert [item["review_attempt_id"] for item in report_state.post_execution_reviews] == [
+        "review-main"
+    ]
+    api = restored.to_api_dict(include_messages=False)
+    assert api["restore_branch_id"] == branch
+    assert [result["pi_summary"] for result in api["round_results"]] == [
+        "inherited summary"
+    ]
+    assert [figure["name"] for figure in api["publication_figures"]] == [
+        "inherited_result"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_restore_of_a_pre_clone_child_uses_its_unique_evidence_lineage(captured):
+    from backend.models.schemas import RoundResult
+    from backend.services.session_store import ensure_session_loaded_for_read
+
+    def populate(state):
+        state.restore_branch_id = "restore-old-child"
+        state.last_restored_snapshot_id = "grandparent/r002-direction-g10"
+        state.round_results = [RoundResult(
+            round_number=2,
+            phase="innovation",
+            direction="Inherited direction",
+            lineage_id="main",
+            pi_summary="pre-clone inherited summary",
+        )]
+
+    source, snapshot = await captured(prepare_state=populate)
+    new_id = await restore_snapshot_into_new_session(
+        source_session_id=source, snapshot=snapshot, user_id=OWNER,
+    )
+    restored = await ensure_session_loaded_for_read(new_id)
+
+    assert restored is not None
+    assert restored.restore_source_lineage_id == "main"
+    assert [result.lineage_id for result in restored.round_results] == [
+        "main", restored.restore_branch_id,
+    ]
+    assert restored.round_results[1].inherited_from_lineage_id == "main"
+
+
+@pytest.mark.asyncio
+async def test_restore_of_a_materialized_branch_uses_that_branch_as_its_source(captured):
+    from backend.models.schemas import RoundResult
+    from backend.services.session_store import ensure_session_loaded_for_read
+
+    source_branch = "restore-current-child"
+
+    def populate(state):
+        state.restore_branch_id = source_branch
+        state.restore_source_lineage_id = "main"
+        state.last_restored_snapshot_id = "grandparent/r002-direction-g10"
+        state.round_results = [
+            RoundResult(
+                round_number=2,
+                phase="innovation",
+                direction="Inherited direction",
+                lineage_id="main",
+                pi_summary="ancestor summary",
+            ),
+            RoundResult(
+                round_number=3,
+                phase="innovation",
+                direction="Current branch direction",
+                lineage_id=source_branch,
+                branch_id=source_branch,
+                inherited_from_lineage_id="main",
+                pi_summary="current branch summary",
+            ),
+        ]
+
+    source, snapshot = await captured(prepare_state=populate)
+    new_id = await restore_snapshot_into_new_session(
+        source_session_id=source, snapshot=snapshot, user_id=OWNER,
+    )
+    restored = await ensure_session_loaded_for_read(new_id)
+
+    assert restored is not None
+    assert restored.restore_source_lineage_id == source_branch
+    inherited = [
+        result
+        for result in restored.round_results
+        if result.lineage_id == restored.restore_branch_id
+    ]
+    assert [result.pi_summary for result in inherited] == ["current branch summary"]
+    assert inherited[0].inherited_from_lineage_id == "main"
 
 
 @pytest.mark.asyncio

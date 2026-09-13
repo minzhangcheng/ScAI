@@ -29,7 +29,11 @@ from backend.services.report.figure_discovery import (
     discover_figures_in_workspace,
     ensure_legacy_artifact_inventory,
 )
-from backend.workflow.direction_coverage import normalize_legacy_round_result
+from backend.workflow.direction_coverage import (
+    clone_round_results_for_branch,
+    normalize_direction_key,
+    normalize_legacy_round_result,
+)
 
 
 REPORT_TARGET_LINEAGE_STATE_KEY = "_report_target_lineage_id"
@@ -394,6 +398,9 @@ def clone_publication_figures_for_branch(
             continue
         expected_identity = {
             "lineage_id": target,
+            "inherited_from_lineage_id": str(
+                getattr(original, "inherited_from_lineage_id", None) or source
+            ),
             "logical_figure_id": str(
                 getattr(original, "logical_figure_id", None) or ""
             ),
@@ -438,6 +445,9 @@ def clone_publication_figures_for_branch(
             continue
         clone = clone_source.model_copy(deep=True)
         clone.lineage_id = target
+        clone.inherited_from_lineage_id = (
+            getattr(original, "inherited_from_lineage_id", None) or source
+        )
         # IDs are API/download identities. Keep inherited records addressable in
         # both lineages without making two records share one route key.
         clone.id = clone_id
@@ -530,23 +540,80 @@ def build_lineage_report_state(
     sandbox_state[REPORT_TARGET_LINEAGE_STATE_KEY] = target
     report_state.sandbox_state = sandbox_state
     normalized = [normalize_legacy_round_result(r) for r in report_state.round_results]
-    report_state.round_results = [r for r in normalized if r.lineage_id == target]
+    target_rounds = [result for result in normalized if result.lineage_id == target]
+    legacy_source_lineage = None
+    target_is_materialized = any(
+        (getattr(record, "lineage_id", None) or "main") == target
+        for records in (
+            report_state.round_results,
+            report_state.publication_figures,
+            report_state.publication_tables,
+            report_state.code_history,
+        )
+        for record in (records or [])
+    )
+    if (
+        not target_is_materialized
+        and target == (report_state.restore_branch_id or "")
+    ):
+        legacy_source_lineage = report_state._legacy_restore_source_lineage()
+        if legacy_source_lineage:
+            normalized = clone_round_results_for_branch(
+                normalized,
+                branch_id=target,
+                branch_label=report_state.restore_branch_label,
+                source_snapshot_id=report_state.last_restored_snapshot_id or "",
+                source_lineage_id=legacy_source_lineage,
+            )
+            target_rounds = [
+                result for result in normalized if result.lineage_id == target
+            ]
+    report_state.round_results = target_rounds
+    inherited_round_keys = {
+        (
+            str(result.inherited_from_lineage_id),
+            int(result.round_number),
+            str(result.direction_key or ""),
+        )
+        for result in report_state.round_results
+        if result.inherited_from_lineage_id
+    }
+
+    def _review_belongs_to_report(review: Any) -> bool:
+        if not isinstance(review, dict):
+            return True
+        review_lineage = str(review.get("lineage_id") or "main").strip()
+        if review_lineage == target:
+            return True
+        try:
+            review_round = int(review.get("round_number", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        review_direction = normalize_direction_key(
+            str(review.get("direction_key") or review.get("direction") or "")
+        )
+        return (review_lineage, review_round, review_direction) in inherited_round_keys
+
     # Review records are session-level state and may contain decisions from
-    # several restored branches.  Keep only this report's lineage; records from
-    # pre-lineage sessions are legacy-main records and remain visible there.
+    # several restored branches. Keep target-owned records plus records whose
+    # exact round identity was explicitly inherited into this branch.
     report_state.post_execution_reviews = [
         review
         for review in (report_state.post_execution_reviews or [])
-        if (
-            not isinstance(review, dict)
-            or str(review.get("lineage_id") or "main").strip() == target
-        )
+        if _review_belongs_to_report(review)
     ]
-    report_state.publication_figures = [
-        figure
-        for figure in report_state.publication_figures
-        if (getattr(figure, "lineage_id", None) or "main") == target
-    ]
+    selected_figures = []
+    for figure in report_state.publication_figures:
+        figure_lineage = str(getattr(figure, "lineage_id", None) or "main")
+        if figure_lineage == target:
+            selected_figures.append(figure)
+        elif legacy_source_lineage and figure_lineage == legacy_source_lineage:
+            figure.lineage_id = target
+            figure.inherited_from_lineage_id = (
+                figure.inherited_from_lineage_id or legacy_source_lineage
+            )
+            selected_figures.append(figure)
+    report_state.publication_figures = selected_figures
     report_state.publication_tables = [
         table
         for table in report_state.publication_tables
@@ -568,29 +635,87 @@ def build_lineage_report_state(
         (report_state.sandbox_state or {}).get("analysis_generation", 0) or 0
     )
     if active_cohort_generation or active_analysis_generation:
-        eligible_execution_by_id = {
-            str(execution.id): execution
-            for execution in report_state.code_history
-            if execution_is_current_receipt(
+        finding_receipt_lineages: dict[str, set[str]] = {}
+        for round_result in report_state.round_results:
+            inherited_lineage = str(
+                round_result.inherited_from_lineage_id or ""
+            )
+            for record in round_result.bioinformatics_finding_records or []:
+                if not isinstance(record, dict):
+                    continue
+                record_lineage = str(record.get("lineage_id") or "main")
+                if record_lineage not in {target, inherited_lineage}:
+                    continue
+                for value in record.get("evidence_execution_ids") or []:
+                    execution_id = str(value)
+                    if execution_id:
+                        finding_receipt_lineages.setdefault(
+                            execution_id, set()
+                        ).add(record_lineage)
+
+        artifact_receipt_lineages: dict[str, set[str]] = {}
+        for artifact in (
+            *report_state.publication_figures,
+            *report_state.publication_tables,
+        ):
+            execution_id = str(
+                getattr(artifact, "source_execution_id", "") or ""
+            )
+            if not execution_id:
+                continue
+            receipt_lineage = str(
+                getattr(artifact, "inherited_from_lineage_id", None) or target
+            )
+            artifact_receipt_lineages.setdefault(execution_id, set()).add(
+                receipt_lineage
+            )
+
+        inherited_round_lineages = {
+            (source_lineage, round_number)
+            for source_lineage, round_number, _direction_key in inherited_round_keys
+        }
+        method_receipt_identities: dict[str, set[tuple[str, int]]] = {}
+        for decision in report_state.method_decisions:
+            execution_id = str(decision.execution_id or "")
+            decision_round = int(decision.round_number or 0)
+            for source_lineage, round_number in inherited_round_lineages:
+                if execution_id and decision_round == round_number:
+                    method_receipt_identities.setdefault(
+                        execution_id, set()
+                    ).add((source_lineage, round_number))
+
+        eligible_execution_by_id = {}
+        artifact_execution_by_id = {}
+        for execution in report_state.code_history:
+            execution_id = str(execution.id)
+            execution_lineage = str(execution.lineage_id or "main")
+            if (
+                execution_lineage == target
+                or execution_lineage
+                in finding_receipt_lineages.get(execution_id, set())
+                or (
+                    execution_lineage,
+                    int(execution.round_number or 0),
+                ) in method_receipt_identities.get(execution_id, set())
+            ) and execution_is_current_receipt(
                 execution,
-                lineage_id=target,
+                lineage_id=execution_lineage,
                 analysis_generation=active_analysis_generation,
                 cohort_digest=(
                     active_cohort_digest if active_cohort_generation else None
                 ),
-                cohort_generation=(
-                    active_cohort_generation or None
-                ),
-            )
-        }
-        artifact_execution_by_id = {
-            str(execution.id): execution
-            for execution in report_state.code_history
-            if execution_is_current_receipt(
+                cohort_generation=(active_cohort_generation or None),
+            ):
+                eligible_execution_by_id[execution_id] = execution
+            if (
+                execution_lineage == target
+                or execution_lineage
+                in artifact_receipt_lineages.get(execution_id, set())
+            ) and execution_is_current_receipt(
                 execution,
-                lineage_id=target,
-            )
-        }
+                lineage_id=execution_lineage,
+            ):
+                artifact_execution_by_id[execution_id] = execution
         current_execution_ids = set(eligible_execution_by_id)
 
         def _linked_artifact_execution_id(artifact: Any) -> str | None:
@@ -599,6 +724,11 @@ def build_lineage_report_state(
             )
             execution = artifact_execution_by_id.get(source_id)
             if execution is None:
+                return None
+            expected_lineage = str(
+                getattr(artifact, "inherited_from_lineage_id", None) or target
+            )
+            if str(execution.lineage_id or "main") != expected_lineage:
                 return None
             if int(getattr(execution, "round_number", 0) or 0) != int(
                 getattr(artifact, "round_number", 0) or 0
@@ -687,13 +817,19 @@ def build_lineage_report_state(
             if records:
                 retained_records = []
                 for record in records:
+                    record_lineage = str(record.get("lineage_id") or "main")
+                    allowed_record_lineages = {target}
+                    if round_result.inherited_from_lineage_id:
+                        allowed_record_lineages.add(
+                            str(round_result.inherited_from_lineage_id)
+                        )
                     cited = {
                         str(value) for value in (
                             record.get("evidence_execution_ids") or []
                         ) if str(value)
                     }
                     if (
-                        str(record.get("lineage_id") or "main") == target
+                        record_lineage in allowed_record_lineages
                         and (
                             not active_cohort_generation
                             or (
@@ -709,7 +845,11 @@ def build_lineage_report_state(
                         valid_cited = sorted(
                             execution_id
                             for execution_id in cited & current_execution_ids
-                            if int(record.get(
+                            if str(
+                                eligible_execution_by_id[execution_id].lineage_id
+                                or "main"
+                            ) == record_lineage
+                            and int(record.get(
                                 "analysis_generation", active_analysis_generation
                             ) or 0) == active_analysis_generation
                             and int(getattr(

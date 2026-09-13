@@ -96,6 +96,7 @@ class TestAnalysisStateApiDictRoundTrip:
             "snapshot_transaction",
             "pending_required_snapshot",
             "detailed_report_fallback_pending",
+            "restore_branch_id",
             # Promoted onto the api dict in ver 0.34.7 and consumed by the
             # frontend (utils/transformLoadResponse.ts, hooks/api/useWebSocket.ts).
             "wait_input_reason",
@@ -160,6 +161,65 @@ class TestAnalysisStateApiDictRoundTrip:
         assert api["messages"][0]["agent"] == "pi"
         assert len(api["round_results"]) == 1
         assert api["round_results"][0]["round"] == 1
+
+    def test_restored_state_exposes_branch_and_only_its_round_results(self):
+        state = AnalysisState(
+            user_id="test",
+            restore_branch_id="restore/source-r003",
+            round_results=[
+                RoundResult(
+                    round_number=3,
+                    lineage_id="main",
+                    pi_summary="source summary",
+                ),
+                RoundResult(
+                    round_number=3,
+                    lineage_id="restore/source-r003",
+                    branch_id="restore/source-r003",
+                    pi_summary="inherited branch summary",
+                ),
+            ],
+        )
+
+        api = state.to_api_dict()
+
+        assert api["restore_branch_id"] == "restore/source-r003"
+        assert [item["pi_summary"] for item in api["round_results"]] == [
+            "inherited branch summary"
+        ]
+
+    def test_pre_fix_restore_without_branch_clones_keeps_unique_source_rounds(self):
+        state = AnalysisState(
+            user_id="test",
+            restore_branch_id="restore/source-r003",
+            last_restored_snapshot_id="source/r003-integration-g277",
+            round_results=[
+                RoundResult(
+                    round_number=3,
+                    lineage_id="main",
+                    pi_summary="legacy inherited summary",
+                ),
+            ],
+        )
+
+        api = state.to_api_dict()
+
+        assert [item["pi_summary"] for item in api["round_results"]] == [
+            "legacy inherited summary"
+        ]
+
+    def test_pre_fix_restore_does_not_guess_an_ambiguous_source_lineage(self):
+        state = AnalysisState(
+            user_id="test",
+            restore_branch_id="restore/source-r003",
+            last_restored_snapshot_id="source/r003-integration-g277",
+            round_results=[
+                RoundResult(round_number=2, lineage_id="main"),
+                RoundResult(round_number=3, lineage_id="branch-x"),
+            ],
+        )
+
+        assert state.to_api_dict()["round_results"] == []
 
     def test_strip_message_base64_callable(self):
         """strip_message_base64 callable must be applied to message content."""

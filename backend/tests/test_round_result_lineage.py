@@ -64,6 +64,36 @@ def test_branch_clone_inherits_main_ancestor_results_with_branch_identity():
     assert [r.lineage_id for r in cloned] == ["main", "restore-snap-1"]
     assert cloned[1].result_identity_key == "restore-snap-1:innovation:3:direction a"
     assert cloned[1].source_snapshot_id == "snap-1"
+    assert cloned[1].inherited_from_lineage_id == "main"
+
+
+def test_nested_branch_clone_preserves_the_original_evidence_lineage():
+    inherited = RoundResult(
+        round_number=3,
+        phase="innovation",
+        direction="Direction A",
+        lineage_id="branch-a",
+        branch_id="branch-a",
+        inherited_from_lineage_id="main",
+        restored_from_snapshot_id="source/snapshot-a",
+        bioinformatics_finding_records=[{
+            "text": "Inherited finding",
+            "lineage_id": "main",
+            "evidence_execution_ids": ["execution-main"],
+        }],
+    )
+
+    cloned = clone_round_results_for_branch(
+        [inherited],
+        branch_id="branch-b",
+        branch_label="branch-b",
+        source_snapshot_id="source/snapshot-b",
+        source_lineage_id="branch-a",
+    )
+
+    branch_b = next(result for result in cloned if result.lineage_id == "branch-b")
+    assert branch_b.inherited_from_lineage_id == "main"
+    assert branch_b.bioinformatics_finding_records[0]["lineage_id"] == "main"
 
 
 def test_branch_clone_does_not_inherit_unrelated_branch_results():

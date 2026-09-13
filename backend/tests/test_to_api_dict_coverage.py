@@ -94,7 +94,7 @@ _EXCLUDED_FIELDS = {
     "restore_resume_gate",
     "restore_resume_workflow_state",
     "restore_start_intent",
-    "restore_branch_id",
+    "restore_source_lineage_id",
     "restore_branch_label",
     "integration_cycle",
     "max_integration_cycles",
