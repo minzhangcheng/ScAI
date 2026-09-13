@@ -31,6 +31,7 @@ from .model_traits import _WEB_SEARCH_TOOL_NAMES, _get_effective_temperature, _i
 from .protocol import _NO_BACKGROUND_ENDPOINT, _anthropic_messages_translate, _anthropic_restore_thinking, _anthropic_translate_tool_choice, _anthropic_translate_tools, _parse_anthropic_dump, _parse_responses_dump, _responses_messages_to_input, _responses_translate_tool_choice, _responses_translate_tools
 from .responses import LLMResponse, LLMToolResponse, _tool_calls_to_raw_assistant
 from .retry import DEFAULT_REQUEST_TIMEOUT
+from .prompt_cache import PromptCacheController
 
 
 # Anthropic's Messages API rejects a request without max_tokens, so this is the
@@ -198,7 +199,9 @@ class _AnthropicAdapter:
     """Adapter for the Anthropic Messages API. anthropic SDK is imported lazily
     so the module loads even when the package is absent (only this class needs it)."""
 
-    def __init__(self, api_key: str, base_url: str, http_client=None, agent_name: str = "unknown"):
+    def __init__(self, api_key: str, base_url: str, http_client=None,
+                 agent_name: str = "unknown",
+                 prompt_cache_controller: Optional[PromptCacheController] = None):
         from anthropic import AsyncAnthropic  # lazy import
         kwargs = {"api_key": api_key}
         if base_url:
@@ -207,6 +210,20 @@ class _AnthropicAdapter:
             kwargs["http_client"] = http_client
         self.client = AsyncAnthropic(**kwargs)
         self.agent_name = agent_name
+        self._prompt_cache_controller = prompt_cache_controller
+
+    async def _create(self, params: Dict[str, Any], *, model: str,
+                      modality: str = "text"):
+        controller = getattr(self, "_prompt_cache_controller", None)
+        if controller is None:
+            return await self.client.messages.create(**params)
+        return await controller.request(
+            self.client.messages.create,
+            params,
+            model=model,
+            protocol="anthropic",
+            modality=modality,
+        )
 
     def _build_params(self, model, messages, temperature, max_tokens,
                       tools=None, tool_choice=None, skip_temperature=False) -> Dict[str, Any]:
@@ -323,6 +340,9 @@ class _AnthropicAdapter:
         }
         if has_cache_telemetry:
             usage["cached_tokens"] = usage_data.get("cache_read_input_tokens", 0)
+            usage["cache_write_tokens"] = usage_data.get(
+                "cache_creation_input_tokens", 0
+            )
         return LLMResponse(
             content="".join(text_parts),
             model=model_name,
@@ -339,7 +359,7 @@ class _AnthropicAdapter:
             params["stream"] = True
         if timeout is not None:
             params["timeout"] = timeout
-        resp = await self.client.messages.create(**params)
+        resp = await self._create(params, model=model)
         if stream:
             started = await _start_stream(
                 resp,
@@ -358,7 +378,7 @@ class _AnthropicAdapter:
                                   temperature, max_tokens, skip_temperature=False) -> LLMToolResponse:
         params = self._build_params(model, messages, temperature, max_tokens,
                                     tools=tools, tool_choice=tool_choice, skip_temperature=skip_temperature)
-        resp = await self.client.messages.create(**params)
+        resp = await self._create(params, model=model, modality="tools")
         return self._to_tool_response(resp, model)
 
     async def complete_vision(self, model, text_prompt, images, temperature,
@@ -380,7 +400,7 @@ class _AnthropicAdapter:
             params["timeout"] = timeout
         if stream:
             params["stream"] = True
-        resp = await self.client.messages.create(**params)
+        resp = await self._create(params, model=model, modality="vision")
         if stream:
             started = await _start_stream(
                 resp,
@@ -398,7 +418,7 @@ class _AnthropicAdapter:
     async def stream(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False):
         params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
         params["stream"] = True
-        stream = await self.client.messages.create(**params)
+        stream = await self._create(params, model=model)
         try:
             async for event in stream:
                 if getattr(event, "type", "") == "content_block_delta":
@@ -416,10 +436,12 @@ class _ResponsesAdapter:
     Responses. Parsing operates on model_dump() dicts (see _parse_responses_dump)."""
 
     def __init__(self, client: "AsyncOpenAI", agent_name: str = "unknown",
-                 base_url: str = ""):
+                 base_url: str = "",
+                 prompt_cache_controller: Optional[PromptCacheController] = None):
         self.client = client
         self.agent_name = agent_name
         self.base_url = base_url
+        self._prompt_cache_controller = prompt_cache_controller
 
     def _build_params(self, model, messages, temperature, max_tokens, tools=None,
                       tool_choice=None, stream=False, timeout=None, skip_temperature=False,
@@ -456,12 +478,25 @@ class _ResponsesAdapter:
             params["timeout"] = timeout
         return params
 
-    async def _create_responses_with_fallback(self, params: Dict[str, Any]):
+    async def _create_responses_with_fallback(
+        self, params: Dict[str, Any], *, modality: str = "text"
+    ):
         """Call responses.create with web_search tool name fallback.
         On an unknown-tool error for an auto-injected web_search tool,
         retries once with the alternate name."""
+        async def create(request_params):
+            if self._prompt_cache_controller is None:
+                return await self.client.responses.create(**request_params)
+            return await self._prompt_cache_controller.request(
+                self.client.responses.create,
+                request_params,
+                model=params["model"],
+                protocol="responses",
+                modality=modality,
+            )
+
         try:
-            return await self.client.responses.create(**params)
+            return await create(params)
         except Exception as e:
             # Provider rejected background mode: cache the endpoint, drop the
             # flag, and retry synchronously (best we can do without background).
@@ -473,7 +508,7 @@ class _ResponsesAdapter:
                 if self.base_url:
                     _NO_BACKGROUND_ENDPOINT.add(self.base_url)
                 params.pop("background", None)
-                return await self.client.responses.create(**params)
+                return await create(params)
             if not _is_unknown_web_search_tool_error(e):
                 raise
             tools = params.get("tools")
@@ -491,7 +526,7 @@ class _ResponsesAdapter:
                         f" retrying with '{alt}'"
                     )
                     params["tools"] = _swap_web_search_tool_name(tools, tried_name, alt)
-                    return await self.client.responses.create(**params)
+                    return await create(params)
             raise
 
     async def _await_completion(self, resp):
@@ -687,7 +722,7 @@ class _ResponsesAdapter:
         params = self._build_params(model, messages, temperature, max_tokens,
                                     tools=tools, tool_choice=tool_choice,
                                     skip_temperature=skip_temperature, stream=stream)
-        resp = await self._create_responses_with_fallback(params)
+        resp = await self._create_responses_with_fallback(params, modality="tools")
         if stream:
             started = await _start_stream(
                 resp,
@@ -724,7 +759,7 @@ class _ResponsesAdapter:
             model, messages, temperature, max_tokens, stream=stream,
             timeout=timeout, skip_temperature=skip_temperature,
         )
-        resp = await self._create_responses_with_fallback(params)
+        resp = await self._create_responses_with_fallback(params, modality="vision")
         if stream:
             started = await _start_stream(
                 resp,

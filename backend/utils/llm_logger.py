@@ -189,6 +189,7 @@ class LLMInteraction:
     response_content: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     usage: Optional[Dict[str, int]] = None
+    cache: Optional[Dict[str, Any]] = None
 
     # Metadata
     error: Optional[str] = None
@@ -268,7 +269,7 @@ class LLMLogger:
                 for key in (
                     "timestamp", "session_id", "agent", "model",
                     "interaction_type", "temperature", "max_tokens", "base_url",
-                    "usage", "error", "duration_ms",
+                    "usage", "cache", "error", "duration_ms",
                 )
             }
             daily_data.update({
@@ -384,6 +385,7 @@ class LLMLogger:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         base_url: Optional[str] = None,
+        cache: Optional[Dict[str, Any]] = None,
     ) -> LLMInteraction:
         """
         Create an interaction record for a request.
@@ -401,6 +403,7 @@ class LLMLogger:
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=base_url,
+            cache=cache,
         )
     
     def log_response(

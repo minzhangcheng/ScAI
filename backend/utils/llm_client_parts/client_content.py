@@ -201,6 +201,17 @@ class ClientContentMixin:
         Older/custom test loggers may expose only the synchronous method, which
         remains a fallback rather than a second write.
         """
+        interaction = kwargs.get("interaction")
+        cache_context = getattr(interaction, "cache", None)
+        if isinstance(cache_context, dict):
+            protocol = cache_context.get("protocol")
+            modality = cache_context.get("modality", "text")
+            model = getattr(interaction, "model", None)
+            if protocol and model:
+                interaction.cache = self._prompt_cache_log_context(
+                    model, protocol, modality
+                )
+
         async_log_response = getattr(self.llm_logger, "log_response_async", None)
         if callable(async_log_response):
             result = async_log_response(**kwargs)
@@ -247,8 +258,12 @@ class ClientContentMixin:
                 return attributes.get(key, missing)
 
             cached = reported_value(details, "cached_tokens")
+            cache_write = reported_value(details, "cache_write_tokens")
             top_level_cached = reported_value(
                 response.usage, "cache_read_input_tokens"
+            )
+            top_level_cache_write = reported_value(
+                response.usage, "cache_creation_input_tokens"
             )
             if top_level_cached is not missing and top_level_cached is not None:
                 if cached is missing or cached is None:
@@ -257,6 +272,14 @@ class ClientContentMixin:
                 # Preserve an explicitly reported zero so report generation can
                 # distinguish a measured 0% hit rate from unavailable metrics.
                 result["cached_tokens"] = cached or 0
+            if (
+                top_level_cache_write is not missing
+                and top_level_cache_write is not None
+                and (cache_write is missing or cache_write is None)
+            ):
+                cache_write = top_level_cache_write
+            if cache_write is not missing and cache_write is not None:
+                result["cache_write_tokens"] = cache_write or 0
             return result
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 

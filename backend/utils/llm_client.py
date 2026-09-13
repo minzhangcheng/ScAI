@@ -203,6 +203,7 @@ from .llm_client_parts import (  # noqa: F401
     ClientChatMixin,
     ClientStreamVisionMixin,
 )
+from .llm_client_parts.prompt_cache import PromptCacheController
 class OpenAICompatibleClient(
     ClientParamsMixin,
     ClientContentMixin,
@@ -230,6 +231,10 @@ class OpenAICompatibleClient(
         self.session_id = session_id
         self.agent_name = agent_name
         self.llm_logger = get_llm_logger()
+        self._prompt_cache_controller = PromptCacheController(
+            self.base_url,
+            context_getter=lambda: (self.session_id, self.agent_name),
+        )
         # Optional callback fired before each retry sleep, used to push
         # status updates to WebSocket so the frontend knows we're still alive.
         # Signature: async (attempt, max_retries, delay, error_type, agent_name) -> None

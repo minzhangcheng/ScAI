@@ -94,6 +94,16 @@ def test_chat_cache_telemetry_distinguishes_absent_null_zero_and_gateway_fallbac
     )
     assert explicit_nested_zero["cached_tokens"] == 0
 
+    nested_write = ClientContentMixin._extract_usage(
+        _chat_response(details=SimpleNamespace(cache_write_tokens=19))
+    )
+    assert nested_write["cache_write_tokens"] == 19
+
+    gateway_write = ClientContentMixin._extract_usage(
+        _chat_response(cache_creation_input_tokens=23)
+    )
+    assert gateway_write["cache_write_tokens"] == 23
+
 
 def _responses_dump(details):
     return {
@@ -116,9 +126,10 @@ def test_responses_cache_telemetry_distinguishes_absent_null_and_zero():
         assert "cached_tokens" not in usage
 
     _, _, _, usage = _parse_responses_dump(
-        _responses_dump({"cached_tokens": 0})
+        _responses_dump({"cached_tokens": 0, "cache_write_tokens": 7})
     )
     assert usage["cached_tokens"] == 0
+    assert usage["cache_write_tokens"] == 7
 
 
 def _anthropic_dump(usage):
@@ -128,7 +139,7 @@ def _anthropic_dump(usage):
     }
 
 
-def test_anthropic_cache_telemetry_uses_full_input_and_cache_read_only():
+def test_anthropic_cache_telemetry_uses_full_input_and_read_write_counts():
     _, _, _, usage = _parse_anthropic_dump(_anthropic_dump({
         "input_tokens": 10,
         "cache_creation_input_tokens": 5,
@@ -138,6 +149,7 @@ def test_anthropic_cache_telemetry_uses_full_input_and_cache_read_only():
     assert usage["prompt_tokens"] == 18
     assert usage["total_tokens"] == 22
     assert usage["cached_tokens"] == 3
+    assert usage["cache_write_tokens"] == 5
 
     _, _, _, unavailable = _parse_anthropic_dump(_anthropic_dump({
         "input_tokens": 10,
@@ -153,6 +165,7 @@ def test_anthropic_cache_telemetry_uses_full_input_and_cache_read_only():
     }))
     assert reported_without_reads["prompt_tokens"] == 15
     assert reported_without_reads["cached_tokens"] == 0
+    assert reported_without_reads["cache_write_tokens"] == 5
 
     _, _, _, reported_read_zero = _parse_anthropic_dump(_anthropic_dump({
         "input_tokens": 10,

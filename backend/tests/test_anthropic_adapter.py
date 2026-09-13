@@ -214,6 +214,7 @@ async def test_anthropic_adapter_streaming_text_aggregates_usage():
         "completion_tokens": 2,
         "total_tokens": 7,
         "cached_tokens": 2,
+        "cache_write_tokens": 0,
     }
     assert client.messages.create.call_args.kwargs["stream"] is True
 

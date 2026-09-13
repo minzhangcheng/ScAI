@@ -302,6 +302,7 @@ class ClientStreamVisionMixin:
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=self.base_url,
+            cache=self._prompt_cache_log_context(model, "chat", "vision"),
         )
 
         start_time = time.time()
@@ -316,7 +317,7 @@ class ClientStreamVisionMixin:
 
         def _build_vision_requests():
             make_request, make_request_no_temp = self._build_request_pair(
-                base_params, model, temperature, max_tokens
+                base_params, model, temperature, max_tokens, modality="vision"
             )
             if not stream:
                 return make_request, make_request_no_temp

@@ -153,6 +153,14 @@ from .shared import (  # noqa: F401
 class ClientParamsMixin:
     """Per-model request parameters, temperature fallback, and retry kwargs."""
 
+    def _prompt_cache_log_context(
+        self, model: str, protocol: str, modality: str = "text"
+    ) -> Optional[Dict[str, Any]]:
+        controller = getattr(self, "_prompt_cache_controller", None)
+        if controller is None:
+            return None
+        return controller.describe(model, protocol, modality)
+
     def _apply_model_params(self, params: Dict[str, Any], model: str, temperature: Optional[float], max_tokens: Optional[int], skip_temperature: bool = False) -> None:
         """Apply temperature and max_tokens to request params based on model type.
 
@@ -339,20 +347,33 @@ class ClientParamsMixin:
         temperature: Optional[float],
         max_tokens: Optional[int],
         request_timeout: Optional[float] = None,
+        modality: str = "text",
     ) -> tuple:
         """构建请求闭包对：(标准请求, 无temperature备选请求)."""
+        async def send(params: Dict[str, Any]):
+            controller = getattr(self, "_prompt_cache_controller", None)
+            if controller is None:
+                return await self.client.chat.completions.create(**params)
+            return await controller.request(
+                self.client.chat.completions.create,
+                params,
+                model=model,
+                protocol="chat",
+                modality=modality,
+            )
+
         async def make_request():
             params = {**base_params}
             self._apply_model_params(params, model, temperature, max_tokens)
             if request_timeout is not None:
                 params["timeout"] = request_timeout
-            return await self.client.chat.completions.create(**params)
+            return await send(params)
 
         async def make_request_no_temp():
             params = {**base_params}
             self._apply_model_params(params, model, temperature, max_tokens, skip_temperature=True)
             if request_timeout is not None:
                 params["timeout"] = request_timeout
-            return await self.client.chat.completions.create(**params)
+            return await send(params)
 
         return make_request, make_request_no_temp

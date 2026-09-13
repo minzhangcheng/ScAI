@@ -160,14 +160,24 @@ class ClientDispatchMixin:
     def _get_responses_adapter(self) -> "_ResponsesAdapter":
         if getattr(self, "_responses_adapter", None) is None:
             self._responses_adapter = _ResponsesAdapter(
-                self.client, agent_name=self.agent_name, base_url=self.base_url)
+                self.client,
+                agent_name=self.agent_name,
+                base_url=self.base_url,
+                prompt_cache_controller=getattr(
+                    self, "_prompt_cache_controller", None
+                ),
+            )
         return self._responses_adapter
 
     def _get_anthropic_adapter(self) -> "_AnthropicAdapter":
         if getattr(self, "_anthropic_adapter", None) is None:
             self._anthropic_adapter = _AnthropicAdapter(
                 api_key=self.api_key, base_url=_anthropic_sdk_base_url(self.base_url),
-                http_client=self.http_client, agent_name=self.agent_name)
+                http_client=self.http_client, agent_name=self.agent_name,
+                prompt_cache_controller=getattr(
+                    self, "_prompt_cache_controller", None
+                ),
+            )
         return self._anthropic_adapter
 
     @staticmethod
@@ -176,7 +186,7 @@ class ClientDispatchMixin:
     ) -> Tuple[Callable[[], Awaitable[Any]], Callable[[], Awaitable[Any]]]:
         return (lambda: call_factory(False), lambda: call_factory(True))
 
-    async def _invoke_adapter(self, *, interaction_type, model, log_messages,
+    async def _invoke_adapter(self, *, protocol="responses", interaction_type, model, log_messages,
                               make_coro, make_coro_no_temp,
                               tools=None, tool_choice=None, temperature=None,
                               max_tokens=None, request_timeout=None,
@@ -201,6 +211,15 @@ class ClientDispatchMixin:
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=self.base_url,
+            cache=self._prompt_cache_log_context(
+                model,
+                protocol,
+                (
+                    "vision" if interaction_type == "vision"
+                    else "tools" if interaction_type == "chat_with_tools"
+                    else "text"
+                ),
+            ),
         )
         start_time = time.time()
         model_key = _extract_model_name(model)
@@ -293,6 +312,7 @@ class ClientDispatchMixin:
                 )
                 await asyncio.sleep(delay)
                 return await self._invoke_adapter(
+                    protocol=protocol,
                     interaction_type=interaction_type,
                     model=model,
                     log_messages=log_messages,
@@ -538,7 +558,7 @@ class ClientDispatchMixin:
         request_timeout: Optional[float] = None,
         make_probe_fallback_call: Optional[Callable[[], Awaitable[Any]]] = None,
     ):
-        def invoke(adapter, adapter_call, max_retries_override=None,
+        def invoke(protocol, adapter, adapter_call, max_retries_override=None,
                    non_retryable_predicate=None, allow_empty_retry=True):
             if non_retryable_predicate is None:
                 non_retryable_predicate = lambda e: not is_transient_probe_error(e)
@@ -546,6 +566,7 @@ class ClientDispatchMixin:
                 lambda skip_temperature: adapter_call(adapter, skip_temperature)
             )
             return self._invoke_adapter(
+                protocol=protocol,
                 interaction_type=interaction_type, model=model, log_messages=log_messages,
                 make_coro=make_coro, make_coro_no_temp=make_coro_no_temp,
                 tools=tools, tool_choice=tool_choice, temperature=temperature,
@@ -575,13 +596,13 @@ class ClientDispatchMixin:
                 )
             )
             if protocol == "responses":
-                return lambda: invoke(self._get_responses_adapter(),
+                return lambda: invoke(protocol, self._get_responses_adapter(),
                                       make_responses_adapter_call, max_retries_override=mr,
                                       non_retryable_predicate=np, allow_empty_retry=not probe)
             if protocol == "anthropic":
                 if make_anthropic_adapter_call is None:
                     return None
-                return lambda: invoke(self._get_anthropic_adapter(),
+                return lambda: invoke(protocol, self._get_anthropic_adapter(),
                                       make_anthropic_adapter_call, max_retries_override=mr,
                                       non_retryable_predicate=np, allow_empty_retry=not probe)
             if protocol == "chat":

@@ -253,6 +253,7 @@ class ClientChatMixin:
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=self.base_url,
+            cache=self._prompt_cache_log_context(model, "chat"),
         )
 
         start_time = time.time()
@@ -701,6 +702,7 @@ class ClientChatMixin:
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=self.base_url,
+            cache=self._prompt_cache_log_context(model, "chat", "tools"),
         )
 
         start_time = time.time()
@@ -722,7 +724,7 @@ class ClientChatMixin:
 
         base_params = {"model": model, "messages": messages, "tools": tools, "tool_choice": effective_tool_choice}
         _make_request, _make_request_no_temp = self._build_request_pair(
-            base_params, model, temperature, max_tokens
+            base_params, model, temperature, max_tokens, modality="tools"
         )
         effective_max_retries = max_retries_override if max_retries_override is not None else max_retries
         retry_kwargs = self._build_retry_kwargs(
@@ -752,7 +754,8 @@ class ClientChatMixin:
                             self._toolchoice_unsupported_models.add(model_key)
                     base_params["tool_choice"] = "auto"
                     _make_request, _make_request_no_temp = self._build_request_pair(
-                        base_params, model, temperature, max_tokens
+                        base_params, model, temperature, max_tokens,
+                        modality="tools",
                     )
                     response = await self._call_with_temp_fallback(
                         _make_request, _make_request_no_temp, model_key, retry_kwargs

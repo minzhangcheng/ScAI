@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.12 · **Last updated**: 2026-09-13
+**Version**: 0.56.13 · **Last updated**: 2026-09-13
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,14 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.56.x — (2026-09-08 onward)**
+
+- `0.56.13` — Adds provider-neutral automatic prompt-cache negotiation for LLM
+  calls. Anthropic-compatible and OpenRouter Anthropic requests send top-level
+  ephemeral cache control plus opaque session affinity; deterministic cache
+  parameter rejections are remembered per protocol/model/modality and retried
+  once without optional fields. Cache read/write telemetry is normalized across
+  Chat Completions, Responses, and Anthropic logs, while unknown endpoints retain
+  provider-managed caching and no user-facing configuration is added.
 
 - `0.56.12` — Removes the misleading live-session “No committed runtime”
   warning shown before the first runtime save attempt, while retaining

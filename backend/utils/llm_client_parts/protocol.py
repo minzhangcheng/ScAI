@@ -377,6 +377,7 @@ def _parse_anthropic_dump(dump: Dict[str, Any]):
     )
     if has_cache_telemetry:
         usage["cached_tokens"] = cache_read_input
+        usage["cache_write_tokens"] = cache_creation_input
 
     return "\n".join(text_parts), tool_calls, (thinking_blocks or None), usage
 
@@ -456,5 +457,7 @@ def _parse_responses_dump(dump: Dict[str, Any]):
     details = u.get("input_tokens_details") or {}
     if details.get("cached_tokens") is not None:
         usage["cached_tokens"] = details["cached_tokens"] or 0
+    if details.get("cache_write_tokens") is not None:
+        usage["cache_write_tokens"] = details["cache_write_tokens"] or 0
 
     return "\n".join(text_parts), tool_calls, (citations or None), usage

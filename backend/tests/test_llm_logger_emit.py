@@ -86,6 +86,7 @@ async def test_emit_log_response_writes_one_daily_and_one_session_record(
         agent="test",
         model="test-model",
         messages=[{"role": "user", "content": "hello"}],
+        cache={"strategy": "automatic"},
     )
     client.llm_logger = logger
 
@@ -104,7 +105,9 @@ async def test_emit_log_response_writes_one_daily_and_one_session_record(
     session_record = json.loads((session_dir / "llm.jsonl").read_text())
     assert "messages" not in daily_record
     assert daily_record["message_count"] == 1
+    assert daily_record["cache"] == {"strategy": "automatic"}
     assert session_record["messages"][0]["content"] == "hello"
+    assert session_record["cache"] == {"strategy": "automatic"}
 
 
 def test_session_log_is_bounded_and_redacts_inline_images(tmp_path, monkeypatch):
