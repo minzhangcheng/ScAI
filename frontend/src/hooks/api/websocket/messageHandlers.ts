@@ -169,6 +169,7 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
         store.setShowSpeciesInputDialog(true)
       }
     } else if (
+      syncContent.change_type === 'species_input_received' ||
       syncContent.change_type === 'species_resolved' ||
       syncContent.change_type === 'species_auto_skipped'
     ) {

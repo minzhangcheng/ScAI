@@ -168,6 +168,7 @@ export function useAnalysisPanelController() {
   const speciesInputInfo = useAppStore(state => state.speciesInputInfo)
   const speciesInputOwnerKey = useAppStore(state => state.speciesInputOwnerKey)
   const showSpeciesInputDialog = useAppStore(state => state.showSpeciesInputDialog)
+  const setShowSpeciesInputDialog = useAppStore(state => state.setShowSpeciesInputDialog)
   const clearSpeciesInputState = useAppStore(state => state.clearSpeciesInputState)
   const explorationFailedInfo = useAppStore(state => state.explorationFailedInfo)
   const explorationFailedOwnerKey = useAppStore(state => state.explorationFailedOwnerKey)
@@ -292,11 +293,13 @@ export function useAnalysisPanelController() {
   })
   const interventionActions = useAnalysisPanelInterventionActions({
     currentSession: store.currentSession, clearExplorationFailedState, clearSpeciesInputState,
-    setShowLlmTimeoutDialog, setShowStopDialog, handleStop: lifecycleActions.handleStop,
+    setShowSpeciesInputDialog, setShowLlmTimeoutDialog, setShowStopDialog,
+    handleStop: lifecycleActions.handleStop,
     annotationData, annotationGateData, setAnnotationData, setShowAnnotationDialog,
     integrationGateData, setShowIntegrationGateDialog, explorationReportData,
     setShowExplorationDialog, feedbackRoundData, setShowFeedbackDialog,
-    setShowPlanReviewDialog, wsConnect: store.wsConnect, maxExplorationRound: MAX_EXPLORATION_ROUND,
+    setShowPlanReviewDialog, wsConnect: store.wsConnect,
+    maxExplorationRound: MAX_EXPLORATION_ROUND, addMessage: store.addMessage,
   })
   const llmWaitSeconds = llmFailureInfo?.waitSeconds ?? roundWaitSeconds
   const { timeRemaining } = useCountdownTimer({

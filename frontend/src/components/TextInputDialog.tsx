@@ -46,6 +46,8 @@ export function TextInputDialog({
     try {
       await onSubmit(input.trim())
       onClose?.()
+    } catch {
+      // The owner restores the dialog and surfaces the concrete API error.
     } finally {
       setSubmitting(false)
     }

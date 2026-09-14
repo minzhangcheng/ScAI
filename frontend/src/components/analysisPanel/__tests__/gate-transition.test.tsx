@@ -118,6 +118,42 @@ describe('Gate continuation transitions', () => {
     expect(mocks.apiFetch).toHaveBeenCalledTimes(1)
   })
 
+  it('closes annotation and plan dialogs as soon as their requests start', async () => {
+    mocks.apiFetch.mockResolvedValue({})
+    const props = options({
+      currentSession: session('session-a', 'waiting_annotation'),
+    })
+    useAppStore.setState({
+      currentSession: session('session-a', 'waiting_annotation'),
+    })
+    const { result } = renderHook(() => useAnalysisPanelGateActions(props))
+
+    await act(async () => {
+      await result.current.handleConfirmAnnotations([])
+    })
+    expect(props.setShowAnnotationDialog).toHaveBeenCalledWith(false)
+
+    await act(async () => {
+      await result.current.handlePlanModify('Use the paired design')
+    })
+    expect(props.setShowPlanReviewDialog).toHaveBeenCalledWith(false)
+  })
+
+  it('closes integration selection immediately and restores it on failure', async () => {
+    mocks.apiFetch.mockRejectedValue(new Error('selection rejected'))
+    const setShowIntegrationGateDialog = vi.fn()
+    const props = options({ setShowIntegrationGateDialog })
+    const { result } = renderHook(() => useAnalysisPanelGateActions(props))
+
+    await act(async () => {
+      await result.current.submitIntegrationDirections([
+        { direction: 'Validate Kupffer-cell origin', notes: '' },
+      ])
+    })
+
+    expect(setShowIntegrationGateDialog.mock.calls).toEqual([[false], [true]])
+  })
+
   it('holds pending through PAUSED and clears on a strictly newer authoritative state', async () => {
     mocks.apiFetch.mockResolvedValue({})
     let props = options()
@@ -190,6 +226,7 @@ describe('Gate continuation transitions', () => {
         { direction: 'Kupffer heterogeneity', notes: '', isCustom: false },
       ])
     })
+    expect(setShowExplorationDialog).toHaveBeenCalledWith(false)
     props = options({
       setShowExplorationDialog,
       stateVersion: 11,
@@ -213,7 +250,8 @@ describe('Gate continuation transitions', () => {
 
   it('shows a concrete error and restores the action on failure', async () => {
     mocks.apiFetch.mockRejectedValue(new Error('upstream unavailable'))
-    const props = options()
+    const setShowExplorationDialog = vi.fn()
+    const props = options({ setShowExplorationDialog })
     const { result } = renderHook(() => useAnalysisPanelGateActions(props))
 
     await act(async () => {
@@ -226,6 +264,7 @@ describe('Gate continuation transitions', () => {
     expect(props.onGateActionError).toHaveBeenCalledWith(
       expect.any(Error), 'direction_selection',
     )
+    expect(setShowExplorationDialog.mock.calls).toEqual([[false], [true]])
   })
 
   it('owner switching clears the pending indicator without touching the new owner', async () => {

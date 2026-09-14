@@ -65,6 +65,8 @@ describe('state_sync with a partial payload', () => {
       stateVersion: 7,
       llmFailureInfo: null,
       showLlmTimeoutDialog: false,
+      speciesInputInfo: null,
+      showSpeciesInputDialog: false,
     })
   })
 
@@ -164,5 +166,37 @@ describe('state_sync with a partial payload', () => {
 
     expect(useAppStore.getState().llmFailureInfo).toBeNull()
     expect(useAppStore.getState().showLlmTimeoutDialog).toBe(false)
+  })
+
+  it('clears the species gate as soon as the backend accepts its input', async () => {
+    const { result } = renderHook(() => useWebSocket())
+
+    await act(async () => {
+      result.current.connect()
+    })
+
+    useAppStore.getState().setSpeciesInputInfo({
+      source: 'inference',
+      suggestions: ['Mus musculus'],
+      context: 'Confirm species',
+    })
+    useAppStore.getState().setShowSpeciesInputDialog(true)
+
+    const ws = wsInstances[wsInstances.length - 1]
+    await act(async () => {
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: 'state_sync',
+          change_type: 'species_input_received',
+          version: 8,
+          status: 'running',
+        }),
+      } as MessageEvent)
+    })
+
+    const state = useAppStore.getState()
+    expect(state.speciesInputInfo).toBeNull()
+    expect(state.showSpeciesInputDialog).toBe(false)
+    expect(state.currentSession?.status).toBe('running')
   })
 })

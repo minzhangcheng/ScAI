@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
 
-import { apiFetch } from '../../../hooks/useApi'
+import { apiFetch, generateId } from '../../../hooks/useApi'
 import { useAppStore, type Session } from '../../../stores/appStore'
 import type { AnnotationData } from '../../../utils/annotationGate'
 import { chatOwnerKey } from '../../../utils/chatOwnership'
@@ -11,6 +11,7 @@ interface InterventionActionOptions {
   currentSession: Session | null
   clearExplorationFailedState: () => void
   clearSpeciesInputState: () => void
+  setShowSpeciesInputDialog: (show: boolean) => void
   setShowLlmTimeoutDialog: (show: boolean) => void
   setShowStopDialog: (show: boolean) => void
   handleStop: (action: 'immediate' | 'summarize') => Promise<void>
@@ -27,6 +28,7 @@ interface InterventionActionOptions {
   setShowPlanReviewDialog: (show: boolean) => void
   wsConnect: (() => void) | null
   maxExplorationRound: number
+  addMessage: ReturnType<typeof useAppStore.getState>['addMessage']
 }
 
 function ownerForSession(session: Session | null): string | null {
@@ -39,6 +41,16 @@ function currentOwner(): string | null {
 }
 
 export function useAnalysisPanelInterventionActions(options: InterventionActionOptions) {
+  const reportActionError = useCallback((action: string, error: unknown) => {
+    const detail = error instanceof Error ? error.message : String(error)
+    options.addMessage({
+      id: generateId(),
+      type: 'error',
+      content: `${action}: ${detail}`,
+      timestamp: new Date().toISOString(),
+    })
+  }, [options.addMessage])
+
   const handleExplorationFailedGoToData = useCallback(() => {
     const owner = ownerForSession(options.currentSession)
     if (!owner || currentOwner() !== owner) return
@@ -64,32 +76,40 @@ export function useAnalysisPanelInterventionActions(options: InterventionActionO
     const session = options.currentSession
     const owner = ownerForSession(session)
     if (!session || !owner || currentOwner() !== owner || !info) return
+    options.setShowLlmTimeoutDialog(false)
     try {
       await apiFetch(`/session/${session.id}/llm-failure-action`, {
         method: 'POST',
         body: JSON.stringify({ action: 'skip', node_name: info.nodeName, generation: info.generation }),
       })
-      if (currentOwner() === owner) options.setShowLlmTimeoutDialog(false)
     } catch (error) {
       console.error('Failed to signal LLM skip:', error)
+      if (currentOwner() === owner) {
+        options.setShowLlmTimeoutDialog(true)
+        reportActionError('llm_skip', error)
+      }
     }
-  }, [options.currentSession, options.setShowLlmTimeoutDialog])
+  }, [options.currentSession, options.setShowLlmTimeoutDialog, reportActionError])
 
   const handleLlmRetry = useCallback(async () => {
     const info = useAppStore.getState().llmFailureInfo
     const session = options.currentSession
     const owner = ownerForSession(session)
     if (!session || !owner || currentOwner() !== owner || !info) return
+    options.setShowLlmTimeoutDialog(false)
     try {
       await apiFetch(`/session/${session.id}/llm-failure-action`, {
         method: 'POST',
         body: JSON.stringify({ action: 'retry', node_name: info.nodeName, generation: info.generation }),
       })
-      if (currentOwner() === owner) options.setShowLlmTimeoutDialog(false)
     } catch (error) {
       console.error('Failed to signal LLM retry:', error)
+      if (currentOwner() === owner) {
+        options.setShowLlmTimeoutDialog(true)
+        reportActionError('llm_retry', error)
+      }
     }
-  }, [options.currentSession, options.setShowLlmTimeoutDialog])
+  }, [options.currentSession, options.setShowLlmTimeoutDialog, reportActionError])
 
   const handleSpeciesInput = useCallback(async (input: string) => {
     const session = options.currentSession
@@ -98,6 +118,7 @@ export function useAnalysisPanelInterventionActions(options: InterventionActionO
     // callback retained by the source dialog must not post to the source (or
     // clear the child) after a branch-only session switch.
     if (!session || !owner || currentOwner() !== owner) return
+    options.setShowSpeciesInputDialog(false)
     try {
       await apiFetch(`/session/${session.id}/species-input`, {
         method: 'POST', body: JSON.stringify({ input }),
@@ -105,8 +126,16 @@ export function useAnalysisPanelInterventionActions(options: InterventionActionO
       if (currentOwner() === owner) options.clearSpeciesInputState()
     } catch (error) {
       console.error('Failed to submit species input:', error)
+      if (currentOwner() === owner) {
+        options.setShowSpeciesInputDialog(true)
+        reportActionError('species_input', error)
+      }
+      throw error
     }
-  }, [options.currentSession, options.clearSpeciesInputState])
+  }, [
+    options.currentSession, options.clearSpeciesInputState,
+    options.setShowSpeciesInputDialog, reportActionError,
+  ])
 
   const handleLlmModifyAgent = useCallback(() => {
     const owner = ownerForSession(options.currentSession)
@@ -122,16 +151,20 @@ export function useAnalysisPanelInterventionActions(options: InterventionActionO
     const session = options.currentSession
     const owner = ownerForSession(session)
     if (!session || !owner || currentOwner() !== owner || !info) return
+    options.setShowLlmTimeoutDialog(false)
     try {
       await apiFetch(`/session/${session.id}/llm-failure-action`, {
         method: 'POST',
         body: JSON.stringify({ action: 'terminate', node_name: info.nodeName, generation: info.generation }),
       })
-      if (currentOwner() === owner) options.setShowLlmTimeoutDialog(false)
     } catch (error) {
       console.error('Failed to signal LLM terminate:', error)
+      if (currentOwner() === owner) {
+        options.setShowLlmTimeoutDialog(true)
+        reportActionError('llm_terminate', error)
+      }
     }
-  }, [options.currentSession, options.setShowLlmTimeoutDialog])
+  }, [options.currentSession, options.setShowLlmTimeoutDialog, reportActionError])
 
   const handleStopDialogCancel = useCallback(() => {
     const owner = ownerForSession(options.currentSession)

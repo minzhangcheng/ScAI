@@ -75,7 +75,7 @@ describe('manual-input attachment uploads', () => {
     }))
   })
 
-  it('preserves upload, input, resume, and close ordering when all uploads succeed', async () => {
+  it('closes after input acceptance without waiting for resume completion', async () => {
     const order: string[] = []
     vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
       const url = String(input)
@@ -84,7 +84,10 @@ describe('manual-input attachment uploads', () => {
         return Promise.resolve(jsonResponse({ data: { file_id: 'file-one' } }))
       }
       order.push('input')
-      return Promise.resolve(jsonResponse({ ok: true }))
+      return Promise.resolve(jsonResponse({
+        ok: true,
+        data: { continuation_started: true },
+      }))
     }))
     const lifecycle = options({
       resumeAnalysis: vi.fn(async () => { order.push('resume') }),
@@ -102,8 +105,27 @@ describe('manual-input attachment uploads', () => {
       }])
     })
 
-    expect(order).toEqual(['upload', 'input', 'resume', 'close'])
+    expect(order).toEqual(['upload', 'input', 'close'])
+    expect(lifecycle.resumeAnalysis).not.toHaveBeenCalled()
     expect(lifecycle.addMessage).not.toHaveBeenCalled()
+  })
+
+  it('closes immediately for skip and restores the dialog if continuation fails', async () => {
+    const lifecycle = options({
+      language: 'zh',
+      continueRound: vi.fn().mockRejectedValue(new Error('continue rejected')),
+    })
+    const { result } = renderHook(() => useAnalysisPanelLifecycleActions(lifecycle))
+
+    await act(async () => {
+      await result.current.handleDialogSkip()
+    })
+
+    expect(lifecycle.setShowFeedbackDialog.mock.calls).toEqual([[false], [true]])
+    expect(lifecycle.addMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'error',
+      content: expect.stringContaining('continue rejected'),
+    }))
   })
 
   it('keeps the stop dialog open and reports a stop failure', async () => {

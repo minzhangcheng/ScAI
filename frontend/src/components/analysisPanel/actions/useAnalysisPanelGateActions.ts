@@ -42,55 +42,64 @@ export function useAnalysisPanelGateActions(options: GateActionOptions) {
     if (!options.currentSession) return
     await submitGateAction(
       'annotation_confirmation',
-      token => apiFetch(`/session/${token.sessionId}/confirm-annotations`, {
-        method: 'POST', body: JSON.stringify({ annotations }),
-      }),
-      (ownerKey) => {
+      token => {
         options.setShowAnnotationDialog(false)
+        return apiFetch(`/session/${token.sessionId}/confirm-annotations`, {
+          method: 'POST', body: JSON.stringify({ annotations }),
+        })
+      },
+      (ownerKey) => {
         reconnectIfNeeded(ownerKey)
       },
-    ).catch(() => undefined)
+    ).catch(() => options.setShowAnnotationDialog(true))
   }, [options.currentSession, options.setShowAnnotationDialog, reconnectIfNeeded, submitGateAction])
 
   const handlePlanApprove = useCallback(async () => {
     if (!options.currentSession) return
     await submitGateAction(
       'plan_review',
-      token => apiFetch(`/session/${token.sessionId}/plan-review`, {
-        method: 'POST', body: JSON.stringify({ action: 'approve' }),
-      }),
-      (ownerKey) => {
+      token => {
         options.setShowPlanReviewDialog(false)
+        return apiFetch(`/session/${token.sessionId}/plan-review`, {
+          method: 'POST', body: JSON.stringify({ action: 'approve' }),
+        })
+      },
+      (ownerKey) => {
         reconnectIfNeeded(ownerKey)
       },
-    ).catch(() => undefined)
+    ).catch(() => options.setShowPlanReviewDialog(true))
   }, [options.currentSession, options.setShowPlanReviewDialog, reconnectIfNeeded, submitGateAction])
 
   const handlePlanSkip = useCallback(async () => {
     if (!options.currentSession) return
     await submitGateAction(
       'plan_review',
-      token => apiFetch(`/session/${token.sessionId}/plan-review`, {
-        method: 'POST', body: JSON.stringify({ action: 'skip' }),
-      }),
-      (ownerKey) => {
+      token => {
         options.setShowPlanReviewDialog(false)
+        return apiFetch(`/session/${token.sessionId}/plan-review`, {
+          method: 'POST', body: JSON.stringify({ action: 'skip' }),
+        })
+      },
+      (ownerKey) => {
         reconnectIfNeeded(ownerKey)
       },
-    ).catch(() => undefined)
+    ).catch(() => options.setShowPlanReviewDialog(true))
   }, [options.currentSession, options.setShowPlanReviewDialog, reconnectIfNeeded, submitGateAction])
 
   const handlePlanModify = useCallback(async (userInput: string) => {
     if (!options.currentSession) return
     await submitGateAction(
       'plan_review',
-      token => apiFetch(`/session/${token.sessionId}/plan-review`, {
-        method: 'POST',
-        body: JSON.stringify({ action: 'modify', user_input: userInput }),
-      }),
+      token => {
+        options.setShowPlanReviewDialog(false)
+        return apiFetch(`/session/${token.sessionId}/plan-review`, {
+          method: 'POST',
+          body: JSON.stringify({ action: 'modify', user_input: userInput }),
+        })
+      },
       (ownerKey) => reconnectIfNeeded(ownerKey),
-    ).catch(() => undefined)
-  }, [options.currentSession, reconnectIfNeeded, submitGateAction])
+    ).catch(() => options.setShowPlanReviewDialog(true))
+  }, [options.currentSession, options.setShowPlanReviewDialog, reconnectIfNeeded, submitGateAction])
 
   const handleChooseDirections = useCallback(async (
     directions: Array<{ direction: string; notes: string; isCustom: boolean }>,
@@ -98,78 +107,88 @@ export function useAnalysisPanelGateActions(options: GateActionOptions) {
     if (!options.currentSession) return
     await submitGateAction(
       'direction_selection',
-      token => apiFetch(`/session/${token.sessionId}/choose-direction`, {
-        method: 'POST', body: JSON.stringify({ directions: buildDirectionsPayload(directions) }),
-      }),
-      (ownerKey) => {
+      token => {
         options.setShowExplorationDialog(false)
+        return apiFetch(`/session/${token.sessionId}/choose-direction`, {
+          method: 'POST', body: JSON.stringify({ directions: buildDirectionsPayload(directions) }),
+        })
+      },
+      (ownerKey) => {
         reconnectIfNeeded(ownerKey)
       },
-    ).catch(() => undefined)
+    ).catch(() => options.setShowExplorationDialog(true))
   }, [options.currentSession, options.setShowExplorationDialog, reconnectIfNeeded, submitGateAction])
 
   const handleLetPiDecide = useCallback(async () => {
     if (!options.currentSession) return
     await submitGateAction(
       'direction_selection',
-      token => apiFetch(`/session/${token.sessionId}/choose-direction`, {
-        method: 'POST', body: JSON.stringify({ direction: '', let_pi_decide: true }),
-      }),
-      (ownerKey) => {
+      token => {
         options.setShowExplorationDialog(false)
+        return apiFetch(`/session/${token.sessionId}/choose-direction`, {
+          method: 'POST', body: JSON.stringify({ direction: '', let_pi_decide: true }),
+        })
+      },
+      (ownerKey) => {
         reconnectIfNeeded(ownerKey)
       },
-    ).catch(() => undefined)
+    ).catch(() => options.setShowExplorationDialog(true))
   }, [options.currentSession, options.setShowExplorationDialog, reconnectIfNeeded, submitGateAction])
 
   const submitIntegrationDirections = async (selected: any[]) => {
     if (!options.currentSession) return
     await submitGateAction(
       'integration_selection',
-      token => apiFetch(`/session/${token.sessionId}/choose-direction`, {
-        method: 'POST',
-        body: JSON.stringify({
-          directions: buildDirectionsPayload(selected.map(item => ({
-            direction: item.direction,
-            notes: item.notes ?? '',
-            isCustom: !!item.isCustom,
-          }))),
-        }),
-      }),
-      (ownerKey) => {
+      token => {
         options.setShowIntegrationGateDialog(false)
+        return apiFetch(`/session/${token.sessionId}/choose-direction`, {
+          method: 'POST',
+          body: JSON.stringify({
+            directions: buildDirectionsPayload(selected.map(item => ({
+              direction: item.direction,
+              notes: item.notes ?? '',
+              isCustom: !!item.isCustom,
+            }))),
+          }),
+        })
+      },
+      (ownerKey) => {
         options.setIntegrationGateData(null)
         reconnectIfNeeded(ownerKey)
       },
-    ).catch(() => undefined)
+    ).catch(() => options.setShowIntegrationGateDialog(true))
   }
 
   const finalizeFromIntegration = async () => {
     if (!options.currentSession) return
     await submitGateAction(
       'finalize_integration',
-      token => apiFetch(`/session/${token.sessionId}/finalize-from-integration`, { method: 'POST' }),
-      (ownerKey) => {
+      token => {
         options.setShowIntegrationGateDialog(false)
+        return apiFetch(`/session/${token.sessionId}/finalize-from-integration`, { method: 'POST' })
+      },
+      (ownerKey) => {
         options.setIntegrationGateData(null)
         reconnectIfNeeded(ownerKey)
       },
-    ).catch(() => undefined)
+    ).catch(() => options.setShowIntegrationGateDialog(true))
   }
 
   const handleLetPiDecideIntegration = async () => {
     if (!options.currentSession) return
     await submitGateAction(
       'integration_selection',
-      token => apiFetch(`/session/${token.sessionId}/choose-direction`, {
-        method: 'POST', body: JSON.stringify({ let_pi_decide: true }),
-      }),
-      (ownerKey) => {
+      token => {
         options.setShowIntegrationGateDialog(false)
+        return apiFetch(`/session/${token.sessionId}/choose-direction`, {
+          method: 'POST', body: JSON.stringify({ let_pi_decide: true }),
+        })
+      },
+      (ownerKey) => {
         options.setIntegrationGateData(null)
         reconnectIfNeeded(ownerKey)
       },
-    ).catch(() => undefined)
+    ).catch(() => options.setShowIntegrationGateDialog(true))
   }
 
   const handleSupplementaryAnalysis = useCallback(async (

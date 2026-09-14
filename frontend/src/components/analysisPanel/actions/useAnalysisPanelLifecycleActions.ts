@@ -214,14 +214,19 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
       })
       return
     }
+    let inputAccepted = false
     try {
       if (activeOwner() !== ownerKey) return
-      await apiFetch(`/session/${session.id}/human-input`, {
+      const response = await apiFetch<any>(`/session/${session.id}/human-input`, {
         method: 'POST',
         body: JSON.stringify({ message, uploaded_files: uploadedData, target_agent: 'pi' }),
       })
+      inputAccepted = true
       if (activeOwner() !== ownerKey) return
-      await options.resumeAnalysis()
+      options.setShowFeedbackDialog(false)
+      // An active workflow consumes this action directly. Only the cold
+      // fallback still needs /resume to recreate a workflow owner.
+      if (!response?.data?.continuation_started) await options.resumeAnalysis()
       if (activeOwner() === ownerKey && !options.wsConnected) {
         setTimeout(() => {
           if (activeOwner() === ownerKey) options.wsConnect?.()
@@ -229,13 +234,24 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
       }
     } catch (error) {
       console.error('Failed to send input:', error)
+      if (activeOwner() === ownerKey) {
+        if (!inputAccepted) options.setShowFeedbackDialog(true)
+        options.addMessage({
+          id: generateId(),
+          type: 'error',
+          content: `Failed to send input: ${error instanceof Error ? error.message : String(error)}`,
+          timestamp: new Date().toISOString(),
+        })
+      }
     }
-    if (activeOwner() === ownerKey) options.setShowFeedbackDialog(false)
   }, [
     options.currentSession,
     options.resumeAnalysis,
     options.wsConnected,
     options.wsConnect,
+    options.setShowFeedbackDialog,
+    options.addMessage,
+    options.language,
     blockForwardResume,
   ])
 
@@ -247,6 +263,7 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
       if (activeOwner() === ownerKey) options.setShowFeedbackDialog(false)
       return
     }
+    options.setShowFeedbackDialog(false)
     try {
       if (activeOwner() !== ownerKey) return
       await options.continueRound()
@@ -257,9 +274,21 @@ export function useAnalysisPanelLifecycleActions(options: LifecycleActionOptions
       }
     } catch (error) {
       console.error('Failed to continue round:', error)
+      if (activeOwner() === ownerKey) {
+        options.setShowFeedbackDialog(true)
+        options.addMessage({
+          id: generateId(),
+          type: 'error',
+          content: `Failed to continue round: ${error instanceof Error ? error.message : String(error)}`,
+          timestamp: new Date().toISOString(),
+        })
+      }
     }
-    if (activeOwner() === ownerKey) options.setShowFeedbackDialog(false)
-  }, [options.continueRound, options.wsConnected, options.wsConnect, blockForwardResume])
+  }, [
+    options.currentSession, options.continueRound, options.wsConnected,
+    options.wsConnect, options.setShowFeedbackDialog, options.addMessage,
+    options.language, blockForwardResume,
+  ])
 
   const handlePause = useCallback(async () => {
     const session = options.currentSession

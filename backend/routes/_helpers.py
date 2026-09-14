@@ -1,10 +1,41 @@
 """Shared helpers for route modules."""
 import asyncio
 import logging
+from datetime import datetime
 
+from backend.models.schemas import TaskStatus
 from backend.state import workflows, _run_tasks, _monitor_tasks, state_lock
+from backend.utils.websocket_delivery import send_analysis_json
 
 logger = logging.getLogger(__name__)
+
+
+async def mark_gate_action_received(state) -> None:
+    """Leave a user-facing wait state once its action has been accepted."""
+    state.status = TaskStatus.RUNNING
+    state.waiting_input_started_at = None
+    await state.increment_version()
+
+
+async def send_gate_action_received(
+    session_id: str,
+    state,
+    change_type: str,
+) -> None:
+    """Publish the authoritative post-acceptance state without workflow delay."""
+    await send_analysis_json(session_id, {
+        "type": "state_sync",
+        "agent": None,
+        "content": {
+            "change_type": change_type,
+            "version": state.state_version,
+            "status": state.status.value,
+            "current_round": state.current_round,
+            "analysis_phase": state.analysis_phase,
+            "timestamp": state.last_sync_timestamp.isoformat(),
+        },
+        "timestamp": datetime.now().isoformat(),
+    })
 
 
 async def teardown_running_workflow(

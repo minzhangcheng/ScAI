@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.57.1 · **Last updated**: 2026-09-14
+**Version**: 0.57.2 · **Last updated**: 2026-09-14
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,15 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.57.x — (2026-09-14 onward)**
+
+- `0.57.2` — Settles accepted human-in-the-loop actions immediately across
+  direction and integration choices, annotation confirmation, plan review,
+  round feedback, species input, and LLM intervention dialogs. Backend routes
+  publish an authoritative `running` state before slow workflow continuation;
+  the frontend closes dialogs as soon as a request is accepted, restores them
+  with a concrete error on failure, and avoids a duplicate resume request when
+  an active workflow already consumed the input. Focused HITL regressions passed;
+  no image build or deployment was performed.
 
 - `0.57.1` — Replaces the expanding Stage 1 `adata` integrity gate with
   immutable, versioned AnnData checkpoints and explicit per-plan source lineage.

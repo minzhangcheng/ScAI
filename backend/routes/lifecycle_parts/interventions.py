@@ -1,6 +1,11 @@
 """Lifecycle interventions action owners."""
 from __future__ import annotations
 
+from backend.routes._helpers import (
+    mark_gate_action_received,
+    send_gate_action_received,
+)
+
 _OWNED_NAMES = frozenset({'_llm_failure_action_locked', 'retry_node', 'llm_failure_action', 'get_failed_node', 'resume_bioinformatics'})
 
 bindings = None
@@ -61,6 +66,11 @@ async def _llm_failure_action_locked(session_id: str, user_id: str, req: LlmFail
             status_code=409,
             detail=f"Stale or duplicate request (generation {req.generation} != current)"
         )
+
+    await mark_gate_action_received(state)
+    await send_gate_action_received(
+        session_id, state, f"llm_{req.action}",
+    )
 
     return APIResponse(
         success=True,

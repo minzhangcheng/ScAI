@@ -33,6 +33,10 @@ from backend.utils.websocket_delivery import (
     close_analysis_websocket,
     send_analysis_json,
 )
+from backend.routes._helpers import (
+    mark_gate_action_received,
+    send_gate_action_received,
+)
 from backend.services.interaction_record_capture import (
     get_or_open_direction_record, map_selections, build_annotation_record,
     populate_direction_record_from_state, resolve_integration_gate,
@@ -95,10 +99,16 @@ async def send_human_input(session_id: str, request: Request, body: HumanInputRe
                     "timestamp": datetime.now().isoformat()
         })
 
+        continuation_started = False
         async with _state_lock:
             workflow = workflows.get(session_id)
         if workflow and state.status == TaskStatus.WAITING_INPUT:
+            await mark_gate_action_received(state)
+            await send_gate_action_received(
+                session_id, state, "human_input_received",
+            )
             workflow.signal_continue()
+            continuation_started = True
             logger.info(f"[{session_id}] Human input received, signalling workflow to continue")
 
     return APIResponse(
@@ -106,7 +116,8 @@ async def send_human_input(session_id: str, request: Request, body: HumanInputRe
         message="Human input received",
         data={
             "target_agent": body.target_agent,
-            "files_count": len(body.uploaded_files)
+            "files_count": len(body.uploaded_files),
+            "continuation_started": continuation_started,
         }
     )
 
@@ -164,11 +175,16 @@ async def confirm_annotations(session_id: str, request: Request, body: Annotatio
                 state,
                 expected_gate=GATE_ANNOTATION_CONFIRMATION,
             )
+        else:
+            await mark_gate_action_received(state)
 
         await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
 
         if workflow:
+            await send_gate_action_received(
+                session_id, state, "annotation_confirmation_received",
+            )
             workflow.signal_annotation_confirmed()
         else:
             await _pause_and_restart_ws(session_id, state)
@@ -376,11 +392,19 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
             state,
             expected_gate=expected_gate,
         )
+    else:
+        # The workflow may still be copying a large decision snapshot before
+        # it reaches `_wait_for_user_input` and consumes this signal.  The
+        # direction is already validated and owned by this route, so keeping
+        # the authoritative status at WAITING_INPUT during that copy invites a
+        # duplicate submission and makes the UI look unresponsive.
+        await mark_gate_action_received(state)
 
     await _update_session_cache(session_id, state)
     await async_save_session(session_id, state)
 
     if workflow:
+        await send_gate_action_received(session_id, state, "direction_selected")
         workflow.signal_continue()
     else:
         await _pause_and_restart_ws(session_id, state)
@@ -416,11 +440,16 @@ async def finalize_from_integration(session_id: str, request: Request):
         # only place the fail-closed contract can still hold.
         state.final_report_requested = True
         rec = resolve_integration_gate(state, event_type="finalize")
-        await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state)
         async with _state_lock:
             workflow = workflows.get(session_id)
         if workflow:
+            await mark_gate_action_received(state)
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+        if workflow:
+            await send_gate_action_received(
+                session_id, state, "integration_finalize_received",
+            )
             workflow.signal_continue()
         else:
             # No active workflow — set GENERATING_REPORT so the WS reconnect
@@ -502,6 +531,10 @@ async def submit_plan_review(session_id: str, request: Request, body: PlanReview
                 status_code=409,
                 detail="A plan review action has already been accepted",
             )
+        await mark_gate_action_received(state)
+        await send_gate_action_received(
+            session_id, state, "plan_review_received",
+        )
     return APIResponse(success=True, message=f"Plan review action '{action}' received")
 
 
@@ -526,4 +559,8 @@ async def species_input(session_id: str, request: Request, body: SpeciesInputReq
                 status_code=409,
                 detail="Species input has already been accepted",
             )
+        await mark_gate_action_received(state)
+        await send_gate_action_received(
+            session_id, state, "species_input_received",
+        )
     return APIResponse(success=True, message="Species input received")
