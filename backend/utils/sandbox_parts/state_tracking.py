@@ -117,6 +117,12 @@ class StateTrackingMixin:
         sandbox_state = dict(getattr(state, "sandbox_state", None) or {})
         sandbox_state["runtime_revision"] = self.runtime_revision
         sandbox_state["saved_runtime_revision"] = self.saved_runtime_revision
+        sandbox_state["runtime_instance_id"] = getattr(
+            self, "runtime_instance_id", None
+        )
+        registry_name = getattr(self, "adata_binding_registry_name", None)
+        if registry_name:
+            sandbox_state["adata_binding_registry_name"] = registry_name
         sandbox_state["runtime_persistence"] = snapshot
         state.sandbox_state = sandbox_state
         return snapshot
@@ -139,7 +145,16 @@ class StateTrackingMixin:
                 try:
                     parsed = json.loads(raw)
                     if isinstance(parsed, list):
-                        return set(str(x) for x in parsed)
+                        names = {str(x) for x in parsed}
+                        # Registry/anchors are Host-managed control state,
+                        # not user-created globals.  Generated working names
+                        # such as scai_work_7 remain agent-visible user state.
+                        host_managed = getattr(
+                            self, "host_managed_global_names", None
+                        )
+                        if callable(host_managed):
+                            names -= set(host_managed())
+                        return names
                 except (json.JSONDecodeError, TypeError):
                     pass
         return set(self._known_user_globals)

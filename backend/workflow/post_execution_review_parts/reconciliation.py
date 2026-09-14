@@ -12,22 +12,15 @@ from ...services.report.artifacts import (
 )
 
 def _identity_context(analysis_state, plan) -> Dict[str, Any]:
-    cohort = dict(
-        ((getattr(analysis_state, "sandbox_state", None) or {}).get(
-            "cohort_identity_v1", {}
-        )) or {}
-    )
+    # Generation/cohort values remain observations on receipts and artifacts;
+    # they are not active-value equality gates for current-plan progress.
     return {
         "round_number": int(getattr(analysis_state, "current_round", 0) or 0),
         "lineage_id": getattr(analysis_state, "restore_branch_id", None) or "main",
         "plan_id": str(getattr(plan, "id", "") or ""),
-        "analysis_generation": int(
-            (getattr(analysis_state, "sandbox_state", None) or {}).get(
-                "analysis_generation", 0
-            ) or 0
+        "adata_source_preparation_id": (
+            str(getattr(plan, "adata_source_preparation_id", "") or "") or None
         ),
-        "cohort_digest": str(cohort.get("cohort_digest") or "") or None,
-        "cohort_generation": int(cohort.get("cohort_generation", 0) or 0),
     }
 
 
@@ -43,21 +36,7 @@ def _matches_current_identity(
         return False
     if require_plan and str(getattr(item, "plan_id", "") or "") != identity["plan_id"]:
         return False
-    if int(getattr(item, "analysis_generation", 0) or 0) != identity[
-        "analysis_generation"
-    ]:
-        return False
-    item_cohort = str(getattr(item, "cohort_digest", "") or "") or None
-    if (
-        identity["cohort_digest"] is not None
-        and item_cohort != identity["cohort_digest"]
-    ):
-        return False
-    return (
-        not identity["cohort_generation"]
-        or int(getattr(item, "cohort_generation", 0) or 0)
-        == identity["cohort_generation"]
-    )
+    return True
 
 
 def _collect_current_evidence(
@@ -72,11 +51,12 @@ def _collect_current_evidence(
             round_number=identity["round_number"],
             plan_id=identity["plan_id"],
             lineage_id=identity["lineage_id"],
-            analysis_generation=identity["analysis_generation"],
-            cohort_digest=identity["cohort_digest"],
-            cohort_generation=(
-                identity["cohort_generation"] or None
-            ),
+        )
+        and (
+            identity.get("adata_source_preparation_id") is None
+            or str(
+                getattr(item, "adata_source_preparation_id", "") or ""
+            ) == identity["adata_source_preparation_id"]
         )
     ]
     figures = [
@@ -112,21 +92,6 @@ def _collect_current_evidence(
         if str(record.get("lineage_id") or identity["lineage_id"]) != identity["lineage_id"]:
             continue
         if str(record.get("plan_id") or identity["plan_id"]) != identity["plan_id"]:
-            continue
-        if int(
-            record.get("analysis_generation", identity["analysis_generation"]) or 0
-        ) != identity["analysis_generation"]:
-            continue
-        if (
-            identity["cohort_digest"]
-            and str(record.get("cohort_digest") or "") != identity["cohort_digest"]
-        ):
-            continue
-        if (
-            identity["cohort_generation"]
-            and int(record.get("cohort_generation", 0) or 0)
-            != identity["cohort_generation"]
-        ):
             continue
         finding_records.append(record)
     return {

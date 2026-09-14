@@ -92,7 +92,7 @@ _GROUP_KEY_HINTS = (
 _MAX_GROUP_LEVELS = 8
 
 
-def build_probe_code() -> str:
+def build_probe_code(managed_names=None) -> str:
     """Return kernel code that reports what a diagnostic panel could plot.
 
     Runs before any drawing. The publication-figure wrapper saves in a ``finally``
@@ -104,6 +104,7 @@ def build_probe_code() -> str:
     nothing constrains what the analysis called its object, and a stale hint picks
     the wrong one silently.
     """
+    managed = sorted({str(name) for name in (managed_names or []) if str(name)})
     return (
         "import json as _scai_json\n"
         "_scai_out = {}\n"
@@ -111,6 +112,8 @@ def build_probe_code() -> str:
         "    import anndata as _scai_ad\n"
         "    import numpy as _scai_np\n"
         "    import pandas as _scai_pd\n"
+        f"    _scai_managed = set({managed!r})\n"
+        "    _scai_seen = set()\n"
         f"    _scai_priority = {list(_PRIORITY_METRICS)!r}\n"
         f"    _scai_hints = {list(_GROUP_KEY_HINTS)!r}\n"
         f"    _scai_max_levels = {_MAX_GROUP_LEVELS!r}\n"
@@ -119,6 +122,9 @@ def build_probe_code() -> str:
         "    for _scai_name, _scai_obj in list(globals().items()):\n"
         "        if _scai_name.startswith('_') or not isinstance(_scai_obj, _scai_ad.AnnData):\n"
         "            continue\n"
+        "        if _scai_name in _scai_managed or id(_scai_obj) in _scai_seen:\n"
+        "            continue\n"
+        "        _scai_seen.add(id(_scai_obj))\n"
         "        _scai_cols = [\n"
         "            _c for _c in _scai_obj.obs.columns\n"
         "            if _scai_pd.api.types.is_numeric_dtype(_scai_obj.obs[_c])\n"
@@ -338,8 +344,10 @@ async def ensure_exploration_diagnostic_figure(agent: Any, state: Any) -> Option
     if sandbox is None:
         return None
     try:
+        _managed_getter = getattr(sandbox, "host_managed_global_names", None)
+        _managed = _managed_getter() if callable(_managed_getter) else set()
         probe_result = await sandbox.execute(
-            build_probe_code(), records_history=False, skip_safety_check=True, mutates_namespace=False
+            build_probe_code(_managed), records_history=False, skip_safety_check=True, mutates_namespace=False
         )
     except Exception as err:  # pragma: no cover - defensive
         logger.warning("[Bioinformatics] QC diagnostic probe failed: %r", err)

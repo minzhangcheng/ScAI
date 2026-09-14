@@ -5,6 +5,7 @@ Extracted from backend/main.py to decouple human-in-the-loop route handlers.
 import json
 import logging
 import re
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -206,13 +207,39 @@ async def request_supplementary_analysis(
             raise HTTPException(status_code=400, detail="Session is not at annotation confirmation point")
         if body.target == "direction" and state.status != TaskStatus.WAITING_INPUT:
             raise HTTPException(status_code=400, detail="Session is not at direction selection point")
+        if body.target == "round" and state.status != TaskStatus.WAITING_INPUT:
+            raise HTTPException(status_code=400, detail="Session is not at round decision point")
 
         async with _state_lock:
             workflow = workflows.get(session_id)
         if not workflow:
             raise HTTPException(status_code=400, detail="No active workflow for this session")
 
-        workflow.signal_supplementary_analysis(body.request_text, body.target)
+        request_id = f"supp_{uuid.uuid4().hex[:12]}"
+        request_scope_id = f"supp_scope_{uuid.uuid4().hex[:12]}"
+        sandbox_state = dict(getattr(state, "sandbox_state", None) or {})
+        request_map = dict(sandbox_state.get("supplementary_requests_v1") or {})
+        request_map[request_id] = {
+            "request_id": request_id,
+            "request_text": str(body.request_text or "")[:2000],
+            "target": str(body.target or ""),
+            "round_number": int(getattr(state, "current_round", 0) or 0),
+            "request_scope_id": request_scope_id,
+            "status": "queued",
+            "adata_source": None,
+            "source_selection_signature": None,
+            "adata_source_preparation_id": None,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "error_summary": None,
+        }
+        sandbox_state["supplementary_requests_v1"] = request_map
+        state.sandbox_state = sandbox_state
+        await async_save_session(session_id, state, force=True)
+
+        workflow.signal_supplementary_analysis(
+            request_id, body.target, request_id=request_id,
+        )
 
     return APIResponse(
         success=True,

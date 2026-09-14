@@ -1,6 +1,8 @@
 """Bioinformatics-PI planning dialogue phases."""
 from __future__ import annotations
 
+import uuid
+
 
 def bind_facade(facade) -> None:
     globals().update(
@@ -292,6 +294,24 @@ async def run_planning_dialogue_rounds(self, ctx, state):
                 return state
 
         # --- Process PI review decision ---
+        _review_source = review.get("adata_source")
+        if _review_source is not None:
+            try:
+                if (
+                    _review_source.model_dump(mode="json")
+                    != plan.adata_source.model_dump(mode="json")
+                ):
+                    # B1: a source switch owns a fresh application and a
+                    # fresh transcript run scope.  The inherited settlement
+                    # scope stays because earlier reached-kernel attempts must
+                    # remain in boundary identity.
+                    plan.adata_source = _review_source.model_copy(deep=True)
+                    plan.adata_source_preparation_id = None
+                    plan.bioinformatics_run_scope_id = (
+                        f"run_scope_{uuid.uuid4().hex}"
+                    )
+            except AttributeError:
+                pass
         dialogue_history.append({
             "round": round_num,
             "plan": plan.model_dump(mode="json"),

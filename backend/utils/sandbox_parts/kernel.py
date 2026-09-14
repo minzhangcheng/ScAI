@@ -16,6 +16,7 @@ import asyncio
 import time
 import hmac
 import hashlib
+import uuid
 import logging
 from importlib.metadata import PackageNotFoundError, version as package_version
 from queue import Empty as QueueEmpty
@@ -254,6 +255,7 @@ class KernelMixin:
             # a failed restore discards this generation below.
             self._kernel_dead = False
             self.kernel_epoch = getattr(self, "kernel_epoch", 0) + 1
+            self.runtime_instance_id = uuid.uuid4().hex
             epoch_callback = getattr(self, "runtime_epoch_callback", None)
             if callable(epoch_callback):
                 epoch_callback(self.kernel_epoch)
@@ -412,6 +414,7 @@ class KernelMixin:
             # than the one it already partially serialized.
             self._kernel_dead = False
             self.kernel_epoch = getattr(self, "kernel_epoch", 0) + 1
+            self.runtime_instance_id = uuid.uuid4().hex
             epoch_callback = getattr(self, "runtime_epoch_callback", None)
             if callable(epoch_callback):
                 epoch_callback(self.kernel_epoch)

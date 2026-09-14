@@ -178,9 +178,12 @@ def test_a_runtime_that_lives_only_in_sidecars_is_refused_not_half_loaded(tmp_pa
 
 
 def test_the_generated_restore_script_no_longer_reads_sidecars():
-    from backend.tests.split_facade import split_source
+    from backend.tests.split_facade import source_for_path
 
-    source = split_source("backend.utils.sandbox")
+    # Explicit, PI-selected AnnData checkpoints have their own H5AD loader.
+    # This invariant is specifically about ordinary runtime restoration no
+    # longer reconstructing variables from the retired sidecar mechanism.
+    source = source_for_path("backend/utils/sandbox_parts/runtime_restore.py")
     assert "_h5ad_manifest_path" not in source
     assert "read_h5ad" not in source
 

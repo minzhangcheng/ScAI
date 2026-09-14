@@ -1,6 +1,8 @@
 """Plan approval, review gate, and dialogue presentation helpers."""
 from __future__ import annotations
 
+import uuid
+
 
 def bind_facade(facade) -> None:
     globals().update(
@@ -45,6 +47,15 @@ async def _approve_plan(
 ) -> None:
     """Mark plan as approved and notify frontend."""
     populate_plan_scope(plan, analysis_state)
+    if not getattr(plan, "bioinformatics_run_scope_id", None):
+        plan.bioinformatics_run_scope_id = f"run_scope_{uuid.uuid4().hex}"
+    if not getattr(plan, "bioinformatics_settlement_scope_id", None):
+        plan.bioinformatics_settlement_scope_id = (
+            f"settle_scope_{uuid.uuid4().hex}"
+        )
+    analysis_state.bioinformatics_settlement_attempt_ids.setdefault(
+        plan.bioinformatics_settlement_scope_id, []
+    )
     plan.status = "approved"
     plan.approved_at = datetime.now()
     # Preserve reviewed figures for completed steps carried unchanged into a

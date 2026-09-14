@@ -77,6 +77,14 @@ class ExecutorLoopContext:
     max_empty_responses: int = 3
     max_free_figure_iterations: int = 5
     max_free_register_score_iterations: int = 5
+    executor_run_kind: str = "ordinary"
+    executor_run_scope_id: str | None = None
+    executor_settlement_scope_id: str | None = None
+    supplementary_request_id: str | None = None
+    attempt_execution_ids: list = None
+    pending_dispatch: dict | None = None
+    resolved_adata_source_context: dict | None = None
+    adata_source: Any = None
 
     def __post_init__(self) -> None:
         if self.evidence_gate_findings is None:
@@ -87,3 +95,9 @@ class ExecutorLoopContext:
             self.accepted_finding_records = []
         if self.plan_revision_context is None:
             self.plan_revision_context = {}
+        if self.attempt_execution_ids is None:
+            self.attempt_execution_ids = []
+        if self.pending_dispatch is None:
+            self.pending_dispatch = {}
+        if self.resolved_adata_source_context is None:
+            self.resolved_adata_source_context = {}

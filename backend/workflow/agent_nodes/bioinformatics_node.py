@@ -328,6 +328,15 @@ async def collect_bioinformatics_results(self, ctx, result):
 
     # Check result status and log accordingly
     result_status = result.get("status", "unknown")
+    if result_status == "adata_source_error":
+        await self._send_message(
+            "error",
+            "AnnData source preparation failed; the plan needs an explicit "
+            "source choice before execution can continue: "
+            + str(result.get("error") or "unknown source error"),
+            AgentType.BIOINFORMATICS,
+        )
+        return
     if result_status == "error":
         logger.error(f"[{self.session_id}] Bioinformatics analysis failed: {result.get('error', 'Unknown error')}")
         await self._send_message("error", f"Bioinformatics analysis encountered an error: {result.get('error', 'Unknown error')}", AgentType.BIOINFORMATICS)
@@ -338,6 +347,21 @@ async def collect_bioinformatics_results(self, ctx, result):
     # Collect results
     all_findings = result.get("findings", [])
     all_figures = result.get("figures", [])
+
+    _settlement_scope = str(result.get("executor_settlement_scope_id") or "")
+    _settlement_attempt_ids = list(
+        result.get("settlement_attempt_execution_ids") or []
+    )
+    if _settlement_scope and _settlement_attempt_ids:
+        _attempt_map = dict(
+            getattr(analysis_state, "bioinformatics_settlement_attempt_ids", None)
+            or {}
+        )
+        _attempt_map[_settlement_scope] = sorted(
+            set(_attempt_map.get(_settlement_scope, []))
+            | set(str(item) for item in _settlement_attempt_ids if str(item))
+        )
+        analysis_state.bioinformatics_settlement_attempt_ids = _attempt_map
 
     existing_code_ids = {c.id for c in analysis_state.code_history}
     for code_exec in result.get("code_history", []):
@@ -486,6 +510,24 @@ async def collect_bioinformatics_results(self, ctx, result):
     for figure_name in figure_followup.get("figures", []) or []:
         if figure_name not in all_figures:
             all_figures.append(figure_name)
+    followup_attempts = list(
+        figure_followup.get("settlement_attempt_execution_ids") or []
+    )
+    if followup_attempts:
+        result["settlement_attempt_execution_ids"] = sorted({
+            *list(result.get("settlement_attempt_execution_ids") or []),
+            *followup_attempts,
+        })
+    checkpoint_names = [
+        str(name)
+        for name in (
+            result.get("executor_checkpoint_name"),
+            figure_followup.get("executor_checkpoint_name"),
+        )
+        if str(name or "")
+    ]
+    if checkpoint_names:
+        result["executor_checkpoint_names"] = list(dict.fromkeys(checkpoint_names))
 
     # Re-evaluate after deterministic baselines and any supplementary work.
     # The executor's own audit was taken before these workflow-owned repair
@@ -514,6 +556,21 @@ async def collect_bioinformatics_results(self, ctx, result):
 async def finalize_bioinformatics_analysis(self, ctx, result):
     state = ctx["state"]
     analysis_state = ctx["analysis_state"]
+    if result.get("status") == "adata_source_error":
+        result_state = {
+            **state,
+            "analysis_state": analysis_state,
+            "bioinformatics_result": result,
+            "plan_revision_needed": True,
+            "plan_revision_context": result.get("plan_revision_context")
+            or {
+                "technical_invariant": "adata_source_preparation",
+                "reason": result.get("error") or "source preparation failed",
+            },
+        }
+        cache_invalidate(analysis_state, AgentType.BIOINFORMATICS)
+        self._current_graph_state = result_state
+        return result_state
     planning_stage = ctx["planning_stage"]
     all_findings = ctx["all_findings"]
     all_figures = ctx["all_figures"]
@@ -566,6 +623,24 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
         "post_execution_review": review_meta,
         "figure_contract": figure_contract.summary(),
         "figure_followup": figure_followup,
+        # Executor/source continuation identity must survive this explicit
+        # allowlist; otherwise boundary settlement cannot see scopes, attempt
+        # IDs, or the resolved source context after a node boundary.
+        "executor_run_kind": result.get("executor_run_kind"),
+        "executor_run_scope_id": result.get("executor_run_scope_id"),
+        "executor_settlement_scope_id": result.get("executor_settlement_scope_id"),
+        "supplementary_request_id": result.get("supplementary_request_id"),
+        "attempt_execution_ids": list(result.get("attempt_execution_ids") or []),
+        "settlement_attempt_execution_ids": list(
+            result.get("settlement_attempt_execution_ids") or []
+        ),
+        "resolved_adata_source_context": dict(
+            result.get("resolved_adata_source_context") or {}
+        ),
+        "executor_checkpoint_name": result.get("executor_checkpoint_name"),
+        "executor_checkpoint_names": list(
+            result.get("executor_checkpoint_names") or []
+        ),
     }
 
     _saved_fig_count = count_saved_figures(result.get("analysis_log", []))
@@ -686,32 +761,61 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
         "bioinformatics_result": final_result
     }
 
-    should_seal_foundation = (
-        action == "stage1_complete"
-        or (
-            action == "complete"
-            and planning_stage == "full"
-            and int(analysis_state.current_round or 0) == 1
+    # Mandatory Stage 1 boundary capture.  Foundation sealing is retired: a
+    # failed capture is recorded truthfully and never converts Stage 1
+    # completion into a failed status or a plan-revision condition.
+    if action == "stage1_complete":
+        from ...workflow.adata_checkpoint_hooks import (
+            capture_and_persist_boundary,
+            clear_settlement_scope_callback,
         )
-    )
-    foundation_error = None
-    if should_seal_foundation:
-        foundation_signature = await self.bioinformatics_agent.capture_main_object_signature(
-            "adata", None
+
+        source_context = result.get("resolved_adata_source_context") or {}
+        capture_outcome = await capture_and_persist_boundary(
+            self,
+            analysis_state,
+            boundary="stage1_complete",
+            event_scope=f"plan:{analysis_state.current_plan.id}",
+            round_number=int(analysis_state.current_round or 0),
+            planning_stage="stage1",
+            phase=analysis_state.analysis_phase.value,
+            source_plan_id=analysis_state.current_plan.id,
+            direction=analysis_state.current_round_direction or "",
+            research_label="Round 1 Stage 1 accepted atlas",
+            summary_at_capture=str(final_result.get("summary") or ""),
+            outcome_at_capture=str(final_result.get("status") or "completed"),
+            source_preparation_ids_at_capture=tuple(
+                source_context.get("source_preparation_ids") or []
+            ),
+            active_source_preparation_id=source_context.get(
+                "active_source_preparation_id"
+            ),
+            source_scope_id_at_capture=source_context.get("active_source_scope_id"),
+            executor_settlement_scope_id_at_capture=result.get(
+                "executor_settlement_scope_id"
+            ),
+            execution_ids_at_capture=tuple(
+                final_result.get("evidence_execution_ids") or []
+            ),
+            attempt_execution_ids_at_capture=tuple(
+                result.get("settlement_attempt_execution_ids") or []
+            ),
+            before_state_save=clear_settlement_scope_callback(
+                analysis_state, result.get("executor_settlement_scope_id")
+            ),
+            executor_checkpoint_name=result.get("executor_checkpoint_name"),
+            executor_checkpoint_names=result.get("executor_checkpoint_names"),
         )
-        foundation_error = seal_foundation(
-            analysis_state, foundation_signature, canonical_name="adata"
-        )
-        if foundation_error:
-            gate_observations.append(_evidence_gate_record(
-                gate="stage1-foundation-integrity",
-                rule_id="scai-native/stage1-foundation-integrity",
-                subject="adata",
-                detail=foundation_error,
-                severity="error",
-            ))
-            final_result["status"] = "failed"
-            cache_invalidate(analysis_state, AgentType.BIOINFORMATICS)
+        if not capture_outcome.available:
+            notice = (
+                "No clean Stage 1 AnnData checkpoint is currently available; "
+                "Stage 2 will continue against the live `adata`."
+            )
+            result_state["adata_checkpoint_notice"] = notice
+            try:
+                await self._send_message("status", notice, AgentType.PI)
+            except Exception:
+                logger.warning("could not surface Stage 1 checkpoint disclosure")
 
     if action in ("revision", "incomplete"):
         # Stay in the current stage and keep current_plan intact: after the
@@ -739,7 +843,7 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
         # not installed that output yet, so the workflow-level pointer still
         # names the input; move it forward for everything that reads it.
         self._current_graph_state = result_state
-    elif action == "stage1_complete" and not foundation_error:
+    elif action == "stage1_complete":
         # Stage transition: stage1 genuinely completed → set up for stage2.
         # Don't cache the stage1 result — stage2 re-enters this node and must
         # run fresh. Biochem/pathology/literature cache survives so stage2
@@ -757,19 +861,11 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
         }
         analysis_state.current_plan = None
         cache_invalidate(analysis_state, AgentType.BIOINFORMATICS)
-    elif not foundation_error:  # "complete"
+    else:  # "complete"
         cache_store(analysis_state, AgentType.BIOINFORMATICS, final_result)
         if planning_stage == "stage2":
             result_state["planning_stage"] = "full"
             result_state["planning_context"] = None  # Clear stage1 context after stage2 completes
-
-    if foundation_error:
-        result_state["plan_revision_needed"] = True
-        result_state["plan_revision_context"] = {
-            "reason": foundation_error,
-            "technical_invariant": "stage1_foundation_integrity",
-        }
-        self._current_graph_state = result_state
 
     return result_state
 

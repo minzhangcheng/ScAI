@@ -481,7 +481,7 @@ in key_decision_points for PI review.
         Returns:
             AnalysisPlan with method-level steps
         """
-        from ...models.schemas import AnalysisPlan, PlanStep
+        from ...models.schemas import AnalysisPlan, PlanStep, AdataSourceSelection
 
         tasks_text = truncate_for_llm(
             "\n".join(f"- {t}" for t in pi_tasks),
@@ -730,6 +730,26 @@ Return the plan as a JSON object:
             ),
             status="draft",
             revision_of=existing_plan.id if existing_plan else None,
+            adata_source=(
+                existing_plan.adata_source.model_copy(deep=True)
+                if existing_plan is not None
+                else AdataSourceSelection()
+            ),
+            adata_source_preparation_id=(
+                existing_plan.adata_source_preparation_id
+                if existing_plan is not None
+                else None
+            ),
+            bioinformatics_run_scope_id=(
+                existing_plan.bioinformatics_run_scope_id
+                if existing_plan is not None
+                else f"run_scope_{uuid.uuid4().hex}"
+            ),
+            bioinformatics_settlement_scope_id=(
+                existing_plan.bioinformatics_settlement_scope_id
+                if existing_plan is not None
+                else f"settle_scope_{uuid.uuid4().hex}"
+            ),
         )
 
         logger.info(f"[Bioinformatics] Generated plan: {len(steps)} steps, phase={phase}, stage={planning_stage}")
@@ -797,7 +817,7 @@ Return the plan as a JSON object:
         Returns:
             Revised AnalysisPlan with revision_of pointing to current_plan
         """
-        from ...models.schemas import AnalysisPlan, PlanStep
+        from ...models.schemas import AnalysisPlan, PlanStep, AdataSourceSelection
 
         if completed_step_ids is None:
             completed_step_ids = [s.id for s in current_plan.steps if s.status == "completed"]
@@ -978,6 +998,12 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
             status="draft",
             revision_of=current_plan.id,
             revision_reason=pi_feedback[:500],
+            adata_source=current_plan.adata_source.model_copy(deep=True),
+            adata_source_preparation_id=current_plan.adata_source_preparation_id,
+            bioinformatics_run_scope_id=current_plan.bioinformatics_run_scope_id,
+            bioinformatics_settlement_scope_id=(
+                current_plan.bioinformatics_settlement_scope_id
+            ),
         )
 
         return revised_plan
@@ -1014,10 +1040,59 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
         NOT be treated as resumable when stage2 begins. Only an explicit stage
         mismatch disqualifies it (pre-fix checkpoints carry no planning_stage).
         """
+        from . import executor_checkpoint
+
+        plan = getattr(state, "current_plan", None)
+        source = getattr(plan, "adata_source", None)
+        run_scope = str(
+            getattr(plan, "bioinformatics_run_scope_id", "") or ""
+        )
+        settlement_scope = str(
+            getattr(plan, "bioinformatics_settlement_scope_id", "") or ""
+        )
+        preparation = None
+        preparation_id = str(
+            getattr(plan, "adata_source_preparation_id", "") or ""
+        )
+        for record in getattr(state, "adata_source_preparations", None) or []:
+            if str(getattr(record, "preparation_id", "") or "") == preparation_id:
+                preparation = record
+                break
+        legacy_allowed = bool(
+            getattr(source, "mode", "current") == "current"
+            and not getattr(state, "adata_source_preparations", None)
+            and not getattr(state, "adata_live_bindings", None)
+            and not getattr(state, "adata_checkpoints", None)
+        )
+        expected_identity = None
         try:
-            checkpoint_mgr = CheckpointManager(
-                session_id=state.id, state_dir=self._checkpoint_state_dir()
-            )
+            if run_scope and settlement_scope:
+                identity = executor_checkpoint.build_executor_checkpoint_identity(
+                    state,
+                    run_kind="ordinary",
+                    planning_stage=planning_stage,
+                    run_scope_id=run_scope,
+                    settlement_scope_id=settlement_scope,
+                    source_selection=source,
+                    preparation=preparation,
+                )
+                checkpoint_mgr = CheckpointManager(
+                    session_id=state.id,
+                    state_dir=self._checkpoint_state_dir(),
+                    prefix=executor_checkpoint.executor_checkpoint_prefix(
+                        run_kind="ordinary",
+                        scope_digest=identity.scope_digest,
+                    ),
+                )
+                expected_identity = identity.checkpoint_fields()
+            elif legacy_allowed:
+                checkpoint_mgr = CheckpointManager(
+                    session_id=state.id,
+                    state_dir=self._checkpoint_state_dir(),
+                    prefix=executor_checkpoint.legacy_checkpoint_prefix(),
+                )
+            else:
+                return False
             checkpoint = await checkpoint_mgr.load()
         except Exception:
             return False
@@ -1027,6 +1102,16 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
             return False
         cp_stage = checkpoint.get('planning_stage')
         if cp_stage is not None and cp_stage != planning_stage:
+            return False
+        if expected_identity:
+            if executor_checkpoint.validate_checkpoint(
+                checkpoint,
+                current_round=state.current_round,
+                planning_stage=planning_stage,
+                expected_identity=expected_identity,
+            ):
+                return False
+        elif not legacy_allowed or checkpoint.get("_scope_digest"):
             return False
         return True
 

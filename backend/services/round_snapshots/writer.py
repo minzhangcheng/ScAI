@@ -505,6 +505,18 @@ def _stage_session_files(
         progress, skipped,
     ))
 
+    # Immutable AnnData checkpoint blobs referenced by the captured catalog.
+    # They are copied under the same session-relative layout import/restore
+    # already uses; a missing/corrupt blob is reconciled as unavailable rather
+    # than silently advertised as loadable.
+    files.update(_copy_tree(
+        session_dir / "adata-checkpoints" / "blobs",
+        staging / "adata-checkpoints" / "blobs",
+        "adata-checkpoints/blobs",
+        progress,
+        skipped,
+    ))
+
     states = Path(sandbox.notebook_state.state_dir)
     for notebook in sorted(states.glob("*.ipynb")):
         digest, size = _digest_copy(
@@ -800,7 +812,21 @@ async def _capture(
         revision = _require_capturable_generation(sandbox, persistence)
         # Forced: session.json is written through a five-second throttle that
         # RUNNING does not bypass, so an unforced write would capture a
-        # projection up to five seconds behind this decision.
+        # projection up to five seconds behind this decision.  Reconcile blob
+        # availability first so the captured state never advertises an
+        # available checkpoint whose bytes are missing/corrupt.
+        try:
+            from backend.services.adata_checkpoints import (
+                reconcile_catalog_availability,
+            )
+
+            reconcile_catalog_availability(
+                analysis_state, verify_digests=True, runtime_available=True,
+            )
+        except Exception:
+            logger.exception(
+                "decision snapshot catalog reconciliation failed"
+            )
         await async_save_session(session_id, analysis_state, force=True)
 
         pinned = _pin_generation(sandbox, session_id, revision, pin_dir)

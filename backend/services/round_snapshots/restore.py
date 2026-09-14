@@ -160,7 +160,10 @@ def _verify_in_place(source: Path, expected: str, progress) -> None:
 
 
 def _destination(
-    relpath: str, session_id: str, source_session_id: str = "",
+    relpath: str,
+    session_id: str,
+    source_session_id: str = "",
+    source: Path | None = None,
 ) -> Path | None:
     """Where one declared bundle file lands in the new session, or nowhere.
 
@@ -178,6 +181,8 @@ def _destination(
         return get_session_dir(session_id) / "session.json"
     if relpath == CONTINUATION_NAME:
         return None
+    if relpath.startswith("adata-checkpoints/"):
+        return get_session_dir(session_id) / relpath
     if relpath.startswith(f"{BLOBS_DIRNAME}/"):
         return get_session_dir(session_id) / relpath
     if relpath.startswith(f"{NOTEBOOKS_DIRNAME}/"):
@@ -198,7 +203,36 @@ def _destination(
     if relpath == PAIR_STATE_RELPATH:
         return states / f"{session_id}_state.json"
     if relpath == PAIR_EXECUTOR_RELPATH:
-        return states / f"{session_id}_bioinfo_checkpoint.json"
+        from backend.agents.bioinformatics.executor_checkpoint import (
+            executor_checkpoint_prefix,
+        )
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8")) if source else {}
+        except (OSError, ValueError) as exc:
+            raise _refuse(
+                "runtime_unverified",
+                f"the captured executor position is unreadable: {exc}",
+            ) from exc
+        scope_digest = str(payload.get("_scope_digest") or "")
+        if not scope_digest:
+            return states / f"{session_id}_bioinfo_checkpoint.json"
+        run_kind = str(payload.get("run_kind") or "")
+        if (
+            run_kind not in {"ordinary", "supplementary", "figure_followup"}
+            or not re.fullmatch(r"[0-9a-f]{24}", scope_digest)
+            or bool(payload.get("figure_followup"))
+            != (run_kind == "figure_followup")
+        ):
+            raise _refuse(
+                "runtime_unverified",
+                "the captured executor position has an invalid scoped identity",
+            )
+        prefix = executor_checkpoint_prefix(
+            run_kind=run_kind,
+            scope_digest=scope_digest,
+            figure_followup=bool(payload.get("figure_followup")),
+        )
+        return states / f"{session_id}_{prefix}_checkpoint.json"
     # The generation manifest is rebuilt and re-signed under this
     # installation's key rather than copied, and the checkpoint is read in
     # place. Both are handled outside this table.
@@ -219,7 +253,12 @@ def _materialise(bundle: Path, manifest: dict, session_id: str, progress) -> Non
         source = bundle / relpath
         if not source.is_file():
             raise _refuse("bundle_incomplete", f"{relpath} is missing from the bundle")
-        target = _destination(relpath, session_id, manifest["source_session_id"])
+        target = _destination(
+            relpath,
+            session_id,
+            manifest["source_session_id"],
+            source=source,
+        )
         if target is None:
             # Read in place rather than installed -- the graph checkpoint and
             # the generation manifest are both handled elsewhere -- but still
@@ -601,11 +640,31 @@ def _rekey_runtime(state, bundle: Path, manifest: dict, session_id: str) -> None
                 pairing["state_version"] = int(getattr(state, "state_version", 0) or 0)
         record_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
 
-    executor = states / f"{session_id}_bioinfo_checkpoint.json"
-    if executor.is_file():
+    from backend.agents.bioinformatics.executor_checkpoint import (
+        find_executor_checkpoint_paths,
+    )
+
+    executors = find_executor_checkpoint_paths(states, session_id=session_id)
+    if len(executors) > 1:
+        raise _refuse(
+            "runtime_unverified",
+            "the restored generation contains multiple executor positions",
+        )
+    for executor in executors:
         try:
             payload = json.loads(executor.read_text(encoding="utf-8"))
             payload["session_id"] = session_id
+            if payload.get("_scope_digest"):
+                parent_lineage = str(
+                    payload.get("current_lineage_id") or "main"
+                )
+                payload["origin_lineage_id"] = str(
+                    payload.get("origin_lineage_id") or parent_lineage
+                )
+                payload["reconcile_from_lineage_id"] = parent_lineage
+                payload["current_lineage_id"] = str(
+                    getattr(state, "restore_branch_id", None) or "main"
+                )
             executor.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except (OSError, ValueError) as exc:
             raise _refuse(
@@ -665,10 +724,20 @@ def _verify_restored_runtime(state, session_id: str, capsule: dict) -> None:
             f"the restored runtime reads {coherence!r} against its own state",
         )
 
-    executor = states / f"{session_id}_bioinfo_checkpoint.json"
-    if capsule["gate"] == GATE_ANNOTATION_CONFIRMATION and executor.is_file():
+    from backend.agents.bioinformatics.executor_checkpoint import (
+        find_executor_checkpoint_paths,
+    )
+
+    executors = find_executor_checkpoint_paths(states, session_id=session_id)
+    if len(executors) > 1:
+        raise _refuse(
+            "runtime_unverified",
+            "the restored generation contains multiple executor positions",
+        )
+    if capsule["gate"] == GATE_ANNOTATION_CONFIRMATION and executors:
         from backend.agents.bioinformatics.executor_checkpoint import validate_checkpoint
 
+        executor = executors[0]
         payload = json.loads(executor.read_text(encoding="utf-8"))
         persistence = dict(getattr(state, "runtime_persistence", None) or {})
         errors = validate_checkpoint(
@@ -764,6 +833,37 @@ async def restore_snapshot_into_new_session(
         )
         _arm(state, capsule, source_session_id, snapshot, channels)
         bind_import_generation(state)
+        from backend.services.adata_checkpoints import (
+            rebase_inherited_source_state,
+            reconcile_catalog_availability,
+        )
+
+        rebase_inherited_source_state(
+            state,
+            child_lineage_id=str(state.restore_branch_id or "main"),
+            runtime_available=True,
+        )
+        available_checkpoint_ids = {
+            str(getattr(record, "checkpoint_id", "") or "")
+            for record in (getattr(state, "adata_checkpoints", None) or [])
+            if str(getattr(record, "status", "")) == "available"
+        }
+        reconcile_catalog_availability(
+            state, verify_digests=True, runtime_available=True,
+        )
+        unavailable_after_copy = [
+            str(getattr(record, "checkpoint_id", "") or "")
+            for record in (getattr(state, "adata_checkpoints", None) or [])
+            if str(getattr(record, "checkpoint_id", "") or "")
+            in available_checkpoint_ids
+            and str(getattr(record, "status", "")) != "available"
+        ]
+        if unavailable_after_copy:
+            raise _refuse(
+                "bundle_corrupt",
+                "materialized AnnData checkpoint blobs do not match the "
+                "captured catalog",
+            )
         _rekey_runtime(state, bundle, manifest, session_id)
         _verify_restored_runtime(state, session_id, capsule)
 

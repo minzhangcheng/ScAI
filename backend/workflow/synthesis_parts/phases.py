@@ -402,7 +402,7 @@ async def persist_round_result(self, ctx):
     derive_round_completion_status(state, round_result)
     lineage_id = current_lineage_id(analysis_state)
     restored_from = restore_provenance_id(analysis_state)
-    _upsert_round_result(
+    round_result = _upsert_round_result(
         analysis_state.round_results,
         round_result,
         lineage_id=lineage_id,
@@ -422,6 +422,97 @@ async def persist_round_result(self, ctx):
             f"[{self.session_id}] Direction batch fully attempted "
             "-> pending_integration=True"
         )
+    # Mandatory round-boundary capture, after RoundResult upsert and before
+    # state persistence / wait routing.  Capture success is not a gate.
+    from ..adata_checkpoint_hooks import (
+        capture_and_persist_boundary,
+        clear_settlement_scope_callback,
+    )
+
+    _plan = getattr(analysis_state, "current_plan", None)
+    _prep_ids = []
+    _evidence_ids = list(round_result.evidence_execution_ids or [])
+    _by_id = {str(getattr(item, "id", "")): item for item in analysis_state.code_history}
+    for _execution_id in _evidence_ids:
+        _receipt = _by_id.get(str(_execution_id))
+        _prep_id = getattr(_receipt, "adata_source_preparation_id", None)
+        if _prep_id and _prep_id not in _prep_ids:
+            _prep_ids.append(_prep_id)
+    round_result.adata_source_preparation_ids = list(_prep_ids)
+    _attempt_ids = list(
+        bioinformatics_result.get("settlement_attempt_execution_ids") or []
+    )
+    _source_context = dict(
+        bioinformatics_result.get("resolved_adata_source_context") or {}
+    )
+    if not _attempt_ids:
+        _scope_id = str(
+            bioinformatics_result.get("executor_settlement_scope_id") or ""
+        )
+        if _scope_id:
+            _attempt_ids = list(
+                (analysis_state.bioinformatics_settlement_attempt_ids or {}).get(
+                    _scope_id, []
+                )
+                or []
+            )
+    _capture_outcome = await capture_and_persist_boundary(
+        self,
+        analysis_state,
+        boundary="round_complete",
+        event_scope=str(round_result.result_identity_key or ""),
+        round_number=int(analysis_state.current_round or 0),
+        planning_stage=getattr(_plan, "stage", "full") or "full",
+        phase=str(round_result.phase or ""),
+        source_plan_id=getattr(_plan, "id", None),
+        round_result=round_result,
+        direction=round_result.direction or analysis_state.current_round_direction or "",
+        research_label=(
+            round_result.direction
+            or getattr(_plan, "overview", "")
+            or f"Round {analysis_state.current_round} output"
+        ),
+        summary_at_capture=str(round_result.pi_summary or ""),
+        outcome_at_capture=str(round_result.round_status or ""),
+        source_preparation_ids_at_capture=tuple(_prep_ids),
+        active_source_preparation_id=(
+            _source_context.get("active_source_preparation_id")
+            or _source_context.get("preparation_id")
+        ),
+        source_scope_id_at_capture=(
+            _source_context.get("active_source_scope_id")
+            or _source_context.get("scope_id")
+        ),
+        executor_settlement_scope_id_at_capture=(
+            bioinformatics_result.get("executor_settlement_scope_id")
+        ),
+        execution_ids_at_capture=tuple(_evidence_ids),
+        attempt_execution_ids_at_capture=tuple(_attempt_ids),
+        before_state_save=clear_settlement_scope_callback(
+            analysis_state,
+            bioinformatics_result.get("executor_settlement_scope_id"),
+        ),
+        executor_checkpoint_name=bioinformatics_result.get(
+            "executor_checkpoint_name"
+        ),
+        executor_checkpoint_names=bioinformatics_result.get(
+            "executor_checkpoint_names"
+        ),
+    )
+    if not _capture_outcome.available and _capture_outcome.disclosure:
+        round_result.evidence_notes = list(round_result.evidence_notes or []) + [
+            "No canonical AnnData checkpoint was captured at this boundary "
+            f"({_capture_outcome.disclosure})."
+        ]
+    if int(getattr(analysis_state, "current_round", 0) or 0) == 1 and not any(
+        str(getattr(record, "boundary", "")) == "stage1_complete"
+        and str(getattr(record, "status", "")) == "available"
+        for record in (getattr(analysis_state, "adata_checkpoints", None) or [])
+    ):
+        round_result.evidence_notes = list(round_result.evidence_notes or []) + [
+            "No separate Stage 1 baseline exists for this run."
+        ]
+
     # Round is now canonical in round_results; clear the per-round cache
     # so a later snapshot-restored round can't replay stale agent outputs.
     analysis_state.current_round_cache = None

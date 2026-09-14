@@ -296,8 +296,11 @@ async def test_restored_direction_action_advances_to_round_two(bundle):
     assert restored.last_restored_snapshot_id == _origin(source, snapshot)
     assert restored.restore_provenance_snapshot_id == _origin(source, snapshot)
     original_result_count = len(restored.round_results)
-    assert original_result_count == 1
-    assert restored.round_results[0].round_number == 1
+    assert original_result_count == 2
+    assert [result.lineage_id for result in restored.round_results] == [
+        "main", restored.restore_branch_id,
+    ]
+    assert [result.round_number for result in restored.round_results] == [1, 1]
 
     request = types.SimpleNamespace(state=types.SimpleNamespace(user_id=OWNER))
     response = await choose_direction(
@@ -318,9 +321,9 @@ async def test_restored_direction_action_advances_to_round_two(bundle):
     # 4: planning/initialization sees round 2, not another round 1.
     assert ws["analysis_state"].current_round == 2
     assert ws["current_round"] == 2
-    # 5: the captured round 1 result remains singular.
+    # 5: the source record and its branch-local inherited view remain singular.
     assert len(ws["analysis_state"].round_results) == original_result_count
-    assert [r.round_number for r in ws["analysis_state"].round_results] == [1]
+    assert [r.round_number for r in ws["analysis_state"].round_results] == [1, 1]
     # 6: the selected direction is available to round 2 planning.
     assert any(
         item.get("direction") == "Kupffer heterogeneity"
@@ -333,7 +336,8 @@ async def test_restored_direction_action_advances_to_round_two(bundle):
     # One-shot explicit-start flag is consumed in the graph channel.
     assert ws["_preserve_round_on_initialize"] is False
 
-    # 8/9: first new branch result gets the origin once; later results do not.
+    # 8/9: the inherited branch record already carries the origin; new results
+    # consume the pending marker without duplicating that attribution.
     from backend.workflow.provenance import (
         consume_restore_provenance,
         restore_provenance_id,
@@ -351,12 +355,14 @@ async def test_restored_direction_action_advances_to_round_two(bundle):
         bioinformatics_findings=["new"],
     )
     _upsert_round_result(
-        analysis.round_results, first, lineage_id="main", branch_id=None,
-        branch_label=None, restored_from_snapshot_id=restore_provenance_id(analysis),
+        analysis.round_results, first, lineage_id=analysis.restore_branch_id,
+        branch_id=analysis.restore_branch_id,
+        branch_label=analysis.restore_branch_label,
+        restored_from_snapshot_id=restore_provenance_id(analysis),
     )
     consume_restore_provenance(analysis)
     assert first.round_number == 2
-    assert first.restored_from_snapshot_id == origin
+    assert first.restored_from_snapshot_id is None
     assert analysis.last_restored_snapshot_id == origin
     assert restore_provenance_id(analysis) is None
 
@@ -368,8 +374,10 @@ async def test_restored_direction_action_advances_to_round_two(bundle):
         bioinformatics_findings=["later"],
     )
     _upsert_round_result(
-        analysis.round_results, second, lineage_id="main", branch_id=None,
-        branch_label=None, restored_from_snapshot_id=restore_provenance_id(analysis),
+        analysis.round_results, second, lineage_id=analysis.restore_branch_id,
+        branch_id=analysis.restore_branch_id,
+        branch_label=analysis.restore_branch_label,
+        restored_from_snapshot_id=restore_provenance_id(analysis),
     )
     assert second.restored_from_snapshot_id is None
     assert sum(
@@ -669,8 +677,18 @@ async def test_round_result_is_a_reviewed_redundant_channel(bundle):
         extra_capsule_state={"round_result": True},
     )
     restored = await _current(new_id)
-    assert len(restored.round_results) == 1, "canonical round result was lost"
-    assert restored.round_results[0].pi_summary == "one result before restore"
+    assert len(restored.round_results) == 2, "lineage views were not preserved"
+    assert [result.lineage_id for result in restored.round_results] == [
+        "main", restored.restore_branch_id,
+    ]
+    assert all(
+        result.pi_summary == "one result before restore"
+        for result in restored.round_results
+    )
+    assert all(
+        result.bioinformatics_findings == ["original finding"]
+        for result in restored.round_results
+    )
     workflow_state = restored.restore_resume_workflow_state or {}
     assert "round_result" not in workflow_state
 
@@ -718,7 +736,7 @@ async def test_unknown_non_json_channel_is_refused_before_publication(
 async def test_completed_reanalysis_keeps_pending_provenance_single_use(
     bundle, monkeypatch,
 ):
-    """Reaching COMPLETED is not consumption; the next result gets origin once."""
+    """Re-analysis consumes the pending marker without duplicating branch origin."""
     from backend.routes import lifecycle
     from backend.workflow.provenance import (
         consume_restore_provenance,
@@ -751,17 +769,27 @@ async def test_completed_reanalysis_keeps_pending_provenance_single_use(
     assert state.restore_provenance_snapshot_id == origin, (
         "a completed re-analysis must not consume a still-pending one-shot origin"
     )
+    assert sum(
+        result.restored_from_snapshot_id == origin
+        for result in state.round_results
+    ) == 1
 
     first = RoundResult(
         round_number=4, phase="innovation", direction="Reanalysis",
         pi_summary="reanalysis first",
     )
     _upsert_round_result(
-        state.round_results, first, lineage_id="main", branch_id=None,
-        branch_label=None, restored_from_snapshot_id=restore_provenance_id(state),
+        state.round_results, first, lineage_id=state.restore_branch_id,
+        branch_id=state.restore_branch_id,
+        branch_label=state.restore_branch_label,
+        restored_from_snapshot_id=restore_provenance_id(state),
     )
     consume_restore_provenance(state)
-    assert first.restored_from_snapshot_id == origin
+    assert first.restored_from_snapshot_id is None
+    assert sum(
+        result.restored_from_snapshot_id == origin
+        for result in state.round_results
+    ) == 1
     assert state.last_restored_snapshot_id == origin
     assert state.restore_provenance_snapshot_id is None
 

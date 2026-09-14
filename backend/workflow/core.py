@@ -192,9 +192,16 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         core_interventions.bind_facade(sys.modules[__name__])
         return core_interventions.signal_llm_failure_action(self, node_name, action, generation)
 
-    def signal_supplementary_analysis(self, request_text: str, target: str):
+    def signal_supplementary_analysis(
+        self,
+        request_text: str,
+        target: str,
+        request_id: str | None = None,
+    ):
         core_supplementary.bind_facade(sys.modules[__name__])
-        return core_supplementary.signal_supplementary_analysis(self, request_text, target)
+        return core_supplementary.signal_supplementary_analysis(
+            self, request_text, target, request_id=request_id,
+        )
 
     @property
     def _vision_settings(self) -> Dict[str, bool]:

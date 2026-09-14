@@ -219,6 +219,22 @@ async def execute_initial_render(attempt: FigureAttemptState) -> str | None:
         raise
 
     request = attempt.request
+    from .receipt_lookup import artifact_provenance
+
+    provenance, provenance_error = artifact_provenance(
+        attempt.state,
+        request.source_execution_id,
+        fallback_lineage=attempt.active_lineage,
+        fallback_round=int(attempt.state.current_round or 0),
+        fallback_plan_id=attempt.current_plan_id,
+        current_receipts=getattr(attempt.agent, "code_history", None) or [],
+    )
+    if provenance_error:
+        deps.get("_discard_render_attempt")(attempt.attempt_dir)
+        message = f"Figure generation failed: {provenance_error}"
+        logger.error("[Bioinformatics] %s", message)
+        await agent._notify("error", message)
+        return message
     figure = PublicationFigure(
         id=str(uuid.uuid4()),
         name=attempt.safe_name,
@@ -245,23 +261,11 @@ async def execute_initial_render(attempt: FigureAttemptState) -> str | None:
         producer_status="pending",
         revision_of_id=getattr(attempt.prior_attempt, "id", None),
         is_published_head=False,
-        lineage_id=attempt.active_lineage,
-        round_number=int(attempt.state.current_round or 0),
-        analysis_generation=int(
-            attempt.sandbox_state.get("analysis_generation", 0) or 0
-        ),
-        cohort_generation=int(
-            (
-                attempt.sandbox_state.get("cohort_identity_v1") or {}
-            ).get("cohort_generation", 0) or 0
-        ),
-        cohort_digest=(
-            str(
-                (
-                    attempt.sandbox_state.get("cohort_identity_v1") or {}
-                ).get("cohort_digest", "") or ""
-            ) or None
-        ),
+        lineage_id=provenance["lineage_id"],
+        round_number=provenance["round_number"],
+        analysis_generation=provenance["analysis_generation"],
+        cohort_generation=provenance["cohort_generation"],
+        cohort_digest=provenance["cohort_digest"],
         source_execution_id=request.source_execution_id,
         expression_provenance=dict(
             attempt.sandbox_state.get("expression_contract_v1") or {}

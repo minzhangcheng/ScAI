@@ -239,13 +239,21 @@ class IntrospectionMixin:
             return (None, None)
 
         hint_repr = repr(cluster_key_hint)
+        _managed_getter = getattr(self.sandbox, "host_managed_global_names", None)
+        _managed = set(_managed_getter()) if callable(_managed_getter) else set()
+        managed_repr = repr(sorted(_managed))
         discover_code = (
             "import json as _json, anndata as _ad\n"
             f"_hint = {hint_repr}\n"
+            f"_managed = set({managed_repr})\n"
+            "_seen_ids = set()\n"
             "_result = {}\n"
             "for _name, _obj in list(globals().items()):\n"
             "    if not isinstance(_obj, _ad.AnnData) or _name.startswith('_'):\n"
             "        continue\n"
+            "    if _name in _managed or id(_obj) in _seen_ids:\n"
+            "        continue\n"
+            "    _seen_ids.add(id(_obj))\n"
             "    _cols = list(_obj.obs.columns)\n"
             "    _key = None\n"
             "    if _hint and _hint in _cols:\n"
@@ -298,8 +306,12 @@ class IntrospectionMixin:
             return {}
         hint_repr = repr(cluster_key_hint)
         preferred_repr = repr(preferred_var_name)
+        _managed_getter = getattr(self.sandbox, "host_managed_global_names", None)
+        _managed = set(_managed_getter()) if callable(_managed_getter) else set()
+        managed_repr = repr(sorted(_managed))
         code = (
             "import json as _json, os as _os, anndata as _ad\n"
+            f"_managed = set({managed_repr})\n"
             "import pandas as _pd\n"
             f"_hint = {hint_repr}\n"
             f"_preferred = {preferred_repr}\n"
@@ -319,8 +331,11 @@ class IntrospectionMixin:
             "    if _key is None: _key = _cand[0] if _cand else None\n"
             "    return _key, _cand\n"
             "_candidates = {}\n"
+            "_seen_ids = set()\n"
             "for _name, _o in list(globals().items()):\n"
             "    if not isinstance(_o, _ad.AnnData) or _name.startswith('_'): continue\n"
+            "    if _name in _managed or id(_o) in _seen_ids: continue\n"
+            "    _seen_ids.add(id(_o))\n"
             "    _key, _cand = _cluster_key(_o)\n"
             "    if _key is not None: _candidates[_name] = (_key, _cand)\n"
             "_selected = None; _selection_source = None; _selection_error = None\n"

@@ -26,7 +26,6 @@ from .shared import (
     AnalysisStep,
     CodeExecution,
     compact_traceback,
-    code_is_statically_unsafe,
     execution_supports_evidence,
     truncate_for_llm,
 )
@@ -42,26 +41,10 @@ _validated_supplementary_findings = (
 class SupplementaryMixin:
     """Bounded supplementary task execution driven by the post-execution review."""
 
-    # Operations a supplementary cell may never contain. The annotation validator's
-    # denylist also bans analysis (rank_genes_groups, score_genes, ...), which is
-    # wrong here: differential expression, module scoring and pathway activity are
-    # precisely what a supplement is asked to add. What remains is the set that
-    # would corrupt the round rather than extend it:
-    #   sc.pp.filter_*        re-running QC changes the cell population every
-    #                         already-reported number was computed on
-    #   normalize_total /
-    #   log1p / scale         rewrites .X in place, silently invalidating the
-    #                         round's expression-derived results
-    #   leiden / louvain /
-    #   umap / neighbors      re-clustering or re-embedding renames the groups all
-    #                         prior findings and figures refer to
-    #   .write( / .write_h5ad overwrites persisted data that later rounds, reports
-    #                         and snapshot restore read back
-    _SUPPLEMENTARY_DENYLIST = (
-        "sc.pp.filter_", "sc.pp.normalize_total", "sc.pp.log1p", "sc.pp.scale",
-        "sc.tl.leiden", "sc.tl.louvain", "sc.tl.umap", "sc.pp.neighbors",
-        ".write(", ".write_h5ad",
-    )
+    # Supplementary execution may mutate, remap or rebind the selected live
+    # object when the approved task calls for it.  The Host does not keep a
+    # scientific mutation denylist; only objective resource/process/filesystem
+    # boundaries and generic sandbox safety remain.
 
     # This executor repairs computational evidence only.  Any result figure must
     # return to the main autonomous loop, where it receives a PublicationFigure
@@ -151,15 +134,12 @@ class SupplementaryMixin:
     # MAIN_OBJECT_SIGNATURE_KEYS: `obs_columns`, `layers`, `layers_fingerprint`,
     # `id` and `x_id` all move when a supplement adds a derived column or layer,
     # which is the point of the pass.
-    _SUPPLEMENTARY_FATAL_SIGNATURE_KEYS = (
-        "n_obs", "n_vars", "x_sum", "x_nnz", "obs_hash", "var_hash", "cluster_counts",
-    )
-
     def _supplementary_code_is_safe(self, code: str, main_var: str) -> Optional[str]:
         """Return a reason string if a supplementary cell is statically unsafe, else None."""
-        unsafe = code_is_statically_unsafe(code, main_var, self._SUPPLEMENTARY_DENYLIST)
-        if unsafe:
-            return unsafe
+        # main_var is retained for call compatibility with the bounded
+        # executor contract, but supplementary execution no longer vetoes
+        # assignment/rebinding or scientific method families.
+        _ = main_var
 
         try:
             tree = ast.parse(code)
@@ -281,20 +261,6 @@ class SupplementaryMixin:
                     if any(flag in mode_node.value for flag in "wax+"):
                         return "disallowed file-writing call 'open'"
         return None
-
-    def _supplementary_fatal_signature_changes(self, changed: List[str]) -> List[str]:
-        """Destructive subset of a signature diff from `signatures_match`.
-
-        `obs_hash` needs one carve-out: it hashes whole obs rows, so ADDING a column
-        moves it even when no existing value was touched. When `obs_columns` moved
-        too the two causes are indistinguishable, and a new score column is the
-        expected outcome of a supplement — an in-place edit of an existing column
-        still surfaces as `obs_hash` with `obs_columns` unchanged.
-        """
-        fatal = [key for key in changed if key in self._SUPPLEMENTARY_FATAL_SIGNATURE_KEYS]
-        if "obs_columns" in changed and "obs_hash" in fatal:
-            fatal.remove("obs_hash")
-        return fatal
 
     async def run_supplementary_tasks(
         self,

@@ -173,9 +173,15 @@ def _drop_kernelless_checkpoints(session_id: str, notify=None) -> None:
         if not path.is_file():
             continue
         name = path.name.casefold()
+        from backend.agents.bioinformatics.executor_checkpoint import (
+            is_executor_checkpoint_name,
+        )
+
         if not (
             name.startswith(CHECKPOINT_SQLITE_FILENAME)
-            or name.endswith("_bioinfo_checkpoint.json")
+            or is_executor_checkpoint_name(
+                path.name, session_id=str(session_id),
+            )
         ):
             continue
         try:
@@ -219,6 +225,8 @@ def _resolve_import_dest(
     def _rest(prefix: str) -> str:
         return relative_to_base[len(prefix):]
 
+    if relative_to_base.startswith("adata-checkpoints/"):
+        return get_session_dir(session_id) / relative_to_base
     if relative_to_base.startswith("states/"):
         return get_session_states(session_id) / _rebind_states_member_name(
             _rest("states/"), src_id, session_id

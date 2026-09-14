@@ -87,6 +87,25 @@ class CodeExecution(BaseModel):
     analysis_generation: int = 0
     cohort_generation: int = 0
     cohort_digest: Optional[str] = None
+    # Host-scoped AnnData source provenance. These fields are observations and
+    # pointers; they never make an Agent-authored checkpoint ID authoritative.
+    adata_source_preparation_id: Optional[str] = None
+    adata_requested_checkpoint_id: Optional[str] = None
+    adata_loaded_checkpoint_id: Optional[str] = None
+    adata_input_binding_id: Optional[str] = None
+    adata_input_binding_status: Optional[Literal[
+        "exact", "evolved", "missing", "unknown",
+    ]] = None
+    adata_input_lineage_id: Optional[str] = None
+    adata_ancestor_checkpoint_id: Optional[str] = None
+    adata_input_cohort_digest: Optional[str] = None
+    adata_input_cohort_binding_id: Optional[str] = None
+    executor_run_kind: Optional[Literal[
+        "ordinary", "supplementary", "figure_followup",
+    ]] = None
+    executor_run_scope_id: Optional[str] = None
+    executor_settlement_scope_id: Optional[str] = None
+    supplementary_request_id: Optional[str] = None
     input_profile_ids: List[str] = Field(default_factory=list)
     declared_persistent_outputs: List[str] = Field(default_factory=list)
     realized_persistent_outputs: List[str] = Field(default_factory=list)

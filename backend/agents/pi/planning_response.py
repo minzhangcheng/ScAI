@@ -1,10 +1,30 @@
 """Typed normalization helpers for PI planning response boundaries."""
 
 from typing import Any, Dict, Iterable, Optional
+import uuid
 
 from ...constants import PI_REVIEW_FALLBACK_DECISION
-from ...models.schemas import AnalysisPlan, PlanStep
+from ...models.schemas import AdataSourceSelection, AnalysisPlan, PlanStep
 from ...utils.formatting import as_list, coerce_json_text
+
+
+def normalize_adata_source_selection(
+    value: Any,
+) -> Optional[AdataSourceSelection]:
+    """Normalize one PI-supplied source selector, or return None on omission.
+
+    An explicit malformed selector is an operation-local schema error, not a
+    silent fallback to ``current``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, AdataSourceSelection):
+        return value
+    if isinstance(value, str):
+        value = {"mode": value}
+    if not isinstance(value, dict):
+        raise ValueError("adata_source must be an object or null")
+    return AdataSourceSelection.model_validate(value)
 
 
 _PLAN_REVIEW_DECISIONS = frozenset({"approved", "revise", "reject"})
@@ -25,7 +45,7 @@ def normalize_plan_review_result(value: Any) -> Dict[str, Any]:
     feedback = coerce_json_text(data.get("feedback"))
     if not feedback and not data:
         feedback = "Plan needs review (fallback — PI response could not be parsed)"
-    return {
+    result = {
         **data,
         "decision": decision,
         "feedback": feedback,
@@ -34,6 +54,11 @@ def normalize_plan_review_result(value: Any) -> Dict[str, Any]:
             data.get("modification_dispositions")
         ),
     }
+    if "adata_source" in data:
+        result["adata_source"] = normalize_adata_source_selection(
+            data.get("adata_source")
+        )
+    return result
 
 
 def select_valid_plan_seed(
@@ -105,6 +130,10 @@ def _normalize_final_payload(value: Any) -> Dict[str, Any]:
         step["figure_requirements"] = as_list(step.get("figure_requirements"))
         normalized_steps.append(step)
     data["steps"] = normalized_steps
+    if "adata_source" in data:
+        data["adata_source"] = normalize_adata_source_selection(
+            data.get("adata_source")
+        )
     return data
 
 
@@ -130,6 +159,32 @@ def build_validated_final_plan(
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ValueError("no parseable steps")
     steps = [PlanStep.model_validate(raw_step) for raw_step in raw_steps]
+    explicit_source = normalized.get("adata_source")
+    source = explicit_source or (
+        seed_plan.adata_source.model_copy(deep=True)
+        if seed_plan is not None
+        else AdataSourceSelection()
+    )
+    source_preparation_id = (
+        seed_plan.adata_source_preparation_id
+        if seed_plan is not None
+        and seed_plan.adata_source_preparation_id
+        and source == seed_plan.adata_source
+        else None
+    )
+    same_source_revision = bool(
+        seed_plan is not None and source == seed_plan.adata_source
+    )
+    run_scope_id = (
+        seed_plan.bioinformatics_run_scope_id
+        if same_source_revision
+        else f"run_scope_{uuid.uuid4().hex}"
+    )
+    settlement_scope_id = (
+        seed_plan.bioinformatics_settlement_scope_id
+        if seed_plan is not None
+        else f"settle_scope_{uuid.uuid4().hex}"
+    ) or f"settle_scope_{uuid.uuid4().hex}"
     return AnalysisPlan(
         phase=phase,
         stage=stage,
@@ -147,6 +202,12 @@ def build_validated_final_plan(
         status="pi_reviewing",
         revision_of=seed_plan.id if seed_plan is not None else None,
         revision_reason=f"{termination_reason} — PI finalized unilaterally",
+        adata_source=source,
+        adata_source_preparation_id=source_preparation_id,
+        bioinformatics_run_scope_id=(
+            run_scope_id or f"run_scope_{uuid.uuid4().hex}"
+        ),
+        bioinformatics_settlement_scope_id=settlement_scope_id,
     )
 
 
@@ -221,6 +282,15 @@ def normalize_supplementary_plan(value: Any, *, user_request: str) -> Dict[str, 
             ) if text
         ],
         "summary": coerce_json_text(data.get("summary")) or user_request,
+        **(
+            {
+                "adata_source": normalize_adata_source_selection(
+                    data.get("adata_source")
+                )
+            }
+            if "adata_source" in data
+            else {}
+        ),
     }
 
 

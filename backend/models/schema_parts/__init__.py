@@ -64,4 +64,12 @@ from .outputs import (  # noqa: F401
     UploadRequest,
     WebSocketMessage,
 )
+from .adata_checkpoints import (  # noqa: F401
+    AdataCheckpointRecord,
+    AdataLiveBindingRecord,
+    AdataSourcePreparation,
+    AdataSourceSelection,
+    canonical_id_set_digest,
+    normalize_id_set,
+)
 from .snapshot_failure import sanitize_snapshot_failure  # noqa: F401

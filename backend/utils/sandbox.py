@@ -7,6 +7,7 @@ Supports pause/resume by saving and restoring the full session state.
 
 import os
 import re
+import uuid
 import json
 import base64
 import asyncio
@@ -93,6 +94,7 @@ from .sandbox_parts import (  # noqa: F401
     StateTrackingMixin,
     PersistenceMixin,
     PathsMixin,
+    AdataCheckpointMixin,
 )
 from .sandbox_parts import runtime_restore as _runtime_restore_owner
 from .sandbox_parts import runtime_save as _runtime_save_owner
@@ -125,6 +127,7 @@ async def _run_durable_host_operation(
 
 
 class LocalJupyterSandbox(
+    AdataCheckpointMixin,
     KernelMixin,
     ExecutionMixin,
     StateTrackingMixin,
@@ -194,6 +197,12 @@ class LocalJupyterSandbox(
         # capture in particular) can assert that all of its cells ran against
         # one namespace instead of silently mixing generations.
         self.kernel_epoch = 0
+        # Host-owned generation identity for the live kernel namespace.  A
+        # restart creates a new value; it is provenance, never an
+        # authorization secret or idempotence key.
+        self.runtime_instance_id = uuid.uuid4().hex
+        self.adata_binding_registry_name: Optional[str] = None
+        self._adata_host_managed_name_set: set[str] = set()
         # Snapshot V2 runtime dependency tracking (created/loaded user globals).
         self._known_user_globals: set[str] = set()
         self._last_execution_diff: Dict[str, Any] = {

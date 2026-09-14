@@ -10,6 +10,7 @@ from backend.utils.sandbox_parts.runtime_save import (
     SavePhaseRecorder,
     _parse_save_phase_markers,
 )
+from backend.tests.split_facade import setattr_facade
 
 
 def test_phase_recorder_closes_the_interval_with_unattributed_overhead():
@@ -479,8 +480,11 @@ async def test_no_staged_execute_save_attributes_compatibility_hmac(
 
     sandbox._execute_unlocked = execute_legacy_save
     integrity_dir = tmp_path / "integrity"
-    monkeypatch.setattr(
-        sandbox_module, "_integrity_dir", lambda _session_id: integrity_dir,
+    setattr_facade(
+        monkeypatch,
+        "backend.utils.sandbox",
+        "_integrity_dir",
+        lambda _session_id: integrity_dir,
     )
     write_signature = sandbox_module._write_pkl_signature
 

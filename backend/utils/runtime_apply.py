@@ -484,8 +484,34 @@ def restore_generation_pair(session_id: str, *, revision: int) -> bool:
 
     live_state = states_dir / f"{session_id}_state.json"
     live_checkpoint = checkpoint_sqlite_path(states_dir)
-    live_executor = states_dir / f"{session_id}_bioinfo_checkpoint.json"
     paired_executor = pair / "executor_checkpoint.json"
+    live_executor = states_dir / f"{session_id}_bioinfo_checkpoint.json"
+    if paired_executor.is_file():
+        try:
+            _executor_payload = json.loads(paired_executor.read_text())
+            if _executor_payload.get("_scope_digest"):
+                from backend.agents.bioinformatics.executor_checkpoint import (
+                    executor_checkpoint_prefix,
+                )
+
+                _prefix = executor_checkpoint_prefix(
+                    run_kind=str(
+                        _executor_payload.get("run_kind") or "ordinary"
+                    ),
+                    scope_digest=str(
+                        _executor_payload.get("_scope_digest") or ""
+                    ),
+                    figure_followup=bool(
+                        _executor_payload.get("figure_followup")
+                    ),
+                )
+                live_executor = states_dir / (
+                    f"{session_id}_{_prefix}_checkpoint.json"
+                )
+            else:
+                live_executor = states_dir / f"{session_id}_bioinfo_checkpoint.json"
+        except Exception:
+            live_executor = states_dir / f"{session_id}_bioinfo_checkpoint.json"
 
     # Ordered so the *declaration* lands last. There is no journal here, and
     # adding one would duplicate the commit transaction for three small files;
@@ -680,7 +706,19 @@ def retire_live_runtime(session_id: str, *, include_checkpoint: bool = False) ->
         # The report generator's checkpoint (`_report_checkpoint.json`) is
         # deliberately not included: it resumes from session data, not from
         # kernel state, so a retired runtime does not invalidate it.
-        executor_checkpoint = states_dir / f"{session_id}_bioinfo_checkpoint.json"
-        if _quarantine_path(executor_checkpoint) is not None:
-            retired = True
+        try:
+            from backend.agents.bioinformatics.executor_checkpoint import (
+                find_executor_checkpoint_paths,
+            )
+
+            _executor_files = find_executor_checkpoint_paths(
+                states_dir, session_id=session_id,
+            )
+        except Exception:
+            _executor_files = [
+                states_dir / f"{session_id}_bioinfo_checkpoint.json"
+            ]
+        for executor_checkpoint in _executor_files:
+            if _quarantine_path(executor_checkpoint) is not None:
+                retired = True
     return retired

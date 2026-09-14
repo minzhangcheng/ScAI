@@ -110,9 +110,18 @@ def restore_executor_state(
             initial_instruction,
         )
         if state.current_plan and state.current_plan.status == "approved":
+            _source_context = dict(
+                (getattr(state, "sandbox_state", None) or {}).get(
+                    "resolved_adata_source_context_v1"
+                )
+                or {}
+            )
             messages.append({
                 "role": "user",
-                "content": build_approved_plan_context(state.current_plan),
+                "content": build_approved_plan_context(
+                    state.current_plan,
+                    source_context=_source_context or None,
+                ),
             })
         findings = []
         figures = []

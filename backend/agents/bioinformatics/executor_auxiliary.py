@@ -83,8 +83,51 @@ async def finalize_run(context) -> dict:
         len(context.figures),
         saved_figure_count,
     )
+    _run_attempt_ids = list(getattr(context, "attempt_execution_ids", None) or [])
+    _scope_id = getattr(context, "executor_settlement_scope_id", None)
+    try:
+        _attempt_map = dict(
+            context.analysis_state.bioinformatics_settlement_attempt_ids or {}
+        )
+    except Exception:
+        _attempt_map = {}
+    _persisted = list(_attempt_map.get(_scope_id, []) or [])
+    _settlement_attempt_ids = sorted(set(_persisted) | set(_run_attempt_ids))
+    if _scope_id:
+        _attempt_map[str(_scope_id)] = _settlement_attempt_ids
+        context.analysis_state.bioinformatics_settlement_attempt_ids = _attempt_map
+        # Persist the reached-kernel accumulator before the workflow can route
+        # to a plan revision or terminal settlement.  The scoped executor
+        # checkpoint remains the fallback if this Host-state write fails.
+        try:
+            await context.analysis_state.increment_version()
+            from backend.services.session_store import async_save_session
+
+            await async_save_session(
+                str(context.analysis_state.id),
+                context.analysis_state,
+                force=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not force-save executor settlement attempts for %s: %s",
+                _scope_id,
+                exc,
+            )
     if context.completed:
-        context.checkpoint_manager.clear()
+        # Keep the exact transcript until the workflow has durably settled the
+        # corresponding AnnData boundary.  `completed=True` prevents a retry
+        # from replaying it during that crash window.
+        try:
+            await context.save_checkpoint(
+                f"step_{context.step_count}_pending_settlement",
+                completed=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not mark completed executor checkpoint pending settlement: %s",
+                exc,
+            )
     return {
         "status": status,
         "findings": context.findings,
@@ -119,4 +162,29 @@ async def finalize_run(context) -> dict:
         "plan_revision_context": (
             context.plan_revision_context if context.plan_revision_needed else {}
         ),
+        "executor_run_kind": getattr(context, "executor_run_kind", "ordinary"),
+        "executor_run_scope_id": getattr(context, "executor_run_scope_id", None),
+        "executor_settlement_scope_id": _scope_id,
+        "supplementary_request_id": getattr(
+            context, "supplementary_request_id", None
+        ),
+        "attempt_execution_ids": _run_attempt_ids,
+        "settlement_attempt_execution_ids": _settlement_attempt_ids,
+        "resolved_adata_source_context": dict(
+            getattr(context, "resolved_adata_source_context", None) or {}
+        ),
+        "adata_source": (
+            context.adata_source.model_dump(mode="json")
+            if hasattr(context.adata_source, "model_dump")
+            else context.adata_source
+        ),
+        "executor_checkpoint_name": getattr(
+            getattr(context, "checkpoint_manager", None),
+            "checkpoint_path",
+            None,
+        ).name if getattr(
+            getattr(context, "checkpoint_manager", None),
+            "checkpoint_path",
+            None,
+        ) is not None else None,
     }

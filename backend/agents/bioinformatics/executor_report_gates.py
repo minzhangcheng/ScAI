@@ -111,16 +111,16 @@ async def prepare_report_attempt(context, tool_call) -> ReportAttempt | None:
     active_cohort_generation = int(
         cohort_identity.get("cohort_generation", 0) or 0
     ) or None
+    active_preparation_id = str(
+        getattr(getattr(state, "current_plan", None), "adata_source_preparation_id", "")
+        or ""
+    ) or None
     evidence_executions = successful_evidence_executions(
         self.code_history,
         round_number=state.current_round,
         plan_id=active_plan_id,
         lineage_id=active_lineage,
-        cohort_digest=active_cohort_digest,
-        cohort_generation=active_cohort_generation,
-        analysis_generation=int(
-            (state.sandbox_state or {}).get("analysis_generation", 0) or 0
-        ),
+        adata_source_preparation_id=active_preparation_id,
         require_plan_binding=False,
     )
     for record in finding_records:

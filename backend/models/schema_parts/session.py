@@ -19,6 +19,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+from .adata_checkpoints import AdataSourceSelection
 from .enums import AnalysisPhaseType, PlanStage, PlanStatus
 
 
@@ -273,6 +274,16 @@ class AnalysisPlan(BaseModel):
     created_from_snapshot_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
     approved_at: Optional[datetime] = None
+
+    # AnnData source selection is a PI-owned plan input. Application identity
+    # is separate: adata_source_preparation_id survives same-source plan
+    # revisions even when the plan UUID changes.
+    adata_source: AdataSourceSelection = Field(default_factory=AdataSourceSelection)
+    adata_source_preparation_id: Optional[str] = None
+    # Host-owned transcript/resume and settlement scopes are distinct from the
+    # source preparation's scope_id.
+    bioinformatics_run_scope_id: Optional[str] = None
+    bioinformatics_settlement_scope_id: Optional[str] = None
 
 SpeciesTissueQualification = Literal[
     "",

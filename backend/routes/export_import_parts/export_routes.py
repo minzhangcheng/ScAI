@@ -74,6 +74,7 @@ from .core import (
     router,
 )
 from .tar_builders import (
+    _add_adata_checkpoint_blobs_to_tar,
     _add_json_bytes,
     _add_portable_state_json,
     _add_reproducibility_to_tar,
@@ -156,7 +157,7 @@ def _generation_facts(
 
 
 def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = False,
-                       state_payload=None) -> None:
+                       state_payload=None, descriptor=None) -> None:
     """Write the portable session archive for *session_id* to *tar_path*.
 
     Both export endpoints share this so their archives cannot drift apart; they
@@ -180,6 +181,19 @@ def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = F
         session_file = resolve_session_metadata_path(session_id)
         if state_payload is None and session_file and session_file.exists():
             state_payload = json.loads(session_file.read_text(encoding="utf-8"))
+        if not include_runtime and state_payload is not None:
+            try:
+                from backend.services.adata_checkpoints import (
+                    scrub_runtime_dependent_state,
+                )
+
+                state_payload = scrub_runtime_dependent_state(state_payload)
+            except Exception:
+                logger.exception(
+                    "Results-only export state scrub failed; omitting the "
+                    "portable state rather than leaking continuation state"
+                )
+                state_payload = None
 
         # Manifest first: the importer latches the session id from the first
         # member it sees and reconciles it against this file.
@@ -203,7 +217,20 @@ def _build_session_tar(tar_path: str, session_id: str, include_runtime: bool = F
             )
 
         # 2. states (checkpoints, notebook, pkl)
-        _add_states_to_tar(tf, session_id, include_runtime=include_runtime)
+        _add_states_to_tar(
+            tf,
+            session_id,
+            include_runtime=include_runtime,
+            descriptor=descriptor,
+        )
+
+        # 2b. immutable AnnData checkpoint blobs are runtime lineage data:
+        # resumable archives include them; results-only archives omit them and
+        # import marks the corresponding records unavailable.
+        if include_runtime:
+            _add_adata_checkpoint_blobs_to_tar(
+                tf, session_id, descriptor=descriptor,
+            )
 
         # 3. uploads (recursive)
         upload_dir = get_session_uploads(session_id)
@@ -311,7 +338,7 @@ async def _pack_frozen_session_archive(
 
     args = (tar_path, session_id, include_runtime)
     if include_runtime:
-        args += (state_payload,)
+        args += (state_payload, descriptor)
     await run_in_owned_thread(_build_session_tar, *args)
     if include_runtime:
         await run_in_owned_thread(verify_captured_archive, tar_path, session_id, descriptor)

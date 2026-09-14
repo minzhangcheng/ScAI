@@ -23,6 +23,11 @@ async def run_autonomous_analysis(
     resume_from_checkpoint: bool = True,
     planning_stage="full",
     figure_followup: bool = False,
+    adata_source=None,
+    run_scope_id=None,
+    settlement_scope_id=None,
+    run_kind=None,
+    supplementary_request_id=None,
     *,
     bindings,
 ):
@@ -48,8 +53,92 @@ async def run_autonomous_analysis(
             resume_from_checkpoint=resume_from_checkpoint,
             planning_stage=planning_stage,
             figure_followup=figure_followup,
+            adata_source=adata_source,
+            run_scope_id=run_scope_id,
+            settlement_scope_id=settlement_scope_id,
+            run_kind=run_kind,
+            supplementary_request_id=supplementary_request_id,
         )
         return await executor_loop.run_turn_loop(context)
+    except Exception as exc:
+        # Source preparation is operation-local: surface it as a bounded
+        # plan-revision signal, never as a global execute refusal.
+        from backend.services.adata_checkpoints.errors import (
+            AdataSourcePreparationError,
+        )
+
+        if not isinstance(exc, AdataSourcePreparationError):
+            raise
+        effective_kind = (
+            "figure_followup" if figure_followup else str(run_kind or "ordinary")
+        )
+        request_record = {}
+        plan = None if effective_kind == "supplementary" else getattr(
+            state, "current_plan", None
+        )
+        if effective_kind == "supplementary":
+            request_record = dict(
+                ((getattr(state, "sandbox_state", None) or {}).get(
+                    "supplementary_requests_v1"
+                ) or {}).get(str(supplementary_request_id or ""))
+                or {}
+            )
+        resolved_run_scope = str(
+            request_record.get("executor_run_scope_id")
+            or request_record.get("request_scope_id")
+            or getattr(plan, "bioinformatics_run_scope_id", None)
+            or run_scope_id
+            or ""
+        ) or None
+        resolved_settlement_scope = str(
+            request_record.get("executor_settlement_scope_id")
+            or request_record.get("request_scope_id")
+            or getattr(plan, "bioinformatics_settlement_scope_id", None)
+            or settlement_scope_id
+            or ""
+        ) or None
+        source_context = dict(
+            (getattr(state, "sandbox_state", None) or {}).get(
+                "resolved_adata_source_context_v1"
+            )
+            or {}
+        )
+        checkpoint_name = getattr(
+            getattr(agent, "sandbox", None),
+            "active_executor_checkpoint_name",
+            None,
+        )
+        return {
+            "status": "adata_source_error",
+            "error": str(exc),
+            "findings": [],
+            "figures": [],
+            "mechanism_programs": [],
+            "code_history": [],
+            "analysis_log": [],
+            "steps_executed": 0,
+            "evidence_execution_ids": [],
+            "evidence_verified": None,
+            "evidence_gate_degraded": False,
+            "evidence_gate_findings": [],
+            "executor_run_kind": effective_kind,
+            "executor_run_scope_id": resolved_run_scope,
+            "executor_settlement_scope_id": resolved_settlement_scope,
+            "supplementary_request_id": supplementary_request_id,
+            "attempt_execution_ids": [],
+            "settlement_attempt_execution_ids": list(
+                (getattr(state, "bioinformatics_settlement_attempt_ids", None) or {})
+                .get(resolved_settlement_scope, [])
+                if resolved_settlement_scope else []
+            ),
+            "resolved_adata_source_context": source_context,
+            "executor_checkpoint_name": checkpoint_name,
+            "plan_revision_needed": True,
+            "plan_revision_context": {
+                "technical_invariant": "adata_source_preparation",
+                "adata_source_error": exc.to_context(),
+            },
+        }
     finally:
         if figure_followup:
             # Preserve receipts even on cancellation, before restoring the parent

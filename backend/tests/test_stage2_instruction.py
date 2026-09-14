@@ -25,14 +25,15 @@ def test_stage2_is_downstream_only():
     assert "df_to_lr" in txt
 
 
-def test_stage2_uses_live_sealed_adata_not_a_guessed_file():
+def test_stage2_uses_host_resolved_source_not_a_guessed_file():
     txt = build_phase_instruction(
         planning_stage="stage2", analysis_phase="exploration",
         has_bulk=False, has_scrna=True, direction="",
     )
-    assert "live, sealed canonical" in txt
-    assert "Do NOT reload or rebind `adata`" in txt
-    assert "work = adata[mask].copy()" in txt
+    assert "sealed" not in txt.lower()
+    assert "Do NOT reload or rebind `adata`" not in txt
+    assert "Host-resolved source binding" in txt
+    assert "rebinding live analysis state is allowed" in txt
     assert "adata_annotated.h5ad" not in txt
 
 

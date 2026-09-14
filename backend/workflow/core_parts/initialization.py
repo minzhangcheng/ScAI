@@ -301,6 +301,142 @@ def ensure_agent_ready(self, agent_name: str) -> bool:
         agent.refresh_runtime_config_if_needed()
     return True
 
+async def _rebuild_supplementary_queue(self) -> None:
+    """Restore durable queued requests into the in-memory FIFO (R1.7).
+
+    Only nonterminal records whose target still matches the restored semantic
+    gate are made runnable.  A record whose graph position has already passed
+    is marked failed rather than routing backward.
+    """
+    state = getattr(self, "_state", None)
+    if state is None:
+        return
+    sandbox_state = dict(getattr(state, "sandbox_state", None) or {})
+    requests = dict(sandbox_state.get("supplementary_requests_v1") or {})
+    if not requests:
+        return
+    terminal = {"settled", "failed"}
+    existing = {key for key, _target in self._supplementary_queue}
+    ordered = sorted(
+        requests.items(),
+        key=lambda item: (
+            str((item[1] or {}).get("created_at") or ""),
+            str(item[0]),
+        ),
+    )
+    changed = False
+    from backend.constants import GATE_DIRECTION_SELECTION, GATE_ROUND_WAIT
+    from backend.models.schemas import TaskStatus
+    from backend.services.round_snapshots.gates import round_boundary_gate
+
+    restored_gate = None
+    if getattr(state, "status", None) == TaskStatus.WAITING_INPUT:
+        restored_gate = round_boundary_gate(state)
+
+    def resumable_checkpoint(request_id: str, record: dict) -> str | None:
+        import json
+
+        from backend.agents.bioinformatics.executor_checkpoint import (
+            find_executor_checkpoint_paths,
+            is_executor_checkpoint_name,
+        )
+        from backend.config import get_session_states
+
+        states_dir = get_session_states(str(state.id))
+        requested_name = str(record.get("executor_checkpoint_name") or "")
+        paths = (
+            [states_dir / requested_name]
+            if requested_name
+            and is_executor_checkpoint_name(
+                requested_name, session_id=str(state.id),
+            )
+            else find_executor_checkpoint_paths(
+                states_dir, session_id=str(state.id),
+            )
+        )
+        for path in paths:
+            if not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (
+                payload.get("run_kind") == "supplementary"
+                and str(payload.get("supplementary_request_id") or "")
+                == str(request_id)
+                and not payload.get("completed")
+                and payload.get("_scope_digest")
+            ):
+                return path.name
+        return None
+
+    for request_id, raw in ordered:
+        if not isinstance(raw, dict):
+            continue
+        record = dict(raw)
+        status = str(record.get("status") or "queued")
+        if status in terminal or request_id in existing:
+            continue
+        target = str(record.get("target") or "")
+        request_round = int(record.get("round_number") or 0)
+        state_status = getattr(state, "status", None)
+        continuation_name = None
+        if status in {"planning", "running", "interrupted"}:
+            continuation_name = resumable_checkpoint(request_id, record)
+            if not continuation_name:
+                record["status"] = "failed"
+                record["error_summary"] = (
+                    "The interrupted supplementary request has no valid scoped "
+                    "executor continuation."
+                )[:500]
+                record["updated_at"] = datetime.now().isoformat()
+                requests[request_id] = record
+                changed = True
+                continue
+            if record.get("executor_checkpoint_name") != continuation_name:
+                record["executor_checkpoint_name"] = continuation_name
+                requests[request_id] = record
+                changed = True
+        match = False
+        if target == "annotation":
+            match = state_status == TaskStatus.WAITING_ANNOTATION
+        elif target == "direction":
+            match = (
+                state_status == TaskStatus.WAITING_INPUT
+                and restored_gate == GATE_DIRECTION_SELECTION
+            )
+        elif target == "round":
+            match = (
+                state_status == TaskStatus.WAITING_INPUT
+                and restored_gate == GATE_ROUND_WAIT
+                and request_round == int(getattr(state, "current_round", 0) or 0)
+            )
+        if not match:
+            record["status"] = "failed"
+            record["error_summary"] = (
+                "Restored graph is no longer at the request's semantic gate; "
+                "the request was not routed backward."
+            )[:500]
+            record["updated_at"] = datetime.now().isoformat()
+            requests[request_id] = record
+            changed = True
+            continue
+        self._supplementary_queue.append((request_id, target))
+        existing.add(request_id)
+        if target == "annotation":
+            self._annotation_event.set()
+        elif target in {"direction", "round"}:
+            self._continue_event.set()
+    if changed:
+        sandbox_state["supplementary_requests_v1"] = requests
+        state.sandbox_state = sandbox_state
+        await state.increment_version()
+        from backend.services.session_store import async_save_session
+
+        await async_save_session(str(state.id), state, force=True)
+
+
 async def initialize(self):
     """Initialize all components"""
     logger.info(f"[{self.session_id}] Initializing workflow components")
@@ -382,6 +518,9 @@ async def initialize(self):
         working_dir=str(get_session_workspace(self.session_id)),
         timeout=self.config.sandbox_timeout,
         runtime_budgets=runtime_budgets,
+    )
+    self.sandbox.adata_checkpoint_candidate_byte_budget = getattr(
+        self.config, "adata_checkpoint_candidate_byte_budget", None
     )
     self._continuation_kernel_epoch = None
 
@@ -474,6 +613,7 @@ async def initialize(self):
     # Build workflow graph
     self._build_graph()
     logger.info(f"[{self.session_id}] Workflow graph built")
+    await _rebuild_supplementary_queue(self)
 
 def _install_retry_notifiers(self):
     """Set retry notification and pause-gate callbacks on all LLM clients.

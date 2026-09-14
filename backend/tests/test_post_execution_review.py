@@ -447,7 +447,7 @@ async def test_runtime_linkage_does_not_pass_a_missing_execution_receipt():
 
 
 @pytest.mark.asyncio
-async def test_runtime_linkage_rejects_stale_analysis_generation():
+async def test_runtime_linkage_keeps_prior_generation_as_provenance():
     plan = AnalysisPlan(
         id="runtime-generation-plan",
         phase="innovation",
@@ -485,8 +485,8 @@ async def test_runtime_linkage_rejects_stale_analysis_generation():
         SimpleNamespace(supervisor_agent=None, session_id="s"), state, result,
     )
 
-    assert result["evidence_verified"] is False
-    assert result["evidence_execution_ids"] == []
+    assert result["evidence_verified"] is True
+    assert result["evidence_execution_ids"] == [execution.id]
 
 
 @pytest.mark.asyncio

@@ -62,7 +62,6 @@ from .agent_nodes.shared import (  # noqa: F401
     safe_pi_brief,
     STAGE1_KEYWORDS,
     BLOB_REF_PREFIX,
-    seal_foundation,
     with_retry,
     _reset_pi_instructions_for_stage2,
     _stable_code_hash,

@@ -339,7 +339,9 @@ class TestAutonomousLoopBudgetExhaustion:
         assert result["status"] == "max_steps_reached"
         assert result["findings"] == []
         assert not any("Fallback extraction" in finding for finding in result["findings"])
-        assert len(checkpoints) == 1
-        assert checkpoints[0]["step_name"] == "step_1_budget_exhausted"
-        assert checkpoints[0]["budget_exhausted"] is True
+        # Dispatch identity is checkpointed before and after the kernel call;
+        # the terminal budget record must remain the final position.
+        assert checkpoints
+        assert checkpoints[-1]["step_name"] == "step_1_budget_exhausted"
+        assert checkpoints[-1]["budget_exhausted"] is True
         assert cleared == []

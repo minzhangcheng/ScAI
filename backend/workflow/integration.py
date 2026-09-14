@@ -168,7 +168,7 @@ class IntegrationMixin:
         lineage_id = current_lineage_id(analysis_state)
         from .provenance import consume_restore_provenance, restore_provenance_id
         restored_from = restore_provenance_id(analysis_state)
-        _upsert_round_result(
+        integration_result = _upsert_round_result(
             analysis_state.round_results,
             integration_result,
             lineage_id=lineage_id,
@@ -178,6 +178,36 @@ class IntegrationMixin:
         )
         if restored_from is not None:
             consume_restore_provenance(analysis_state)
+
+        # Integration is a recorded round even when it produces only text.
+        # Capture its canonical boundary before any gate/report exit; no kernel
+        # is started merely to create a backup.
+        from .adata_checkpoint_hooks import capture_and_persist_boundary
+
+        _capture_outcome = await capture_and_persist_boundary(
+            self,
+            analysis_state,
+            boundary="round_complete",
+            event_scope=str(integration_result.result_identity_key or "integration"),
+            round_number=int(integration_result.round_number or 0),
+            planning_stage="full",
+            phase="integration",
+            source_plan_id=None,
+            round_result=integration_result,
+            direction=integration_result.direction or "integration",
+            summary_at_capture=str(integration_result.pi_summary or ""),
+            outcome_at_capture=str(integration_result.round_status or ""),
+            source_preparation_ids_at_capture=tuple(
+                integration_result.adata_source_preparation_ids or []
+            ),
+        )
+        if not _capture_outcome.available and _capture_outcome.disclosure:
+            integration_result.evidence_notes = list(
+                integration_result.evidence_notes or []
+            ) + [
+                "No canonical AnnData checkpoint was captured at this integration "
+                f"boundary ({_capture_outcome.disclosure})."
+            ]
 
         # Send round_summary so the frontend shows this integration round
         effective_max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds

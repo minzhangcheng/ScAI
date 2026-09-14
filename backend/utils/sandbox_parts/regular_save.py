@@ -98,10 +98,32 @@ def paired_generation_sources(sandbox) -> Dict[str, Path]:
     from backend.utils.checkpoint_paths import checkpoint_sqlite_path
 
     states = Path(sandbox.notebook_state.state_dir)
+    try:
+        from backend.agents.bioinformatics.executor_checkpoint import (
+            is_executor_checkpoint_name,
+        )
+
+        active_name = str(
+            getattr(sandbox, "active_executor_checkpoint_name", "") or ""
+        )
+        if active_name and Path(active_name).name == active_name and (
+            is_executor_checkpoint_name(
+                active_name, session_id=str(sandbox.session_id),
+            )
+        ):
+            executor_checkpoint = states / active_name
+        else:
+            # No active owner means there is no safe basis for choosing one of
+            # several scoped transcripts.  Retain only the narrow legacy path.
+            executor_checkpoint = (
+                states / f"{sandbox.session_id}_bioinfo_checkpoint.json"
+            )
+    except Exception:
+        executor_checkpoint = states / f"{sandbox.session_id}_bioinfo_checkpoint.json"
     return {
         "state": Path(sandbox.notebook_state.state_path),
         "checkpoint": checkpoint_sqlite_path(states),
-        "executor_checkpoint": states / f"{sandbox.session_id}_bioinfo_checkpoint.json",
+        "executor_checkpoint": executor_checkpoint,
     }
 
 

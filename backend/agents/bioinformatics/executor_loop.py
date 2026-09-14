@@ -6,6 +6,7 @@ continue to affect a resumed executor without creating an import cycle.
 from __future__ import annotations
 
 import hashlib
+import uuid
 
 from ...constants import NO_OUTPUT_TOKEN_CAP
 from .executor_auxiliary import LoopExit, TurnEffects, TurnStart, finalize_run
@@ -345,6 +346,21 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
         plan_revision_context=_plan_revision_context,
         save_checkpoint=_save_executor_checkpoint,
         supervisor_callback=_supervisor_callback,
+        executor_run_kind=getattr(context, "executor_run_kind", "ordinary"),
+        executor_run_scope_id=getattr(context, "executor_run_scope_id", None),
+        executor_settlement_scope_id=getattr(
+            context, "executor_settlement_scope_id", None
+        ),
+        supplementary_request_id=getattr(
+            context, "supplementary_request_id", None
+        ),
+        attempt_execution_ids=getattr(context, "attempt_execution_ids", None)
+        if getattr(context, "attempt_execution_ids", None) is not None
+        else [],
+        pending_dispatch=getattr(context, "pending_dispatch", None),
+        resolved_adata_source_context=dict(
+            getattr(context, "resolved_adata_source_context", None) or {}
+        ),
     )
     dispatch_context = ToolDispatchContext(
         messages=messages,
@@ -364,6 +380,9 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
             ),
             "lookup_documentation": functools.partial(
                 handle_lookup_documentation, tool_runtime
+            ),
+            "list_adata_checkpoints": functools.partial(
+                handle_list_adata_checkpoints, tool_runtime
             ),
             "generate_publication_figure": functools.partial(
                 handle_publication_figure, tool_runtime
@@ -456,6 +475,7 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
     context.accepted_finding_records = accepted_finding_records
     context.mechanism_programs_registered = mechanism_programs_registered
     context.completed = completed
+    context.pending_dispatch = tool_runtime.pending_dispatch
     return TurnEffects(
         response=response,
         step_figures=_step_figures,
@@ -683,6 +703,11 @@ async def prepare_loop_context(
     resume_from_checkpoint: bool = True,
     planning_stage: PlanStage = "full",  # "stage1", "stage2", or "full"
     figure_followup: bool = False,
+    adata_source: Any = None,
+    run_scope_id: Optional[str] = None,
+    settlement_scope_id: Optional[str] = None,
+    run_kind: Optional[str] = None,
+    supplementary_request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run analysis with autonomous technical steps, PI consultation, and step-level checkpointing.
@@ -703,16 +728,302 @@ async def prepare_loop_context(
     review_callback = figure_review_callback or self.figure_review_callback
     _supervisor_callback = supervisor_callback or self.supervisor_callback
 
-    # Initialize checkpoint manager for step-level recovery
+    logger.info(f"[Bioinformatics] Starting autonomous analysis with max_steps={max_steps}")
+
+    # Resolve the durable owner and Host-owned scopes before touching the
+    # runtime.  The scoped transcript identity below depends on these values;
+    # allocating them after checkpoint lookup both crashed the first run and
+    # allowed a transcript to be selected without its owner being known.
+    if figure_followup:
+        if run_kind not in (None, "figure_followup"):
+            raise ValueError("figure_followup contradicts executor run_kind")
+        _run_kind = "figure_followup"
+    else:
+        _run_kind = str(run_kind or "ordinary")
+    if _run_kind not in {"ordinary", "supplementary", "figure_followup"}:
+        raise ValueError(f"Unsupported executor run_kind: {_run_kind}")
+    _source_owner_plan = None
+    _request_record = {}
+    _owner_state_changed = False
+    if _run_kind == "supplementary":
+        _request_map = dict(
+            (getattr(state, "sandbox_state", None) or {}).get(
+                "supplementary_requests_v1"
+            )
+            or {}
+        )
+        _request_id = str(supplementary_request_id or "").strip()
+        _request_record = dict(_request_map.get(_request_id) or {})
+        if (
+            not _request_id
+            or not _request_record
+            or _request_record.get("compacted")
+            or _request_record.get("status") in {"settled", "failed"}
+        ):
+            from backend.services.adata_checkpoints.errors import (
+                AdataSourcePreparationError,
+            )
+
+            raise AdataSourcePreparationError(
+                "Supplementary executor has no active durable request owner",
+                reason="supplementary_request_unavailable",
+                context={"supplementary_request_id": _request_id or None},
+            )
+        _durable_run_scope = str(
+            _request_record.get("executor_run_scope_id")
+            or _request_record.get("request_scope_id")
+            or ""
+        )
+        _durable_settlement_scope = str(
+            _request_record.get("executor_settlement_scope_id")
+            or _request_record.get("request_scope_id")
+            or ""
+        )
+        if run_scope_id and _durable_run_scope and str(run_scope_id) != _durable_run_scope:
+            raise ValueError("supplementary run scope does not match its durable request")
+        if (
+            settlement_scope_id
+            and _durable_settlement_scope
+            and str(settlement_scope_id) != _durable_settlement_scope
+        ):
+            raise ValueError(
+                "supplementary settlement scope does not match its durable request"
+            )
+        _resolved_run_scope = str(
+            _durable_run_scope
+            or f"supp_run_{uuid.uuid4().hex}"
+        )
+        _resolved_settlement_scope = str(
+            _durable_settlement_scope
+            or _resolved_run_scope
+        )
+        if _request_record.get("executor_run_scope_id") != _resolved_run_scope:
+            _request_record["executor_run_scope_id"] = _resolved_run_scope
+            _owner_state_changed = True
+        if (
+            _request_record.get("executor_settlement_scope_id")
+            != _resolved_settlement_scope
+        ):
+            _request_record["executor_settlement_scope_id"] = (
+                _resolved_settlement_scope
+            )
+            _owner_state_changed = True
+        _request_map[_request_id] = _request_record
+        _scope_state = dict(getattr(state, "sandbox_state", None) or {})
+        _scope_state["supplementary_requests_v1"] = _request_map
+        state.sandbox_state = _scope_state
+    else:
+        _source_owner_plan = getattr(state, "current_plan", None)
+        _owner_scope_key = (
+            f"ordinary:{int(getattr(state, 'current_round', 0) or 0)}:"
+            f"{planning_stage}:{'figure' if figure_followup else 'run'}"
+        )
+        _owner_scopes = dict(
+            (getattr(state, "sandbox_state", None) or {}).get(
+                "executor_owner_scopes_v1"
+            )
+            or {}
+        )
+        _stored_scopes = dict(_owner_scopes.get(_owner_scope_key) or {})
+        _resolved_run_scope = str(
+            (
+                run_scope_id
+                if _run_kind == "figure_followup"
+                else None
+            )
+            or getattr(_source_owner_plan, "bioinformatics_run_scope_id", None)
+            or _stored_scopes.get("run_scope_id")
+            or f"run_scope_{uuid.uuid4().hex}"
+        )
+        _resolved_settlement_scope = str(
+            getattr(
+                _source_owner_plan,
+                "bioinformatics_settlement_scope_id",
+                None,
+            )
+            or _stored_scopes.get("settlement_scope_id")
+            or f"settle_scope_{uuid.uuid4().hex}"
+        )
+        if _source_owner_plan is not None:
+            if not getattr(_source_owner_plan, "bioinformatics_run_scope_id", None):
+                _source_owner_plan.bioinformatics_run_scope_id = _resolved_run_scope
+                _owner_state_changed = True
+            if not getattr(
+                _source_owner_plan,
+                "bioinformatics_settlement_scope_id",
+                None,
+            ):
+                _source_owner_plan.bioinformatics_settlement_scope_id = (
+                    _resolved_settlement_scope
+                )
+                _owner_state_changed = True
+        else:
+            _new_scope_record = {
+                "run_scope_id": _resolved_run_scope,
+                "settlement_scope_id": _resolved_settlement_scope,
+            }
+            if _stored_scopes != _new_scope_record:
+                _owner_scopes[_owner_scope_key] = _new_scope_record
+                _owner_state_changed = True
+            _scope_state = dict(getattr(state, "sandbox_state", None) or {})
+            _scope_state["executor_owner_scopes_v1"] = _owner_scopes
+            state.sandbox_state = _scope_state
+    if _resolved_settlement_scope not in state.bioinformatics_settlement_attempt_ids:
+        state.bioinformatics_settlement_attempt_ids[_resolved_settlement_scope] = []
+        _owner_state_changed = True
+    if _owner_state_changed:
+        await state.increment_version()
+        from backend.services.session_store import async_save_session
+
+        await async_save_session(str(state.id), state, force=True)
+
+    await executor_runtime.prepare_sandbox(
+        self,
+        state,
+        bindings=sys.modules[__name__],
+    )
+
+    # Apply or verify the selected AnnData source after the runtime is
+    # restored/started and before the executor restores its transcript.  A
+    # failure is operation-local and propagates as AdataSourcePreparationError.
+    _source_selection = None
+    _inherited_preparation_id = None
+    if _run_kind == "supplementary":
+        _source_selection = _request_record.get("adata_source")
+        _inherited_preparation_id = _request_record.get(
+            "adata_source_preparation_id"
+        )
+    else:
+        _source_selection = getattr(_source_owner_plan, "adata_source", None)
+    from backend.models.schemas import AdataSourceSelection
+
+    if _source_selection is None:
+        _source_selection = AdataSourceSelection()
+    elif isinstance(_source_selection, dict):
+        _source_selection = AdataSourceSelection.model_validate(_source_selection)
+    _preparation = None
+    if _source_selection is not None and getattr(
+        _source_selection, "mode", "current"
+    ) != "current":
+        from backend.services.adata_checkpoints import (
+            ensure_adata_source_prepared,
+        )
+
+        _preparation = await ensure_adata_source_prepared(
+            self.sandbox,
+            state,
+            _source_selection,
+            plan=_source_owner_plan,
+            owner_kind=(
+                "supplementary" if _run_kind == "supplementary" else "plan"
+            ),
+            owner_id=(
+                supplementary_request_id
+                or getattr(_source_owner_plan, "id", None)
+            ),
+            request_scope_id=_resolved_settlement_scope,
+            inherited_preparation_id=_inherited_preparation_id,
+        )
+
+    _source_preparation_ids = (
+        [str(getattr(_preparation, "preparation_id"))]
+        if getattr(_preparation, "preparation_id", None)
+        else []
+    )
+    from backend.services.adata_checkpoints.selection import selection_signature
+
+    _resolved_source_context = {
+        "mode": getattr(_source_selection, "mode", "current"),
+        "preparation_id": getattr(_preparation, "preparation_id", None),
+        "active_source_preparation_id": getattr(
+            _preparation, "preparation_id", None
+        ),
+        "source_preparation_ids": _source_preparation_ids,
+        "scope_id": getattr(_preparation, "scope_id", None),
+        "active_source_scope_id": getattr(_preparation, "scope_id", None),
+        "source_selection_signature": getattr(
+            _preparation, "selection_signature", None
+        ) or selection_signature(_source_selection),
+        "binding_id": getattr(_preparation, "binding_id", None),
+        "binding_identity_status": getattr(
+            _preparation, "binding_identity_status", "unknown"
+        ),
+        "adata_lineage_id": getattr(_preparation, "adata_lineage_id", None),
+        "loaded_checkpoint_id": getattr(
+            _preparation, "loaded_checkpoint_id", None
+        ),
+        "ancestor_checkpoint_id": getattr(
+            _preparation, "ancestor_checkpoint_id", None
+        ),
+    }
+    _sandbox_state = dict(getattr(state, "sandbox_state", None) or {})
+    _sandbox_state["resolved_adata_source_context_v1"] = dict(
+        _resolved_source_context
+    )
+    state.sandbox_state = _sandbox_state
+    await state.increment_version()
+    from backend.services.session_store import async_save_session
+
+    await async_save_session(str(state.id), state, force=True)
+
+    # Build the scoped executor checkpoint identity only after runtime and
+    # source resolution, so a transcript can never cross run/source/request.
     if hasattr(self.sandbox, 'state_dir') and self.sandbox.state_dir:
         state_dir = str(self.sandbox.state_dir)
     else:
-        # Use sandbox working directory as base for states
         state_dir = str(Path(self.sandbox.working_dir) / "states")
         Path(state_dir).mkdir(parents=True, exist_ok=True)
-    checkpoint_kwargs = {"prefix": "bioinfo_figure_followup"} if figure_followup else {}
+    if _preparation is None and _run_kind == "supplementary":
+        _prep_id = _request_record.get("adata_source_preparation_id")
+    elif _preparation is None:
+        _prep_id = getattr(_source_owner_plan, "adata_source_preparation_id", None)
+    else:
+        _prep_id = getattr(_preparation, "preparation_id", None)
+    if _preparation is None:
+        for _record in getattr(state, "adata_source_preparations", None) or []:
+            if str(getattr(_record, "preparation_id", "")) == str(_prep_id):
+                _preparation = _record
+                break
+    _checkpoint_identity = executor_checkpoint.build_executor_checkpoint_identity(
+        state,
+        run_kind=_run_kind,
+        planning_stage=planning_stage,
+        run_scope_id=_resolved_run_scope,
+        settlement_scope_id=_resolved_settlement_scope,
+        source_selection=_source_selection,
+        preparation=_preparation,
+        supplementary_request_id=supplementary_request_id,
+        figure_followup=figure_followup,
+    )
+    _scope_digest = _checkpoint_identity.scope_digest
+    checkpoint_kwargs = {
+        "prefix": executor_checkpoint.executor_checkpoint_prefix(
+            run_kind=_run_kind,
+            scope_digest=_scope_digest,
+            figure_followup=figure_followup,
+        )
+    }
     checkpoint_mgr = CheckpointManager(
         session_id=state.id, state_dir=state_dir, **checkpoint_kwargs
+    )
+    if getattr(checkpoint_mgr, "checkpoint_path", None) is not None:
+        self.sandbox.active_executor_checkpoint_name = (
+            checkpoint_mgr.checkpoint_path.name
+        )
+    _legacy_allowed = bool(
+        getattr(_source_selection, "mode", "current") == "current"
+        and not getattr(state, "adata_source_preparations", None)
+        and not getattr(state, "adata_live_bindings", None)
+        and not getattr(state, "adata_checkpoints", None)
+    )
+    legacy_checkpoint_mgr = (
+        CheckpointManager(
+            session_id=state.id,
+            state_dir=state_dir,
+            prefix=executor_checkpoint.legacy_checkpoint_prefix(),
+        )
+        if _legacy_allowed
+        else None
     )
 
     checkpoint, checkpoint_valid = await executor_checkpoint.load_checkpoint(
@@ -722,16 +1033,10 @@ async def prepare_loop_context(
         resume_from_checkpoint=resume_from_checkpoint,
         planning_stage=planning_stage,
         bindings=sys.modules[__name__],
+        expected_identity=_checkpoint_identity.checkpoint_fields(),
+        legacy_checkpoint_manager=legacy_checkpoint_mgr,
+        allow_legacy_current=_legacy_allowed,
     )
-
-
-    logger.info(f"[Bioinformatics] Starting autonomous analysis with max_steps={max_steps}")
-    await executor_runtime.prepare_sandbox(
-        self,
-        state,
-        bindings=sys.modules[__name__],
-    )
-
 
     # Build initial prompt — split into static prefix (cacheable) and dynamic context
     self._current_analysis_state = state
@@ -794,6 +1099,7 @@ async def prepare_loop_context(
         save_sandbox: bool = False,
         budget_exhausted: bool = False,
         extra_messages: list | None = None,
+        completed: bool = False,
     ) -> None:
         """Persist the executor transcript independently of planning history.
 
@@ -823,7 +1129,32 @@ async def prepare_loop_context(
             analysis_context=self.analysis_context,
             budget_exhausted=budget_exhausted,
             runtime_revision=getattr(self.sandbox, "runtime_revision", None),
+            checkpoint_scope_digest=_scope_digest,
+            checkpoint_run_kind=_run_kind,
+            checkpoint_run_scope_id=_resolved_run_scope,
+            checkpoint_settlement_scope_id=_resolved_settlement_scope,
+            checkpoint_source_scope_id=getattr(_preparation, "scope_id", None),
+            checkpoint_preparation_id=getattr(_preparation, "preparation_id", None),
+            checkpoint_selection_signature=getattr(
+                _preparation, "selection_signature", None
+            ),
+            checkpoint_token_digest=(
+                hashlib.sha256(
+                    str(getattr(_preparation, "application_token", "") or "").encode()
+                ).hexdigest()
+                if _preparation is not None else None
+            ),
+            checkpoint_request_id=supplementary_request_id,
+            checkpoint_figure_followup=figure_followup,
+            attempt_execution_ids=list(loop_context.attempt_execution_ids),
+            pending_dispatch=(
+                dict(loop_context.pending_dispatch)
+                if loop_context.pending_dispatch
+                else None
+            ),
+            checkpoint_identity=_checkpoint_identity.checkpoint_fields(),
         )
+        checkpoint_data["completed"] = bool(completed)
         await checkpoint_mgr.save(checkpoint_data)
         if save_sandbox:
             from backend.services.save_cadence import runtime_save_due
@@ -882,7 +1213,28 @@ async def prepare_loop_context(
         annotation_completed=annotation_completed,
         mechanism_programs_registered=mechanism_programs_registered,
         evidence_gate_findings=evidence_gate_findings,
+        executor_run_kind=_run_kind,
+        executor_run_scope_id=_resolved_run_scope,
+        executor_settlement_scope_id=_resolved_settlement_scope,
+        supplementary_request_id=supplementary_request_id,
+        attempt_execution_ids=list(
+            (checkpoint or {}).get("attempt_execution_ids") or []
+        ) if checkpoint_valid else [],
+        pending_dispatch=(
+            dict((checkpoint or {}).get("pending_dispatch") or {})
+        ) if checkpoint_valid else {},
+        resolved_adata_source_context=dict(_resolved_source_context),
+        adata_source=_source_selection,
     )
+
+    if loop_context.pending_dispatch.get("status") == "pending_dispatch":
+        # The process ended after the pre-dispatch checkpoint and before it
+        # could publish an objective completion.  Preserve the preallocated ID
+        # as an uncertain reached-kernel attempt; never credit it as evidence.
+        loop_context.pending_dispatch["status"] = "dispatch_unknown"
+        await _save_executor_checkpoint(
+            f"step_{loop_context.step_count}_dispatch_unknown"
+        )
 
     # A resumed executor must keep its original tool transcript, but an
     # approved replacement plan has to be made visible before the next LLM
@@ -896,6 +1248,12 @@ async def prepare_loop_context(
             messages,
             state.current_plan,
             checkpoint_plan_id,
+            source_context=dict(
+                (getattr(state, "sandbox_state", None) or {}).get(
+                    "resolved_adata_source_context_v1"
+                )
+                or {}
+            ),
         ):
             try:
                 await _save_executor_checkpoint(

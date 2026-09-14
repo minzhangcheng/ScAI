@@ -126,7 +126,8 @@ async def test_targeted_missing_figure_falls_back_to_explicit_pi_selection():
     assert is_report_eligible(selected) is True
     call = bioinformatics.run_autonomous_analysis.await_args
     assert "Render the linked contrast as a volcano plot" in call.args[1]
-    assert call.kwargs["resume_from_checkpoint"] is False
+    assert call.kwargs["resume_from_checkpoint"] is True
+    assert call.kwargs["run_kind"] == "figure_followup"
 
 
 @pytest.mark.asyncio

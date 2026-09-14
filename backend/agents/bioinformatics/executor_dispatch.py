@@ -55,6 +55,13 @@ class ToolRuntime:
     supervisor_callback: Any = None
     max_consecutive_errors: int = 5
     max_total_errors: int = 50
+    executor_run_kind: str = "ordinary"
+    executor_run_scope_id: Any = None
+    executor_settlement_scope_id: Any = None
+    supplementary_request_id: Any = None
+    attempt_execution_ids: list = field(default_factory=list)
+    pending_dispatch: dict | None = None
+    resolved_adata_source_context: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

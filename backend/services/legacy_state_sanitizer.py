@@ -121,8 +121,31 @@ def sanitize_legacy_state(state: Any, *, workflow_active: bool = False) -> bool:
             isinstance(transaction, dict) and "recovery_error" in transaction
         )
     )
+
+    # Retired foundation/closure state must be removed even when no Snapshot
+    # V2 failure gate is present.  These keys were persisted by older builds
+    # and some former failure latches can block all ordinary work if left in
+    # ``sandbox_state``.  Remove only the control keys; historical execution,
+    # report and artifact records are untouched.
+    foundation_changed = False
+    sandbox_state = getattr(state, "sandbox_state", None)
+    if isinstance(sandbox_state, dict):
+        for key in (
+            "stage1_foundation_v1",
+            "stage1_foundation_bindings_v1",
+            "stage2_foundation_integrity_failure_v1",
+            "stage2_foundation_integrity_baseline_v1",
+            "stage2_foundation_bindings_v1",
+            "analysis_closure_integrity_failure_v1",
+        ):
+            if key in sandbox_state:
+                sandbox_state.pop(key, None)
+                foundation_changed = True
+        if foundation_changed:
+            state.sandbox_state = sandbox_state
+
     if not failure_gate and not recovery_gate:
-        return False
+        return foundation_changed
 
     recovery_marked = False
     if journal_pending and not getattr(state, "recovery_blocked", False):
@@ -175,4 +198,4 @@ def sanitize_legacy_state(state: Any, *, workflow_active: bool = False) -> bool:
     if getattr(state, "status", None) != next_status:
         setattr(state, "status", next_status)
         changed = True
-    return changed
+    return changed or foundation_changed

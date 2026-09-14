@@ -184,3 +184,78 @@ def record_cohort_transition(
     if changed and baseline_digest:
         _annotate_prior_cohort_artifacts(state, identity)
     return identity
+
+
+_BINDING_MARKER = "__SCAI_BINDING_COHORT_IDENTITY_V1__:"
+
+
+def binding_cohort_probe_code(binding_name: str) -> str:
+    """Return trusted kernel code measuring one resolved working binding."""
+    name_repr = repr(str(binding_name))
+    return f'''
+import hashlib as _scai_hashlib
+import json as _scai_json
+_scai_name = {name_repr}
+_scai_obj = globals().get(_scai_name)
+_scai_payload = {{"present": False, "binding_name": _scai_name}}
+if (
+    _scai_obj is not None
+    and hasattr(_scai_obj, "obs_names")
+    and hasattr(_scai_obj, "var_names")
+):
+    _scai_digest = _scai_hashlib.sha256()
+    for _scai_axis, _scai_names in (
+        (b"obs", _scai_obj.obs_names),
+        (b"var", _scai_obj.var_names),
+    ):
+        _scai_digest.update(_scai_axis)
+        for _scai_value in _scai_names:
+            _scai_bytes = str(_scai_value).encode("utf-8", errors="surrogatepass")
+            _scai_digest.update(len(_scai_bytes).to_bytes(8, "big"))
+            _scai_digest.update(_scai_bytes)
+    _scai_payload = {{
+        "present": True,
+        "binding_name": _scai_name,
+        "binding_cohort_digest": _scai_digest.hexdigest(),
+        "n_obs": int(_scai_obj.n_obs),
+        "n_vars": int(_scai_obj.n_vars),
+    }}
+print("{_BINDING_MARKER}" + _scai_json.dumps(_scai_payload, sort_keys=True))
+'''
+
+
+def parse_binding_cohort_probe(output: str) -> Optional[Dict[str, Any]]:
+    for line in reversed(str(output or "").splitlines()):
+        if not line.startswith(_BINDING_MARKER):
+            continue
+        try:
+            payload = json.loads(line[len(_BINDING_MARKER):])
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if not payload.get("present"):
+            return {"present": False}
+        digest = str(payload.get("binding_cohort_digest") or "")
+        if len(digest) != 64:
+            return None
+        return {
+            "present": True,
+            "binding_name": str(payload.get("binding_name") or ""),
+            "binding_cohort_digest": digest,
+            "n_obs": max(0, int(payload.get("n_obs") or 0)),
+            "n_vars": max(0, int(payload.get("n_vars") or 0)),
+        }
+    return None
+
+
+async def probe_binding_cohort(sandbox, binding_name: str):
+    result = await sandbox.execute(
+        binding_cohort_probe_code(binding_name),
+        records_history=False,
+        skip_safety_check=True,
+        mutates_namespace=False,
+    )
+    if getattr(result, "error", None):
+        return None
+    return parse_binding_cohort_probe(getattr(result, "output", ""))

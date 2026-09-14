@@ -812,6 +812,7 @@ def test_cross_loop_replacement_orders_delivery_and_releases_lease(old_fails):
 def test_old_loop_workflow_send_does_not_route_to_new_connection_owner_loop():
     old_registered = threading.Event()
     replacement_registered = threading.Event()
+    old_closed = threading.Event()
     old_finished = threading.Event()
     results: dict[str, object] = {}
 
@@ -824,6 +825,7 @@ def test_old_loop_workflow_send_does_not_route_to_new_connection_owner_loop():
 
         async def close(self, code=1000):
             self.closed.append(code)
+            old_closed.set()
 
     class NewSocket:
         def __init__(self):
@@ -850,6 +852,7 @@ def test_old_loop_workflow_send_does_not_route_to_new_connection_owner_loop():
             results["sent"] = await send_connection_json(
                 old, {"generation": "replacement"}
             )
+            await wait_for(old_closed)
             old_finished.set()
 
         asyncio.run(run())

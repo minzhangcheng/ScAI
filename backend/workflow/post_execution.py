@@ -18,6 +18,7 @@ queue and the integration bookkeeping stay untouched.
 """
 import logging
 import inspect
+import hashlib
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -214,14 +215,36 @@ class PostExecutionReviewMixin:
                 "artifact-delivery summary.\n\n" + "\n".join(lines)
             )
             try:
+                parent_run_scope = str(
+                    getattr(
+                        analysis_state.current_plan,
+                        "bioinformatics_run_scope_id",
+                        "",
+                    )
+                    or plan_id
+                    or "unplanned"
+                )
+                followup_scope = "figure_scope_" + hashlib.sha256(
+                    (
+                        f"{lineage}|{parent_run_scope}|{planning_stage}|"
+                        + ",".join(sorted(task.id for task in targeted))
+                    ).encode("utf-8")
+                ).hexdigest()
                 redraw_result = await self.bioinformatics_agent.run_autonomous_analysis(
                     analysis_state, instruction,
                     max_steps=min(40, max(12, len(targeted) * 8)),
                     figure_review_callback=self._figure_review_callback,
                     supervisor_callback=self._supervisor_callback,
-                    resume_from_checkpoint=False,
+                    resume_from_checkpoint=True,
                     planning_stage=planning_stage,
                     figure_followup=True,
+                    run_kind="figure_followup",
+                    run_scope_id=followup_scope,
+                    settlement_scope_id=getattr(
+                        analysis_state.current_plan,
+                        "bioinformatics_settlement_scope_id",
+                        None,
+                    ),
                 )
             except Exception as exc:
                 logger.warning("[%s] figure follow-up failed: %s", self.session_id, exc)
@@ -273,6 +296,19 @@ class PostExecutionReviewMixin:
             "targeted_task_ids": [task.id for task in targeted],
             "redraw_status": redraw_result.get("status"),
             "figures": list(redraw_result.get("figures", []) or []),
+            "attempt_execution_ids": list(
+                redraw_result.get("attempt_execution_ids") or []
+            ),
+            "settlement_attempt_execution_ids": list(
+                redraw_result.get("settlement_attempt_execution_ids") or []
+            ),
+            "executor_run_scope_id": redraw_result.get("executor_run_scope_id"),
+            "executor_settlement_scope_id": redraw_result.get(
+                "executor_settlement_scope_id"
+            ),
+            "executor_checkpoint_name": redraw_result.get(
+                "executor_checkpoint_name"
+            ),
         }
 
     # ------------------------------------------------------------------

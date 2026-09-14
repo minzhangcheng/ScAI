@@ -53,18 +53,12 @@ from ..services.sample_design import (
 )
 from ..services.cohort_identity import (
     active_cohort_identity,
+    probe_binding_cohort,
     probe_canonical_cohort,
     record_cohort_transition,
 )
-from ..services.foundation_integrity import (
-    accept_foundation_extensions,
-    classify_foundation_signature,
-    clear_foundation_bindings,
-    commit_foundation_bindings,
-    foundation_is_sealed,
-    foundation_write_guard,
-    mark_foundation_drift,
-    registered_derived_names,
+from .bioinformatics.executor_checkpoints import (
+    handle_list_adata_checkpoints,
 )
 from .bioinformatics.executor_collaboration import (
     handle_annotate_clusters,
@@ -793,6 +787,11 @@ class BioinformaticsAgent(
         resume_from_checkpoint: bool = True,
         planning_stage: PlanStage = "full",
         figure_followup: bool = False,
+        adata_source: Any = None,
+        run_scope_id: Optional[str] = None,
+        settlement_scope_id: Optional[str] = None,
+        run_kind: Optional[str] = None,
+        supplementary_request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         return await executor_controller.run_autonomous_analysis(
             self,
@@ -804,6 +803,11 @@ class BioinformaticsAgent(
             resume_from_checkpoint=resume_from_checkpoint,
             planning_stage=planning_stage,
             figure_followup=figure_followup,
+            adata_source=adata_source,
+            run_scope_id=run_scope_id,
+            settlement_scope_id=settlement_scope_id,
+            run_kind=run_kind,
+            supplementary_request_id=supplementary_request_id,
             bindings=ExecutorBindings.from_facade(),
         )
 

@@ -11,7 +11,6 @@ from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...agents.bioinformatics_agent import count_saved_figures
 from ..helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS
 from ...utils.blob_store import BLOB_REF_PREFIX
-from ...services.foundation_integrity import seal_foundation
 from ..retry import with_retry
 
 if TYPE_CHECKING:
@@ -292,14 +291,16 @@ def _build_stage2_instruction(
         "consult the PI if measured design facts require a scientific choice"
     )
     stage1_state = """Stage 1 (QC, clustering, cell type annotation) is COMPLETE. Its
-accepted annotated atlas is already available as the live, sealed canonical
-variable `adata` in the kernel.
+accepted annotated atlas is available in the live kernel; use the
+Host-resolved source binding reported in the approved-plan context. The kernel retains the
+live `adata` and all unrelated variables from previous rounds.
 
-Do NOT re-run QC, clustering, or cell type annotation. Do NOT reload or rebind `adata`,
-and do NOT repeat normalization or embedding. For transformations or subset-specific work,
-create an explicit derived object such as `work = adata[mask].copy()` and mutate
-only that object. Append downstream outputs under new, uniquely named keys and
-proceed to downstream analysis ONLY:"""
+Do NOT re-run QC, clustering, or cell type annotation, and do NOT repeat
+normalization or embedding unless the approved plan explicitly asks for it. If
+the plan selected a working binding, operate on that resolved variable; mutating
+or rebinding live analysis state is allowed under the approved plan. Append
+downstream outputs under new, uniquely named keys and proceed to downstream
+analysis ONLY:"""
     downstream_menu = """2. The downstream analyses the PI-approved plan calls for. Where the plan leaves the
    method open, these are available and appropriate to single-cell data — pick from
    them by what the question needs, not by working down the list:

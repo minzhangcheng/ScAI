@@ -42,6 +42,7 @@ def _state_and_figure():
         initial_instruction="test",
         treatment_groups=[],
         current_plan=None,
+        figure_revision_tasks=[],
         build_experimental_design_summary=lambda: "",
     )
     figure = SimpleNamespace(

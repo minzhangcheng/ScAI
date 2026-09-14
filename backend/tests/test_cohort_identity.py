@@ -266,11 +266,13 @@ def test_report_requires_current_cohort_generation_even_for_same_digest():
         old_execution.id, current_execution.id,
     ]
     assert report_state.round_results[0].bioinformatics_findings == [
-        "Current generation finding."
+        "Old generation finding.",
+        "Current generation finding.",
     ]
     assert report_state.round_results[0].bioinformatics_evidence_verified is True
     assert report_state.round_results[0].evidence_execution_ids == [
-        current_execution.id
+        old_execution.id,
+        current_execution.id,
     ]
     assert [figure.name for figure in report_state.publication_figures] == [
         "old generation figure"
@@ -493,9 +495,17 @@ def test_report_rejects_stale_generation_and_failed_validation_output():
     report_state = build_lineage_report_state(state, "main")
     result = report_state.round_results[0]
 
-    assert report_state.code_history == []
+    assert [item.id for item in report_state.code_history] == [stale.id]
     assert result.bioinformatics_evidence_verified is False
     assert result.evidence_execution_ids == []
+    assert [record["id"] for record in result.bioinformatics_finding_records] == [
+        f"finding-{stale.id}",
+        f"finding-{rejected.id}",
+    ]
+    assert all(
+        record["evidence_status"] == "unverified"
+        for record in result.bioinformatics_finding_records
+    )
 
 
 def test_unchanged_cohort_does_not_advance_generation():

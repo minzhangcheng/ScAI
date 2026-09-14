@@ -9,16 +9,6 @@ from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
 
 from backend.services.cohort_identity import active_cohort_identity
-from backend.services.foundation_integrity import (
-    accept_foundation_extensions,
-    classify_foundation_signature,
-    clear_foundation_bindings,
-    commit_foundation_bindings,
-    foundation_is_sealed,
-    foundation_manifest,
-    foundation_write_guard,
-    mark_foundation_drift,
-)
 from backend.services.sample_design import (
     infer_execution_modalities,
     samples_per_group_by_modality,
@@ -154,23 +144,8 @@ async def _execute_supplementary_pass(
     analysis_log,
     warnings,
     envelope,
-    signatures_match,
 ) -> Dict[str, Any]:
-    baseline = await agent.capture_main_object_signature(var_name, cluster_key)
-    if not baseline:
-        return envelope(
-            "failed",
-            "Supplementary pass aborted: could not capture the main-object signature.",
-            ["pre-supplement main-object signature unavailable"],
-        )
-
     transcript: List[str] = []
-    tolerated: Set[str] = set()
-    # The NAMES of what this pass added, not just which signature keys
-    # moved. A quantity computed and then not named is indistinguishable
-    # downstream from one never computed, and is the more expensive of
-    # the two: the next pass re-requests it under a guessed name.
-    added_columns: Set[str] = set()
     final_result: Optional[Dict[str, Any]] = None
 
     abort_envelope: Optional[Dict[str, Any]] = None
@@ -182,7 +157,7 @@ async def _execute_supplementary_pass(
         caller can time-box a whole step without this body knowing that it
         is being timed.
         """
-        nonlocal baseline, final_result, abort_envelope
+        nonlocal final_result, abort_envelope
         prompt = agent._build_supplementary_executor_prompt(
             clean_tasks, context_summary, direction, metadata,
             "\n\n".join(transcript[-3:]),
@@ -206,7 +181,6 @@ async def _execute_supplementary_pass(
 
         unsafe = agent._supplementary_code_is_safe(code, var_name)
         state = agent._current_analysis_state
-        unsafe = unsafe or foundation_write_guard(code, state)
         if unsafe:
             transcript.append(
                 f"[rejected] {unsafe}. Add derived results without re-running "
@@ -283,71 +257,6 @@ async def _execute_supplementary_pass(
             f"[execution_id {record.id}]\n[code]\n{code[:1500]}\n"
             f"[stdout]\n{output[:6000]}\n[error]\n{error or 'none'}")
 
-        post_sig = await agent.capture_main_object_signature(var_name, cluster_key)
-        if foundation_is_sealed(state):
-            foundation_status, foundation_changes = classify_foundation_signature(
-                state, post_sig
-            )
-            if foundation_status == "unavailable":
-                clear_foundation_bindings(state)
-                verification_error = (
-                    "FoundationIntegrityVerificationError: the sealed Stage 1 "
-                    "atlas could not be fingerprinted after the supplementary "
-                    "cell; no foundation drift was recorded."
-                )
-                record.error = f"{record.error or ''}\n{verification_error}".strip()
-                record.execution_status = "failed"
-                record.evidence_eligible = False
-                abort_envelope = envelope(
-                    "failed", verification_error,
-                    ["sealed Stage 1 foundation could not be verified"],
-                )
-                return "abort"
-            if foundation_status == "drift":
-                integrity_error = (
-                    "FoundationIntegrityError: supplementary cell changed the "
-                    "sealed Stage 1 atlas (" + ", ".join(foundation_changes[:12]) + ")."
-                )
-                mark_foundation_drift(state, integrity_error)
-                clear_foundation_bindings(state)
-                record.error = f"{record.error or ''}\n{integrity_error}".strip()
-                record.execution_status = "failed"
-                record.evidence_eligible = False
-                abort_envelope = envelope(
-                    "failed", integrity_error,
-                    ["sealed Stage 1 foundation changed"],
-                )
-                return "abort"
-            if error:
-                clear_foundation_bindings(state)
-            else:
-                accept_foundation_extensions(state, post_sig)
-                commit_foundation_bindings(state, code)
-        ok, changed = signatures_match(baseline, post_sig)
-        if not ok:
-            fatal = agent._supplementary_fatal_signature_changes(changed)
-            if fatal:
-                logger.error(
-                    f"[{getattr(agent, 'session_id', '?')}] supplementary pass "
-                    f"corrupted main object: {fatal}")
-                abort_envelope = envelope(
-                    "failed",
-                    f"Supplementary pass aborted: main object was modified ({fatal}).",
-                    [f"main-object invariant changed: {fatal}"],
-                )
-                return "abort"
-            # Re-baseline on the tolerated state so the next cell is compared
-            # against the object it actually starts from; comparing every cell
-            # to the original signature would let a later in-place edit hide
-            # behind an earlier column addition.
-            added_columns.update(
-                str(c) for c in (
-                    set(post_sig.get("obs_columns") or [])
-                    - set(baseline.get("obs_columns") or [])
-                )
-            )
-            tolerated.update(changed)
-            baseline = post_sig
         return "continue"
 
     for _ in range(max_iterations):
@@ -362,38 +271,6 @@ async def _execute_supplementary_pass(
                 f"[{getattr(agent, 'session_id', '?')}] supplementary step "
                 f"exceeded its {step_timeout}s budget")
             agent._interrupt_kernel_after_timeout()
-            state = agent._current_analysis_state
-            if foundation_is_sealed(state):
-                clear_foundation_bindings(state)
-                try:
-                    post_timeout_sig = await asyncio.wait_for(
-                        agent.capture_main_object_signature(var_name, cluster_key),
-                        timeout=min(float(step_timeout), 30.0),
-                    )
-                except asyncio.TimeoutError:
-                    post_timeout_sig = {}
-                timeout_status, timeout_changes = classify_foundation_signature(
-                    state, post_timeout_sig
-                )
-                if timeout_status == "unavailable":
-                    return envelope(
-                        "failed",
-                        "FoundationIntegrityVerificationError: the sealed Stage 1 "
-                        "atlas could not be fingerprinted after the interrupted "
-                        "cell; no foundation drift was recorded.",
-                        ["sealed Stage 1 foundation could not be verified after timeout"],
-                    )
-                if timeout_status == "drift":
-                    integrity_error = (
-                        "FoundationIntegrityError: interrupted supplementary "
-                        "cell changed the sealed Stage 1 atlas ("
-                        + ", ".join(timeout_changes[:12]) + ")."
-                    )
-                    mark_foundation_drift(state, integrity_error)
-                    return envelope(
-                        "failed", integrity_error,
-                        ["sealed Stage 1 foundation changed after timeout"],
-                    )
             warnings.append(
                 f"A supplementary step exceeded its {step_timeout}s budget and "
                 f"was interrupted.")
@@ -402,9 +279,6 @@ async def _execute_supplementary_pass(
                 "kernel was interrupted. Do not retry that computation as-is: "
                 "use a cheaper approach, reduce its scope, or set done=true and "
                 "report what is already available.")
-            # `baseline` is deliberately NOT re-captured: an interrupted cell
-            # may have left the object half-modified, and the next step's
-            # invariant check is what has to catch that.
             continue
         if signal == "done":
             break
@@ -412,39 +286,19 @@ async def _execute_supplementary_pass(
             return abort_envelope or envelope(
                 "failed", "Supplementary pass aborted.", ["aborted"])
 
-    if tolerated:
-        detail = (
-            "added " + ", ".join(sorted(added_columns)[:40])
-            if added_columns else ", ".join(sorted(tolerated))
-        )
-        warnings.append("Supplementary pass extended the analysis object: " + detail)
-
     if final_result is None:
         # Ending on the iteration limit does not mean nothing was computed.
-        # Name what landed on the object and which cells produced it, so the
-        # assessor can read out a result the pass ran out of budget to report
-        # -- and so the next pass addresses it by its real name.
+        # The Host records the cells that actually ran; it does not keep a
+        # signature gate deciding whether the live object changed.
         orphan_warnings = ["max_iterations reached"]
-        if added_columns:
+        if produced:
             orphan_warnings.append(
-                "Computed but not reported: "
-                + ", ".join(sorted(added_columns)[:40])
-                + ". These exist on the live object; read them out rather than "
-                "recomputing them."
+                "Produced by execution_id(s): "
+                + ", ".join(str(rec.id) for rec in produced[-5:])
             )
-            if produced:
-                orphan_warnings.append(
-                    "Produced by execution_id(s): "
-                    + ", ".join(str(rec.id) for rec in produced[-5:])
-                )
         return envelope(
             "partial",
-            "Supplementary pass reached its iteration limit before reporting a result."
-            + (
-                f" It did leave {len(added_columns)} new column(s) on the analysis "
-                f"object; see warnings for their names."
-                if added_columns else ""
-            ),
+            "Supplementary pass reached its iteration limit before reporting a result.",
             orphan_warnings,
         )
 
@@ -508,10 +362,6 @@ async def run_supplementary_tasks(
     Returns the raw dict for `sanitize_review_result`, plus `code_history` (the
     CodeExecution records produced, for evidence provenance) and `analysis_log`.
     """
-    # Imported here, as the annotation validator does: backend.workflow's
-    # package __init__ pulls in the workflow core, which imports the agents.
-    from ...workflow.annotation_validation import signatures_match
-
     state = getattr(agent, "_current_analysis_state", None)
     registered_data_files = (
         agent._render_registered_data_files(state)
@@ -584,8 +434,7 @@ async def run_supplementary_tasks(
     if not clean_tasks:
         return _envelope("completed", "No supplementary tasks were requested.", [])
 
-    manifest = foundation_manifest(state) if state is not None else None
-    preferred_var_name = str((manifest or {}).get("canonical_name") or "adata")
+    preferred_var_name = "adata"
     introspect = agent.introspect_validation_metadata
     try:
         parameters = inspect.signature(introspect).parameters.values()
@@ -599,7 +448,7 @@ async def run_supplementary_tasks(
         introspect(
             None,
             preferred_var_name=preferred_var_name,
-            require_preferred=manifest is not None,
+            require_preferred=False,
         )
         if supports_preferred else introspect(None)
     )
@@ -607,11 +456,7 @@ async def run_supplementary_tasks(
     cluster_key = metadata.get("cluster_key")
     active_object_selection.update({
         "name": str(var_name or ""),
-        "selection_source": (
-            "foundation"
-            if manifest is not None and var_name == preferred_var_name
-            else str(metadata.get("selection_source") or "unresolved")
-        ),
+        "selection_source": str(metadata.get("selection_source") or "unresolved"),
         "canonical_verified": False,
         "candidate_names": [
             str(name)[:100] for name in (metadata.get("candidate_names") or [])[:20]
@@ -625,24 +470,9 @@ async def run_supplementary_tasks(
             "No unambiguous active analysis object is available; supplementary tasks cannot run.",
             [reason],
         )
-    if manifest is not None:
-        current_signature = await agent.capture_main_object_signature(var_name, cluster_key)
-        foundation_status, foundation_changes = classify_foundation_signature(
-            state, current_signature
-        )
-        if foundation_status != "verified":
-            detail = (
-                "sealed canonical object fingerprint is unavailable"
-                if foundation_status == "unavailable"
-                else "sealed canonical object drifted: " + ", ".join(foundation_changes[:12])
-            )
-            active_object_selection["selection_error"] = detail
-            return _envelope(
-                "failed",
-                "The sealed canonical analysis object could not be verified; supplementary execution was not started.",
-                [detail],
-            )
-        active_object_selection["canonical_verified"] = True
+    # Foundation/signature verification is retired.  A non-`current` plan
+    # source is resolved and bound by the checkpoint selection service before
+    # this pass; the Host never vetoes scientific mutation here.
     round_number = int(getattr(agent._current_analysis_state, "current_round", 0) or 0)
 
     try:
@@ -663,7 +493,6 @@ async def run_supplementary_tasks(
                 analysis_log=analysis_log,
                 warnings=warnings,
                 envelope=_envelope,
-                signatures_match=signatures_match,
             ),
             timeout=total_timeout,
         )

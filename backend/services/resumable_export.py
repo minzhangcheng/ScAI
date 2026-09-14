@@ -175,18 +175,109 @@ def _capture_descriptor(session_id: str, state) -> dict:
     on the live path, the execution lock are held across the call, so nothing
     can save or start a kernel while it reads.
     """
+    from backend.agents.bioinformatics.executor_checkpoint import (
+        executor_checkpoint_prefix,
+        find_executor_checkpoint_paths,
+    )
     from backend.config import get_session_states
+    from backend.services.adata_checkpoints.layout import (
+        resolve_session_relative,
+        verify_blob,
+    )
     from backend.utils.runtime_apply import state_runtime_coherence
 
     manifest = verify_committed_generation(session_id)
     pairing = _pairing(session_id, state)
     if manifest.get("pairing") != pairing or state_runtime_coherence(state) != "current":
         raise _refuse("generation_mismatch", "The committed runtime does not match the current state and checkpoint.")
+    states_dir = get_session_states(session_id)
     notebooks = {}
-    for path in get_session_states(session_id).glob("*.ipynb"):
+    for path in states_dir.glob("*.ipynb"):
         with path.open("rb") as stream:
             notebooks[path.name] = _digest(stream)
-    return {"pairing": pairing, "manifest": manifest, "notebooks": notebooks}
+    executor_checkpoints = {}
+    identity_fields = (
+        "identity_version", "run_kind", "round_number", "planning_stage",
+        "current_lineage_id", "origin_lineage_id", "reconcile_from_lineage_id",
+        "active_plan_id", "revision_of_plan_id", "run_scope_id",
+        "settlement_scope_id", "source_scope_id", "preparation_id",
+        "selection_signature", "application_token_digest",
+        "supplementary_request_id", "figure_followup", "_scope_digest",
+    )
+    for path in find_executor_checkpoint_paths(states_dir, session_id=session_id):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise _refuse(
+                "generation_unverified",
+                "An executor checkpoint is unreadable.",
+            ) from exc
+        if str(payload.get("session_id") or session_id) != session_id:
+            raise _refuse(
+                "generation_mismatch",
+                "An executor checkpoint belongs to another session.",
+            )
+        scope_digest = str(payload.get("_scope_digest") or "")
+        if scope_digest:
+            run_kind = str(payload.get("run_kind") or "")
+            expected_name = (
+                f"{session_id}_"
+                + executor_checkpoint_prefix(
+                    run_kind=run_kind,
+                    scope_digest=scope_digest,
+                    figure_followup=bool(payload.get("figure_followup")),
+                )
+                + "_checkpoint.json"
+            )
+            if expected_name != path.name:
+                raise _refuse(
+                    "generation_mismatch",
+                    "An executor checkpoint filename does not match its identity.",
+                )
+        with path.open("rb") as stream:
+            digest = _digest(stream)
+        executor_checkpoints[path.name] = {
+            "sha256": digest,
+            "size": int(path.stat().st_size),
+            "identity": {
+                key: payload.get(key) for key in identity_fields
+            },
+        }
+
+    checkpoint_blobs = {}
+    for record in getattr(state, "adata_checkpoints", None) or []:
+        if str(getattr(record, "status", "")) != "available":
+            continue
+        relative = str(getattr(record, "blob_relative_path", "") or "")
+        digest = str(getattr(record, "blob_sha256", "") or "")
+        if not relative or not digest:
+            raise _refuse(
+                "generation_mismatch",
+                "An available AnnData checkpoint has no blob identity.",
+            )
+        path = resolve_session_relative(session_id, relative)
+        try:
+            identity = verify_blob(
+                path,
+                expected_sha256=digest,
+                expected_size=getattr(record, "size_bytes", None),
+            )
+        except Exception as exc:
+            raise _refuse(
+                "generation_unverified",
+                "An AnnData checkpoint blob failed verification.",
+            ) from exc
+        checkpoint_blobs[relative] = {
+            "sha256": identity.sha256,
+            "size": int(identity.size),
+        }
+    return {
+        "pairing": pairing,
+        "manifest": manifest,
+        "notebooks": notebooks,
+        "executor_checkpoints": executor_checkpoints,
+        "checkpoint_blobs": checkpoint_blobs,
+    }
 
 
 async def flush_for_resumable_export(session_id: str, state) -> dict:
@@ -222,10 +313,54 @@ def verify_captured_archive(tar_path: str, session_id: str, descriptor: dict) ->
             state = json.load(member(f"{session_id}/sessions/{session_id}.json"))
             if state.get("state_version") != descriptor["pairing"]["state_version"]:
                 raise ValueError("captured state version changed")
+            for record in state.get("adata_checkpoints") or []:
+                if not isinstance(record, dict):
+                    continue
+                if str(record.get("status") or "") != "available":
+                    continue
+                relative = str(record.get("blob_relative_path") or "")
+                digest = str(record.get("blob_sha256") or "")
+                if not relative or not digest:
+                    raise ValueError("available checkpoint record has no blob identity")
+                with member(f"{session_id}/{relative}") as stream:
+                    if _digest(stream) != digest:
+                        raise ValueError("captured checkpoint blob digest changed")
             for name, digest in descriptor["notebooks"].items():
                 with member(prefix + name) as stream:
                     if _digest(stream) != digest:
                         raise ValueError("captured notebook changed")
+            declared_executors = descriptor.get("executor_checkpoints") or {}
+            from backend.agents.bioinformatics.executor_checkpoint import (
+                is_executor_checkpoint_name,
+            )
+
+            archived_executors = {
+                Path(name).name
+                for name in archive.getnames()
+                if name.startswith(prefix)
+                and is_executor_checkpoint_name(
+                    Path(name).name, session_id=session_id,
+                )
+            }
+            if archived_executors != set(declared_executors):
+                raise ValueError("captured executor checkpoint set changed")
+            for name, entry in declared_executors.items():
+                with member(prefix + name) as stream:
+                    if _digest(stream) != entry["sha256"]:
+                        raise ValueError("captured executor checkpoint changed")
+            declared_blobs = descriptor.get("checkpoint_blobs") or {}
+            archived_blobs = {
+                name[len(f"{session_id}/"):]
+                for name in archive.getnames()
+                if name.startswith(f"{session_id}/adata-checkpoints/blobs/")
+                and not name.endswith("/")
+            }
+            if archived_blobs != set(declared_blobs):
+                raise ValueError("captured AnnData checkpoint blob set changed")
+            for relative, entry in declared_blobs.items():
+                with member(f"{session_id}/{relative}") as stream:
+                    if _digest(stream) != entry["sha256"]:
+                        raise ValueError("captured checkpoint blob changed")
             checkpoint_name = prefix + "checkpoints.sqlite"
             checkpoint = None
             if checkpoint_name in archive.getnames():

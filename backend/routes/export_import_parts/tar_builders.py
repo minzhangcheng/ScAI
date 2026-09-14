@@ -258,7 +258,39 @@ def _add_portable_state_json(tf, source: Path, arcname: str) -> None:
     _add_json_bytes(tf, arcname, strip_analysis_state_secrets(payload))
 
 
-def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
+def _add_adata_checkpoint_blobs_to_tar(
+    tf, session_id: str, descriptor: dict | None = None,
+) -> None:
+    """Add Host-owned immutable checkpoint blobs to a resumable archive.
+
+    Results-only export callers must not call this helper; their import path
+    marks omitted blob records unavailable with reason ``not_materialized``.
+    """
+    if descriptor is None:
+        blobs_dir = get_session_dir(session_id) / "adata-checkpoints" / "blobs"
+        if blobs_dir.is_dir():
+            _add_tree_to_tar(
+                tf,
+                blobs_dir,
+                f"{session_id}/adata-checkpoints/blobs",
+            )
+        return
+    declared = dict(descriptor.get("checkpoint_blobs") or {})
+    for relative in sorted(declared):
+        source = get_session_dir(session_id) / relative
+        added = _safe_add_file(tf, source, f"{session_id}/{relative}")
+        if not added:
+            raise OSError(
+                f"failed to add declared AnnData checkpoint blob {relative}"
+            )
+
+
+def _add_states_to_tar(
+    tf,
+    session_id: str,
+    include_runtime: bool = False,
+    descriptor: dict | None = None,
+):
     """Add files under sessions/<id>/states/ to the tar.
 
     Skips the live sandbox pickle and LangGraph checkpoint unless
@@ -275,11 +307,30 @@ def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
     it — :func:`backend.utils.secret_redaction.open_secret` degrades a value it
     cannot decrypt to empty instead of failing the load.)
     """
+    declared_executors = set(
+        ((descriptor or {}).get("executor_checkpoints") or {}).keys()
+    )
+
     def _add(state_file: Path):
         # The dump, its manifest and that manifest's signature are one
         # generation; a portable archive drops all three together.
         if not include_runtime and is_runtime_generation_name(state_file.name):
             return
+        from ...agents.bioinformatics.executor_checkpoint import (
+            is_executor_checkpoint_name,
+        )
+
+        if is_executor_checkpoint_name(
+            state_file.name, session_id=session_id,
+        ):
+            if (
+                not include_runtime
+                or (
+                    descriptor is not None
+                    and state_file.name not in declared_executors
+                )
+            ):
+                return
         # A live SQLite database is never archived by path. Runtime exports
         # add exactly one verified standalone backup below, and portable
         # exports omit the database plus its WAL/SHM companions entirely.

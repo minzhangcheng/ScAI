@@ -310,6 +310,16 @@ def get_session_states(session_id: str) -> Path:
     return get_session_dir(session_id) / "states"
 
 
+def get_session_adata_checkpoints_dir(session_id: str) -> Path:
+    """Host-owned AnnData checkpoint root for one session.
+
+    The directory is intentionally outside the Agent-visible workspace.  The
+    kernel may serialize candidates into its private temp root; the Host is the
+    only component allowed to publish immutable blobs below this path.
+    """
+    return get_session_dir(session_id) / "adata-checkpoints"
+
+
 def get_session_uploads(session_id: str) -> Path:
     """Uploads directory for a session."""
     return get_session_dir(session_id) / "uploads"
@@ -575,6 +585,11 @@ class SystemConfig(BaseModel):
         default=None, ge=1, exclude=True
     )
     runtime_max_rss_bytes: Optional[int] = Field(
+        default=None, ge=1, exclude=True
+    )
+    # Optional Host-side cap for one AnnData checkpoint candidate copy. None
+    # keeps the existing session/container free-space checks as the bound.
+    adata_checkpoint_candidate_byte_budget: Optional[int] = Field(
         default=None, ge=1, exclude=True
     )
     # Bioinformatics agent settings

@@ -351,7 +351,7 @@ def _upsert_round_result(
     branch_id: Optional[str],
     branch_label: Optional[str],
     restored_from_snapshot_id: Optional[str],
-) -> None:
+) -> RoundResult:
     # Keep the caller's object synchronized with the canonical record. The
     # normalizer returns a deep copy, but synthesis/integration continue to use
     # their local ``RoundResult`` when building the following websocket payload.
@@ -419,6 +419,7 @@ def _upsert_round_result(
     else:
         normalized[target_index] = result
     results[:] = normalized
+    return result
 
 
 def _should_force_next_round(analysis_state: AnalysisState) -> bool:

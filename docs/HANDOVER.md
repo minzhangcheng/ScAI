@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.56.15 · **Last updated**: 2026-09-13
+**Version**: 0.57.1 · **Last updated**: 2026-09-14
 
 ## 1. Runtime Architecture
 
@@ -344,6 +344,20 @@ six minutes per occurrence rather than blocking.
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.57.x — (2026-09-14 onward)**
+
+- `0.57.1` — Replaces the expanding Stage 1 `adata` integrity gate with
+  immutable, versioned AnnData checkpoints and explicit per-plan source lineage.
+  Round and supplementary settlements record checkpoint attempts independently
+  from scientific outcomes; PI and Bioinformatics context can inspect available
+  baseline and round sources without restarting the live kernel. Execution,
+  report, export/import, snapshot, and supplementary-request paths now preserve
+  source/cohort lineage and durable checkpoint state across reloads and branches.
+  Foundation-only blockers and stale persistence are sanitized without turning
+  scientific observations into host acceptance gates. Focused checkpoint and
+  regression checks passed; no image build, registry push, deployment, or
+  historical-session mutation was performed.
 
 **0.56.x — (2026-09-08 onward)**
 

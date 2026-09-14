@@ -94,6 +94,14 @@ from .schema_parts.session import (  # noqa: F401
     DirectionSelectionDecision,
     tolerant_from_llm_dict,
 )
+from .schema_parts.adata_checkpoints import (  # noqa: F401
+    AdataCheckpointRecord,
+    AdataLiveBindingRecord,
+    AdataSourcePreparation,
+    AdataSourceSelection,
+    canonical_id_set_digest,
+    normalize_id_set,
+)
 from .schema_parts.outputs import (  # noqa: F401
     ExplorationReport,
     PathologyCoverageRecord,
@@ -305,6 +313,21 @@ class AnalysisState(BaseModel):
     # Round results
     round_results: List[RoundResult] = Field(default_factory=list)
     current_round_cache: Optional[AgentRoundCache] = None
+
+    # AnnData checkpoint lineage catalog. These fields are persisted in
+    # session.json and graph checkpoints but are intentionally excluded from
+    # the default public session payload (_API_KEY_MAP); in particular
+    # blob_relative_path is Host-internal.
+    adata_checkpoints: List[AdataCheckpointRecord] = Field(default_factory=list)
+    active_adata_checkpoint_id: Optional[str] = None
+    active_adata_lineage_id: Optional[str] = None
+    adata_checkpoint_sequence: int = 0
+    adata_source_preparations: List[AdataSourcePreparation] = Field(default_factory=list)
+    adata_live_bindings: List[AdataLiveBindingRecord] = Field(default_factory=list)
+    # Host-internal accumulator for not-yet-settled executor attempt IDs.
+    bioinformatics_settlement_attempt_ids: Dict[str, List[str]] = Field(
+        default_factory=dict
+    )
 
     # Data-driven mechanism programs captured across rounds
     data_driven_mechanism_programs: List[DataDrivenMechanismProgram] = Field(default_factory=list)

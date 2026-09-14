@@ -700,11 +700,6 @@ def build_lineage_report_state(
             ) and execution_is_current_receipt(
                 execution,
                 lineage_id=execution_lineage,
-                analysis_generation=active_analysis_generation,
-                cohort_digest=(
-                    active_cohort_digest if active_cohort_generation else None
-                ),
-                cohort_generation=(active_cohort_generation or None),
             ):
                 eligible_execution_by_id[execution_id] = execution
             if (
@@ -778,8 +773,12 @@ def build_lineage_report_state(
             )
             if (source_id := _linked_artifact_execution_id(artifact)) is not None
         }
+        # Historical report projection keeps every receipt that resolves to a
+        # retained finding, artifact or method-decision source on an authorized
+        # lineage.  It does not require the receipt to match today's active
+        # generation/cohort.
         report_execution_ids = (
-            current_execution_ids | retained_artifact_execution_ids
+            set(eligible_execution_by_id) | retained_artifact_execution_ids
         )
         report_state.code_history = [
             execution for execution in report_state.code_history
@@ -787,7 +786,7 @@ def build_lineage_report_state(
         ]
         report_state.method_decisions = [
             decision for decision in report_state.method_decisions
-            if decision.execution_id in current_execution_ids
+            if decision.execution_id in eligible_execution_by_id
         ]
         report_state.analysis_log = [
             step for step in report_state.analysis_log
@@ -802,7 +801,7 @@ def build_lineage_report_state(
                     step.step_type == "report_findings"
                     and bool(
                         set(getattr(step, "evidence_execution_ids", None) or [])
-                        & current_execution_ids
+                        & report_execution_ids
                     )
                 )
             )
@@ -828,30 +827,17 @@ def build_lineage_report_state(
                             record.get("evidence_execution_ids") or []
                         ) if str(value)
                     }
-                    if (
-                        record_lineage in allowed_record_lineages
-                        and (
-                            not active_cohort_generation
-                            or (
-                                str(record.get("cohort_digest") or "")
-                                == active_cohort_digest
-                                and int(record.get("cohort_generation", 0) or 0)
-                                == active_cohort_generation
-                            )
-                        )
-                    ):
+                    if record_lineage in allowed_record_lineages:
                         retained = dict(record)
                         record_plan_id = str(record.get("plan_id") or "")
                         valid_cited = sorted(
                             execution_id
-                            for execution_id in cited & current_execution_ids
-                            if str(
+                            for execution_id in cited & report_execution_ids
+                            if execution_id in eligible_execution_by_id
+                            and str(
                                 eligible_execution_by_id[execution_id].lineage_id
                                 or "main"
                             ) == record_lineage
-                            and int(record.get(
-                                "analysis_generation", active_analysis_generation
-                            ) or 0) == active_analysis_generation
                             and int(getattr(
                                 eligible_execution_by_id[execution_id],
                                 "round_number", 0,
@@ -862,6 +848,39 @@ def build_lineage_report_state(
                                     eligible_execution_by_id[execution_id],
                                     "plan_id", "",
                                 ) or "") == record_plan_id
+                            )
+                            and (
+                                not record.get("analysis_generation")
+                                or int(record.get("analysis_generation") or 0)
+                                == int(
+                                    getattr(
+                                        eligible_execution_by_id[execution_id],
+                                        "analysis_generation",
+                                        0,
+                                    ) or 0
+                                )
+                            )
+                            and (
+                                not record.get("cohort_digest")
+                                or str(record.get("cohort_digest") or "")
+                                == str(
+                                    getattr(
+                                        eligible_execution_by_id[execution_id],
+                                        "cohort_digest",
+                                        "",
+                                    ) or ""
+                                )
+                            )
+                            and (
+                                not record.get("cohort_generation")
+                                or int(record.get("cohort_generation") or 0)
+                                == int(
+                                    getattr(
+                                        eligible_execution_by_id[execution_id],
+                                        "cohort_generation",
+                                        0,
+                                    ) or 0
+                                )
                             )
                         )
                         retained["evidence_execution_ids"] = valid_cited
@@ -895,8 +914,8 @@ def build_lineage_report_state(
                         round_result.evidence_notes
                     ) + [
                         f"{excluded_count} bioinformatics finding(s) belonged to a "
-                        "different lineage or cohort and remain only in source-session "
-                        "audit history."
+                        "different lineage and remain only in source-session audit "
+                        "history."
                     ]
                 unlinked_count = sum(
                     1 for record in retained_records
@@ -907,9 +926,9 @@ def build_lineage_report_state(
                     round_result.evidence_notes = list(
                         round_result.evidence_notes
                     ) + [
-                        f"{unlinked_count} current-cohort bioinformatics finding(s) "
-                        "are not linked to a successful execution receipt for the "
-                        "same round and plan; they remain available for PI review."
+                        f"{unlinked_count} bioinformatics finding(s) are not linked "
+                        "to a successful execution receipt for the same round and "
+                        "plan; they remain available for PI review."
                     ]
             else:
                 if round_result.bioinformatics_findings:

@@ -161,10 +161,13 @@ async def handle_register_publication_table(context, tool_call) -> ToolAction:
     active_lineage = getattr(state, "restore_branch_id", None) or "main"
     cohort = active_cohort_identity(state)
     source_id = str(args.get("evidence_execution_id") or "").strip()
-    source = next((
-        item for item in context.agent.code_history
-        if str(getattr(item, "id", "") or "") == source_id
-    ), None)
+    from .receipt_lookup import artifact_provenance, lookup_execution_receipt
+
+    source = lookup_execution_receipt(
+        state,
+        source_id,
+        current_receipts=getattr(context.agent, "code_history", None) or [],
+    )
     source_error = current_execution_identity_error(state, source)
     source_current = source_error is None
     approved_steps = {
@@ -178,6 +181,24 @@ async def handle_register_publication_table(context, tool_call) -> ToolAction:
     })
     if not source_current:
         candidate_steps = []
+    _provenance, _provenance_error = artifact_provenance(
+        state,
+        source_id or None,
+        fallback_lineage=active_lineage,
+        fallback_round=int(state.current_round or 0),
+        fallback_plan_id=str(getattr(state.current_plan, "id", "") or "") or None,
+        current_receipts=getattr(context.agent, "code_history", None) or [],
+    )
+    if _provenance_error:
+        context.messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": (
+                "register_publication_table rejected: "
+                f"{_provenance_error}."
+            ),
+        })
+        return ToolAction.CONTINUE
     table = PublicationTable(
         name=str(args.get("name") or relative.stem)[:300],
         description=str(args.get("description") or "")[:4000],
@@ -188,8 +209,8 @@ async def handle_register_publication_table(context, tool_call) -> ToolAction:
         total_rows=total_rows,
         interpretation=str(args.get("interpretation") or "")[:4000] or None,
         review_status=FigureReviewStatus.APPROVED,
-        lineage_id=active_lineage,
-        plan_id=str(getattr(state.current_plan, "id", "") or "") or None,
+        lineage_id=_provenance["lineage_id"],
+        plan_id=_provenance["plan_id"],
         plan_step_ids=candidate_steps,
         plan_binding_status="candidate" if candidate_steps else "unverified",
         plan_binding_reason=(
@@ -201,13 +222,13 @@ async def handle_register_publication_table(context, tool_call) -> ToolAction:
                 "No candidate current-plan step was supplied."
             )
         ),
-        round_number=int(state.current_round or 0),
-        analysis_generation=int(
-            (state.sandbox_state or {}).get("analysis_generation", 0) or 0
+        round_number=_provenance["round_number"],
+        analysis_generation=_provenance["analysis_generation"],
+        cohort_generation=_provenance["cohort_generation"],
+        cohort_digest=_provenance["cohort_digest"],
+        source_execution_id=(
+            source.id if source is not None else None
         ),
-        cohort_generation=int(cohort.get("cohort_generation", 0) or 0),
-        cohort_digest=str(cohort.get("cohort_digest") or "") or None,
-        source_execution_id=source.id if source_current else None,
     )
     state.publication_tables.append(table)
     context.messages.append({

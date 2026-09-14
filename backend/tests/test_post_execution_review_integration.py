@@ -340,13 +340,17 @@ async def test_real_agents_complete_the_review_and_merge_back():
 
 
 @pytest.mark.asyncio
-async def test_denylisted_code_is_rejected_without_touching_the_kernel():
-    """A supplement that tries to re-cluster must be refused, not executed."""
+async def test_scientific_preprocessing_is_not_vetoed_by_supplementary_execution():
+    """A supplement may re-cluster when the approved task calls for it.
+
+    The Host keeps objective file-write/resource boundaries only; it does not
+    decide that a scientific mutation makes the execution fail.
+    """
     state = _state_and_plan()
     pi = _pi_agent([_REVIEW_JSON, _ASSESS_JSON])
     bio = _bio_agent([
         json.dumps({"code": "sc.tl.leiden(adata, resolution=2.0)"}),
-        json.dumps({"done": True, "result": {"summary": "Could not complete.", "findings": []}}),
+        json.dumps({"done": True, "result": {"summary": "Re-clustering completed.", "findings": []}}),
     ])
     bio._current_analysis_state = state
     harness = _Harness(pi, bio)
@@ -355,11 +359,10 @@ async def test_denylisted_code_is_rejected_without_touching_the_kernel():
     audit_summary = harness._audit_round_plan_execution(state, result)
     meta, merge = await harness._run_post_execution_review(state, result, audit_summary, "full")
 
-    assert bio.executed_code == [], "re-clustering must never reach the sandbox"
+    assert bio.executed_code == ["sc.tl.leiden(adata, resolution=2.0)"]
     assert meta["review_status"] in ("completed", "partial", "failed")
     assert merge["findings"] == []
-    # The rejection is fed back to the model so it can correct itself.
-    assert any("rejected" in p for p in bio.prompts_seen[1:])
+    assert not any("rejected" in p for p in bio.prompts_seen)
 
 
 @pytest.mark.parametrize("code", [

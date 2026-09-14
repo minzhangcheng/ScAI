@@ -141,9 +141,17 @@ async def resume_bioinformatics(session_id: str, request: Request):
     user_id = getattr(request.state, "user_id", "")
     state = await bindings.require_session_ownership(session_id=session_id, user_id=user_id)
 
-    # Check for checkpoint
-    checkpoint_path = get_session_states(session_id) / f"{session_id}_bioinfo_checkpoint.json"
-    if not checkpoint_path.exists():
+    # Check for any recognized legacy/scoped executor transcript.  Scoped
+    # runs deliberately coexist, so this endpoint only reports the newest
+    # available position rather than assuming the legacy filename.
+    from backend.agents.bioinformatics.executor_checkpoint import (
+        latest_executor_checkpoint_path,
+    )
+
+    checkpoint_path = latest_executor_checkpoint_path(
+        get_session_states(session_id), session_id=session_id,
+    )
+    if checkpoint_path is None:
         raise HTTPException(status_code=404, detail="No bioinformatics checkpoint found")
 
     # Read checkpoint info

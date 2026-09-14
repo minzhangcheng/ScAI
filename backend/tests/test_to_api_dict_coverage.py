@@ -10,6 +10,17 @@ from backend.models.schemas import AnalysisState
 
 
 _EXCLUDED_FIELDS = {
+    # AnnData checkpoint catalog and source-preparation bookkeeping are
+    # Host-internal. The approved plan carries only the opaque source
+    # selection; paths, anchors, application tokens and the pending
+    # settlement accumulator must never enter the public session payload.
+    "adata_checkpoints",
+    "active_adata_checkpoint_id",
+    "active_adata_lineage_id",
+    "adata_checkpoint_sequence",
+    "adata_source_preparations",
+    "adata_live_bindings",
+    "bioinformatics_settlement_attempt_ids",
     # Host-internal bound on the execution-driven replan cycle. The client
     # learns the outcome from the round's status and its gate observations;
     # the raw attempt counter is bookkeeping.

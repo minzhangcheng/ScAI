@@ -91,6 +91,11 @@ class RoundResult(BaseModel):
     lineage_id: str = "main"
     branch_id: Optional[str] = None
     branch_label: Optional[str] = None
+    # Host-stamped source/output lineage for the settled round. A round with
+    # multiple sources retains every preparation id; the final plan's source
+    # must not overwrite earlier execution provenance.
+    adata_source_preparation_ids: List[str] = Field(default_factory=list)
+    canonical_adata_output_checkpoint_id: Optional[str] = None
     source_snapshot_id: Optional[str] = None
     restored_from_snapshot_id: Optional[str] = None
     # The execution/finding records in an inherited branch result keep the

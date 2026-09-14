@@ -163,6 +163,41 @@ async def _persist_recovery_marker(session_id: str, state: AnalysisState) -> Non
         )
 
 
+def _reconcile_checkpoint_continuation_state(state: AnalysisState) -> bool:
+    """Lightweight no-kernel catalog/live-state reconciliation.
+
+    Missing/corrupt blobs are truthfully unavailable.  Durable/registered live
+    state is downgraded to pending until the first kernel start verifies the
+    committed runtime token, scope, signature, aliases, and object identity.
+    """
+    try:
+        from backend.services.adata_checkpoints import (
+            mark_runtime_reconciliation_pending,
+            reconcile_catalog_availability,
+        )
+        from backend.utils.runtime_apply import _live_pkl
+
+        runtime_available = bool(_live_pkl(state.id).exists())
+        changed = reconcile_catalog_availability(
+            state,
+            verify_digests=False,
+            runtime_available=runtime_available,
+        )
+        changed = (
+            mark_runtime_reconciliation_pending(
+                state, runtime_available=runtime_available,
+            )
+            or changed
+        )
+        return changed
+    except Exception:
+        logger.exception(
+            "Session %s: checkpoint continuation reconciliation failed",
+            getattr(state, "id", "?"),
+        )
+        return False
+
+
 def assert_recovery_clear(state: AnalysisState | None = None, *, session_id: str | None = None) -> None:
     """Raise if snapshot recovery left mutations blocked.
 
@@ -640,7 +675,8 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
         await _recover_publication_transactions_on_load(session_id, cached)
         from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
-        if sanitize_legacy_state(cached, workflow_active=False):
+        _sanitized = sanitize_legacy_state(cached, workflow_active=False)
+        if _sanitized:
             await _persist_recovery_marker(session_id, cached)
             # The initial lifecycle check preceded the cache read and any
             # normalization write. Deletion may have committed in between;
@@ -705,7 +741,9 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
     # Clear the blockers the retired snapshot subsystem left behind. Spec 4.6.
     from backend.services.legacy_state_sanitizer import sanitize_legacy_state
 
-    if sanitize_legacy_state(state, workflow_active=False):
+    _sanitized = sanitize_legacy_state(state, workflow_active=False)
+    _continuation_changed = _reconcile_checkpoint_continuation_state(state)
+    if _sanitized or _continuation_changed:
         await _persist_recovery_marker(session_id, state)
 
     # Install under the same lifecycle lock deletion uses.  Re-check after all

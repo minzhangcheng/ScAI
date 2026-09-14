@@ -231,6 +231,48 @@ def _finalize_imported_state(
     clears them at all — leaving ``/run`` at 409 and ``/resume`` refused, pointing
     the user at snapshot actions whose objects this archive never carried.
     """
+    try:
+        from backend.services.adata_checkpoints import (
+            mark_runtime_reconciliation_pending,
+            reconcile_catalog_availability,
+        )
+
+        reconcile_catalog_availability(
+            state,
+            verify_digests=True,
+            runtime_available=bool(imported_runtime),
+        )
+        mark_runtime_reconciliation_pending(
+            state, runtime_available=bool(imported_runtime),
+        )
+        if not imported_runtime:
+            plan = getattr(state, "current_plan", None)
+            if plan is not None:
+                plan.bioinformatics_run_scope_id = None
+                plan.bioinformatics_settlement_scope_id = None
+            state.bioinformatics_settlement_attempt_ids = {}
+            sandbox_state = dict(getattr(state, "sandbox_state", None) or {})
+            sandbox_state.pop("resolved_adata_source_context_v1", None)
+            sandbox_state.pop("source_preparation_ack_v1", None)
+            request_map = dict(
+                sandbox_state.get("supplementary_requests_v1") or {}
+            )
+            for request_id, raw in request_map.items():
+                if not isinstance(raw, dict) or raw.get("status") not in {
+                    "queued", "planning", "running", "interrupted",
+                }:
+                    continue
+                record = dict(raw)
+                record["status"] = "failed"
+                record["error_summary"] = (
+                    "Request was imported without its runtime continuation."
+                )[:500]
+                request_map[request_id] = record
+            if request_map:
+                sandbox_state["supplementary_requests_v1"] = request_map
+            state.sandbox_state = sandbox_state
+    except Exception:
+        logger.exception("AnnData checkpoint catalog reconciliation failed")
     _mark_runtime_availability_after_import(state, imported_pkl=imported_runtime)
     # Nothing can own a session that is being created right now.
     sanitize_legacy_state(state, workflow_active=False)

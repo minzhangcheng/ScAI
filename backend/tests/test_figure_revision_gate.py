@@ -868,7 +868,7 @@ def _approved_prior_figure(tmp_path: Path) -> tuple[PublicationFigure, bytes]:
 
 @pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
 @pytest.mark.asyncio
-async def test_dispatched_figure_transport_failure_invalidates_expression_artifacts(
+async def test_dispatched_figure_transport_failure_warns_expression_artifacts(
     tmp_path, failure_type
 ):
     prior, _old_bytes = _approved_prior_figure(tmp_path)
@@ -891,7 +891,8 @@ async def test_dispatched_figure_transport_failure_invalidates_expression_artifa
         )
 
     assert sandbox.executions == 1
-    assert prior.is_current is False
+    assert prior.is_current is True
+    assert "representation_change_warning" in prior.expression_provenance
     assert state.sandbox_state["analysis_generation"] == 1
     assert not (tmp_path / "figures" / ".attempts").exists()
 

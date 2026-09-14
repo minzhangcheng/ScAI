@@ -176,10 +176,53 @@ _CELL_TYPE_ASSIGN_RE = re.compile(
 )
 
 
+def format_adata_source_context(source_context: Optional[Dict[str, Any]]) -> str:
+    """Render the Host-resolved source block without paths or tokens."""
+    if not isinstance(source_context, dict) or not source_context:
+        return ""
+    mode = str(source_context.get("mode") or "current")
+    if mode == "current":
+        return (
+            "\n\nApproved AnnData source: current live state (no reload was "
+            "performed by the Host)."
+        )
+    binding_name = str(source_context.get("binding_name") or "") or "(canonical adata)"
+    binding_id = str(source_context.get("binding_id") or "") or "canonical"
+    status = str(source_context.get("binding_identity_status") or "unknown")
+    lineage = str(source_context.get("adata_lineage_id") or "")[:24]
+    extra = ""
+    if mode == "checkpoint_branch":
+        extra = (
+            "\n`adata` was rebound to the selected checkpoint; previously "
+            "retained variables may belong to another AnnData lineage and must "
+            "not be reused without checking compatibility."
+        )
+    elif mode == "checkpoint_copy":
+        extra = (
+            "\nThe live `adata` and unrelated kernel variables were retained. "
+            "Operate on the resolved working binding unless the plan says "
+            "otherwise; the round backup captures canonical `adata`."
+        )
+    elif mode in {"live_binding", "promote_live"}:
+        extra = (
+            "\nThe existing modified object was retained without reloading its "
+            "original checkpoint."
+        )
+    return (
+        f"\n\nApproved AnnData source: {mode}.\n"
+        f"Resolved binding: {binding_name} ({binding_id}); status={status}; "
+        f"lineage={lineage or 'unknown'}.\n"
+        "This records the approved input binding, not proof that every cell "
+        "reads it; cite successful execution IDs for results."
+        + extra
+    )
+
+
 def build_approved_plan_context(
     plan: Any,
     *,
     resumed_from_plan_id: Optional[str] = None,
+    source_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build the bounded plan message used by the autonomous executor.
 
@@ -248,13 +291,14 @@ Steps:
 Key Decision Points: {decisions}
 
 {transition} For key decision points, use consult_pi.
-If results significantly deviate from plan expectations, report via consult_pi immediately."""
+If results significantly deviate from plan expectations, report via consult_pi immediately.""" + format_adata_source_context(source_context)
 
 
 def inject_revised_plan_context(
     messages: List[Dict[str, Any]],
     plan: Any,
     checkpoint_plan_id: Optional[str],
+    source_context: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Append an approved plan only when it differs from the checkpoint plan.
 
@@ -270,6 +314,7 @@ def inject_revised_plan_context(
         "content": build_approved_plan_context(
             plan,
             resumed_from_plan_id=checkpoint_plan_id or "legacy-checkpoint",
+            source_context=source_context,
         ),
     })
     return True
@@ -310,6 +355,7 @@ def successful_evidence_executions(
     cohort_digest: Optional[str] = None,
     cohort_generation: Optional[int] = None,
     analysis_generation: Optional[int] = None,
+    adata_source_preparation_id: Optional[str] = None,
     require_plan_binding: bool = False,
 ) -> List[CodeExecution]:
     """Filter code history to successful, non-contradictory executions."""
@@ -340,6 +386,11 @@ def successful_evidence_executions(
             analysis_generation is None
             or int(getattr(execution, "analysis_generation", 0) or 0)
             == int(analysis_generation)
+        )
+        and (
+            adata_source_preparation_id is None
+            or str(getattr(execution, "adata_source_preparation_id", "") or "")
+            == str(adata_source_preparation_id)
         )
         and (
             not require_plan_binding
@@ -377,21 +428,20 @@ def current_execution_identity_error(state: Any, execution: Any) -> Optional[str
     active_lineage = getattr(state, "restore_branch_id", None) or "main"
     if (getattr(execution, "lineage_id", None) or "main") != active_lineage:
         return "execution_id belongs to another lineage"
-    sandbox_state = getattr(state, "sandbox_state", None) or {}
-    active_analysis_generation = int(
-        sandbox_state.get("analysis_generation", 0) or 0
+    # Generation/cohort values are provenance observations.  A legal mutation
+    # or rebinding of the approved source advances them and must not make an
+    # earlier execution unreferenceable.  The approved plan's preparation id,
+    # when present, is the explicit source scope.
+    active_preparation_id = str(
+        getattr(getattr(state, "current_plan", None), "adata_source_preparation_id", "")
+        or ""
     )
-    if int(getattr(execution, "analysis_generation", 0) or 0) != active_analysis_generation:
-        return "execution_id belongs to an earlier analysis generation"
-    cohort = sandbox_state.get("cohort_identity_v1") or {}
-    active_digest = str(cohort.get("cohort_digest") or "")
-    if active_digest and str(getattr(execution, "cohort_digest", "") or "") != active_digest:
-        return "execution_id belongs to another analysis cohort"
-    active_cohort_generation = int(cohort.get("cohort_generation", 0) or 0)
-    if active_cohort_generation and int(
-        getattr(execution, "cohort_generation", 0) or 0
-    ) != active_cohort_generation:
-        return "execution_id belongs to an earlier cohort generation"
+    if active_preparation_id:
+        execution_preparation_id = str(
+            getattr(execution, "adata_source_preparation_id", "") or ""
+        )
+        if execution_preparation_id != active_preparation_id:
+            return "execution_id belongs to another AnnData source preparation"
     return None
 
 

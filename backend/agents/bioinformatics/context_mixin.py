@@ -232,8 +232,10 @@ class ContextMixin:
                 f"n_vars={int(cohort.get('n_vars', 0) or 0)}; "
                 f"digest={str(cohort.get('cohort_digest') or '')[:16] or 'none'}; "
                 f"lineage={cohort.get('lineage_id') or 'main'}. "
-                "Only evidence stamped with this cohort can support current "
-                "findings and report artifacts."
+                "This is a provenance observation for work executed against "
+                "the current representation. Evidence stamped with an earlier "
+                "cohort remains citable with its own recorded source and "
+                "compatibility caveats; the PI decides its scientific weight."
             )
         transition = sandbox_state.get("cohort_transition_notice") or {}
         if transition.get("changed"):
@@ -243,9 +245,10 @@ class ContextMixin:
             parts.append(
                 "## Cohort transition notice\n"
                 f"The canonical analysis cohort changed ({transition_reason}). "
-                "Prior-cohort outputs remain audit history; "
-                "recompute or explicitly compare them before making current-cohort "
-                "claims."
+                "Prior-cohort outputs remain linked to their original source "
+                "executions and can still be cited with explicit compatibility "
+                "caveats. Distinguish the representations instead of presenting "
+                "old work as newly executed; the PI decides its scientific weight."
             )
         if state.species:
             parts.append(

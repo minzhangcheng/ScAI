@@ -82,14 +82,16 @@ class Stage1BaselineFigureSpec:
     code: str
 
 
-def build_stage1_baseline_probe_code() -> str:
+def build_stage1_baseline_probe_code(managed_names=None) -> str:
     """Return kernel code that discovers the best Stage 1 AnnData object.
 
     Discovery happens in the live kernel because the analysis agent is free to
     name its AnnData object. The probe returns metadata only; it never draws or
-    mutates the object.
+    mutates the object.  Exact Host-managed anchor names are skipped so an alias
+    cannot win the candidate scan.
     """
 
+    managed = sorted({str(name) for name in (managed_names or []) if str(name)})
     return (
         "import json as _s1_json\n"
         "_s1_out = {}\n"
@@ -97,6 +99,8 @@ def build_stage1_baseline_probe_code() -> str:
         "    import anndata as _s1_ad\n"
         "    import numpy as _s1_np\n"
         "    import pandas as _s1_pd\n"
+        f"    _s1_managed = set({managed!r})\n"
+        "    _s1_seen = set()\n"
         f"    _s1_annotation_hints = {list(_ANNOTATION_KEYS)!r}\n"
         f"    _s1_batch_hints = {list(_BATCH_KEYS)!r}\n"
         f"    _s1_cluster_hints = {list(_CLUSTER_KEYS)!r}\n"
@@ -185,6 +189,9 @@ def build_stage1_baseline_probe_code() -> str:
         "    for _s1_name, _s1_obj in list(globals().items()):\n"
         "        if _s1_name.startswith('_') or not isinstance(_s1_obj, _s1_ad.AnnData):\n"
         "            continue\n"
+        "        if _s1_name in _s1_managed or id(_s1_obj) in _s1_seen:\n"
+        "            continue\n"
+        "        _s1_seen.add(id(_s1_obj))\n"
         "        _s1_umap_key = None\n"
         "        for _candidate in ('X_umap', 'umap'):\n"
         "            _coords = _s1_obj.obsm.get(_candidate)\n"
@@ -584,8 +591,10 @@ async def ensure_stage1_baseline_figures(
     if sandbox is None:
         return {}
     try:
+        _managed_getter = getattr(sandbox, "host_managed_global_names", None)
+        _managed = _managed_getter() if callable(_managed_getter) else set()
         probe_result = await sandbox.execute(
-            build_stage1_baseline_probe_code(),
+            build_stage1_baseline_probe_code(_managed),
             skip_safety_check=True,
             mutates_namespace=False,
         )

@@ -87,7 +87,7 @@ def test_omitted_purpose_without_plan_candidates_stays_unverified():
     assert "omitted" in warning
 
 
-def test_current_derived_record_rejects_foreign_plan_and_generation():
+def test_current_derived_record_rejects_foreign_plan_and_source_preparation():
     state = _state_with_plan()
     state.current_round = 2
     state.sandbox_state = {
@@ -119,7 +119,15 @@ def test_current_derived_record_rejects_foreign_plan_and_generation():
         state, stale_plan
     )
 
+    # Generation/cohort values are provenance observations, not active-value
+    # equality gates; a prior generation remains a valid current-plan receipt.
     stale_generation = receipt.model_copy(update={"analysis_generation": 3})
-    assert "earlier analysis generation" in current_execution_identity_error(
-        state, stale_generation
+    assert current_execution_identity_error(state, stale_generation) is None
+
+    state.current_plan.adata_source_preparation_id = "prep-current"
+    other_source = receipt.model_copy(
+        update={"adata_source_preparation_id": "prep-other"}
+    )
+    assert "another AnnData source preparation" in current_execution_identity_error(
+        state, other_source
     )

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import uuid
 
 from .executor_dispatch import ToolAction
 
@@ -266,12 +267,128 @@ def execution_input_binding(state, args):
     return purpose, step_ids, profile_ids, binding_status, warning
 
 
+def _adata_source_provenance(state, executor_context=None):
+    """Return Host-stamped source pointers for one execution receipt."""
+    plan = getattr(state, "current_plan", None)
+    resolved = dict(
+        getattr(executor_context, "resolved_adata_source_context", None) or {}
+    )
+    preparation_id = str(resolved.get("preparation_id") or "").strip() or None
+    if not preparation_id and executor_context is None:
+        preparation_id = str(
+            getattr(plan, "adata_source_preparation_id", "") or ""
+        ).strip() or None
+    preparation = None
+    for record in getattr(state, "adata_source_preparations", None) or []:
+        if str(getattr(record, "preparation_id", "")) == str(preparation_id):
+            preparation = record
+            break
+    selection = getattr(executor_context, "adata_source", None)
+    if selection is None:
+        selection = getattr(plan, "adata_source", None)
+    return {
+        "adata_source_preparation_id": preparation_id,
+        "adata_requested_checkpoint_id": (
+            getattr(selection, "checkpoint_id", None)
+            if getattr(selection, "mode", "current") in {
+                "checkpoint_copy", "checkpoint_branch"
+            }
+            else None
+        ),
+        "adata_loaded_checkpoint_id": getattr(
+            preparation, "loaded_checkpoint_id", None
+        ),
+        "adata_input_binding_id": getattr(preparation, "binding_id", None),
+        "adata_input_binding_status": getattr(
+            preparation, "binding_identity_status", None
+        ),
+        "adata_input_lineage_id": getattr(preparation, "adata_lineage_id", None),
+        "adata_ancestor_checkpoint_id": getattr(
+            preparation, "ancestor_checkpoint_id", None
+        ),
+    }
+
+
+def _apply_registry_reconciliation_to_state(state, payload):
+    """Sync Host records with the trusted kernel registry classification."""
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        return False
+    prep_statuses = payload.get("preparation_statuses") or {}
+    binding_statuses = payload.get("binding_statuses") or {}
+    changed = False
+    canonical_status = str(payload.get("canonical_status") or "")
+    if canonical_status in {"evolved", "missing"}:
+        if getattr(state, "active_adata_checkpoint_id", None) is not None:
+            state.active_adata_checkpoint_id = None
+            changed = True
+        if getattr(state, "active_adata_lineage_id", None) is not None:
+            state.active_adata_lineage_id = None
+            changed = True
+    for record in getattr(state, "adata_source_preparations", None) or []:
+        status = prep_statuses.get(str(getattr(record, "preparation_id", "")))
+        if status:
+            status = str(status)
+            if record.binding_identity_status != status:
+                record.binding_identity_status = status
+                changed = True
+            if str(status) in {"evolved", "missing"}:
+                for field in ("anchor_name", "binding_id", "adata_lineage_id"):
+                    if getattr(record, field, None) is not None:
+                        setattr(record, field, None)
+                        changed = True
+    for record in getattr(state, "adata_live_bindings", None) or []:
+        status = binding_statuses.get(str(getattr(record, "binding_id", "")))
+        if status:
+            status = str(status)
+            if record.status != status:
+                record.status = status
+                changed = True
+            if status != "registered" and record.anchor_name:
+                record.anchor_name = ""
+                changed = True
+    return bool(payload.get("changed")) or changed
+
+
+def _resolved_input_binding_name(state, executor_context=None):
+    """Return the plan's resolved working binding name, if any."""
+    planning = getattr(state, "current_plan", None)
+    preparation_id = str(
+        (getattr(executor_context, "resolved_adata_source_context", None) or {}).get(
+            "preparation_id"
+        )
+        or (
+            getattr(planning, "adata_source_preparation_id", "")
+            if executor_context is None
+            else ""
+        )
+        or ""
+    ).strip()
+    if not preparation_id:
+        return None
+    for record in getattr(state, "adata_source_preparations", None) or []:
+        if str(getattr(record, "preparation_id", "")) != preparation_id:
+            continue
+        mode = str(getattr(getattr(record, "selection", None), "mode", "current"))
+        name = str(getattr(record, "binding_name", "") or "").strip()
+        if (
+            getattr(record, "binding_identity_status", "unknown") == "exact"
+            and mode in {"checkpoint_copy", "live_binding", "promote_live"}
+            and name
+        ):
+            return name if name != "adata" else None
+    return None
+
+
 def build_code_execution_receipt(
     state, code, result, execution_time, purpose, step_ids, cohort, profile_ids,
-    binding_status, binding_reason, persistent_outputs,
+    binding_status, binding_reason, persistent_outputs, executor_context=None,
+    input_cohort=None, execution_id=None,
 ):
     """Build the schema-v2 receipt from host-observed execution facts."""
-    return CodeExecution(
+    source = _adata_source_provenance(state, executor_context)
+    run_kind = getattr(executor_context, "executor_run_kind", None)
+    supplementary = run_kind == "supplementary"
+    code_execution = CodeExecution(
         code=code,
         output=result.output,
         error=result.error,
@@ -280,11 +397,19 @@ def build_code_execution_receipt(
         round_number=state.current_round,
         analysis_modalities=infer_execution_modalities(code),
         evidence_schema_version=2,
-        plan_id=str(getattr(state.current_plan, "id", "") or "").strip() or None,
-        plan_step_ids=step_ids,
-        execution_purpose=purpose,
-        plan_binding_status=binding_status,
-        plan_binding_reason=binding_reason,
+        plan_id=(
+            None
+            if supplementary
+            else str(getattr(state.current_plan, "id", "") or "").strip() or None
+        ),
+        plan_step_ids=[] if supplementary else step_ids,
+        execution_purpose="supplementary" if supplementary else purpose,
+        plan_binding_status="supplementary" if supplementary else binding_status,
+        plan_binding_reason=(
+            "Owned by the durable supplementary request."
+            if supplementary
+            else binding_reason
+        ),
         execution_status="failed" if result.error else "succeeded",
         lineage_id=getattr(state, "restore_branch_id", None) or "main",
         analysis_generation=int(
@@ -292,6 +417,27 @@ def build_code_execution_receipt(
         ),
         cohort_generation=int(cohort.get("cohort_generation", 0) or 0),
         cohort_digest=str(cohort.get("cohort_digest") or "") or None,
+        adata_source_preparation_id=source["adata_source_preparation_id"],
+        adata_requested_checkpoint_id=source["adata_requested_checkpoint_id"],
+        adata_loaded_checkpoint_id=source["adata_loaded_checkpoint_id"],
+        adata_input_binding_id=source["adata_input_binding_id"],
+        adata_input_binding_status=source["adata_input_binding_status"],
+        adata_input_lineage_id=source["adata_input_lineage_id"],
+        adata_ancestor_checkpoint_id=source["adata_ancestor_checkpoint_id"],
+        adata_input_cohort_digest=(
+            str((input_cohort or {}).get("binding_cohort_digest") or "") or None
+        ),
+        adata_input_cohort_binding_id=(
+            str((input_cohort or {}).get("binding_name") or "") or None
+        ),
+        executor_run_kind=run_kind,
+        executor_run_scope_id=getattr(executor_context, "executor_run_scope_id", None),
+        executor_settlement_scope_id=getattr(
+            executor_context, "executor_settlement_scope_id", None
+        ),
+        supplementary_request_id=getattr(
+            executor_context, "supplementary_request_id", None
+        ),
         input_profile_ids=profile_ids,
         declared_persistent_outputs=[
             str(name).strip()
@@ -307,6 +453,9 @@ def build_code_execution_receipt(
             if not result.error else []
         ),
     )
+    if execution_id:
+        code_execution.id = str(execution_id)
+    return code_execution
 
 
 async def record_execution_result(
@@ -333,8 +482,8 @@ async def record_execution_result(
         code_description=description,
         code_step_type=step_type,
         plan_id=code_exec.plan_id,
-        plan_step_ids=step_ids,
-        execution_purpose=purpose,
+        plan_step_ids=list(code_exec.plan_step_ids or []),
+        execution_purpose=code_exec.execution_purpose,
         execution_id=code_exec.id,
         saved_figure_filenames=saved_figures,
     ))
@@ -416,29 +565,6 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
             code_description=description, code_step_type=step_type,
         ))
         return ToolAction.CONTINUE
-    foundation_error = foundation_write_guard(code, state)
-    if foundation_error:
-        logger.warning("[Bioinformatics] %s", foundation_error)
-        await self._notify("error", foundation_error)
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": (
-                f"Execution blocked: {foundation_error} The accepted Stage 1 "
-                "atlas remains available as live `adata`. Use an explicit "
-                "derived copy such as `work = adata[mask].copy()` and operate "
-                "on `work`, or append a new uniquely named result key."
-            ),
-        })
-        analysis_log.append(AnalysisStep(
-            step_number=step_count, step_type="execute_code",
-            agent_reasoning=agent_reasoning, code=code,
-            code_error=foundation_error, code_description=description,
-            code_step_type=step_type,
-        ))
-        context.consecutive_errors += 1
-        context.total_errors += 1
-        return ToolAction.CONTINUE
     await self._notify("status", f"[{step_type.upper()}] {description}")
     await self._notify("code", code)
     instrumented_code, sensitive_call_count = (
@@ -464,6 +590,9 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
     wrapped_code = _build_exec_autosave_wrapper(
         guarded_code, str(figures_dir), timestamp
     )
+    input_binding_name = _resolved_input_binding_name(state, context)
+    binding_cohort_before = None
+    binding_cohort_after = None
     try:
         cohort_before = await probe_canonical_cohort(self.sandbox)
     except Exception as cohort_error:
@@ -472,8 +601,22 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
             compact_traceback(str(cohort_error), max_chars=1000),
         )
         cohort_before = None
-    sealed_foundation = foundation_is_sealed(state)
-    derived_names = registered_derived_names(state)
+    if input_binding_name:
+        try:
+            binding_cohort_before = await probe_binding_cohort(
+                self.sandbox, input_binding_name
+            )
+        except Exception as binding_error:
+            logger.warning(
+                "[Bioinformatics] Could not inspect working-binding cohort: %s",
+                compact_traceback(str(binding_error), max_chars=1000),
+            )
+            binding_cohort_before = None
+    derived_names = {
+        str(record.name)
+        for record in (getattr(state, "adata_live_bindings", None) or [])
+        if getattr(record, "status", "") == "registered"
+    }
     representation_will_change = mutates_expression_representation(
         code, derived_names=derived_names,
     )
@@ -484,6 +627,28 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
     user_code_execution_started = False
     invalidated_count = 0
     staleness_note = ""
+    execution_id = str(uuid.uuid4())
+    attempt_ids = context.attempt_execution_ids
+    if execution_id not in attempt_ids:
+        attempt_ids.append(execution_id)
+    context.pending_dispatch.clear()
+    context.pending_dispatch.update({
+        "execution_id": execution_id,
+        "status": "pending_dispatch",
+    })
+    if callable(context.save_checkpoint):
+        try:
+            await context.save_checkpoint(
+                f"step_{step_count}_pending_dispatch_{execution_id}"
+            )
+        except BaseException:
+            context.pending_dispatch.clear()
+            if execution_id in attempt_ids:
+                attempt_ids.remove(execution_id)
+            raise
+    dispatch_completed = False
+    dispatch_reached_kernel = False
+    dispatch_error = None
     try:
         runtime_setup_result = None
         if preinstall_expression_runtime:
@@ -504,7 +669,34 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
                 track_globals=True,
                 skip_safety_check=True,
             )
+        dispatch_completed = True
+    except BaseException as exc:
+        dispatch_error = exc
     finally:
+        dispatch_reached_kernel = bool(
+            getattr(self.sandbox, "_last_execution_reached_kernel", False)
+        )
+        if not dispatch_reached_kernel and execution_id in attempt_ids:
+            attempt_ids.remove(execution_id)
+        context.pending_dispatch.clear()
+        if dispatch_reached_kernel and not dispatch_completed:
+            context.pending_dispatch.update({
+                "execution_id": execution_id,
+                "status": "dispatch_unknown",
+            })
+        if callable(context.save_checkpoint):
+            try:
+                await context.save_checkpoint(
+                    f"step_{step_count}_dispatch_result_{execution_id}"
+                )
+            except BaseException:
+                # The reached-kernel attempt stays recoverable in the older
+                # pending checkpoint.  A post-dispatch persistence error must
+                # never replace the original execution/cancellation error.
+                logger.warning(
+                    "[Bioinformatics] Could not persist dispatch result checkpoint",
+                    exc_info=True,
+                )
         execution_time = time.perf_counter() - execution_started
         try:
             (
@@ -533,47 +725,64 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
                 "after expression representation change",
                 invalidated_count,
             )
-    if sealed_foundation:
-        post_signature = await self.capture_main_object_signature("adata", None)
-        foundation_status, foundation_changes = classify_foundation_signature(
-            state, post_signature
-        )
-        if foundation_status == "unavailable":
-            clear_foundation_bindings(state)
-            verification_error = (
-                "FoundationIntegrityVerificationError: the sealed Stage 1 atlas "
-                "could not be fingerprinted after this cell. The execution is "
-                "not eligible as evidence, but no foundation drift was recorded."
+    if dispatch_reached_kernel:
+        try:
+            await self.sandbox.execute(
+                "import anndata as _ad\n"
+                "for _name, _obj in list(globals().items()):\n"
+                "    if isinstance(_obj, _ad.AnnData):\n"
+                "        _obj.obs_names_make_unique()\n"
+                "        _obj.var_names_make_unique()\n"
+                "del _ad\n", skip_safety_check=True
             )
-            result.success = False
-            result.error = f"{result.error or ''}\n{verification_error}".strip()
-        elif foundation_status == "drift":
-            clear_foundation_bindings(state)
-            integrity_error = (
-                "FoundationIntegrityError: dispatched cell changed the sealed "
-                "Stage 1 atlas (" + ", ".join(foundation_changes[:12]) + "). "
-                "The execution is not eligible as evidence; stop downstream "
-                "analysis and start an explicit new foundation lineage."
+        except BaseException:
+            logger.warning(
+                "[Bioinformatics] AnnData name cleanup failed after execution",
+                exc_info=True,
             )
-            result.success = False
-            result.error = f"{result.error or ''}\n{integrity_error}".strip()
-            mark_foundation_drift(state, integrity_error)
-        elif not result.error:
-            accept_foundation_extensions(state, post_signature)
-            commit_foundation_bindings(state, code)
-        else:
-            # A failed Jupyter cell may have partially rebound aliases. Do not
-            # trust cross-cell derived-object provenance after that boundary.
-            clear_foundation_bindings(state)
-    else:
-        await self.sandbox.execute(
-            "import anndata as _ad\n"
-            "for _name, _obj in list(globals().items()):\n"
-            "    if isinstance(_obj, _ad.AnnData):\n"
-            "        _obj.obs_names_make_unique()\n"
-            "        _obj.var_names_make_unique()\n"
-            "del _ad\n", skip_safety_check=True
+    # Reconcile after the user cell and the bounded AnnData-name cleanup.  The
+    # cleanup is a separate Host cell, so use the dispatch flag captured above
+    # when deciding whether the user's attempt reached the kernel.
+    try:
+        _reconcile = getattr(
+            self.sandbox, "reconcile_adata_registry_after_execution", None
         )
+        if dispatch_reached_kernel and callable(_reconcile):
+            _registry_name = str(
+                (dict(getattr(state, "sandbox_state", None) or {})).get(
+                    "adata_binding_registry_name"
+                )
+                or getattr(self.sandbox, "adata_binding_registry_name", "")
+                or ""
+            )
+            _reconciled = await _reconcile(registry_name=_registry_name or None)
+            if _apply_registry_reconciliation_to_state(state, _reconciled):
+                try:
+                    self.sandbox._note_execution_effect(
+                        mutates_namespace=True,
+                        reached_kernel=True,
+                    )
+                except Exception:
+                    pass
+            _source_after = _adata_source_provenance(state, context)
+            context.resolved_adata_source_context.update({
+                "preparation_id": _source_after["adata_source_preparation_id"],
+                "binding_id": _source_after["adata_input_binding_id"],
+                "binding_identity_status": _source_after[
+                    "adata_input_binding_status"
+                ],
+                "adata_lineage_id": _source_after["adata_input_lineage_id"],
+                "loaded_checkpoint_id": _source_after[
+                    "adata_loaded_checkpoint_id"
+                ],
+                "ancestor_checkpoint_id": _source_after[
+                    "adata_ancestor_checkpoint_id"
+                ],
+            })
+    except Exception:
+        logger.debug("post-execution registry reconciliation failed", exc_info=True)
+    if dispatch_error is not None:
+        raise dispatch_error
     try:
         cohort_after = await probe_canonical_cohort(self.sandbox)
         cohort_identity = record_cohort_transition(
@@ -585,6 +794,17 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
             compact_traceback(str(cohort_error), max_chars=1000),
         )
         cohort_identity = active_cohort_identity(state)
+    if input_binding_name:
+        try:
+            binding_cohort_after = await probe_binding_cohort(
+                self.sandbox, input_binding_name
+            )
+        except Exception as binding_error:
+            logger.warning(
+                "[Bioinformatics] Could not inspect post-execution working-binding cohort: %s",
+                compact_traceback(str(binding_error), max_chars=1000),
+            )
+            binding_cohort_after = None
     expression_contracts = parse_expression_contracts(result.output)
     if expression_contracts:
         record_expression_contract(state, expression_contracts)
@@ -601,7 +821,9 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
     code_exec = build_code_execution_receipt(
         state, code, result, execution_time, execution_purpose, plan_step_ids,
         cohort_identity, input_profile_ids, plan_binding_status,
-        binding_warning, persistent_outputs,
+        binding_warning, persistent_outputs, executor_context=context,
+        input_cohort=binding_cohort_after or binding_cohort_before,
+        execution_id=execution_id,
     )
     await record_execution_result(
         context, code_exec, result, code, description, step_type,

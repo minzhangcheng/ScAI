@@ -281,8 +281,12 @@ def test_every_read_only_probe_opts_out_explicitly():
         "backend/agents/bioinformatics/innovation_baseline_figures.py": 1,
         "backend/agents/bioinformatics/introspection.py": 4,
         "backend/agents/bioinformatics/validation.py": 4,
-        "backend/services/cohort_identity.py": 1,
+        "backend/services/cohort_identity.py": 2,
         "backend/utils/sandbox.py": 1,
+        # Trusted checkpoint serialization, registry queries, source
+        # application, and reconciliation are Host bookkeeping. They must not
+        # be replayed as user-authored notebook cells.
+        "backend/utils/sandbox_parts/adata_checkpoints.py": 6,
         "backend/utils/sandbox_parts/kernel.py": 2,
         "backend/utils/sandbox_parts/runtime_restore.py": 1,
         "backend/utils/sandbox_parts/runtime_save.py": 1,

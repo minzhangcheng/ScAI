@@ -390,7 +390,9 @@ async def test_rerun_quiesces_existing_workflow_before_retiring_checkpoint(monke
     assert not checkpoint.exists()
     assert not _live_pkl(sid).exists()
     assert state.runtime_recompute_pending
-    assert state.restore_start_intent == "explicit_start"
+    assert state.restore_start_intent == (
+        "completed_reanalysis" if completed else "explicit_start"
+    )
     owner.close.assert_awaited_once_with(save_runtime=False)
 
 

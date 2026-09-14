@@ -58,6 +58,12 @@ class ResearchPlanningMixin:
         # dialogue read the same rendering, and so a long plan shrinks its
         # fields to fit rather than losing its tail.
         steps_text = render_plan_steps(plan.steps)
+        try:
+            from ...services.adata_checkpoints import build_prompt_catalog_text
+
+            adata_catalog = build_prompt_catalog_text(state)
+        except Exception:
+            adata_catalog = ""
 
         decision_points = "\n".join(f"  - {d}" for d in plan.key_decision_points)
         sample_design_facts = sequencing_design_instruction(state)
@@ -94,6 +100,8 @@ This plan is for **Stage 2**. Stage 2 covers downstream analyses (DEG, GO/KEGG, 
 
 ## Key Decision Points
 {decision_points}
+
+{adata_catalog}
 
 ## Context
 - Phase: {plan.phase}
@@ -132,16 +140,55 @@ Respond in JSON:
     "modifications": [
         {{"step_id": 3, "suggestion": "Use a sample-level method supported by the measured replicate design because..."}},
         ...
-    ]
+    ],
+    "adata_source": null,
+    "checkpoint_lookup": null
 }}
+
+Optional ``checkpoint_lookup``: to retrieve catalog entries omitted by the
+bounded projection, return an object with ``page``, ``page_size`` and optional
+``checkpoint_id``/``live_binding_id``; the Host performs one read-only lookup
+and re-asks this review once.
+
+Optional ``adata_source``: include it only when the plan should switch the
+AnnData source. Use an object with ``mode`` in
+``current|checkpoint_copy|checkpoint_branch|live_binding|promote_live`` plus
+``checkpoint_id`` or ``live_binding_id`` as appropriate. Omit it (or use null)
+to inherit the already-approved selection. Do not invent checkpoint paths.
 
 IMPORTANT: Be specific in your feedback. Reference exact step IDs. If you approve, modifications must be empty. If you reject, explain what the bioinformatics agent should rethink."""
 
         response = await self.chat(prompt, temperature=0.2)
         result = self._safe_parse_json(response, default={})
-        
+
+        lookup = result.get("checkpoint_lookup") if isinstance(result, dict) else None
+        if isinstance(lookup, dict):
+            try:
+                from ...services.adata_checkpoints import (
+                    build_checkpoint_projection,
+                )
+
+                lookup_result = build_checkpoint_projection(
+                    state,
+                    page=lookup.get("page", 1),
+                    page_size=lookup.get("page_size", 20),
+                    checkpoint_id=lookup.get("checkpoint_id"),
+                    live_binding_id=lookup.get("live_binding_id"),
+                )
+            except Exception as exc:
+                lookup_result = {"error": type(exc).__name__}
+            response = await self.chat(
+                prompt
+                + "\n\n[Checkpoint lookup result, read-only]\n"
+                + json.dumps(lookup_result, ensure_ascii=False, sort_keys=True),
+                temperature=0.2,
+            )
+            result = self._safe_parse_json(response, default={})
+
         result = normalize_plan_review_result(result)
-        
+        if isinstance(result, dict):
+            result.pop("checkpoint_lookup", None)
+
         logger.info(f"[PI] Plan review decision: {result['decision']} (round {dialogue_round})")
         return result
 
@@ -231,7 +278,8 @@ Respond ONLY with JSON in this schema:
         ...
     ],
     "key_decision_points": ["...", "..."],
-    "expected_runtime": "~N steps"
+    "expected_runtime": "~N steps",
+    "adata_source": null
 }}"""
 
         response = await self.chat(prompt, temperature=0.2)
@@ -470,7 +518,15 @@ Respond in JSON:
             if bits:
                 round_context = "\n\nResults this request follows on from:\n" + "\n".join(bits)
 
+        try:
+            from ...services.adata_checkpoints import build_prompt_catalog_text
+
+            adata_catalog = build_prompt_catalog_text(state)
+        except Exception:
+            adata_catalog = ""
         prompt = f"""You are the PI Agent coordinating a supplementary analysis requested by the user.
+
+{adata_catalog}
 
 Current analysis checkpoint: {context_desc}
 
@@ -488,7 +544,8 @@ Return a JSON object with these keys (empty lists for agents that don't need to 
 {{
     "bioinformatics_tasks": ["task1", "task2"],
     "literature_topics": ["topic1"],
-    "summary": "Brief explanation of what will be analyzed"
+    "summary": "Brief explanation of what will be analyzed",
+    "adata_source": null
 }}
 
 Keep tasks focused and actionable. The user is waiting for results to make a decision,

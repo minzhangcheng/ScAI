@@ -781,6 +781,42 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_adata_checkpoints",
+            "description": (
+                "Read-only lookup of the approved AnnData checkpoint catalog. "
+                "Use it to retrieve bounded, path-free facts about current, "
+                "Stage 1, prior-round and retained working-object choices. It "
+                "performs no load and returns no filesystem path."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "page": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Page number for bounded pagination.",
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "Entries per page.",
+                    },
+                    "checkpoint_id": {
+                        "type": ["string", "null"],
+                        "description": "Exact opaque checkpoint id filter.",
+                    },
+                    "live_binding_id": {
+                        "type": ["string", "null"],
+                        "description": "Exact opaque live-binding id filter.",
+                    },
+                },
+            },
+        },
+    },
 ]
 
 # Derived from TOOLS to keep the dispatch chain in

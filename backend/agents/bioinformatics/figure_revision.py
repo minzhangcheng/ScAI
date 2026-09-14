@@ -179,19 +179,28 @@ def _accept_revision_output(attempt: FigureAttemptState, result, revised_code: s
     figure.png_base64 = attempt.agent._compress_image_to_base64(
         attempt.jpg_path, max_width=800
     )
-    sandbox_state = attempt.state.sandbox_state or {}
-    figure.analysis_generation = int(
-        sandbox_state.get("analysis_generation", 0) or 0
+    from .receipt_lookup import artifact_provenance
+
+    provenance, provenance_error = artifact_provenance(
+        attempt.state,
+        figure.source_execution_id,
+        fallback_lineage=figure.lineage_id,
+        fallback_round=figure.round_number,
+        fallback_plan_id=figure.plan_id,
+        current_receipts=getattr(attempt.agent, "code_history", None) or [],
     )
-    cohort_identity = sandbox_state.get("cohort_identity_v1") or {}
-    figure.cohort_generation = int(
-        cohort_identity.get("cohort_generation", 0) or 0
-    )
-    figure.cohort_digest = (
-        str(cohort_identity.get("cohort_digest", "") or "") or None
-    )
+    if provenance_error:
+        figure.producer_status = "failed"
+        attempt.terminal_revision_reason = "source_execution_unresolved"
+        return
+    figure.lineage_id = provenance["lineage_id"]
+    figure.round_number = provenance["round_number"]
+    figure.plan_id = provenance["plan_id"] or figure.plan_id
+    figure.analysis_generation = provenance["analysis_generation"]
+    figure.cohort_generation = provenance["cohort_generation"]
+    figure.cohort_digest = provenance["cohort_digest"]
     figure.expression_provenance = dict(
-        sandbox_state.get("expression_contract_v1") or {}
+        (attempt.state.sandbox_state or {}).get("expression_contract_v1") or {}
     )
     figure.is_current = True
     figure.invalidated_at = None
