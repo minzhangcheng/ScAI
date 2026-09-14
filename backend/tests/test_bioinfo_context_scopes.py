@@ -15,6 +15,8 @@ from backend.agents import bioinformatics_agent as bioinformatics_facade
 from backend.agents.bioinformatics import executor_loop
 from backend.constants import PLAN_REVISION_NEEDED_TAG
 from backend.models.schemas import (
+    AdataSourcePreparation,
+    AdataSourceSelection,
     AgentType,
     AnalysisPlan,
     AnalysisState,
@@ -203,6 +205,65 @@ def test_fresh_approved_plan_context_is_not_a_resume_instruction():
     text = build_approved_plan_context(_plan(plan_id="initial"))
     assert "APPROVED ANALYSIS PLAN" in text
     assert "Resume from the existing checkpoint" not in text
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_copy_binding_name_reaches_fresh_executor_context(
+    monkeypatch,
+    tmp_path,
+):
+    agent = _bare_agent(monkeypatch, tmp_path)
+    agent.sandbox.session_id = "test-session"
+    source = AdataSourceSelection(
+        mode="checkpoint_copy",
+        checkpoint_id="cp-round-1",
+    )
+    plan = _plan(plan_id="copy-plan")
+    plan.adata_source = source
+    preparation = AdataSourcePreparation(
+        preparation_id="prep-copy",
+        scope_id="prep-scope",
+        owner_id=plan.id,
+        selection=source,
+        selection_signature="a" * 64,
+        application_token="copy-token",
+        binding_id="lb-copy",
+        binding_name="scai_work_copy",
+        anchor_name="scai_adata_anchor_copy",
+        binding_identity_status="exact",
+        adata_lineage_id="adata-lineage-copy",
+        loaded_checkpoint_id="cp-round-1",
+        ancestor_checkpoint_id="cp-round-1",
+        status="durable",
+    )
+    plan.adata_source_preparation_id = preparation.preparation_id
+    state = AnalysisState(id="test-session", user_id="test-user")
+    state.current_plan = plan
+    state.adata_source_preparations = [preparation]
+
+    prepare_source = AsyncMock(return_value=preparation)
+    monkeypatch.setattr(
+        "backend.services.adata_checkpoints.ensure_adata_source_prepared",
+        prepare_source,
+    )
+    executor_loop.bind_facade(bioinformatics_facade)
+
+    context = await executor_loop.prepare_loop_context(
+        agent,
+        state,
+        initial_instruction="Use the approved checkpoint copy.",
+        max_steps=1,
+        resume_from_checkpoint=False,
+    )
+
+    assert context.resolved_adata_source_context["binding_name"] == "scai_work_copy"
+    plan_message = next(
+        str(message.get("content") or "")
+        for message in context.messages
+        if str(message.get("content") or "").startswith("[Approved Analysis Plan]")
+    )
+    assert "Resolved binding: scai_work_copy (lb-copy)" in plan_message
+    assert "Resolved binding: (canonical adata)" not in plan_message
 
 
 def test_new_pi_plan_resets_exhausted_executor_to_a_fresh_attempt():

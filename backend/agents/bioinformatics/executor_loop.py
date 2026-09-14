@@ -945,6 +945,7 @@ async def prepare_loop_context(
             _preparation, "selection_signature", None
         ) or selection_signature(_source_selection),
         "binding_id": getattr(_preparation, "binding_id", None),
+        "binding_name": getattr(_preparation, "binding_name", None),
         "binding_identity_status": getattr(
             _preparation, "binding_identity_status", "unknown"
         ),

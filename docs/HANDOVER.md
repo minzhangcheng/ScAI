@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.57.2 · **Last updated**: 2026-09-14
+**Version**: 0.57.3 · **Last updated**: 2026-09-14
 
 ## 1. Runtime Architecture
 
@@ -346,6 +346,13 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.57.x — (2026-09-14 onward)**
+
+- `0.57.3` — Preserves the resolved AnnData working-binding name in the
+  Bioinformatics executor context so `checkpoint_copy` plans expose the
+  allocated `scai_work_*` object instead of falling back to canonical `adata`.
+  Adds a focused regression for source-preparation context propagation. No
+  image build, registry push, deployment, or historical-session mutation was
+  performed.
 
 - `0.57.2` — Settles accepted human-in-the-loop actions immediately across
   direction and integration choices, annotation confirmation, plan review,
