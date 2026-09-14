@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.57.3.1 · **Last updated**: 2026-09-14
+**Version**: 0.57.4 · **Last updated**: 2026-09-14
 
 ## 1. Runtime Architecture
 
@@ -228,6 +228,10 @@ skipped rather than rejected.
 
 ### Decision snapshots
 
+> **Status: Experimental.** Decision snapshots are opt-in and may change in
+> behavior, on-disk format, or user interface between versions. Do not treat
+> them as backups; keep independent backups of required data.
+
 Part B of the plain-persistence design
 (`docs/coding/plain-persistence-part-b-spec.md`), off unless
 `SCAI_SNAPSHOT_DIR` names an absolute path. It is not a return of Snapshot V2:
@@ -346,6 +350,15 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.57.x — (2026-09-14 onward)**
+
+- `0.57.4` — Repairs decision-snapshot restore when the graph continuation
+  carries supported `DataDrivenMechanismProgram` values nested in
+  `bioinformatics_result`; the restore path now normalizes that reviewed model
+  type to JSON-safe data while continuing to refuse unknown non-JSON channels.
+  Adds a production-shaped regression and labels decision snapshots as
+  experimental in the current architecture and user/administrator guidance.
+  Three focused snapshot-restore regressions passed; no image build, registry
+  push, deployment, or historical-session mutation was performed.
 
 - `0.57.3.1` — Fixes the frontend production-build regression caused by a
   stale species-input test fixture using the retired `inference` source value;

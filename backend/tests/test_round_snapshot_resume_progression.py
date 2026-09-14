@@ -30,6 +30,7 @@ from backend.models.schemas import (
     AnalysisPhase,
     AnalysisPlan,
     AnalysisState,
+    DataDrivenMechanismProgram,
     PlanStep,
     RoundResult,
     TaskStatus,
@@ -691,6 +692,39 @@ async def test_round_result_is_a_reviewed_redundant_channel(bundle):
     )
     workflow_state = restored.restore_resume_workflow_state or {}
     assert "round_result" not in workflow_state
+
+
+@pytest.mark.asyncio
+async def test_supported_model_nested_in_bioinformatics_result_is_json_normalized(
+    bundle,
+):
+    """A supported model nested in a graph dict remains restorable."""
+    program = DataDrivenMechanismProgram(
+        label="Observed program",
+        evidence_execution_ids=["exec-1"],
+    )
+    new_id, _source, _snapshot = await bundle(
+        gate=GATE_DIRECTION_SELECTION,
+        round_number=1,
+        extra_channels={
+            "bioinformatics_result": {
+                "status": "completed",
+                "mechanism_programs": [program],
+            },
+        },
+        extra_capsule_state={"bioinformatics_result": True},
+    )
+
+    restored = await _current(new_id)
+    bioinformatics_result = (
+        restored.restore_resume_workflow_state or {}
+    )["bioinformatics_result"]
+    restored_program = bioinformatics_result["mechanism_programs"][0]
+    assert isinstance(restored_program, dict)
+    assert restored_program["id"] == program.id
+    assert restored_program["label"] == "Observed program"
+    assert restored_program["evidence_execution_ids"] == ["exec-1"]
+    assert isinstance(restored_program["timestamp"], str)
 
 
 @pytest.mark.asyncio

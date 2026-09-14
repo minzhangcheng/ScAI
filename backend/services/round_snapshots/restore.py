@@ -404,20 +404,39 @@ def restored_session_name(source_name: str, round_number: int, gate: str, *, amb
 # --------------------------------------------------------------- continuation
 
 
+def _supported_continuation_json_default(value: Any) -> Any:
+    """Serialize only reviewed model values carried by graph channels."""
+    from backend.models.schemas import DataDrivenMechanismProgram
+
+    if isinstance(value, DataDrivenMechanismProgram):
+        return value.model_dump(mode="json")
+    raise TypeError(
+        f"Object of type {type(value).__name__} is not JSON serializable"
+    )
+
+
 def _jsonable(value: Any) -> Any | None:
     """The value if it survives a JSON round trip, else None.
 
-    The capsule is stored on ``AnalysisState`` and written into
-    ``session.json``, so a channel holding a live model object could not be
-    persisted at all. The analysis state is the authority either way -- it is
-    restored from the captured ``session.json`` -- and these channels are
-    routing context, so dropping one costs a hint rather than a fact.
+    Reviewed Pydantic values that the workflow deliberately puts inside a
+    graph-channel dict are normalized exactly as ``AnalysisState`` would write
+    them to ``session.json``. Arbitrary live objects still fail closed.
     """
     try:
         # Python's default encoder accepts NaN/Infinity even though they are
         # not valid JSON and would be rejected by strict consumers later.
         json.dumps(value, allow_nan=False)
-    except (TypeError, ValueError):
+    except TypeError:
+        try:
+            encoded = json.dumps(
+                value,
+                allow_nan=False,
+                default=_supported_continuation_json_default,
+            )
+            return json.loads(encoded)
+        except (TypeError, ValueError):
+            return None
+    except ValueError:
         return None
     return value
 
