@@ -176,7 +176,7 @@ describe('state_sync with a partial payload', () => {
     })
 
     useAppStore.getState().setSpeciesInputInfo({
-      source: 'inference',
+      source: 'pi_inference',
       suggestions: ['Mus musculus'],
       context: 'Confirm species',
     })
