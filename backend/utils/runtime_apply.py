@@ -430,6 +430,45 @@ def _remove_empty_workspace_directories(workspace: Path) -> None:
             continue
 
 
+def _generation_pair_matches_manifest(
+    session_id: str, revision: int, pair: Path,
+) -> bool:
+    """Verify a modern pair against the signed generation declaration."""
+    from backend.utils.runtime_manifest import (
+        RuntimeManifestError,
+        read_runtime_manifest,
+        runtime_manifest_path,
+    )
+    from backend.utils.runtime_pairing import checkpoint_identity_at_path
+
+    manifest_path = runtime_manifest_path(
+        session_id, states_dir=_states_dir(session_id),
+    )
+    if not manifest_path.is_file():
+        return True  # A generation written before signed pairing existed.
+    try:
+        manifest = read_runtime_manifest(manifest_path)
+    except RuntimeManifestError:
+        return False
+    if int(manifest.get("revision") or -1) != int(revision):
+        return False
+    pairing = manifest.get("pairing")
+    if not isinstance(pairing, dict):
+        return True  # A generation written before signed pairing existed.
+    expected = pairing.get("checkpoint")
+    try:
+        actual = checkpoint_identity_at_path(
+            session_id, pair / "checkpoints.sqlite",
+        )
+    except Exception:
+        logger.warning(
+            "[%s] Could not verify generation %d checkpoint pairing",
+            session_id, revision, exc_info=True,
+        )
+        return False
+    return actual == expected
+
+
 def generation_pair_is_restorable(session_id: str, revision: int | None) -> bool:
     """Whether a rollback to *revision* has the files it needs.
 
@@ -447,7 +486,11 @@ def generation_pair_is_restorable(session_id: str, revision: int | None) -> bool
         pair = _states_dir(session_id) / GENERATION_PAIR_DIRNAME / str(int(revision))
     except (TypeError, ValueError):
         return False
-    return (pair / "state.json").is_file() and (pair / "checkpoints.sqlite").is_file()
+    return (
+        (pair / "state.json").is_file()
+        and (pair / "checkpoints.sqlite").is_file()
+        and _generation_pair_matches_manifest(session_id, int(revision), pair)
+    )
 
 
 def restore_generation_pair(session_id: str, *, revision: int) -> bool:
@@ -479,7 +522,11 @@ def restore_generation_pair(session_id: str, *, revision: int) -> bool:
     pair = states_dir / GENERATION_PAIR_DIRNAME / str(int(revision))
     paired_state = pair / "state.json"
     paired_checkpoint = pair / "checkpoints.sqlite"
-    if not (paired_state.is_file() and paired_checkpoint.is_file()):
+    if not (
+        paired_state.is_file()
+        and paired_checkpoint.is_file()
+        and _generation_pair_matches_manifest(session_id, int(revision), pair)
+    ):
         return False
 
     live_state = states_dir / f"{session_id}_state.json"

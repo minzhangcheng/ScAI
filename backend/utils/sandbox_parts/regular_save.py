@@ -586,6 +586,7 @@ def _commit_pkl_transaction(
     fault_hook=None,
     generation_root: Path | None = None,
     paired_sources: Dict[str, Path | None] | None = None,
+    pairing_session_id: str | None = None,
     workspace_root: Path | None = None,
     phase_recorder=None,
 ) -> None:
@@ -805,6 +806,32 @@ def _commit_pkl_transaction(
             _fsync_dir(pair_dir)
             if fault_hook is not None:
                 fault_hook("pair_captured")
+
+            pairing = (runtime_manifest or {}).get("pairing")
+            if isinstance(pairing, dict):
+                expected_checkpoint = pairing.get("checkpoint")
+                checkpoint_target = next(
+                    (
+                        target for kind, _source, target in pair_targets
+                        if kind == "paired_checkpoint"
+                    ),
+                    None,
+                )
+                if pairing_session_id is None or checkpoint_target is None:
+                    raise RuntimeError(
+                        "runtime checkpoint pairing could not be verified"
+                    )
+                from backend.utils.runtime_pairing import (
+                    checkpoint_identity_at_path,
+                )
+
+                actual_checkpoint = checkpoint_identity_at_path(
+                    pairing_session_id, checkpoint_target,
+                )
+                if actual_checkpoint != expected_checkpoint:
+                    raise RuntimeError(
+                        "runtime checkpoint pairing changed during save"
+                    )
         _phase_record(phase_recorder, "graph_workspace_capture", _capture_started)
 
         _verify_started = _phase_begin(phase_recorder)

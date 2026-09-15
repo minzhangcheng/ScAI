@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.57.6 · **Last updated**: 2026-09-15
+**Version**: 0.57.7 · **Last updated**: 2026-09-15
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,18 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.57.x — (2026-09-14 onward)**
+
+- `0.57.7` — Hardens runtime-generation and experimental decision-Snapshot
+  pairing. LangGraph invocations now wait for checkpoint durability; regular
+  saves verify the copied SQLite identity against the signed runtime pairing,
+  and rollback/Snapshot readers reject mismatched generations. Snapshot capture
+  validates continuation channels before publication, refreshes executor-only
+  generations, restores nested supplementary checkpoint ownership, preserves
+  repeated executor-step updates, and uses a recoverable same-ID directory
+  replacement. The focused persistence, Snapshot, workflow, and executor
+  regressions passed `181/181` via `scripts/scai-test fast` at
+  `test-results/20260915T042110Z-2251606/evidence.json`; no image build,
+  deployment, or historical-session mutation was performed.
 
 - `0.57.6` — Repairs post-restart Analysis rendering for long textual round
   summaries. Durable realtime history now preserves blob handles for

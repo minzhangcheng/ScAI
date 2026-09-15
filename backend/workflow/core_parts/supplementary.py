@@ -316,6 +316,13 @@ async def _run_supplementary_analysis(
     supp_result = None
     if bio_tasks and self.bioinformatics_agent:
         await self._send_message("status", "Running supplementary bioinformatics analysis...", AgentType.BIOINFORMATICS)
+        _sandbox = getattr(self.bioinformatics_agent, "sandbox", None)
+        _had_checkpoint_owner = hasattr(
+            _sandbox, "active_executor_checkpoint_name",
+        )
+        _parent_checkpoint_name = getattr(
+            _sandbox, "active_executor_checkpoint_name", None,
+        )
         try:
             combined_instruction = "Supplementary analysis tasks:\n" + "\n".join(f"- {t}" for t in bio_tasks)
             supp_result = await self.bioinformatics_agent.run_autonomous_analysis(
@@ -347,6 +354,14 @@ async def _run_supplementary_analysis(
             )
             logger.error(f"[{self.session_id}] Supplementary bioinformatics failed: {e}")
             await self._send_message("error", f"Supplementary bioinformatics analysis failed: {e}", AgentType.BIOINFORMATICS)
+        finally:
+            if _had_checkpoint_owner:
+                _sandbox.active_executor_checkpoint_name = _parent_checkpoint_name
+            else:
+                try:
+                    delattr(_sandbox, "active_executor_checkpoint_name")
+                except AttributeError:
+                    pass
 
     # Execute literature tasks if planned
     lit_tasks = supp_plan.get("literature_topics", [])

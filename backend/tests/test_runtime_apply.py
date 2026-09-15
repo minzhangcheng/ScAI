@@ -332,6 +332,61 @@ def test_restoring_a_pair_puts_the_positions_back_beside_the_dump():
     assert not (states / "checkpoints.sqlite-shm").exists()
 
 
+def test_a_generation_pair_must_match_its_signed_checkpoint_identity():
+    """A complete-looking pair may still belong to another graph position."""
+    import sqlite3
+
+    from backend.utils.runtime_manifest import (
+        build_runtime_manifest,
+        runtime_manifest_path,
+        write_runtime_manifest,
+    )
+    from backend.utils.runtime_pairing import checkpoint_identity_at_path
+
+    sid = "sess-pair-signed-identity"
+    states, pair = _generation_pair(sid, 44)
+    checkpoint = pair / "checkpoints.sqlite"
+    checkpoint.unlink()
+    with sqlite3.connect(checkpoint) as conn:
+        conn.execute(
+            "CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, "
+            "checkpoint_id TEXT, checkpoint BLOB)"
+        )
+        conn.execute(
+            "INSERT INTO checkpoints VALUES (?, '', 'c1', X'00')", (sid,)
+        )
+    expected = checkpoint_identity_at_path(sid, checkpoint)
+    write_runtime_manifest(
+        runtime_manifest_path(sid, states_dir=states),
+        build_runtime_manifest(
+            revision=44,
+            state_revision=12,
+            pkl_digest="d" * 64,
+            saved_names=[],
+            skipped_names=[],
+            serializer_version="dill-zstd-1",
+            pairing={"state_version": 12, "checkpoint": expected},
+        ),
+    )
+    assert runtime_apply.generation_pair_is_restorable(sid, 44) is True
+
+    with sqlite3.connect(checkpoint) as conn:
+        conn.execute(
+            "CREATE TABLE writes (thread_id TEXT, checkpoint_ns TEXT, "
+            "checkpoint_id TEXT, task_id TEXT, idx INTEGER, value BLOB)"
+        )
+        conn.execute(
+            "INSERT INTO writes VALUES (?, '', 'c1', 'task', 0, X'01')",
+            (sid,),
+        )
+    live_state = states / f"{sid}_state.json"
+    live_state.write_text(json.dumps({"session_id": sid, "marker": "live"}))
+
+    assert runtime_apply.generation_pair_is_restorable(sid, 44) is False
+    assert runtime_apply.restore_generation_pair(sid, revision=44) is False
+    assert json.loads(live_state.read_text())["marker"] == "live"
+
+
 # ------------------------------------------------- the workspace, on rollback
 
 # The gap this closes was found by rolling back a real crashed session: eight

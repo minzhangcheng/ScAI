@@ -545,6 +545,7 @@ async def _prepare_save(sandbox, *, bindings):
     has_committed_dump = getattr(sandbox.notebook_state, "has_session_dump", None)
     if (
         not restore_failed
+        and not getattr(sandbox, "_force_generation_pair_refresh", False)
         and previous_persistence.get("committed_pairing") == pairing
         and revision == saved_revision
         and (
@@ -1268,6 +1269,7 @@ async def _execute_save(
                                     sandbox.notebook_state.state_dir
                                 ) / bindings.GENERATION_PAIR_DIRNAME,
                                 paired_sources=bindings.paired_generation_sources(sandbox),
+                                pairing_session_id=sandbox.session_id,
                                 # Scanned here, under the execution lock the
                                 # save already holds, so the list describes the
                                 # same instant as the dump. The root comes from

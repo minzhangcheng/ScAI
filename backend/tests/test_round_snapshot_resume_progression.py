@@ -695,6 +695,63 @@ async def test_round_result_is_a_reviewed_redundant_channel(bundle):
 
 
 @pytest.mark.asyncio
+async def test_legacy_integration_capsule_allows_missing_consumed_route_channel(
+    bundle, monkeypatch,
+):
+    """A pre-fix integration capsule remains restorable without replaying synthesis."""
+    from backend.services.round_snapshots import writer as writer_module
+    from backend.workflow.restore_targets import prepare_restored_semantic_action
+
+    monkeypatch.setattr(
+        writer_module,
+        "_UNCAPTURED_CHANNELS",
+        frozenset({"analysis_state", "messages"}),
+    )
+    new_id, _source, _snapshot = await bundle(
+        gate=GATE_INTEGRATION_SELECTION,
+        round_number=4,
+        phase=AnalysisPhase.INTEGRATION,
+        extra_capsule_state={"integration_next": "gate"},
+    )
+
+    restored = await _current(new_id)
+    assert restored.restore_resume_gate == GATE_INTEGRATION_SELECTION
+    assert "integration_next" not in (
+        restored.restore_resume_workflow_state or {}
+    )
+    assert prepare_restored_semantic_action(restored) == "check_convergence"
+
+
+@pytest.mark.asyncio
+async def test_legacy_missing_route_channel_is_not_accepted_at_another_gate(
+    bundle, monkeypatch,
+):
+    """The compatibility exception is limited to the observed integration gate."""
+    from backend.services.round_snapshots import writer as writer_module
+    from backend.services.round_snapshots.restore import SnapshotRestoreError
+
+    monkeypatch.setattr(
+        writer_module,
+        "_UNCAPTURED_CHANNELS",
+        frozenset({"analysis_state", "messages"}),
+    )
+    # Reproduce a bundle written by the preflight-less historical writer; the
+    # current writer now refuses this inconsistency before publication.
+    monkeypatch.setattr(
+        writer_module, "_verify_continuation_capsule", lambda *_args: None,
+    )
+    with pytest.raises(SnapshotRestoreError) as raised:
+        await bundle(
+            gate=GATE_DIRECTION_SELECTION,
+            round_number=1,
+            extra_capsule_state={"integration_next": "gate"},
+        )
+
+    assert raised.value.reason == "continuation_unreadable"
+    assert "integration_next" in raised.value.detail
+
+
+@pytest.mark.asyncio
 async def test_supported_model_nested_in_bioinformatics_result_is_json_normalized(
     bundle,
 ):
@@ -732,11 +789,8 @@ async def test_unknown_non_json_channel_is_refused_before_publication(
     monkeypatch, tmp_path,
 ):
     """A checkpoint channel that json.dumps cannot carry refuses atomically."""
-    from backend.config import _config, ensure_session_dirs, get_session_dir
-    from backend.services.round_snapshots.restore import (
-        SnapshotRestoreError,
-        restore_snapshot_into_new_session,
-    )
+    from backend.config import _config
+    from backend.services.round_snapshots.listing import read_session_listing
     from backend.services.session_store import list_saved_sessions
 
     monkeypatch.setattr(_config, "SNAPSHOT_DIR", tmp_path / "snapshots")
@@ -752,18 +806,16 @@ async def test_unknown_non_json_channel_is_refused_before_publication(
     }
     _write_stateful_checkpoint(source, state, 1, channels)
     workflow = _Workflow(_Sandbox(source, 57, digest, round_number=1))
+    before = {summary["id"] for summary in list_saved_sessions()}
     snapshot = await capture_decision_snapshot(
         workflow, state, gate=GATE_DIRECTION_SELECTION, workflow_state=channels,
     )
-    assert snapshot is not None
-
-    before = {summary["id"] for summary in list_saved_sessions()}
-    with pytest.raises(SnapshotRestoreError) as raised:
-        await restore_snapshot_into_new_session(
-            source_session_id=source, snapshot=snapshot, user_id=OWNER,
-        )
-    assert raised.value.reason == "continuation_unreadable"
-    assert {summary["id"] for summary in list_saved_sessions()} == before
+    assert snapshot is None
+    assert read_session_listing(source)["snapshots"] == []
+    assert [row["reason"] for row in read_session_listing(source)["failed"]] == [
+        "continuation_unreadable"
+    ]
+    assert {summary["id"] for summary in list_saved_sessions()} == before | {source}
 
 
 @pytest.mark.asyncio

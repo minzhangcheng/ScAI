@@ -233,23 +233,15 @@ class CheckpointManager:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_path = self.state_dir / f"{session_id}_{prefix}_checkpoint.json"
-        self._last_saved_step: Optional[str] = None  # Dedup: track last saved step name
 
     async def save(self, checkpoint: Dict[str, Any]):
         """
         Save checkpoint to disk atomically.
 
-        Skips the write if the same step_name was just saved (dedup for
-        figure-revision loops that decrement the step counter).
-
         Args:
             checkpoint: Checkpoint data to save
         """
         step_name = checkpoint.get('step_name', 'unknown')
-        if step_name == self._last_saved_step:
-            logger.debug(f"[{self.session_id}] Checkpoint for {step_name} already saved, skipping")
-            return
-
         checkpoint['updated_at'] = datetime.now().isoformat()
 
         # Atomic write: write to temp file then rename
@@ -258,7 +250,6 @@ class CheckpointManager:
             async with aiofiles.open(tmp_path, 'w', encoding='utf-8') as f:
                 await f.write(json.dumps(checkpoint, indent=2, default=str))
             tmp_path.replace(self.checkpoint_path)
-            self._last_saved_step = step_name
             logger.info(f"[{self.session_id}] Checkpoint saved: {step_name}")
         except Exception as e:
             logger.exception(f"[{self.session_id}] Failed to save checkpoint")

@@ -6,6 +6,8 @@ bound it to a runtime generation, and `validate_checkpoint` compared exactly
 two fields, `round_number` and `planning_stage`, neither of which can see
 which namespace is in the kernel.
 """
+import pytest
+
 from backend.agents.bioinformatics.executor_checkpoint import (
     build_checkpoint_payload,
     validate_checkpoint,
@@ -162,3 +164,15 @@ def test_a_pair_restore_makes_an_ahead_checkpoint_unacceptable():
         committed_revision=44,
         exact_revision=False,
     ) == []
+
+
+@pytest.mark.asyncio
+async def test_repeated_step_name_replaces_the_executor_checkpoint(tmp_path):
+    """A reopened gate can keep its name while its transcript advances."""
+    from backend.utils.checkpoint import CheckpointManager
+
+    manager = CheckpointManager("s", str(tmp_path))
+    await manager.save({"step_name": "pre_annotation_confirmation", "marker": 1})
+    await manager.save({"step_name": "pre_annotation_confirmation", "marker": 2})
+
+    assert (await manager.load())["marker"] == 2

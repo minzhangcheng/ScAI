@@ -8,6 +8,11 @@ def bind_facade(facade) -> None:
     )
 
 
+async def _ainvoke_durably(graph, value, config):
+    """Do not enter the next graph step before its checkpoint is durable."""
+    return await graph.ainvoke(value, config, durability="sync")
+
+
 def _restored_terminal_task_status(state: AnalysisState) -> TaskStatus:
     """Return the exact terminal outcome carried through lifecycle RUNNING."""
     payload = dict(getattr(state, "restore_resume_workflow_state", None) or {})
@@ -189,9 +194,8 @@ async def run(
 
     try:
         logger.info(f"Starting workflow execution for {thread_id}")
-        final_state = await self.compiled_graph.ainvoke(
-            workflow_state,
-            config
+        final_state = await _ainvoke_durably(
+            self.compiled_graph, workflow_state, config,
         )
         logger.info(f"Workflow completed for {thread_id}")
         return final_state["analysis_state"]
@@ -378,7 +382,9 @@ async def _invoke_restore_entry(
         "configurable": {"thread_id": thread_id},
         "recursion_limit": _recursion_limit_for(self, analysis_state),
     }
-    final_state = await self.compiled_graph.ainvoke(workflow_state, config)
+    final_state = await _ainvoke_durably(
+        self.compiled_graph, workflow_state, config,
+    )
     return final_state["analysis_state"]
 
 async def resume(
@@ -533,9 +539,8 @@ async def resume(
         # Resume from checkpoint
         logger.info(f"[{self.session_id}] Found saved state, resuming execution")
         try:
-            final_state = await self.compiled_graph.ainvoke(
-                None,
-                config
+            final_state = await _ainvoke_durably(
+                self.compiled_graph, None, config,
             )
             logger.info(f"[{self.session_id}] Workflow resumed and completed")
             return final_state["analysis_state"]
@@ -580,7 +585,9 @@ async def resume(
         if analysis_state.restore_resume_node:
             workflow_state["_restore_resume_node"] = analysis_state.restore_resume_node
         try:
-            final_state = await self.compiled_graph.ainvoke(workflow_state, config)
+            final_state = await _ainvoke_durably(
+                self.compiled_graph, workflow_state, config,
+            )
             logger.info(f"[{self.session_id}] Exact graph-node continuation completed")
             self._consume_restore_resume_metadata(final_state["analysis_state"])
             return final_state["analysis_state"]

@@ -549,6 +549,113 @@ def test_a_commit_captures_the_generation_it_can_be_continued_from(tmp_path):
         assert conn.execute("SELECT blob FROM checkpoints").fetchone()[0] == "position-7"
 
 
+def test_a_commit_rejects_a_checkpoint_copy_that_changed_pairing(
+    monkeypatch, tmp_path,
+):
+    """The signed identity must describe the SQLite snapshot actually copied."""
+    import sqlite3
+
+    from backend.utils.runtime_pairing import checkpoint_identity_at_path
+    from backend.utils.sandbox_parts import regular_save
+
+    states = tmp_path / "states"
+    states.mkdir()
+    live = states / "s_session.pkl"
+    staged = states / "s_session.pkl.tmp"
+    staged.write_bytes(b"new-generation")
+    state_json = states / "s_state.json"
+    state_json.write_text(json.dumps({"session_id": "s", "state_version": 12}))
+    checkpoint = states / "checkpoints.sqlite"
+    with sqlite3.connect(checkpoint) as conn:
+        conn.execute(
+            "CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, "
+            "checkpoint_id TEXT, checkpoint BLOB)"
+        )
+        conn.execute("INSERT INTO checkpoints VALUES ('s', '', 'c1', X'00')")
+    expected = checkpoint_identity_at_path("s", checkpoint)
+    real_copy = regular_save._copy_sqlite_durable
+
+    def copy_then_change(source, target):
+        real_copy(source, target)
+        with sqlite3.connect(target) as conn:
+            conn.execute(
+                "CREATE TABLE writes (thread_id TEXT, checkpoint_ns TEXT, "
+                "checkpoint_id TEXT, task_id TEXT, idx INTEGER, value BLOB)"
+            )
+            conn.execute(
+                "INSERT INTO writes VALUES ('s', '', 'c1', 'task', 0, X'01')"
+            )
+
+    monkeypatch.setattr(regular_save, "_copy_sqlite_durable", copy_then_change)
+    with pytest.raises(RuntimeError, match="pairing changed"):
+        _commit_pkl_transaction(
+            staged,
+            live,
+            tmp_path / "integrity",
+            lambda: None,
+            runtime_manifest_path=states / "s_session.runtime.json",
+            runtime_manifest={
+                "state_revision": 12,
+                "pairing": {"state_version": 12, "checkpoint": expected},
+                "saved_names": [],
+                "skipped_names": [],
+                "serializer_version": "dill-zstd-1",
+            },
+            target_revision=7,
+            generation_root=states / "generation",
+            paired_sources={"state": state_json, "checkpoint": checkpoint},
+            pairing_session_id="s",
+        )
+
+    assert not live.exists()
+    assert not (states / "generation" / "7" / "checkpoints.sqlite").exists()
+
+
+@pytest.mark.asyncio
+async def test_executor_pair_refresh_bypasses_unchanged_runtime_reuse(
+    monkeypatch, tmp_path,
+):
+    """A new executor transcript needs a pair even without new kernel cells."""
+    import logging
+
+    from backend.state import sessions
+    from backend.utils.sandbox_parts import runtime_save
+
+    sid = "executor-pair-refresh"
+    state = SimpleNamespace(state_version=7)
+    monkeypatch.setitem(sessions, sid, state)
+    pairing = {"state_version": 7, "checkpoint": None}
+    session_path = tmp_path / f"{sid}_session.pkl"
+    session_path.write_bytes(b"committed")
+    notebook = SimpleNamespace(
+        state_dir=tmp_path,
+        session_path=session_path,
+        runtime_persistence={
+            "committed_pairing": pairing,
+            "commit_source": "regular_save",
+            "saved_revision": 4,
+        },
+        has_session_dump=lambda: True,
+    )
+    sandbox = SimpleNamespace(
+        session_id=sid,
+        notebook_state=notebook,
+        runtime_revision=4,
+        saved_runtime_revision=4,
+        _session_restore_failed=False,
+        _restore_failed_at_revision=None,
+        _expected_lifecycle_generation=1,
+        runtime_budgets={},
+    )
+    bindings = SimpleNamespace(asyncio=asyncio, logger=logging.getLogger(__name__))
+
+    assert await runtime_save._prepare_save(sandbox, bindings=bindings) is True
+    sandbox._force_generation_pair_refresh = True
+    prepared = await runtime_save._prepare_save(sandbox, bindings=bindings)
+
+    assert isinstance(prepared, runtime_save.SaveContext)
+
+
 def test_an_absent_executor_checkpoint_is_recorded_as_absent(tmp_path):
     """A round boundary reached after the executor finished has none.
 

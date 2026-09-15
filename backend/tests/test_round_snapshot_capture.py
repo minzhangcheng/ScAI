@@ -21,6 +21,7 @@ import pytest
 from backend.constants import (
     GATE_ANNOTATION_CONFIRMATION,
     GATE_DIRECTION_SELECTION,
+    GATE_INTEGRATION_SELECTION,
     GATE_ROUND_WAIT,
 )
 
@@ -210,7 +211,9 @@ def _write_pair(session_id: str, revision: int, *, round_number: int = 3) -> Non
     _write_checkpoint_db(pair / "checkpoints.sqlite", session_id, round_number)
 
 
-def _rewrite_runtime_manifest(session_id: str, revision: int) -> None:
+def _rewrite_runtime_manifest(
+    session_id: str, revision: int, *, pairing: dict | None = None,
+) -> None:
     from backend.config import get_session_states
     from backend.utils.runtime_manifest import (
         build_runtime_manifest,
@@ -234,6 +237,7 @@ def _rewrite_runtime_manifest(session_id: str, revision: int) -> None:
                 {"name": "ss", "type": "SingleSampleGSEA", "reason": "serialization_failed"},
             ],
             serializer_version="dill-zstd-1",
+            pairing=pairing,
             carried_definitions=[{"name": "load_loom", "kind": "function"}],
         ),
     )
@@ -450,6 +454,26 @@ async def test_the_capsule_arms_the_decision_the_snapshot_precedes(capture):
 
 
 @pytest.mark.asyncio
+async def test_integration_capsule_omits_consumed_routing_channel(capture):
+    """The semantic gate owns the post-action route, not ``integration_next``."""
+    workflow, state = capture()
+    snapshot = await capture_decision_snapshot(
+        workflow,
+        state,
+        gate=GATE_INTEGRATION_SELECTION,
+        workflow_state={"current_round": 3, "integration_next": "gate"},
+    )
+    capsule = json.loads(
+        (_bundle(state.id, snapshot) / "continuation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert capsule["next_node"] == "check_convergence"
+    assert capsule["workflow_state_keys"] == ["current_round"]
+
+
+@pytest.mark.asyncio
 async def test_an_annotation_capsule_opens_on_the_annotation_dialog(capture):
     workflow, state = capture(round_number=1)
     snapshot = await capture_decision_snapshot(
@@ -519,11 +543,64 @@ async def test_a_boundary_reached_after_a_cell_commits_first(capture):
     )["runtime_revision"] == 60
 
 
+@pytest.mark.asyncio
+async def test_prepared_executor_checkpoint_refreshes_an_unchanged_generation(
+    capture,
+):
+    """The executor can advance at a decision without running another cell."""
+    workflow, state = capture()
+    prepared = False
+
+    async def prepare():
+        nonlocal prepared
+        prepared = True
+
+    await capture_decision_snapshot(
+        workflow, state, gate=GATE_ANNOTATION_CONFIRMATION, prepare=prepare,
+    )
+
+    assert prepared is True
+    assert workflow.sandbox.saves == 1
+
+
 # ------------------------------------------------------------------ preconditions
 
 
 def _failed(session_id: str):
     return read_session_listing(session_id)["failed"]
+
+
+@pytest.mark.asyncio
+async def test_a_mismatched_checkpoint_pair_is_refused_before_publication(
+    monkeypatch, tmp_path,
+):
+    from backend.config import get_session_states
+    from backend.utils.runtime_pairing import checkpoint_identity_at_path
+
+    monkeypatch.setattr(_config, "SNAPSHOT_DIR", tmp_path / "snapshots")
+    session_id = "snap-pair-mismatch"
+    digest = _seed_session(session_id, revision=57, round_number=1)
+    states = get_session_states(session_id)
+    checkpoint = states / "generation" / "57" / "checkpoints.sqlite"
+    _rewrite_runtime_manifest(
+        session_id,
+        57,
+        pairing={
+            "state_version": 1,
+            "checkpoint": checkpoint_identity_at_path(session_id, checkpoint),
+        },
+    )
+    _write_checkpoint_db(checkpoint, session_id, round_number=2)
+
+    state = _state(session_id, round_number=1)
+    workflow = _Workflow(_Sandbox(session_id, 57, digest, round_number=1))
+    assert await capture_decision_snapshot(
+        workflow, state, gate=GATE_DIRECTION_SELECTION,
+    ) is None
+    assert [row["reason"] for row in _failed(session_id)] == [
+        "checkpoint_pairing_mismatch"
+    ]
+    assert read_session_listing(session_id)["snapshots"] == []
 
 
 @pytest.mark.asyncio
@@ -919,3 +996,46 @@ async def test_a_replayed_decision_supersedes_the_earlier_capture(capture):
     # before the supplementary work, and often the one worth going back to --
     # is the one kept longer.
     assert rows[second]["deletion_order"] < rows[first]["deletion_order"]
+
+
+@pytest.mark.asyncio
+async def test_recapturing_the_same_snapshot_id_replaces_the_published_bundle(capture):
+    """A same-id retry still updates the decision after a recoverable swap."""
+    from backend.config import get_session_workspace
+
+    workflow, state = capture()
+    first = await capture_decision_snapshot(
+        workflow, state, gate=GATE_ROUND_WAIT,
+    )
+    table = _bundle(state.id, first) / "workspace" / "table.csv"
+    original = table.read_bytes()
+
+    (get_session_workspace(state.id) / "table.csv").write_bytes(b"later bytes")
+    second = await capture_decision_snapshot(
+        workflow, state, gate=GATE_ROUND_WAIT,
+    )
+
+    assert second == first
+    assert original != b"later bytes"
+    assert table.read_bytes() == b"later bytes"
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_same_id_replacement_recovers_the_previous_bundle(
+    capture,
+):
+    """A crash after moving the old directory does not lose that snapshot."""
+    workflow, state = capture()
+    snapshot = await capture_decision_snapshot(
+        workflow, state, gate=GATE_ROUND_WAIT,
+    )
+    published = _bundle(state.id, snapshot)
+    previous = published.with_name(
+        f".{published.name}{writer_module._REPLACED_SUFFIX}"
+    )
+    os.replace(published, previous)
+
+    assert writer_module._recover_replaced(published.parent) == 1
+    assert published.is_dir()
+    assert not previous.exists()
+    assert read_snapshot_manifest(published / MANIFEST_NAME)["snapshot_id"] == snapshot

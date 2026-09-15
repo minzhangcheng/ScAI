@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from backend.constants import GATE_INTEGRATION_SELECTION
+
 from .layout import (
     BLOBS_DIRNAME,
     CONTINUATION_NAME,
@@ -56,8 +58,22 @@ logger = logging.getLogger(__name__)
 _CHUNK = 4 * 1024 * 1024
 
 #: Channels the capsule never carries. The analysis state is restored from
-#: ``session.json`` and the message list is rebuilt by the graph.
-_UNCARRIED_CHANNELS = frozenset({"analysis_state", "messages"})
+#: ``session.json``, the message list is rebuilt by the graph, and
+#: ``integration_next`` is a one-shot route consumed before any decision
+#: snapshot opens.
+_UNCARRIED_CHANNELS = frozenset({
+    "analysis_state",
+    "integration_next",
+    "messages",
+})
+
+#: Captures written before ``integration_next`` became explicitly uncarried
+#: recorded the in-memory route even when the paired checkpoint had not yet
+#: persisted it. Only the integration gate can prove that the route was already
+#: consumed: its signed capsule derives the post-action target independently.
+_LEGACY_MISSING_CHANNELS_BY_GATE = {
+    GATE_INTEGRATION_SELECTION: frozenset({"integration_next"}),
+}
 
 #: Transient graph channels that have a reviewed, non-carried duplicate in the
 #: canonical AnalysisState. ``round_result`` is the one such channel today:
@@ -518,8 +534,14 @@ def _continuation_channels(
             "Snapshot restore omitted known redundant graph channel(s) that "
             "cannot be persisted: %s", ", ".join(sorted(redundant)),
         )
+    legacy_missing = _LEGACY_MISSING_CHANNELS_BY_GATE.get(
+        str(capsule.get("gate") or ""), frozenset(),
+    )
     missing = sorted(
-        set(capsule["workflow_state_keys"]) - set(carried) - intentionally_skipped
+        set(capsule["workflow_state_keys"])
+        - set(carried)
+        - intentionally_skipped
+        - legacy_missing
     )
     if missing:
         raise _refuse(

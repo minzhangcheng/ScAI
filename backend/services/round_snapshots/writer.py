@@ -74,6 +74,7 @@ _CHUNK = 4 * 1024 * 1024
 #: directory rather than under the snapshot root, because a hardlink cannot
 #: cross a filesystem and the snapshot root is normally a different mount.
 PIN_DIRNAME = "snapshot-pins"
+_REPLACED_SUFFIX = ".previous"
 
 #: Attempts this process is still working on. The periodic sweep reclaims pins
 #: and staging, and a pin is a hardlink to a whole dump -- so a sweep that ran
@@ -83,8 +84,16 @@ PIN_DIRNAME = "snapshot-pins"
 _LIVE_ATTEMPTS: set[str] = set()
 
 #: Channels the capsule must not carry: the analysis state is restored from the
-#: paired graph checkpoint, and the message list is rebuilt by the graph.
-_UNCAPTURED_CHANNELS = frozenset({"analysis_state", "messages"})
+#: paired graph checkpoint, the message list is rebuilt by the graph, and
+#: ``integration_next`` has already been consumed by the conditional edge when
+#: the integration-selection decision opens. The gate owns its post-action
+#: target, so retaining that one-shot route can make the capsule newer than the
+#: paired checkpoint without preserving any continuation state.
+_UNCAPTURED_CHANNELS = frozenset({
+    "analysis_state",
+    "integration_next",
+    "messages",
+})
 
 
 class SnapshotAbandoned(RuntimeError):
@@ -304,11 +313,37 @@ def _reclaim(root: Path) -> int:
     return removed
 
 
+def _recover_replaced(root: Path) -> int:
+    """Recover or retire the old side of an interrupted same-id replacement."""
+    from backend.utils.files import fsync_directory
+
+    recovered = 0
+    if not root.is_dir():
+        return recovered
+    for previous in root.glob(f".*{_REPLACED_SUFFIX}"):
+        if not previous.is_dir():
+            continue
+        snapshot = previous.name[1 : -len(_REPLACED_SUFFIX)]
+        try:
+            parse_snapshot_id(snapshot)
+        except ValueError:
+            continue
+        published = root / snapshot
+        if published.exists():
+            shutil.rmtree(previous, ignore_errors=True)
+        else:
+            os.replace(previous, published)
+        fsync_directory(root)
+        recovered += 1
+    return recovered
+
+
 def _reclaim_session(session_id: str) -> None:
     from backend.config import get_session_dir
 
     _reclaim(get_session_dir(session_id) / PIN_DIRNAME)
     try:
+        _recover_replaced(snapshots_root(session_id))
         _reclaim(staging_root(session_id))
     except SnapshotsDisabled:
         pass
@@ -336,6 +371,7 @@ def reclaim_abandoned_capture_work() -> int:
     if root.is_dir():
         for session in root.iterdir():
             if session.is_dir():
+                removed += _recover_replaced(session)
                 removed += _reclaim(session / STAGING_DIRNAME)
     return removed
 
@@ -458,7 +494,32 @@ def _verify_pinned_generation(session_id: str, pinned: dict[str, Path], revision
     manifest = read_runtime_manifest(pinned["runtime_manifest"])
     if int(manifest.get("revision") or -1) != int(revision):
         raise SnapshotPrecondition("manifest_revision_mismatch")
+    pairing = manifest.get("pairing")
+    if isinstance(pairing, dict):
+        expected_checkpoint = pairing.get("checkpoint")
+        from backend.utils.runtime_pairing import checkpoint_identity_at_path
+
+        try:
+            actual_checkpoint = checkpoint_identity_at_path(
+                session_id, pinned["pair_checkpoint"],
+            )
+        except Exception as exc:
+            raise SnapshotPrecondition("checkpoint_pairing_unreadable") from exc
+        if actual_checkpoint != expected_checkpoint:
+            raise SnapshotPrecondition("checkpoint_pairing_mismatch")
     return manifest
+
+
+def _verify_continuation_capsule(
+    session_id: str, checkpoint: Path, capsule: dict[str, Any],
+) -> None:
+    """Run restore's continuation check before a bundle can be published."""
+    from .restore import SnapshotRestoreError, _continuation_channels
+
+    try:
+        _continuation_channels(checkpoint, session_id, capsule)
+    except SnapshotRestoreError as exc:
+        raise SnapshotPrecondition(exc.reason) from exc
 
 
 # --------------------------------------------------------------- staging
@@ -802,10 +863,26 @@ async def _capture(
         # revision test owns whether there is anything new to save. A decision
         # boundary answers the first unconditionally, so in practice this saves
         # exactly when the kernel has moved past its newest generation.
-        needs_generation = _namespace_has_moved(sandbox, persistence)
+        force_pair_refresh = prepare is not None
+        needs_generation = (
+            force_pair_refresh or _namespace_has_moved(sandbox, persistence)
+        )
         if needs_generation and runtime_save_due(sandbox, "decision_boundary"):
-            if await sandbox._save_session_locked() is not True:
-                raise SnapshotPrecondition("save_failed")
+            had_force = hasattr(sandbox, "_force_generation_pair_refresh")
+            previous_force = getattr(
+                sandbox, "_force_generation_pair_refresh", False,
+            )
+            if force_pair_refresh:
+                sandbox._force_generation_pair_refresh = True
+            try:
+                if await sandbox._save_session_locked() is not True:
+                    raise SnapshotPrecondition("save_failed")
+            finally:
+                if force_pair_refresh:
+                    if not had_force:
+                        delattr(sandbox, "_force_generation_pair_refresh")
+                    else:
+                        sandbox._force_generation_pair_refresh = previous_force
             sandbox.sync_runtime_persistence_state(analysis_state)
             persistence = _persistence(sandbox)
 
@@ -833,6 +910,9 @@ async def _capture(
         runtime_manifest = _verify_pinned_generation(session_id, pinned, revision)
 
         capsule = _capsule(analysis_state, workflow_state, gate)
+        _verify_continuation_capsule(
+            session_id, pinned["pair_checkpoint"], capsule,
+        )
         files = await _watched(
             lambda: _stage_session_files(
                 session_id=session_id, sandbox=sandbox, staging=staging,
@@ -890,15 +970,31 @@ async def _capture(
 
     published = snapshot_dir(session_id, snapshot)
     published.parent.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(published, ignore_errors=True)
-    os.replace(staging, published)
-    fsync_directory(published.parent)
+    previous = published.with_name(
+        f".{published.name}{_REPLACED_SUFFIX}"
+    )
+    replaced = published.is_dir()
+    if replaced:
+        os.replace(published, previous)
+        fsync_directory(published.parent)
+    try:
+        os.replace(staging, published)
+        fsync_directory(published.parent)
+    except BaseException:
+        if previous.is_dir() and not published.exists():
+            os.replace(previous, published)
+            fsync_directory(published.parent)
+        raise
+    if previous.is_dir():
+        shutil.rmtree(previous, ignore_errors=True)
+        fsync_directory(published.parent)
     shutil.rmtree(pin_dir, ignore_errors=True)
     # A decision that failed once and succeeded on a later attempt is not a gap.
     failed_record_path(session_id, snapshot).unlink(missing_ok=True)
     logger.info(
-        "[%s] captured decision snapshot %s (%d bytes, %.1fs)",
-        session_id, snapshot, manifest["bytes_total"], manifest["capture_seconds"],
+        "[%s] %s decision snapshot %s (%d bytes, %.1fs)",
+        session_id, "replaced" if replaced else "captured", snapshot,
+        manifest["bytes_total"], manifest["capture_seconds"],
     )
     # After publication, and never before it: a capture that failed must not
     # cost an existing restore point, and the one just written is the caller's.

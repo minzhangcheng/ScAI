@@ -7,16 +7,14 @@ from contextlib import closing
 from pathlib import Path
 
 
-def checkpoint_identity(session_id: str, states_dir=None) -> str | None:
-    """Hash the latest checkpoints and their pending writes in one read snapshot.
+def checkpoint_identity_at_path(session_id: str, path: str | Path) -> str | None:
+    """Hash one checkpoint database's latest positions in one read snapshot.
 
     SQLite file bytes are not identity: WAL checkpointing/compaction changes
     them without changing a graph position. Read logical rows, including pending
     writes, which can advance a task without creating a new checkpoint ID.
     """
-    from backend.config import get_session_states
-
-    path = Path(states_dir or get_session_states(session_id)) / "checkpoints.sqlite"
+    path = Path(path)
     if not path.exists():
         return None
     digest = hashlib.sha256()
@@ -48,6 +46,14 @@ def checkpoint_identity(session_id: str, states_dir=None) -> str | None:
                         digest.update(payload)
                     count += 1
     return digest.hexdigest() if count else None
+
+
+def checkpoint_identity(session_id: str, states_dir=None) -> str | None:
+    """Hash the live checkpoint database for ``session_id``."""
+    from backend.config import get_session_states
+
+    path = Path(states_dir or get_session_states(session_id)) / "checkpoints.sqlite"
+    return checkpoint_identity_at_path(session_id, path)
 
 
 def capture_pairing(session_id: str, state, states_dir=None) -> dict | None:

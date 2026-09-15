@@ -144,3 +144,19 @@ def test_user_requested_supplementary_keeps_publication_figure_review_callback()
     source = inspect.getsource(supplementary._run_supplementary_analysis)
     assert "run_autonomous_analysis" in source
     assert "figure_review_callback=self._figure_review_callback" in source
+
+
+def test_supplementary_executor_restores_the_parent_checkpoint_owner():
+    """The annotation executor remains the paired owner after a nested run."""
+    import inspect
+
+    from backend.workflow.core_parts import supplementary
+
+    source = inspect.getsource(supplementary._run_supplementary_analysis)
+    call = source.index("run_autonomous_analysis")
+    owner = source.index("_parent_checkpoint_name")
+    restore = source.index(
+        "_sandbox.active_executor_checkpoint_name = _parent_checkpoint_name"
+    )
+    assert owner < call < restore
+    assert source.rfind("finally:", call, restore) > call
