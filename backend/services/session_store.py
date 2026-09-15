@@ -33,6 +33,7 @@ from backend.utils.files import validate_session_id
 from backend.utils.asyncio_tasks import run_in_owned_thread
 from backend.utils.websocket_delivery import (
     json_safe_payload,
+    strip_realtime_media_blob_references,
     strip_nested_binary_payload,
 )
 from backend.services.runtime_persistence_projection import (
@@ -313,36 +314,18 @@ def _preserve_legacy_preview_digests(
 
 
 def _strip_legacy_blob_references(value: Any, *, realtime: bool = False) -> Any:
-    """Replace legacy blob handles only inside durable realtime history."""
-    if isinstance(value, str):
-        return "[image]" if realtime and value.startswith("@scai-blob:") else value
+    """Replace legacy media handles only inside durable realtime history."""
+    if realtime:
+        if isinstance(value, list):
+            return [strip_realtime_media_blob_references(item) for item in value]
+        return strip_realtime_media_blob_references(value)
     if isinstance(value, list):
-        return [_strip_legacy_blob_references(item, realtime=realtime) for item in value]
+        return [_strip_legacy_blob_references(item) for item in value]
     if isinstance(value, dict):
-        round_summary_text_fields = (
-            {"summary", "integration_report_summary"}
-            if realtime and value.get("type") == "round_summary"
-            else set()
-        )
         return {
-            key: (
-                {
-                    content_key: _strip_legacy_blob_references(
-                        content_value,
-                        realtime=(
-                            content_key not in round_summary_text_fields
-                            or not isinstance(content_value, str)
-                        ),
-                    )
-                    for content_key, content_value in item.items()
-                }
-                if key == "content"
-                and round_summary_text_fields
-                and isinstance(item, dict)
-                else _strip_legacy_blob_references(
-                    item,
-                    realtime=realtime or key == "realtime_messages",
-                )
+            key: _strip_legacy_blob_references(
+                item,
+                realtime=(key == "realtime_messages"),
             )
             for key, item in value.items()
         }

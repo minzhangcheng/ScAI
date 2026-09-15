@@ -30,7 +30,10 @@ from backend.utils import crypto
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_path_within, validate_session_id
 from backend.utils.url_validation import validated_http_url
-from backend.utils.websocket_delivery import serialize_realtime_message
+from backend.utils.websocket_delivery import (
+    serialize_realtime_message,
+    strip_realtime_media_blob_references,
+)
 
 router = APIRouter(prefix="/api", tags=["sessions"])
 
@@ -145,19 +148,10 @@ def _strip_message_base64(msg_type: str, content) -> Any:
     return content
 
 
-def _strip_legacy_blob_references(value: Any) -> Any:
-    """Remove legacy blob handles from durable history after JSON conversion."""
-    if isinstance(value, str):
-        return "[image]" if value.startswith("@scai-blob:") else value
-    if isinstance(value, list):
-        return [_strip_legacy_blob_references(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _strip_legacy_blob_references(item) for key, item in value.items()}
-    return value
-
-
 def _serialize_realtime_history_message(message: Any) -> dict:
-    return _strip_legacy_blob_references(serialize_realtime_message(message))
+    return strip_realtime_media_blob_references(
+        serialize_realtime_message(message)
+    )
 
 
 @router.post("/session/start")

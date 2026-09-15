@@ -84,7 +84,7 @@ def test_session_roundtrip_strips_base64_from_json(tmp_path, monkeypatch):
     assert figure.png_base64 == STRIPPED_FIGURE_PLACEHOLDER
 
 
-def test_session_roundtrip_restores_round_summary_text_blobs(tmp_path, monkeypatch):
+def test_session_roundtrip_restores_realtime_text_blobs(tmp_path, monkeypatch):
     import backend.services.session_store as ss
 
     sid = "round-summary-text-session"
@@ -94,33 +94,52 @@ def test_session_roundtrip_restores_round_summary_text_blobs(tmp_path, monkeypat
 
     summary = "Round summary text. " * 80
     integration_summary = "Integration report text. " * 100
+    question = json.dumps({
+        "question": "Question text. " * 100,
+        "context": "Context text. " * 100,
+        "options": [],
+    })
+    response = "PI response text. " * 100
+    code = "print('analysis')\n" * 100
     state = AnalysisState(id=sid, user_id="u")
-    state.realtime_messages = [WebSocketMessage(
-        type="round_summary",
-        content={
-            "round": 4,
-            "phase": "integration",
-            "summary": summary,
-            "integration_report_summary": integration_summary,
-            "legacy_binary": BLOB_REF_PREFIX + ("a" * 64),
-        },
-    )]
+    state.realtime_messages = [
+        WebSocketMessage(
+            type="round_summary",
+            content={
+                "round": 4,
+                "phase": "integration",
+                "summary": summary,
+                "integration_report_summary": integration_summary,
+            },
+        ),
+        WebSocketMessage(type="pi_question", content=question),
+        WebSocketMessage(type="pi_response", content=response),
+        WebSocketMessage(type="code", content=code),
+        WebSocketMessage(type="figure", content="iVBORw0KGgo" + ("A" * 2048)),
+    ]
 
     ss.save_session_to_disk(sid, state)
 
-    persisted_content = json.loads(session_file.read_text(encoding="utf-8"))[
+    persisted_messages = json.loads(session_file.read_text(encoding="utf-8"))[
         "realtime_messages"
-    ][0]["content"]
-    assert persisted_content["summary"].startswith(BLOB_REF_PREFIX)
-    assert persisted_content["integration_report_summary"].startswith(BLOB_REF_PREFIX)
-    assert persisted_content["legacy_binary"] == STRIPPED_FIGURE_PLACEHOLDER
+    ]
+    persisted_summary = persisted_messages[0]["content"]
+    assert persisted_summary["summary"].startswith(BLOB_REF_PREFIX)
+    assert persisted_summary["integration_report_summary"].startswith(BLOB_REF_PREFIX)
+    assert persisted_messages[1]["content"].startswith(BLOB_REF_PREFIX)
+    assert persisted_messages[2]["content"].startswith(BLOB_REF_PREFIX)
+    assert persisted_messages[3]["content"].startswith(BLOB_REF_PREFIX)
+    assert persisted_messages[4]["content"] == STRIPPED_FIGURE_PLACEHOLDER
 
     loaded = ss.load_session_from_disk(sid)
     assert loaded is not None
-    loaded_content = loaded.realtime_messages[0].content
-    assert loaded_content["summary"] == summary
-    assert loaded_content["integration_report_summary"] == integration_summary
-    assert loaded_content["legacy_binary"] == STRIPPED_FIGURE_PLACEHOLDER
+    loaded_summary = loaded.realtime_messages[0].content
+    assert loaded_summary["summary"] == summary
+    assert loaded_summary["integration_report_summary"] == integration_summary
+    assert loaded.realtime_messages[1].content == question
+    assert loaded.realtime_messages[2].content == response
+    assert loaded.realtime_messages[3].content == code
+    assert loaded.realtime_messages[4].content == STRIPPED_FIGURE_PLACEHOLDER
 
 
 def test_async_save_offloads_blob_io_to_worker_thread(tmp_path, monkeypatch):

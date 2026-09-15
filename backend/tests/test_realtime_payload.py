@@ -116,11 +116,12 @@ def test_durable_history_is_json_safe_while_live_delivery_retains_images(
     monkeypatch,
 ):
     state = AnalysisState(id="sanitized-stream", user_id="owner")
+    legacy_ref = "@scai-blob:" + ("a" * 64)
     message = WebSocketMessage(
         type="figure",
         content={
             "image": IMAGE_BASE64,
-            "legacy": "@scai-blob:" + ("a" * 64),
+            "legacy_text": legacy_ref,
             "when": datetime(2026, 8, 10, tzinfo=timezone.utc),
             "kind": _Kind.EXAMPLE,
         },
@@ -134,7 +135,17 @@ def test_durable_history_is_json_safe_while_live_delivery_retains_images(
     assert message.content == original_content
 
     history = session_routes._serialize_realtime_history_message(message)
-    assert history["content"]["legacy"] == STRIPPED_FIGURE_PLACEHOLDER
+    assert history["content"]["legacy_text"] == legacy_ref
+
+    direct_figure = session_routes._serialize_realtime_history_message(
+        WebSocketMessage(type="figure", content=legacy_ref)
+    )
+    assert direct_figure["content"] == STRIPPED_FIGURE_PLACEHOLDER
+
+    pi_response = session_routes._serialize_realtime_history_message(
+        WebSocketMessage(type="pi_response", content=legacy_ref)
+    )
+    assert pi_response["content"] == legacy_ref
 
     live = serialize_realtime_message(message, strip_binary=False)
     assert live["content"]["image"] == IMAGE_BASE64

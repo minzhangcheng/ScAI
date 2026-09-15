@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.57.7 · **Last updated**: 2026-09-15
+**Version**: 0.57.8 · **Last updated**: 2026-09-15
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,16 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.57.x — (2026-09-14 onward)**
+
+- `0.57.8` — Repairs realtime-history blob handling so only semantic media
+  fields and `figure` message bodies are rendered as `[image]`. Long textual
+  `pi_question`, `pi_response`, code, findings/results, summaries, plans,
+  reviews, and reports now retain their blob references until load-time
+  inlining, preventing the Analysis page and realtime stream from displaying a
+  false image marker. The focused blob, realtime, session-store, and version
+  consistency set passed `31/31` via `scripts/scai-test fast` at
+  `test-results/20260915T072518Z-2602389/evidence.json`; no image build,
+  registry push, deployment, or historical-session mutation was performed.
 
 - `0.57.7` — Hardens runtime-generation and experimental decision-Snapshot
   pairing. LangGraph invocations now wait for checkpoint durability; regular

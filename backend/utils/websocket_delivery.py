@@ -40,6 +40,8 @@ from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
 
 from backend.state import report_websockets, websockets
 
+from backend.utils.blob_store import BLOB_REF_PREFIX
+
 from backend.utils.asyncio_tasks import (
     await_with_deferred_cancellation,
     consume_current_cancellation_request,
@@ -163,6 +165,10 @@ def _copy_payload(value: Any, *, seen: set[int], depth: int, strip_binary: bool,
 def strip_nested_binary_payload(value: Any) -> Any:
     delivery_payloads.bind_facade(sys.modules[__name__])
     return delivery_payloads.strip_nested_binary_payload(value)
+
+def strip_realtime_media_blob_references(message: Any) -> Any:
+    delivery_payloads.bind_facade(sys.modules[__name__])
+    return delivery_payloads.strip_realtime_media_blob_references(message)
 
 def append_durable_realtime_message(target: Any, message: Any) -> None:
     delivery_payloads.bind_facade(sys.modules[__name__])

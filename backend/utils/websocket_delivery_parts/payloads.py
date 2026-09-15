@@ -1,7 +1,7 @@
 """WebSocket delivery payloads owners."""
 from __future__ import annotations
 
-_OWNED_NAMES = frozenset({'serialize_realtime_message', 'strip_nested_binary_payload', '_is_media_value_key', '_is_encoded_media', 'json_safe_payload', '_copy_payload', '_is_base64_key', '_normalized_payload_key', '_cycle_placeholder', 'append_durable_realtime_message', '_json_key'})
+_OWNED_NAMES = frozenset({'serialize_realtime_message', 'strip_realtime_media_blob_references', 'strip_nested_binary_payload', '_is_media_value_key', '_is_encoded_media', 'json_safe_payload', '_copy_payload', '_is_base64_key', '_normalized_payload_key', '_cycle_placeholder', 'append_durable_realtime_message', '_json_key'})
 
 def bind_facade(facade) -> None:
     globals().update({name: value for name, value in vars(facade).items() if not name.startswith("__") and name not in _OWNED_NAMES})
@@ -218,6 +218,58 @@ def strip_nested_binary_payload(value: Any) -> Any:
         strip_binary=True,
         json_mode=False,
     )
+
+def strip_realtime_media_blob_references(message: Any) -> Any:
+    """Replace unresolved blob handles only in semantic media positions."""
+    if not isinstance(message, Mapping):
+        return message
+
+    message_type = str(message.get("type") or "")
+
+    def walk(
+        value: Any,
+        *,
+        key: Any = None,
+        direct_content: bool = False,
+        in_figures: bool = False,
+    ) -> Any:
+        if isinstance(value, str):
+            if not value.startswith(BLOB_REF_PREFIX):
+                return value
+            normalized_key = _normalized_payload_key(key) if key is not None else ""
+            is_media = (
+                (direct_content and message_type == "figure")
+                or (key is not None and (_is_base64_key(key) or _is_media_value_key(key)))
+                or (normalized_key == "data" and (message_type == "figure" or in_figures))
+            )
+            return STRIPPED_FIGURE_PLACEHOLDER if is_media else value
+        if isinstance(value, Mapping):
+            return {
+                raw_key: walk(
+                    child,
+                    key=raw_key,
+                    in_figures=(
+                        in_figures
+                        or _normalized_payload_key(raw_key) == "figures"
+                    ),
+                )
+                for raw_key, child in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                walk(item, in_figures=in_figures)
+                for item in value
+            ]
+        return value
+
+    return {
+        key: walk(
+            value,
+            key=key,
+            direct_content=(key == "content"),
+        )
+        for key, value in message.items()
+    }
 
 def append_durable_realtime_message(target: Any, message: Any) -> None:
     """Append a detached binary-free message under the shared history cap."""
