@@ -648,7 +648,7 @@ class SystemConfig(BaseModel):
     post_execution_review_timeout_seconds: int = Field(
         default=0,
         ge=0,
-        description="Wall-clock budget (seconds) for ONE supplementary step — its code generation, its execution and the main-object invariant check. 0 (default) derives it from sandbox_timeout plus an LLM allowance, so a heavy analysis (GRN inference, deconvolution training, full ligand-receptor aggregation) gets its whole allowance rather than inheriting what earlier steps left over. Individual cells are also bounded and interrupted by sandbox_timeout itself. A step that overruns interrupts the kernel and is reported back to the executor, which then picks a cheaper route — it does not abandon the pass.",
+        description="Wall-clock budget (seconds) for ONE supplementary step — its code generation, its execution and result capture. 0 (default) derives it from sandbox_timeout plus an LLM allowance, so a heavy analysis (GRN inference, deconvolution training, full ligand-receptor aggregation) gets its whole allowance rather than inheriting what earlier steps left over. Individual cells are also bounded and interrupted by sandbox_timeout itself. A step that overruns interrupts the kernel and is reported back to the executor, which then picks a cheaper route — it does not abandon the pass.",
     )
     post_execution_review_total_timeout_seconds: int = Field(
         default=0,

@@ -125,4 +125,30 @@ async def test_supplementary_real_entry_receives_registered_inventory(tmp_path):
     assert "counts-1" in prompt
     assert str(upload) in prompt
     assert "Registered uploaded data files (authoritative)" in prompt
-    assert "SUPPLEMENTARY TECHNICAL CONTRACT v1" in prompt
+    assert "SUPPLEMENTARY TECHNICAL CONTRACT v2" in prompt
+
+
+def test_supplementary_prompt_allows_approved_live_object_rebinding():
+    agent = BioinformaticsAgent.__new__(BioinformaticsAgent)
+    task = (
+        "Filter artifact clusters by setting "
+        "`adata = adata[adata.obs['leiden'] != 'artifact'].copy()`."
+    )
+
+    prompt = agent._build_supplementary_executor_prompt(
+        [task],
+        "The PI approved a changed cohort.",
+        "test",
+        {"var": "adata", "n_obs": 10, "n_vars": 5},
+        "",
+    )
+    normalized_prompt = " ".join(prompt.split())
+
+    assert task in prompt
+    assert "rebinding of `adata` is allowed" in normalized_prompt
+    assert "Do not redirect a requested live-object change" in normalized_prompt
+    assert "NEVER assign to `adata`" not in prompt
+    assert "may not replace the canonical object" not in prompt
+    assert agent._supplementary_code_is_safe(
+        "adata = adata[adata.obs['leiden'] != 'artifact'].copy()", "adata"
+    ) is None

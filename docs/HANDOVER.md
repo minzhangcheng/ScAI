@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.57.4 · **Last updated**: 2026-09-14
+**Version**: 0.57.5 · **Last updated**: 2026-09-15
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,18 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.57.x — (2026-09-14 onward)**
+
+- `0.57.5` — Aligns the supplementary executor's PI capability contract and
+  prompt with the v0.57.1 live-AnnData checkpoint model. Approved supplementary
+  tasks may now mutate, filter, preprocess, or rebind the canonical `adata`; the
+  executor no longer redirects an explicitly requested live-object update into a
+  derived variable because of a stale protection instruction. The contract is
+  versioned as v2, and retry guidance no longer describes live-object rebinding as
+  forbidden. Focused executor and post-execution regressions passed `32/32` at
+  `test-results/20260915T004943Z-1795138/evidence.json`, and the version
+  consistency profile passed `8/8` at
+  `test-results/20260915T004913Z-1791190/evidence.json`; no image build, registry
+  push, deployment, or historical-session mutation was performed.
 
 - `0.57.4` — Repairs decision-snapshot restore when the graph continuation
   carries supported `DataDrivenMechanismProgram` values nested in

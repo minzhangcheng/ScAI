@@ -151,7 +151,7 @@ async def _execute_supplementary_pass(
     abort_envelope: Optional[Dict[str, Any]] = None
 
     async def _one_step() -> str:
-        """One executor iteration: generate, run, verify the invariant.
+        """One executor iteration: generate, run, and record the result.
 
         Returns a loop signal — "continue", "done" or "abort" — so the
         caller can time-box a whole step without this body knowing that it
@@ -183,8 +183,9 @@ async def _execute_supplementary_pass(
         state = agent._current_analysis_state
         if unsafe:
             transcript.append(
-                f"[rejected] {unsafe}. Add derived results without re-running "
-                f"preprocessing or rebinding the main object.")
+                f"[rejected] {unsafe}. Revise the code to avoid file writes and "
+                f"unreviewed figures; live-object mutation or rebinding remains "
+                f"allowed when the approved task requires it.")
             return "continue"
 
         started = time.perf_counter()
@@ -352,7 +353,7 @@ async def run_supplementary_tasks(
 
     Two independent budgets, because one shared ceiling cannot serve both:
     `timeout_seconds` bounds ONE step (its code generation, its execution and
-    the invariant check), so a heavy analysis — GRN inference, deconvolution
+    result capture), so a heavy analysis — GRN inference, deconvolution
     training — gets its full allowance instead of inheriting whatever the
     earlier steps left over; `total_timeout_seconds` (default: the sum of the
     per-step budgets) only backstops a pass that never converges. A step that

@@ -325,12 +325,11 @@ def code_is_statically_unsafe(
     main_var: str,
     denylist: Sequence[str],
 ) -> Optional[str]:
-    """Return a reason string if code is statically unsafe, else None.
+    """Return why isolated validation code is statically unsafe, if applicable.
 
-    The denied operations differ per caller — the annotation validator bans
-    analysis, the supplementary executor allows it — but the assignment guard
-    does not: '<main_var> =' but not '<main_var>_val ='. Rebinding the main
-    variable would strand every execution id already cited as evidence.
+    The annotation validator uses this helper to protect its live main object;
+    supplementary execution has a separate objective-safety check because an
+    approved supplementary task may intentionally mutate or rebind that object.
     """
     low = code.lower()
     for pat in denylist:

@@ -1,11 +1,11 @@
 """Restricted supplementary execution for the post-execution review round.
 
 Structurally a sibling of ``ValidationMixin.validate_annotations_with_plan``:
-bounded iterations, a wall-clock timeout, a static denylist, a main-object
-invariant check after every cell, and a body that returns a status instead of
-raising. It differs in the two ways the review round requires — it runs on the
-LIVE main object rather than a copy, and its executions are saved to history so
-the caller can cite their ``CodeExecution`` ids as evidence provenance.
+bounded iterations, a wall-clock timeout, objective file-write checks, and a body
+that returns a status instead of raising. It differs in the two ways the review
+round requires — it runs on the LIVE main object rather than a copy, and its
+executions are saved to history so the caller can cite their ``CodeExecution`` ids
+as evidence provenance.
 """
 from typing import Any, Dict, List, Optional, Set
 import asyncio
@@ -419,11 +419,12 @@ been checked.
 {GENE_INDEX_ALIGNMENT_GUIDANCE}
 
 ## Hard rules
-- Work on the LIVE object `{main_var}`. NEVER assign to `{main_var}` itself; write
-  derived results into new columns/keys or new variables.
-- Do NOT re-run QC filtering, normalization, scaling, clustering, the neighbourhood
-  graph, or embeddings, and do NOT write data files. Those would invalidate results
-  this round has already reported.
+- Work on the LIVE object `{main_var}` and follow the approved supplementary tasks
+  literally. Mutation, remapping, filtering, preprocessing, or rebinding of
+  `{main_var}` is allowed when a task explicitly calls for it. Do not redirect a
+  requested live-object change into a derived variable solely to preserve the
+  current binding.
+- Do NOT expand beyond the approved tasks or write analysis data files.
 - Do NOT render, display, or save plots or images. This pass repairs quantitative
   evidence only. Any visual result belongs in the main publication-figure pipeline,
   which registers, reviews and contract-checks it.

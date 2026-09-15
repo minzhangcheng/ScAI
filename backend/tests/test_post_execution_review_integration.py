@@ -288,10 +288,11 @@ async def test_real_agents_complete_the_review_and_merge_back():
 
     # The PI actually saw the audit, and its prompt named the unmet step.
     assert "Pathway activity" in pi.prompts_seen[0]
-    assert "SUPPLEMENTARY TECHNICAL CONTRACT v1" in pi.prompts_seen[0]
-    assert "may not re-run filtering, normalization, scaling, clustering" in pi.prompts_seen[0]
+    assert "SUPPLEMENTARY TECHNICAL CONTRACT v2" in pi.prompts_seen[0]
+    assert "may mutate, remap, filter, normalize, scale, re-cluster" in pi.prompts_seen[0]
+    assert "live-object mutation alone is not a reason to defer it" in pi.prompts_seen[0]
     assert meta["review_status"] in ("completed", "partial")
-    assert meta["review_plan"]["supplementary_contract_version"] == 1
+    assert meta["review_plan"]["supplementary_contract_version"] == 2
     assert meta["assessment"]["verdict"] == "resolved"
     assert bio.executed_code and "run_ulm" in bio.executed_code[0]
 
