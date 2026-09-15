@@ -110,6 +110,7 @@ from ..llm_client_parts.protocol import (  # noqa: F401
     _DEFAULT_PROTOCOL_ORDER,
     PROBE_RETRY_DELAYS,
     TEXT_MODALITY,
+    CACHED_TEXT_MODALITY,
     TOOLS_MODALITY,
     VISION_MODALITY,
     _probe_key,

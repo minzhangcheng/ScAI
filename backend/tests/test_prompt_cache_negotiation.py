@@ -35,6 +35,22 @@ def test_openrouter_detection_rejects_lookalike_hosts():
     assert _is_openrouter_url("https://openrouter.ai.example.com/v1") is False
 
 
+def test_openrouter_anthropic_adapter_uses_bearer_auth(monkeypatch):
+    import anthropic
+
+    constructor = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", constructor)
+
+    _AnthropicAdapter(
+        api_key="router-secret",
+        base_url="https://openrouter.ai/api",
+    )
+
+    kwargs = constructor.call_args.kwargs
+    assert kwargs["auth_token"] == "router-secret"
+    assert kwargs["api_key"] == ""
+
+
 @pytest.mark.asyncio
 async def test_openrouter_anthropic_uses_cache_control_and_opaque_session_affinity():
     controller = PromptCacheController(
@@ -117,6 +133,58 @@ async def test_cache_parameter_rejection_retries_once_and_is_remembered():
         modality="text",
     ) == "text"
     assert "cache_control" in create.await_args_list[3].kwargs["extra_body"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_cache_rejection_rebuilds_marker_free_request_and_stays_disabled():
+    rejection = _api_error(
+        BadRequestError,
+        "Invalid cache_control in messages.1.content.0.cache_control",
+        400,
+        param="messages.1.content.0.cache_control",
+    )
+    controller = PromptCacheController(
+        "https://openrouter.ai/api/v1",
+        context_getter=lambda: ("session-1", "bioinformatics"),
+    )
+    marked = {
+        "model": "anthropic/claude-sonnet-5",
+        "messages": [{"role": "user", "content": [{
+            "type": "text",
+            "text": "stable",
+            "cache_control": {"type": "ephemeral"},
+        }]}],
+    }
+    marker_free = {
+        "model": marked["model"],
+        "messages": [{"role": "user", "content": "stable"}],
+    }
+    create = AsyncMock(side_effect=[rejection, "fallback", "next"])
+
+    assert await controller.request(
+        create,
+        marked,
+        fallback_params=marker_free,
+        model=marked["model"],
+        protocol="anthropic",
+        modality="tools",
+        cache_mode="explicit",
+    ) == "fallback"
+    assert create.await_args_list[0].kwargs["messages"] == marked["messages"]
+    assert create.await_args_list[1].kwargs["messages"] == marker_free["messages"]
+    assert "cache_control" not in create.await_args_list[0].kwargs["extra_body"]
+    assert "session_id" in create.await_args_list[1].kwargs["extra_body"]
+
+    assert await controller.request(
+        create,
+        marked,
+        fallback_params=marker_free,
+        model=marked["model"],
+        protocol="anthropic",
+        modality="tools",
+        cache_mode="explicit",
+    ) == "next"
+    assert create.await_args_list[2].kwargs["messages"] == marker_free["messages"]
 
 
 @pytest.mark.asyncio

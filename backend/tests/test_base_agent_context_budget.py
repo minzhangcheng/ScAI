@@ -8,16 +8,24 @@ from backend.agents.base import BaseAgent
 from backend.config import SystemConfig
 from backend.models.schemas import AgentType, AnalysisState, ContextBudgetObservation
 from backend.utils.context_budget import append_observation
+from backend.utils.llm_client_parts.prompt_cache import (
+    PROMPT_CACHE_STABLE_BOUNDARY_KEY,
+    PromptCachePlan,
+)
 from backend.utils.settings_provider import AgentSettingsProvider
 
 
 class _Client:
-    def __init__(self, *, error=None):
+    def __init__(self, *, error=None, prompt_cache_plan=None):
         self.error = error
         self.calls = []
+        self._prompt_cache_plan = prompt_cache_plan
 
     def set_context(self, *_args):
         return None
+
+    def prompt_cache_plan_for_history(self, _model):
+        return self._prompt_cache_plan
 
     async def chat(self, **kwargs):
         self.calls.append(kwargs)
@@ -31,10 +39,10 @@ class _Agent(BaseAgent):
         return {}
 
 
-def _agent(state, client):
+def _agent(state, client, agent_type=AgentType.PI):
     provider = AgentSettingsProvider(state, SystemConfig(), global_client=None)
     provider.get_llm_client = lambda _agent: client
-    return _Agent(AgentType.PI, provider)
+    return _Agent(agent_type, provider)
 
 
 def _pending(state):
@@ -59,6 +67,63 @@ async def test_small_context_sends_the_reduced_completion_maximum():
     assert await _agent(state, client).chat("review") == "answer"
     assert client.calls[0]["max_tokens"] == 7_679
     assert client.calls[0]["prefer_stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_pi_history_chat_marks_the_persisted_user_for_explicit_cache():
+    state = AnalysisState(user_id="user-1")
+    client = _Client(prompt_cache_plan=PromptCachePlan())
+    agent = _agent(state, client)
+
+    await agent.chat("review")
+
+    request = client.calls[0]
+    assert request["prompt_cache_plan"] == PromptCachePlan()
+    assert request["messages"][-1] == {
+        "role": "user",
+        "content": "review",
+        PROMPT_CACHE_STABLE_BOUNDARY_KEY: True,
+    }
+    assert agent.message_history[0] == {"role": "user", "content": "review"}
+
+
+@pytest.mark.asyncio
+async def test_pi_history_chat_can_disable_cache_without_marking_the_user():
+    state = AnalysisState(user_id="user-1")
+    disabled = PromptCachePlan(
+        mode="disabled", prefer_anthropic_messages=False
+    )
+    client = _Client(prompt_cache_plan=disabled)
+
+    await _agent(state, client).chat("review")
+
+    request = client.calls[0]
+    assert request["prompt_cache_plan"] == disabled
+    assert PROMPT_CACHE_STABLE_BOUNDARY_KEY not in request["messages"][-1]
+
+
+@pytest.mark.asyncio
+async def test_non_pi_history_chat_keeps_the_default_cache_policy():
+    state = AnalysisState(user_id="user-1")
+    client = _Client(prompt_cache_plan=PromptCachePlan())
+
+    await _agent(state, client, AgentType.LITERATURE).chat("review")
+
+    request = client.calls[0]
+    assert "prompt_cache_plan" not in request
+    assert PROMPT_CACHE_STABLE_BOUNDARY_KEY not in request["messages"][-1]
+
+
+@pytest.mark.asyncio
+async def test_pi_history_chat_keeps_default_policy_for_other_models():
+    state = AnalysisState(user_id="user-1")
+    client = _Client()
+
+    await _agent(state, client).chat("review")
+
+    request = client.calls[0]
+    assert "prompt_cache_plan" not in request
+    assert PROMPT_CACHE_STABLE_BOUNDARY_KEY not in request["messages"][-1]
 
 
 @pytest.mark.asyncio

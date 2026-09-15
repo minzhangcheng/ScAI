@@ -158,6 +158,7 @@ from .llm_client_parts.shared import (  # noqa: F401
     _DEFAULT_PROTOCOL_ORDER,
     PROBE_RETRY_DELAYS,
     TEXT_MODALITY,
+    CACHED_TEXT_MODALITY,
     TOOLS_MODALITY,
     VISION_MODALITY,
     _probe_key,
@@ -203,7 +204,13 @@ from .llm_client_parts import (  # noqa: F401
     ClientChatMixin,
     ClientStreamVisionMixin,
 )
-from .llm_client_parts.prompt_cache import PromptCacheController
+from .llm_client_parts.prompt_cache import (
+    PromptCacheController,
+    PromptCachePlan,
+    _is_anthropic_url,
+    _is_openrouter_anthropic_model,
+    _is_openrouter_url,
+)
 class OpenAICompatibleClient(
     ClientParamsMixin,
     ClientContentMixin,
@@ -317,6 +324,43 @@ class OpenAICompatibleClient(
         self.session_id = session_id
         self.agent_name = agent_name
 
+    def prompt_cache_plan_for_history(
+        self, model: str
+    ) -> Optional[PromptCachePlan]:
+        """Select cache behavior for a persisted-history request."""
+
+        openrouter_anthropic = (
+            _is_openrouter_url(self.base_url)
+            and _is_openrouter_anthropic_model(model)
+        )
+        explicit_protocol = _url_path_suffix_protocol(self.base_url)
+        if explicit_protocol is not None:
+            if explicit_protocol == "anthropic":
+                return PromptCachePlan()
+            if openrouter_anthropic:
+                return PromptCachePlan(
+                    mode="disabled", prefer_anthropic_messages=False
+                )
+            return None
+        if openrouter_anthropic or _is_anthropic_url(self.base_url):
+            return PromptCachePlan()
+        cached_protocol = _PROBE_CACHE.get(
+            _probe_key(self.base_url, model, CACHED_TEXT_MODALITY)
+        )
+        if cached_protocol is not None:
+            return PromptCachePlan() if cached_protocol == "anthropic" else None
+        if _PROBE_CACHE.get(
+            _probe_key(self.base_url, model, TEXT_MODALITY)
+        ) == "anthropic":
+            return PromptCachePlan()
+        return None
+
+    def supports_explicit_prompt_cache(self, model: str) -> bool:
+        """Whether a history call can use Anthropic block cache markers."""
+
+        plan = self.prompt_cache_plan_for_history(model)
+        return plan is not None and plan.mode == "explicit"
+
     def _ensure_cache_locks(self) -> None:
         # Lazy-init guard for objects constructed via __new__ or fixtures that
         # bypass __init__ (e.g., unit tests). Safe to call repeatedly.
@@ -383,6 +427,7 @@ class OpenAICompatibleClient(
         max_retries: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         prefer_stream: bool = False,
+        prompt_cache_plan: Optional[PromptCachePlan] = None,
     ) -> LLMResponse:
         self._begin_request()
         try:
@@ -397,6 +442,7 @@ class OpenAICompatibleClient(
                 max_retries=max_retries,
                 tools=tools,
                 prefer_stream=prefer_stream,
+                prompt_cache_plan=prompt_cache_plan,
             )
         finally:
             self._end_request()
@@ -410,6 +456,7 @@ class OpenAICompatibleClient(
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         prefer_stream: bool = False,
+        prompt_cache_plan: Optional[PromptCachePlan] = None,
     ) -> LLMToolResponse:
         self._begin_request()
         try:
@@ -422,6 +469,7 @@ class OpenAICompatibleClient(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 prefer_stream=prefer_stream,
+                prompt_cache_plan=prompt_cache_plan,
             )
         finally:
             self._end_request()

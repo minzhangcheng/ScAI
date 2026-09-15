@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 # importers and tests keep resolving them from this module.
 
 from .retry import DEFAULT_REQUEST_TIMEOUT
+from .prompt_cache import PromptCacheMode
 from .shared import (  # noqa: F401
     base64,
     html,
@@ -154,12 +155,16 @@ class ClientParamsMixin:
     """Per-model request parameters, temperature fallback, and retry kwargs."""
 
     def _prompt_cache_log_context(
-        self, model: str, protocol: str, modality: str = "text"
+        self,
+        model: str,
+        protocol: str,
+        modality: str = "text",
+        cache_mode: PromptCacheMode = "auto",
     ) -> Optional[Dict[str, Any]]:
         controller = getattr(self, "_prompt_cache_controller", None)
         if controller is None:
             return None
-        return controller.describe(model, protocol, modality)
+        return controller.describe(model, protocol, modality, cache_mode)
 
     def _apply_model_params(self, params: Dict[str, Any], model: str, temperature: Optional[float], max_tokens: Optional[int], skip_temperature: bool = False) -> None:
         """Apply temperature and max_tokens to request params based on model type.
@@ -350,6 +355,7 @@ class ClientParamsMixin:
         max_tokens: Optional[int],
         request_timeout: Optional[float] = None,
         modality: str = "text",
+        cache_mode: PromptCacheMode = "auto",
     ) -> tuple:
         """构建请求闭包对：(标准请求, 无temperature备选请求)."""
         async def send(params: Dict[str, Any]):
@@ -362,6 +368,7 @@ class ClientParamsMixin:
                 model=model,
                 protocol="chat",
                 modality=modality,
+                cache_mode=cache_mode,
             )
 
         async def make_request():

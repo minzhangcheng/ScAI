@@ -9,6 +9,10 @@ import hashlib
 import uuid
 
 from ...constants import NO_OUTPUT_TOKEN_CAP
+from ...utils.llm_client_parts.prompt_cache import (
+    PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
+    PromptCachePlan,
+)
 from .executor_auxiliary import LoopExit, TurnEffects, TurnStart, finalize_run
 
 
@@ -155,14 +159,20 @@ async def start_turn(context) -> TurnStart:
             f"[Bioinformatics] Escalating tool_choice to 'required' "
             f"after {context.empty_response_count} empty response(s)"
         )
-    request_messages = list(context.messages)
+    request_messages = [dict(message) for message in context.messages]
+    prompt_cache_plan = None
     state = getattr(context.agent, "_current_analysis_state", None)
     if state is not None:
         input_anchor = context.agent._build_authoritative_input_anchor(state)
         if input_anchor:
             # Request-only: every turn receives the freshest registry without
             # duplicating the reminder in history or checkpoint transcripts.
-            request_messages.append({"role": "user", "content": input_anchor})
+            request_messages.append({
+                "role": "user",
+                "content": input_anchor,
+                PROMPT_CACHE_EPHEMERAL_TAIL_KEY: True,
+            })
+            prompt_cache_plan = PromptCachePlan()
     try:
         response = await context.agent._budgeted_text_call(
             context.agent.llm_client.chat_with_tools,
@@ -175,6 +185,11 @@ async def start_turn(context) -> TurnStart:
             tool_choice=effective_tool_choice,
             temperature=context.agent.config.temperature,
             prefer_stream=True,
+            **(
+                {"prompt_cache_plan": prompt_cache_plan}
+                if prompt_cache_plan is not None
+                else {}
+            ),
         )
     except UpstreamExhaustedError:
         logger.error(f"[Bioinformatics] Upstream exhausted, propagating to @with_retry")

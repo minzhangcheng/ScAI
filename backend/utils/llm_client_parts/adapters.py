@@ -31,7 +31,12 @@ from .model_traits import _WEB_SEARCH_TOOL_NAMES, _get_effective_temperature, _i
 from .protocol import _NO_BACKGROUND_ENDPOINT, _anthropic_messages_translate, _anthropic_restore_thinking, _anthropic_translate_tool_choice, _anthropic_translate_tools, _parse_anthropic_dump, _parse_responses_dump, _responses_messages_to_input, _responses_translate_tool_choice, _responses_translate_tools
 from .responses import LLMResponse, LLMToolResponse, _tool_calls_to_raw_assistant
 from .retry import DEFAULT_REQUEST_TIMEOUT
-from .prompt_cache import PromptCacheController
+from .prompt_cache import (
+    PromptCacheController,
+    PromptCacheMode,
+    PromptCachePlan,
+    _is_openrouter_url,
+)
 
 
 # Anthropic's Messages API rejects a request without max_tokens, so this is the
@@ -203,7 +208,11 @@ class _AnthropicAdapter:
                  agent_name: str = "unknown",
                  prompt_cache_controller: Optional[PromptCacheController] = None):
         from anthropic import AsyncAnthropic  # lazy import
-        kwargs = {"api_key": api_key}
+        kwargs = (
+            {"api_key": "", "auth_token": api_key}
+            if _is_openrouter_url(base_url)
+            else {"api_key": api_key}
+        )
         if base_url:
             kwargs["base_url"] = base_url
         if http_client is not None:
@@ -212,8 +221,15 @@ class _AnthropicAdapter:
         self.agent_name = agent_name
         self._prompt_cache_controller = prompt_cache_controller
 
-    async def _create(self, params: Dict[str, Any], *, model: str,
-                      modality: str = "text"):
+    async def _create(
+        self,
+        params: Dict[str, Any],
+        *,
+        model: str,
+        modality: str = "text",
+        cache_mode: PromptCacheMode = "auto",
+        fallback_params: Optional[Dict[str, Any]] = None,
+    ):
         controller = getattr(self, "_prompt_cache_controller", None)
         if controller is None:
             return await self.client.messages.create(**params)
@@ -223,12 +239,17 @@ class _AnthropicAdapter:
             model=model,
             protocol="anthropic",
             modality=modality,
+            cache_mode=cache_mode,
+            fallback_params=fallback_params,
         )
 
     def _build_params(self, model, messages, temperature, max_tokens,
-                      tools=None, tool_choice=None, skip_temperature=False) -> Dict[str, Any]:
+                      tools=None, tool_choice=None, skip_temperature=False,
+                      prompt_cache_plan: Optional[PromptCachePlan] = None) -> Dict[str, Any]:
         prepared = _anthropic_restore_thinking(messages)
-        system, anth_messages = _anthropic_messages_translate(prepared)
+        system, anth_messages = _anthropic_messages_translate(
+            prepared, prompt_cache_plan=prompt_cache_plan
+        )
         params: Dict[str, Any] = {
             "model": model,
             "messages": anth_messages,
@@ -353,13 +374,40 @@ class _AnthropicAdapter:
 
     async def complete(self, model, messages, temperature, max_tokens, timeout=None,
                        skip_temperature=False, stream=False,
-                       defer_stream=False) -> LLMResponse:
-        params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
+                       defer_stream=False,
+                       prompt_cache_plan: Optional[PromptCachePlan] = None,
+                       cache_mode: PromptCacheMode = "auto") -> LLMResponse:
+        params = self._build_params(
+            model,
+            messages,
+            temperature,
+            max_tokens,
+            skip_temperature=skip_temperature,
+            prompt_cache_plan=prompt_cache_plan,
+        )
         if stream:
             params["stream"] = True
         if timeout is not None:
             params["timeout"] = timeout
-        resp = await self._create(params, model=model)
+        fallback_params = None
+        if cache_mode == "explicit":
+            fallback_params = self._build_params(
+                model,
+                messages,
+                temperature,
+                max_tokens,
+                skip_temperature=skip_temperature,
+            )
+            if stream:
+                fallback_params["stream"] = True
+            if timeout is not None:
+                fallback_params["timeout"] = timeout
+        resp = await self._create(
+            params,
+            model=model,
+            cache_mode=cache_mode,
+            fallback_params=fallback_params,
+        )
         if stream:
             started = await _start_stream(
                 resp,
@@ -375,10 +423,31 @@ class _AnthropicAdapter:
                            **self._terminal_metadata(dump.get("stop_reason")))
 
     async def complete_with_tools(self, model, messages, tools, tool_choice,
-                                  temperature, max_tokens, skip_temperature=False) -> LLMToolResponse:
+                                  temperature, max_tokens, skip_temperature=False,
+                                  prompt_cache_plan: Optional[PromptCachePlan] = None,
+                                  cache_mode: PromptCacheMode = "auto") -> LLMToolResponse:
         params = self._build_params(model, messages, temperature, max_tokens,
-                                    tools=tools, tool_choice=tool_choice, skip_temperature=skip_temperature)
-        resp = await self._create(params, model=model, modality="tools")
+                                    tools=tools, tool_choice=tool_choice,
+                                    skip_temperature=skip_temperature,
+                                    prompt_cache_plan=prompt_cache_plan)
+        fallback_params = None
+        if cache_mode == "explicit":
+            fallback_params = self._build_params(
+                model,
+                messages,
+                temperature,
+                max_tokens,
+                tools=tools,
+                tool_choice=tool_choice,
+                skip_temperature=skip_temperature,
+            )
+        resp = await self._create(
+            params,
+            model=model,
+            modality="tools",
+            cache_mode=cache_mode,
+            fallback_params=fallback_params,
+        )
         return self._to_tool_response(resp, model)
 
     async def complete_vision(self, model, text_prompt, images, temperature,
@@ -479,7 +548,11 @@ class _ResponsesAdapter:
         return params
 
     async def _create_responses_with_fallback(
-        self, params: Dict[str, Any], *, modality: str = "text"
+        self,
+        params: Dict[str, Any],
+        *,
+        modality: str = "text",
+        cache_mode: PromptCacheMode = "auto",
     ):
         """Call responses.create with web_search tool name fallback.
         On an unknown-tool error for an auto-injected web_search tool,
@@ -493,6 +566,7 @@ class _ResponsesAdapter:
                 model=params["model"],
                 protocol="responses",
                 modality=modality,
+                cache_mode=cache_mode,
             )
 
         try:
@@ -688,7 +762,8 @@ class _ResponsesAdapter:
 
     async def complete(self, model, messages, temperature, max_tokens, timeout=None,
                        skip_temperature=False, tools=None, stream=False,
-                       defer_stream=False) -> LLMResponse:
+                       defer_stream=False,
+                       cache_mode: PromptCacheMode = "auto") -> LLMResponse:
         params = self._build_params(
             model,
             messages,
@@ -700,7 +775,9 @@ class _ResponsesAdapter:
             background_ok=True,
             stream=stream,
         )
-        resp = await self._create_responses_with_fallback(params)
+        resp = await self._create_responses_with_fallback(
+            params, cache_mode=cache_mode
+        )
         if stream:
             started = await _start_stream(
                 resp,
@@ -718,11 +795,14 @@ class _ResponsesAdapter:
 
     async def complete_with_tools(self, model, messages, tools, tool_choice,
                                   temperature, max_tokens, skip_temperature=False,
-                                  stream=False, defer_stream=False) -> LLMToolResponse:
+                                  stream=False, defer_stream=False,
+                                  cache_mode: PromptCacheMode = "auto") -> LLMToolResponse:
         params = self._build_params(model, messages, temperature, max_tokens,
                                     tools=tools, tool_choice=tool_choice,
                                     skip_temperature=skip_temperature, stream=stream)
-        resp = await self._create_responses_with_fallback(params, modality="tools")
+        resp = await self._create_responses_with_fallback(
+            params, modality="tools", cache_mode=cache_mode
+        )
         if stream:
             started = await _start_stream(
                 resp,

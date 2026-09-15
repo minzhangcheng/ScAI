@@ -24,6 +24,13 @@ from ..llm_logger import get_llm_logger, LLMInteraction
 logger = logging.getLogger(__name__)
 
 from .model_traits import _is_deep_research_model
+from .prompt_cache import (
+    PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
+    PROMPT_CACHE_STABLE_BOUNDARY_KEY,
+    PromptCachePlan,
+    _is_openrouter_anthropic_model,
+    _is_openrouter_url,
+)
 from .responses import ToolCall
 
 
@@ -32,12 +39,13 @@ from .responses import ToolCall
 # endpoint so we don't pay a failed round-trip on every deep-research call.
 _NO_BACKGROUND_ENDPOINT: set = set()
 
-# 两级协议探测缓存（模块级，跨 client 实例 / 跨 agent 共享，因协议只由 base_url+model 决定）。
-# 第一级：整站无 Responses 端点（base_url 级，与 model 无关）。
+# Two-level protocol cache shared across client instances and agents.
+# The first level records endpoints with no Responses API.
 _NO_RESPONSES_ENDPOINT: set = set()
 
-# 第二级：模型级协议选择。文本沿用二元 key；vision 使用独立三元 key，
-# 这样一次图像协议降级不会把文本请求永久钉在 Chat Completions。
+# The second level records per-model protocol choices. Default text keeps its
+# legacy two-part key; vision, tools, and explicit-cache text use isolated
+# modality keys so their protocol decisions cannot alter ordinary text calls.
 _PROBE_CACHE: Dict[Tuple[Any, ...], str] = {}
 
 # Deterministic Responses vision-stream rejections, keyed like the vision
@@ -56,6 +64,7 @@ _NO_CHAT_STREAM_OPTIONS: set = set()
 _PROBE_LOCKS: Dict[Tuple[Any, ...], asyncio.Lock] = {}
 
 TEXT_MODALITY = "text"
+CACHED_TEXT_MODALITY = "cached_text"
 TOOLS_MODALITY = "tools"
 VISION_MODALITY = "vision"
 
@@ -120,6 +129,8 @@ def _route_protocol_order(
     base_url: str,
     model: str,
     modality: str = TEXT_MODALITY,
+    *,
+    prefer_anthropic_cache: bool = False,
 ) -> List[str]:
     """Ordered list of protocols to try for (base_url, model).
 
@@ -148,16 +159,31 @@ def _route_protocol_order(
         if text_choice in order:
             order.remove(text_choice)
             order.insert(0, text_choice)
+    if (
+        prefer_anthropic_cache
+        and _is_openrouter_url(base_url)
+        and _is_openrouter_anthropic_model(model)
+        and "anthropic" in order
+    ):
+        order.remove("anthropic")
+        order.insert(0, "anthropic")
     return order
 
 def _route_protocol(
     base_url: str,
     model: str,
     modality: str = TEXT_MODALITY,
+    *,
+    prefer_anthropic_cache: bool = False,
 ) -> str:
     """Primary protocol for (base_url, model) — head of the probe order. Retained
     for streaming dispatch and callers/tests that need a single value."""
-    return _route_protocol_order(base_url, model, modality)[0]
+    return _route_protocol_order(
+        base_url,
+        model,
+        modality,
+        prefer_anthropic_cache=prefer_anthropic_cache,
+    )[0]
 
 def _strip_path_suffix(base_url: str, suffixes: tuple) -> str:
     """Strip the first matching endpoint suffix from a URL's path (case-insensitive),
@@ -266,24 +292,87 @@ def _responses_translate_tool_choice(tool_choice):
         return {"type": "function", "name": tool_choice["function"].get("name")}
     return tool_choice
 
-def _anthropic_messages_translate(messages: List[Dict[str, Any]]):
+def _with_anthropic_cache_control(content: Any) -> Any:
+    """Mark the last cacheable Anthropic block without mutating the source."""
+
+    if isinstance(content, str):
+        if not content:
+            return content
+        return [{
+            "type": "text",
+            "text": content,
+            "cache_control": {"type": "ephemeral"},
+        }]
+    if not isinstance(content, list):
+        return content
+    blocks = [dict(block) if isinstance(block, dict) else block for block in content]
+    for index in range(len(blocks) - 1, -1, -1):
+        block = blocks[index]
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") not in {"text", "tool_use", "tool_result"}:
+            continue
+        blocks[index] = {
+            **block,
+            "cache_control": {"type": "ephemeral"},
+        }
+        break
+    return blocks
+
+
+def _anthropic_messages_translate(
+    messages: List[Dict[str, Any]],
+    prompt_cache_plan: Optional[PromptCachePlan] = None,
+):
     """Translate canonical OpenAI-chat messages -> (system, anthropic_messages).
     - first system message -> top-level `system`
     - assistant.tool_calls -> tool_use content blocks
     - role 'tool' -> user message with a tool_result block"""
+    explicit_cache = (
+        prompt_cache_plan is not None
+        and prompt_cache_plan.mode == "explicit"
+    )
+    stable_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if message.get(PROMPT_CACHE_STABLE_BOUNDARY_KEY) is True
+    ]
+    tail_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if message.get(PROMPT_CACHE_EPHEMERAL_TAIL_KEY) is True
+    ]
+    stable_boundary = None
+    if len(stable_indexes) == 1 and not tail_indexes:
+        stable_boundary = stable_indexes[0]
+    elif len(tail_indexes) == 1 and not stable_indexes:
+        stable_boundary = tail_indexes[0] - 1
+    elif explicit_cache:
+        logger.warning(
+            "Explicit prompt-cache plan expected one stable-boundary or "
+            "ephemeral-tail locator; got stable=%d ephemeral=%d",
+            len(stable_indexes),
+            len(tail_indexes),
+        )
+
     system = None
     out: List[Dict[str, Any]] = []
-    for msg in messages:
+    for message_index, msg in enumerate(messages):
         role = msg.get("role")
         if role == "system" and system is None:
             system = msg.get("content")
+            if explicit_cache:
+                system = _with_anthropic_cache_control(system)
             continue
         if role == "tool":
-            out.append({"role": "user", "content": [{
+            content = [{
                 "type": "tool_result",
                 "tool_use_id": msg.get("tool_call_id"),
                 "content": msg.get("content"),
-            }]})
+            }]
+            if explicit_cache and message_index == stable_boundary:
+                content = _with_anthropic_cache_control(content)
+            out.append({"role": "user", "content": content})
             continue
         if role == "assistant" and msg.get("tool_calls"):
             blocks = []
@@ -306,9 +395,14 @@ def _anthropic_messages_translate(messages: List[Dict[str, Any]]):
                     args = {}
                 blocks.append({"type": "tool_use", "id": tc.get("id"),
                                "name": fn.get("name"), "input": args})
+            if explicit_cache and message_index == stable_boundary:
+                blocks = _with_anthropic_cache_control(blocks)
             out.append({"role": "assistant", "content": blocks})
             continue
-        out.append({"role": role, "content": msg.get("content")})
+        content = msg.get("content")
+        if explicit_cache and message_index == stable_boundary:
+            content = _with_anthropic_cache_control(content)
+        out.append({"role": role, "content": content})
     return system, out
 
 def _anthropic_translate_tools(tools: Optional[List[Dict[str, Any]]]):

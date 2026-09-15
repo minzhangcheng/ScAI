@@ -3,6 +3,12 @@ from backend.utils.llm_client import (
     _anthropic_translate_tools,
     _anthropic_translate_tool_choice,
 )
+from backend.utils.llm_client_parts.prompt_cache import (
+    PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
+    PROMPT_CACHE_STABLE_BOUNDARY_KEY,
+    PromptCacheController,
+    PromptCachePlan,
+)
 
 
 def test_system_extracted_and_text_passthrough():
@@ -32,6 +38,82 @@ def test_tool_result_message_becomes_user_tool_result():
     _system, out = _anthropic_messages_translate(msgs)
     assert out[0]["role"] == "user"
     assert out[0]["content"][0] == {"type": "tool_result", "tool_use_id": "t1", "content": "42"}
+
+
+def test_explicit_cache_marks_system_and_stable_history_not_ephemeral_tail():
+    msgs = [
+        {"role": "system", "content": "stable system"},
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "t1",
+            "type": "function",
+            "function": {"name": "f", "arguments": "{}"},
+        }]},
+        {"role": "tool", "tool_call_id": "t1", "content": "stable result"},
+        {
+            "role": "user",
+            "content": "ephemeral registered inputs",
+            PROMPT_CACHE_EPHEMERAL_TAIL_KEY: True,
+        },
+        {"role": "user", "content": "[Host] context reduced"},
+    ]
+
+    system, out = _anthropic_messages_translate(
+        msgs, prompt_cache_plan=PromptCachePlan()
+    )
+
+    assert system == [{
+        "type": "text",
+        "text": "stable system",
+        "cache_control": {"type": "ephemeral"},
+    }]
+    assert out[1]["content"][0]["type"] == "tool_result"
+    assert out[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert out[2] == {"role": "user", "content": "ephemeral registered inputs"}
+    assert all(
+        PROMPT_CACHE_EPHEMERAL_TAIL_KEY not in message for message in out
+    )
+
+
+def test_explicit_cache_marks_persisted_user_as_stable_boundary():
+    system, out = _anthropic_messages_translate(
+        [
+            {"role": "system", "content": "stable system"},
+            {"role": "user", "content": "earlier question"},
+            {"role": "assistant", "content": "earlier answer"},
+            {
+                "role": "user",
+                "content": "current persisted question",
+                PROMPT_CACHE_STABLE_BOUNDARY_KEY: True,
+            },
+            {"role": "user", "content": "[Host] request-only context"},
+        ],
+        prompt_cache_plan=PromptCachePlan(),
+    )
+
+    assert system[0]["cache_control"] == {"type": "ephemeral"}
+    assert out[2]["content"] == [{
+        "type": "text",
+        "text": "current persisted question",
+        "cache_control": {"type": "ephemeral"},
+    }]
+    assert out[3] == {"role": "user", "content": "[Host] request-only context"}
+
+
+def test_disabled_cache_plan_does_not_add_anthropic_markers():
+    system, out = _anthropic_messages_translate(
+        [
+            {"role": "system", "content": "stable system"},
+            {
+                "role": "user",
+                "content": "persisted question",
+                PROMPT_CACHE_STABLE_BOUNDARY_KEY: True,
+            },
+        ],
+        prompt_cache_plan=PromptCachePlan(mode="disabled"),
+    )
+
+    assert system == "stable system"
+    assert out == [{"role": "user", "content": "persisted question"}]
 
 
 def test_translate_tools_to_input_schema():
@@ -99,6 +181,7 @@ def test_restore_thinking_roundtrip():
 import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from openai import BadRequestError
 from backend.utils.llm_client import _AnthropicAdapter, LLMToolResponse
 
 
@@ -132,6 +215,114 @@ async def test_anthropic_adapter_complete_with_tools_roundtrips_thinking():
     assert r.raw_assistant_message["reasoning_details"][0]["signature"] == "sig"
     # max_tokens passed (Anthropic requires it)
     assert client.messages.create.call_args.kwargs["max_tokens"] == 1000
+
+
+@pytest.mark.asyncio
+async def test_anthropic_explicit_cache_rejection_rebuilds_without_block_markers():
+    dump = {
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn",
+        "usage": {},
+    }
+    response = MagicMock()
+    response.model_dump.return_value = dump
+    response.model = "claude-x"
+    rejection = BadRequestError(
+        message="Unsupported cache_control block",
+        response=MagicMock(status_code=400),
+        body={"error": {
+            "message": "Unsupported cache_control block",
+            "param": "messages.0.content.0.cache_control",
+        }},
+    )
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.create = AsyncMock(side_effect=[rejection, response])
+    adapter = _AnthropicAdapter.__new__(_AnthropicAdapter)
+    adapter.client = client
+    adapter.agent_name = "t"
+    adapter._prompt_cache_controller = PromptCacheController(
+        "https://openrouter.ai/api/v1",
+        context_getter=lambda: ("session", "bioinformatics"),
+    )
+
+    await adapter.complete_with_tools(
+        model="anthropic/claude-x",
+        messages=[
+            {"role": "system", "content": "stable system"},
+            {"role": "user", "content": "stable history"},
+            {
+                "role": "user",
+                "content": "ephemeral",
+                PROMPT_CACHE_EPHEMERAL_TAIL_KEY: True,
+            },
+        ],
+        tools=[{"type": "function", "function": {"name": "f"}}],
+        tool_choice="auto",
+        temperature=0.5,
+        max_tokens=1000,
+        prompt_cache_plan=PromptCachePlan(),
+        cache_mode="explicit",
+    )
+
+    first, fallback = client.messages.create.await_args_list
+    assert "cache_control" in str(first.kwargs["system"])
+    assert "cache_control" in str(first.kwargs["messages"])
+    assert "cache_control" not in str(fallback.kwargs["system"])
+    assert "cache_control" not in str(fallback.kwargs["messages"])
+    assert "session_id" in fallback.kwargs["extra_body"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_text_explicit_cache_rejection_rebuilds_without_markers():
+    response = MagicMock()
+    response.model_dump.return_value = {
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn",
+        "usage": {},
+    }
+    response.model = "claude-x"
+    rejection = BadRequestError(
+        message="Unsupported cache_control block",
+        response=MagicMock(status_code=400),
+        body={"error": {
+            "message": "Unsupported cache_control block",
+            "param": "messages.0.content.0.cache_control",
+        }},
+    )
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.create = AsyncMock(side_effect=[rejection, response])
+    adapter = _AnthropicAdapter.__new__(_AnthropicAdapter)
+    adapter.client = client
+    adapter.agent_name = "t"
+    adapter._prompt_cache_controller = PromptCacheController(
+        "https://openrouter.ai/api/v1",
+        context_getter=lambda: ("session", "pi"),
+    )
+
+    result = await adapter.complete(
+        model="anthropic/claude-x",
+        messages=[
+            {"role": "system", "content": "stable system"},
+            {
+                "role": "user",
+                "content": "persisted question",
+                PROMPT_CACHE_STABLE_BOUNDARY_KEY: True,
+            },
+        ],
+        temperature=0.5,
+        max_tokens=1000,
+        prompt_cache_plan=PromptCachePlan(),
+        cache_mode="explicit",
+    )
+
+    assert result.content == "ok"
+    first, fallback = client.messages.create.await_args_list
+    assert "cache_control" in str(first.kwargs["system"])
+    assert "cache_control" in str(first.kwargs["messages"])
+    assert "cache_control" not in str(fallback.kwargs["system"])
+    assert "cache_control" not in str(fallback.kwargs["messages"])
 
 
 @pytest.mark.asyncio

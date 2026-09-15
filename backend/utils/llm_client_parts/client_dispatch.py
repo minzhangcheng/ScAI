@@ -120,6 +120,8 @@ from .shared import (  # noqa: F401
     _DEFAULT_PROTOCOL_ORDER,
     PROBE_RETRY_DELAYS,
     TEXT_MODALITY,
+    CACHED_TEXT_MODALITY,
+    TOOLS_MODALITY,
     VISION_MODALITY,
     _probe_key,
     _keyword_protocol_hints,
@@ -151,6 +153,11 @@ from .shared import (  # noqa: F401
     _REASONING_ECHO_KEYS,
     _reasoning_echo_allowed,
     _build_assistant_echo,
+)
+from .prompt_cache import (
+    PromptCacheMode,
+    PromptCachePlan,
+    strip_prompt_cache_metadata,
 )
 
 
@@ -190,6 +197,7 @@ class ClientDispatchMixin:
                               make_coro, make_coro_no_temp,
                               tools=None, tool_choice=None, temperature=None,
                               max_tokens=None, request_timeout=None,
+                              cache_mode: PromptCacheMode = "auto",
                               non_retryable_predicate=None, max_retries_override=None,
                               _empty_retry_count: int = 0,
                               _allow_empty_retry: bool = True):
@@ -204,7 +212,7 @@ class ClientDispatchMixin:
             session_id=self.session_id,
             agent=self.agent_name,
             model=model,
-            messages=log_messages,
+            messages=strip_prompt_cache_metadata(log_messages),
             interaction_type=interaction_type,
             tools=tools,
             tool_choice=tool_choice,
@@ -219,6 +227,7 @@ class ClientDispatchMixin:
                     else "tools" if interaction_type == "chat_with_tools"
                     else "text"
                 ),
+                cache_mode,
             ),
         )
         start_time = time.time()
@@ -323,6 +332,7 @@ class ClientDispatchMixin:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     request_timeout=request_timeout,
+                    cache_mode=cache_mode,
                     non_retryable_predicate=non_retryable_predicate,
                     max_retries_override=max_retries_override,
                     _empty_retry_count=_empty_retry_count + 1,
@@ -449,6 +459,7 @@ class ClientDispatchMixin:
         model: str,
         modality: str = TEXT_MODALITY,
         on_context_overflow=None,
+        prefer_anthropic_cache: bool = False,
     ):
         """Try protocols in `order`. Per protocol: up to len(PROBE_RETRY_DELAYS)
         single-shot attempts on TRANSIENT errors (sleeping PROBE_RETRY_DELAYS
@@ -460,8 +471,13 @@ class ClientDispatchMixin:
         async with lock:
             recheck = (
                 _route_protocol_order(self.base_url, model)
-                if modality == TEXT_MODALITY
-                else _route_protocol_order(self.base_url, model, modality)
+                if modality == TEXT_MODALITY and not prefer_anthropic_cache
+                else _route_protocol_order(
+                    self.base_url,
+                    model,
+                    modality,
+                    prefer_anthropic_cache=prefer_anthropic_cache,
+                )
             )
             if len(recheck) == 1:
                 return await self._call_decided_protocol(
@@ -557,6 +573,7 @@ class ClientDispatchMixin:
         max_tokens: Optional[int] = None,
         request_timeout: Optional[float] = None,
         make_probe_fallback_call: Optional[Callable[[], Awaitable[Any]]] = None,
+        prompt_cache_plan: Optional[PromptCachePlan] = None,
     ):
         def invoke(protocol, adapter, adapter_call, max_retries_override=None,
                    non_retryable_predicate=None, allow_empty_retry=True):
@@ -565,12 +582,20 @@ class ClientDispatchMixin:
             make_coro, make_coro_no_temp = self._adapter_temp_call_pair(
                 lambda skip_temperature: adapter_call(adapter, skip_temperature)
             )
+            cache_mode: PromptCacheMode = (
+                prompt_cache_plan.mode
+                if prompt_cache_plan is not None and protocol == "anthropic"
+                else "disabled"
+                if prompt_cache_plan is not None
+                else "auto"
+            )
             return self._invoke_adapter(
                 protocol=protocol,
                 interaction_type=interaction_type, model=model, log_messages=log_messages,
                 make_coro=make_coro, make_coro_no_temp=make_coro_no_temp,
                 tools=tools, tool_choice=tool_choice, temperature=temperature,
                 max_tokens=max_tokens, request_timeout=request_timeout,
+                cache_mode=cache_mode,
                 non_retryable_predicate=non_retryable_predicate,
                 max_retries_override=max_retries_override,
                 _allow_empty_retry=allow_empty_retry)
@@ -614,23 +639,56 @@ class ClientDispatchMixin:
                 )
             return None
 
-        modality = VISION_MODALITY if interaction_type == "vision" else TEXT_MODALITY
+        modality = (
+            VISION_MODALITY
+            if interaction_type == "vision"
+            else CACHED_TEXT_MODALITY
+            if (
+                interaction_type == "chat"
+                and prompt_cache_plan is not None
+                and prompt_cache_plan.mode == "explicit"
+            )
+            else TOOLS_MODALITY
+            if interaction_type == "chat_with_tools" and prompt_cache_plan is not None
+            else TEXT_MODALITY
+        )
+        prefer_anthropic_cache = bool(
+            prompt_cache_plan is not None
+            and prompt_cache_plan.mode == "explicit"
+            and prompt_cache_plan.prefer_anthropic_messages
+        )
         order = (
             _route_protocol_order(self.base_url, model)
-            if modality == TEXT_MODALITY
-            else _route_protocol_order(self.base_url, model, modality)
+            if modality == TEXT_MODALITY and not prefer_anthropic_cache
+            else _route_protocol_order(
+                self.base_url,
+                model,
+                modality,
+                prefer_anthropic_cache=prefer_anthropic_cache,
+            )
         )
         try:
             if len(order) == 1:
                 return await self._call_decided_protocol(order[0], call_for, model, modality)
             if interaction_type not in {"chat", "chat_with_tools"}:
-                return await self._probe_in_order(order, call_for, model, modality)
+                return await self._probe_in_order(
+                    order,
+                    call_for,
+                    model,
+                    modality,
+                    prefer_anthropic_cache=prefer_anthropic_cache,
+                )
             recovery = self._build_retry_kwargs(
                 model, messages=log_messages,
                 tools=tools, max_tokens=max_tokens,
             ).get("on_context_overflow")
             return await self._probe_in_order(
-                order, call_for, model, modality, on_context_overflow=recovery
+                order,
+                call_for,
+                model,
+                modality,
+                on_context_overflow=recovery,
+                prefer_anthropic_cache=prefer_anthropic_cache,
             )
         except StreamInterruptedError as error:
             # Stream completion is observed outside the transport retry

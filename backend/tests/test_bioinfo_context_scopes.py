@@ -493,6 +493,8 @@ async def test_checkpoint_restores_current_step_and_replaced_transcript(
         assert len(anchors) == 1
         assert str(registered_path) in anchors[0]["content"]
         assert request_messages[-1] == anchors[0]
+        assert anchors[0]["_scai_prompt_cache_ephemeral_tail"] is True
+        assert call.kwargs["prompt_cache_plan"].mode == "explicit"
     assert not any(
         str(message.get("content") or "").startswith(
             "[Authoritative Registered Inputs]"
@@ -503,6 +505,10 @@ async def test_checkpoint_restores_current_step_and_replaced_transcript(
     assert saved_payload is not None
     assert saved_payload["step_number"] == context.step_count == 2
     assert saved_payload["messages"] == trimmed_messages
+    assert not any(
+        "_scai_prompt_cache_ephemeral_tail" in message
+        for message in saved_payload["messages"]
+    )
 
     restored_agent = _bare_agent(monkeypatch, tmp_path)
     restored_context = await executor_loop.prepare_loop_context(

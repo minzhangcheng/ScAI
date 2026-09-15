@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 # importers and tests keep resolving them from this module.
 
 from .retry import DEFAULT_REQUEST_TIMEOUT
+from .prompt_cache import (
+    PromptCacheMode,
+    PromptCachePlan,
+    strip_prompt_cache_metadata,
+)
 from .shared import (  # noqa: F401
     base64,
     html,
@@ -122,6 +127,7 @@ from .shared import (  # noqa: F401
     _DEFAULT_PROTOCOL_ORDER,
     PROBE_RETRY_DELAYS,
     TEXT_MODALITY,
+    CACHED_TEXT_MODALITY,
     TOOLS_MODALITY,
     _keyword_protocol_hints,
     _route_protocol_order,
@@ -242,6 +248,7 @@ class ClientChatMixin:
         _allow_empty_retry: bool = True,
         non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
         max_retries_override: Optional[int] = None,
+        cache_mode: PromptCacheMode = "auto",
     ) -> LLMResponse:
         # Create log record
         interaction = self.llm_logger.log_request(
@@ -253,7 +260,9 @@ class ClientChatMixin:
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=self.base_url,
-            cache=self._prompt_cache_log_context(model, "chat"),
+            cache=self._prompt_cache_log_context(
+                model, "chat", "text", cache_mode
+            ),
         )
 
         start_time = time.time()
@@ -269,6 +278,7 @@ class ClientChatMixin:
             make_request, make_request_no_temp = self._build_request_pair(
                 base_params, model, temperature, max_tokens,
                 request_timeout=timeout,
+                cache_mode=cache_mode,
             )
             if not stream:
                 return make_request, make_request_no_temp
@@ -362,6 +372,7 @@ class ClientChatMixin:
                         _allow_empty_retry=_allow_empty_retry,
                         non_retryable_predicate=non_retryable_predicate,
                         max_retries_override=max_retries_override,
+                        cache_mode=cache_mode,
                     )
                 await self._emit_log_response(
                     interaction=interaction,
@@ -406,6 +417,7 @@ class ClientChatMixin:
                     _reasoning_only_retried=_reasoning_only_retried,
                     non_retryable_predicate=non_retryable_predicate,
                     max_retries_override=max_retries_override,
+                    cache_mode=cache_mode,
                 )
 
             # Some OpenAI-compatible reasoning providers return HTTP 200 and
@@ -458,6 +470,7 @@ class ClientChatMixin:
                     _allow_empty_retry=_allow_empty_retry,
                     non_retryable_predicate=non_retryable_predicate,
                     max_retries_override=max_retries_override,
+                    cache_mode=cache_mode,
                 )
 
             # Empty-response guard: a 200 reply with an empty answer, no tool
@@ -501,6 +514,7 @@ class ClientChatMixin:
                         _allow_empty_retry=_allow_empty_retry,
                         non_retryable_predicate=non_retryable_predicate,
                         max_retries_override=max_retries_override,
+                        cache_mode=cache_mode,
                     )
                 raise UpstreamExhaustedError(
                     "LLM returned empty content (zero completion tokens) after "
@@ -550,6 +564,7 @@ class ClientChatMixin:
         max_retries: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         prefer_stream: bool = False,
+        prompt_cache_plan: Optional[PromptCachePlan] = None,
     ) -> LLMResponse:
         """
         Send chat request to OpenAI-compatible API with automatic retry on timeout
@@ -574,6 +589,18 @@ class ClientChatMixin:
             raise ValueError("chat(stream=True) is not supported; use chat_stream() for streaming responses")
 
         enforced = _inject_english_enforcement(messages)
+        cache_mode: PromptCacheMode = (
+            prompt_cache_plan.mode if prompt_cache_plan is not None else "auto"
+        )
+        fallback_cache_mode: PromptCacheMode = (
+            "disabled" if prompt_cache_plan is not None else "auto"
+        )
+        stream_modality = (
+            CACHED_TEXT_MODALITY
+            if prompt_cache_plan is not None
+            and prompt_cache_plan.mode == "explicit"
+            else TEXT_MODALITY
+        )
         probe_timeout = timeout or DEFAULT_REQUEST_TIMEOUT
         stream_preferred = (
             prefer_stream and not tools and not _is_deep_research_model(model)
@@ -581,7 +608,7 @@ class ClientChatMixin:
         stream_enabled = {
             protocol: (
                 stream_preferred
-                and (self.base_url, model, TEXT_MODALITY, protocol)
+                and (self.base_url, model, stream_modality, protocol)
                 not in _NO_TEXT_STREAM
             )
             for protocol in ("responses", "chat", "anthropic")
@@ -594,7 +621,7 @@ class ClientChatMixin:
             def _disable():
                 stream_enabled[protocol] = False
                 _NO_TEXT_STREAM.add(
-                    (self.base_url, model, TEXT_MODALITY, protocol)
+                    (self.base_url, model, stream_modality, protocol)
                 )
 
             return await stream_with_fallback(
@@ -610,6 +637,8 @@ class ClientChatMixin:
                 "max_tokens": max_tokens,
                 "timeout": timeout,
                 "skip_temperature": skip_temperature,
+                "prompt_cache_plan": prompt_cache_plan,
+                "cache_mode": cache_mode,
             }
             return await _stream_first(
                 "anthropic",
@@ -622,12 +651,13 @@ class ClientChatMixin:
         async def _responses_call(adapter, skip_temperature):
             kwargs = {
                 "model": model,
-                "messages": enforced,
+                "messages": strip_prompt_cache_metadata(enforced),
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "timeout": timeout,
                 "skip_temperature": skip_temperature,
                 "tools": tools,
+                "cache_mode": fallback_cache_mode,
             }
             return await _stream_first(
                 "responses",
@@ -643,7 +673,7 @@ class ClientChatMixin:
                              non_retryable_predicate=None):
             kwargs = {
                 "model": model,
-                "messages": enforced,
+                "messages": strip_prompt_cache_metadata(enforced),
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "timeout": request_timeout,
@@ -651,6 +681,7 @@ class ClientChatMixin:
                 "_allow_empty_retry": allow_empty_retry,
                 "non_retryable_predicate": non_retryable_predicate,
                 "max_retries_override": max_retries_override,
+                "cache_mode": fallback_cache_mode,
             }
             return await _stream_first(
                 "chat",
@@ -676,6 +707,7 @@ class ClientChatMixin:
             temperature=temperature,
             max_tokens=max_tokens,
             request_timeout=timeout,
+            prompt_cache_plan=prompt_cache_plan,
         )
 
     async def _chat_with_tools_inline(
@@ -689,7 +721,9 @@ class ClientChatMixin:
         max_retries: Optional[int] = None,
         non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
         max_retries_override: Optional[int] = None,
+        cache_mode: PromptCacheMode = "auto",
     ) -> LLMToolResponse:
+        messages = strip_prompt_cache_metadata(messages)
         # Create log record
         interaction = self.llm_logger.log_request(
             session_id=self.session_id,
@@ -702,7 +736,9 @@ class ClientChatMixin:
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=self.base_url,
-            cache=self._prompt_cache_log_context(model, "chat", "tools"),
+            cache=self._prompt_cache_log_context(
+                model, "chat", "tools", cache_mode
+            ),
         )
 
         start_time = time.time()
@@ -724,7 +760,12 @@ class ClientChatMixin:
 
         base_params = {"model": model, "messages": messages, "tools": tools, "tool_choice": effective_tool_choice}
         _make_request, _make_request_no_temp = self._build_request_pair(
-            base_params, model, temperature, max_tokens, modality="tools"
+            base_params,
+            model,
+            temperature,
+            max_tokens,
+            modality="tools",
+            cache_mode=cache_mode,
         )
         effective_max_retries = max_retries_override if max_retries_override is not None else max_retries
         retry_kwargs = self._build_retry_kwargs(
@@ -756,6 +797,7 @@ class ClientChatMixin:
                     _make_request, _make_request_no_temp = self._build_request_pair(
                         base_params, model, temperature, max_tokens,
                         modality="tools",
+                        cache_mode=cache_mode,
                     )
                     response = await self._call_with_temp_fallback(
                         _make_request, _make_request_no_temp, model_key, retry_kwargs
@@ -890,6 +932,7 @@ class ClientChatMixin:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         prefer_stream: bool = False,
+        prompt_cache_plan: Optional[PromptCachePlan] = None,
     ) -> LLMToolResponse:
         """
         Send chat request with function/tool calling support and automatic retry on timeout.
@@ -909,6 +952,12 @@ class ClientChatMixin:
             LLMToolResponse with potential tool calls
         """
         enforced = _inject_english_enforcement(messages)
+        cache_mode: PromptCacheMode = (
+            prompt_cache_plan.mode if prompt_cache_plan is not None else "auto"
+        )
+        fallback_cache_mode: PromptCacheMode = (
+            "disabled" if prompt_cache_plan is not None else "auto"
+        )
         model_key = _extract_model_name(model)
         effective_tool_choice = tool_choice
         if (
@@ -930,12 +979,13 @@ class ClientChatMixin:
             nonlocal tool_stream_enabled
             kwargs = {
                 "model": model,
-                "messages": enforced,
+                "messages": strip_prompt_cache_metadata(enforced),
                 "tools": tools,
                 "tool_choice": choice,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "skip_temperature": skip_temperature,
+                "cache_mode": fallback_cache_mode,
             }
             if not tool_stream_enabled:
                 return await adapter.complete_with_tools(**kwargs)
@@ -962,21 +1012,27 @@ class ClientChatMixin:
                 log_messages=enforced,
                 make_anthropic_adapter_call=lambda adapter, skip_temperature: adapter.complete_with_tools(
                     model=model, messages=enforced, tools=tools, tool_choice=choice,
-                    temperature=temperature, max_tokens=max_tokens, skip_temperature=skip_temperature),
+                    temperature=temperature, max_tokens=max_tokens,
+                    skip_temperature=skip_temperature,
+                    prompt_cache_plan=prompt_cache_plan,
+                    cache_mode=cache_mode),
                 make_responses_adapter_call=lambda adapter, skip_temperature: _responses_tools_call(
                     adapter, skip_temperature, choice),
                 make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_tools_inline(
                     model, enforced, tools, choice, temperature, max_tokens,
                     non_retryable_predicate=non_retryable_predicate,
-                    max_retries_override=max_retries_override),
+                    max_retries_override=max_retries_override,
+                    cache_mode=fallback_cache_mode),
                 make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_tools_inline(
                     model, enforced, tools, choice, temperature, max_tokens, max_retries=0,
                     non_retryable_predicate=non_retryable_predicate,
-                    max_retries_override=max_retries_override),
+                    max_retries_override=max_retries_override,
+                    cache_mode=fallback_cache_mode),
                 tools=tools,
                 tool_choice=choice,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                prompt_cache_plan=prompt_cache_plan,
             )
 
         try:

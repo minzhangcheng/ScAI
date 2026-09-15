@@ -218,7 +218,11 @@ async def test_chat_only_model_fallback_does_not_mark_base_url_no_responses():
         await c.close()
 
 
-from backend.utils.llm_client import _route_protocol_order
+from backend.utils.llm_client import (
+    CACHED_TEXT_MODALITY,
+    TOOLS_MODALITY,
+    _route_protocol_order,
+)
 
 
 def test_order_default_v1():
@@ -257,6 +261,58 @@ def test_order_cached_decision_single():
     llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
     llm_mod._PROBE_CACHE[("https://x/v1", "m")] = "chat"
     assert _route_protocol_order("https://x/v1", "m") == ["chat"]
+
+
+def test_cache_planned_tools_prefer_anthropic_with_independent_probe_key():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    model = "anthropic/claude-sonnet-5"
+    llm_mod._PROBE_CACHE[("https://openrouter.ai/api/v1", model)] = "responses"
+
+    assert _route_protocol_order(
+        "https://openrouter.ai/api/v1",
+        model,
+        TOOLS_MODALITY,
+        prefer_anthropic_cache=True,
+    ) == ["anthropic", "responses", "chat"]
+    assert _route_protocol_order(
+        "https://openrouter.ai/api/v1", model, TOOLS_MODALITY
+    ) == ["responses", "chat", "anthropic"]
+
+
+def test_cache_planned_text_prefers_anthropic_with_independent_probe_key():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    model = "anthropic/claude-sonnet-5"
+    llm_mod._PROBE_CACHE[("https://openrouter.ai/api/v1", model)] = "responses"
+
+    assert _route_protocol_order(
+        "https://openrouter.ai/api/v1",
+        model,
+        CACHED_TEXT_MODALITY,
+        prefer_anthropic_cache=True,
+    ) == ["anthropic", "responses", "chat"]
+    assert _route_protocol_order(
+        "https://openrouter.ai/api/v1", model
+    ) == ["responses"]
+
+
+def test_cache_preference_does_not_override_explicit_or_cached_tools_route():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    assert _route_protocol_order(
+        "https://openrouter.ai/api/v1/responses",
+        "m",
+        TOOLS_MODALITY,
+        prefer_anthropic_cache=True,
+    ) == ["responses"]
+
+    llm_mod._PROBE_CACHE[
+        ("https://openrouter.ai/api/v1", "m", TOOLS_MODALITY)
+    ] = "chat"
+    assert _route_protocol_order(
+        "https://openrouter.ai/api/v1",
+        "m",
+        TOOLS_MODALITY,
+        prefer_anthropic_cache=True,
+    ) == ["chat"]
 
 
 def test_order_dr_model_responses_then_chat():

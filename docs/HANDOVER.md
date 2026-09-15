@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.57.9 · **Last updated**: 2026-09-15
+**Version**: 0.57.10 · **Last updated**: 2026-09-16
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,17 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.57.x — (2026-09-14 onward)**
+
+- `0.57.10` — Adds protocol-aware prompt-cache handling for PI history. Explicit
+  Anthropic caching is limited to confirmed compatible routes, while explicit
+  OpenRouter Responses/Chat endpoints and fallback paths disable automatic cache
+  writes but retain session affinity. Cached-text and ordinary-text streaming
+  capability decisions are isolated, custom endpoints are no longer classified
+  from a cold-start `/v1` heuristic, and context-overflow retries rebuild requests
+  from the compacted canonical message list. The focused prompt-cache, protocol,
+  and context-recovery set passed `144/144` via `scripts/scai-test fast` at
+  `test-results/20260915T151624Z-3545885/evidence.json`; no image build,
+  deployment, or historical-session mutation was performed.
 
 - `0.57.9` — Fixes ordinary runtime-generation workspace capture when a
   session workspace contains no regular files. Empty workspace copies and

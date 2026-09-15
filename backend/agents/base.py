@@ -20,6 +20,10 @@ from ..utils.llm_client import (
     LLMResponse,
     retry_replay_safe_llm_call,
 )
+from ..utils.llm_client_parts.prompt_cache import (
+    PROMPT_CACHE_STABLE_BOUNDARY_KEY,
+    PromptCachePlan,
+)
 from ..utils.formatting import safe_parse_json as _safe_parse_json_impl
 from ..utils.settings_provider import AgentSettingsProvider
 
@@ -284,18 +288,40 @@ class BaseAgent(ABC):
 
         try:
             self._set_llm_context(client)
+            model = self.model
             messages = self.get_messages_for_llm(message)
+            prompt_cache_plan = None
+            cache_plan_for_history = getattr(
+                client, "prompt_cache_plan_for_history", None
+            )
+            if (
+                self.agent_type == AgentType.PI
+                and callable(cache_plan_for_history)
+            ):
+                candidate = cache_plan_for_history(model)
+                if isinstance(candidate, PromptCachePlan):
+                    prompt_cache_plan = candidate
+            if (
+                prompt_cache_plan is not None
+                and prompt_cache_plan.mode == "explicit"
+            ):
+                messages[-1] = {
+                    **messages[-1],
+                    PROMPT_CACHE_STABLE_BOUNDARY_KEY: True,
+                }
             dispatch = await self._apply_context_budget(messages)
 
             # Use provided temperature or fall back to config default
             actual_temp = temperature if temperature is not None else self.config.temperature
 
             kwargs = {
-                "model": self.model,
+                "model": model,
                 "messages": dispatch.messages,
                 "temperature": actual_temp,
                 "prefer_stream": True,
             }
+            if prompt_cache_plan is not None:
+                kwargs["prompt_cache_plan"] = prompt_cache_plan
             if dispatch.max_tokens is not None:
                 kwargs["max_tokens"] = dispatch.max_tokens
             # Stream completion is observed outside the transport retry
@@ -317,7 +343,7 @@ class BaseAgent(ABC):
             response = await retry_replay_safe_llm_call(
                 dispatch_request,
                 agent_name=self._agent_label(),
-                model_name=str(self.model or ""),
+                model_name=str(model or ""),
                 llm_server=str(getattr(client, "base_url", "") or ""),
             )
             await self._acknowledge_context_budget(dispatch)

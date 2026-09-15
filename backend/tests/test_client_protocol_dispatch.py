@@ -8,6 +8,11 @@ from openai import AsyncOpenAI
 import backend.utils.llm_client as llm_mod
 from backend.utils.llm_client import OpenAICompatibleClient, LLMResponse, LLMToolResponse, NotFoundError, BadRequestError, InternalServerError, RateLimitError
 from backend.utils.llm_client_parts.media import normalize_image_input
+from backend.utils.llm_client_parts.prompt_cache import (
+    PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
+    PROMPT_CACHE_STABLE_BOUNDARY_KEY,
+    PromptCachePlan,
+)
 
 
 _OPEN_CLIENTS = []
@@ -44,6 +49,216 @@ def _client(base_url):
     c = OpenAICompatibleClient(api_key="k", base_url=base_url, agent_name="t")
     _OPEN_CLIENTS.append(c)
     return c
+
+
+@pytest.mark.asyncio
+async def test_cache_planned_openrouter_tools_prefer_anthropic_messages():
+    base_url = "https://openrouter.ai/api/v1"
+    model = "anthropic/claude-sonnet-5"
+    c = _client(base_url)
+    anthropic = MagicMock()
+    anthropic.complete_with_tools = AsyncMock(return_value=LLMToolResponse(
+        content="done",
+        tool_calls=[],
+        model=model,
+        usage={},
+        raw_response=None,
+    ))
+    responses = MagicMock()
+    responses.complete_with_tools = AsyncMock()
+    c._anthropic_adapter = anthropic
+    c._responses_adapter = responses
+
+    result = await c.chat_with_tools(
+        model=model,
+        messages=[
+            {"role": "system", "content": "stable"},
+            {"role": "user", "content": "history"},
+            {
+                "role": "user",
+                "content": "ephemeral",
+                PROMPT_CACHE_EPHEMERAL_TAIL_KEY: True,
+            },
+        ],
+        tools=[{"type": "function", "function": {"name": "f"}}],
+        prompt_cache_plan=PromptCachePlan(),
+        prefer_stream=True,
+    )
+
+    assert result.content == "done"
+    responses.complete_with_tools.assert_not_awaited()
+    request = anthropic.complete_with_tools.await_args.kwargs
+    assert request["cache_mode"] == "explicit"
+    assert request["prompt_cache_plan"] == PromptCachePlan()
+    assert "stream" not in request
+    assert llm_mod._PROBE_CACHE[(base_url, model, "tools")] == "anthropic"
+
+
+@pytest.mark.asyncio
+async def test_cache_plan_respects_explicit_responses_endpoint_and_disables_cache():
+    c = _client("https://openrouter.ai/api/v1/responses")
+    responses = MagicMock()
+    responses.complete_with_tools = AsyncMock(return_value=LLMToolResponse(
+        content="done",
+        tool_calls=[],
+        model="anthropic/claude-sonnet-5",
+        usage={},
+        raw_response=None,
+    ))
+    anthropic = MagicMock()
+    anthropic.complete_with_tools = AsyncMock()
+    c._responses_adapter = responses
+    c._anthropic_adapter = anthropic
+
+    await c.chat_with_tools(
+        model="anthropic/claude-sonnet-5",
+        messages=[{
+            "role": "user",
+            "content": "ephemeral",
+            PROMPT_CACHE_EPHEMERAL_TAIL_KEY: True,
+        }],
+        tools=[{"type": "function", "function": {"name": "f"}}],
+        prompt_cache_plan=PromptCachePlan(),
+    )
+
+    assert responses.complete_with_tools.await_args.kwargs["cache_mode"] == "disabled"
+    anthropic.complete_with_tools.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cache_planned_openrouter_text_prefers_anthropic_messages():
+    base_url = "https://openrouter.ai/api/v1"
+    model = "anthropic/claude-sonnet-5"
+    c = _client(base_url)
+    anthropic = MagicMock()
+    anthropic.complete = AsyncMock(return_value=LLMResponse(
+        content="done", model=model, usage={}, raw_response=None
+    ))
+    responses = MagicMock()
+    responses.complete = AsyncMock()
+    c._anthropic_adapter = anthropic
+    c._responses_adapter = responses
+
+    result = await c.chat(
+        model=model,
+        messages=[
+            {"role": "system", "content": "stable"},
+            {
+                "role": "user",
+                "content": "persisted question",
+                PROMPT_CACHE_STABLE_BOUNDARY_KEY: True,
+            },
+        ],
+        prompt_cache_plan=PromptCachePlan(),
+        prefer_stream=False,
+    )
+
+    assert result.content == "done"
+    responses.complete.assert_not_awaited()
+    request = anthropic.complete.await_args.kwargs
+    assert request["cache_mode"] == "explicit"
+    assert request["prompt_cache_plan"] == PromptCachePlan()
+    assert llm_mod._PROBE_CACHE[(base_url, model, "cached_text")] == "anthropic"
+
+
+@pytest.mark.asyncio
+async def test_disabled_cache_plan_respects_explicit_responses_endpoint():
+    c = _client("https://openrouter.ai/api/v1/responses")
+    responses = MagicMock()
+    responses.complete = AsyncMock(return_value=LLMResponse(
+        content="done",
+        model="anthropic/claude-sonnet-5",
+        usage={},
+        raw_response=None,
+    ))
+    anthropic = MagicMock()
+    anthropic.complete = AsyncMock()
+    c._responses_adapter = responses
+    c._anthropic_adapter = anthropic
+
+    disabled = PromptCachePlan(
+        mode="disabled", prefer_anthropic_messages=False
+    )
+    await c.chat(
+        model="anthropic/claude-sonnet-5",
+        messages=[{
+            "role": "user",
+            "content": "persisted question",
+            PROMPT_CACHE_STABLE_BOUNDARY_KEY: True,
+        }],
+        prompt_cache_plan=disabled,
+    )
+
+    request = responses.complete.await_args.kwargs
+    assert request["cache_mode"] == "disabled"
+    assert PROMPT_CACHE_STABLE_BOUNDARY_KEY not in request["messages"][0]
+    anthropic.complete.assert_not_awaited()
+
+
+def test_explicit_prompt_cache_support_is_scoped_to_compatible_routes():
+    generic = _client("https://openrouter.ai/api/v1")
+    explicit_responses = _client(
+        "https://openrouter.ai/api/v1/responses"
+    )
+    explicit_chat = _client(
+        "https://openrouter.ai/api/v1/chat/completions"
+    )
+    direct_anthropic = _client("https://api.anthropic.com")
+    custom_without_v1 = _client("https://api.deepseek.com")
+
+    assert generic.prompt_cache_plan_for_history(
+        "anthropic/claude-sonnet-5"
+    ) == PromptCachePlan()
+    assert generic.prompt_cache_plan_for_history(
+        "google/gemini-3.8-flash"
+    ) is None
+    disabled = PromptCachePlan(
+        mode="disabled", prefer_anthropic_messages=False
+    )
+    assert explicit_responses.prompt_cache_plan_for_history(
+        "anthropic/claude-sonnet-5"
+    ) == disabled
+    assert explicit_chat.prompt_cache_plan_for_history(
+        "anthropic/claude-sonnet-5"
+    ) == disabled
+    assert direct_anthropic.prompt_cache_plan_for_history(
+        "claude-sonnet-5"
+    ) == PromptCachePlan()
+    assert custom_without_v1.prompt_cache_plan_for_history(
+        "deepseek-chat"
+    ) is None
+    llm_mod._PROBE_CACHE[(
+        "https://api.deepseek.com", "deepseek-chat"
+    )] = "anthropic"
+    assert custom_without_v1.prompt_cache_plan_for_history(
+        "deepseek-chat"
+    ) == PromptCachePlan()
+    assert explicit_responses.supports_explicit_prompt_cache(
+        "anthropic/claude-sonnet-5"
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_disabled_cache_plan_omits_automatic_chat_cache_control():
+    c = _client("https://openrouter.ai/api/v1/chat/completions")
+    c.client.chat.completions.create = AsyncMock(return_value=SimpleNamespace(
+        model="anthropic/claude-sonnet-5",
+        usage=None,
+        choices=[SimpleNamespace(message=SimpleNamespace(content="done"))],
+    ))
+
+    await c.chat(
+        model="anthropic/claude-sonnet-5",
+        messages=[{"role": "user", "content": "persisted question"}],
+        prompt_cache_plan=PromptCachePlan(
+            mode="disabled", prefer_anthropic_messages=False
+        ),
+        prefer_stream=False,
+    )
+
+    request = c.client.chat.completions.create.await_args.kwargs
+    assert request["extra_body"]["session_id"]
+    assert "cache_control" not in request["extra_body"]
 
 
 @pytest.mark.asyncio
@@ -489,6 +704,50 @@ async def test_plain_text_stream_unsupported_is_cached_and_falls_back():
 
     assert stream_flags == [True, False, False]
     assert (base_url, model, "text", "responses") in llm_mod._NO_TEXT_STREAM
+
+
+@pytest.mark.asyncio
+async def test_cached_text_stream_capability_is_isolated_from_plain_text():
+    base_url = "https://api.anthropic.com/v1/messages"
+    model = "claude-sonnet-5"
+    stream_flags = []
+
+    async def complete(**kwargs):
+        stream_flags.append(kwargs.get("stream", False))
+        if len(stream_flags) == 1:
+            raise BadRequestError(
+                message="Error code: 400 - stream is not supported",
+                response=MagicMock(status_code=400),
+                body={"error": {
+                    "message": "stream is not supported",
+                    "param": "stream",
+                }},
+            )
+        return LLMResponse("done", model, {}, None)
+
+    client = _client(base_url)
+    client._anthropic_adapter = MagicMock()
+    client._anthropic_adapter.complete = AsyncMock(side_effect=complete)
+
+    assert (await client.chat(
+        model=model,
+        messages=[{"role": "user", "content": "cached"}],
+        prompt_cache_plan=PromptCachePlan(),
+        prefer_stream=True,
+    )).content == "done"
+    assert (await client.chat(
+        model=model,
+        messages=[{"role": "user", "content": "plain"}],
+        prefer_stream=True,
+    )).content == "done"
+
+    assert stream_flags == [True, False, True]
+    assert (
+        base_url, model, "cached_text", "anthropic"
+    ) in llm_mod._NO_TEXT_STREAM
+    assert (
+        base_url, model, "text", "anthropic"
+    ) not in llm_mod._NO_TEXT_STREAM
 
 
 @pytest.mark.asyncio

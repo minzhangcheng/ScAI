@@ -5,13 +5,28 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
+from dataclasses import dataclass
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Tuple,
+)
 from urllib.parse import urlparse
 
 
 logger = logging.getLogger(__name__)
 
 _CACHE_CONTROL = {"type": "ephemeral"}
+PROMPT_CACHE_EPHEMERAL_TAIL_KEY = "_scai_prompt_cache_ephemeral_tail"
+PROMPT_CACHE_STABLE_BOUNDARY_KEY = "_scai_prompt_cache_stable_boundary"
+_PROMPT_CACHE_METADATA_PREFIX = "_scai_prompt_cache_"
+PromptCacheMode = Literal["auto", "explicit", "disabled"]
 _CACHE_PARAMETER_PATTERN = r"cache[\s_-]*control"
 _CACHE_PARAMETER_RE = re.compile(_CACHE_PARAMETER_PATTERN, re.IGNORECASE)
 _CACHE_REJECTION_AFTER = (
@@ -40,6 +55,29 @@ _EXTRA_BODY_TYPE_ERROR_RE = re.compile(
 )
 
 
+@dataclass(frozen=True)
+class PromptCachePlan:
+    """Request-scoped preference for explicit Anthropic prompt caching."""
+
+    mode: Literal["explicit", "disabled"] = "explicit"
+    prefer_anthropic_messages: bool = True
+
+
+def strip_prompt_cache_metadata(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Remove ScAI-only cache locators before non-Anthropic serialization."""
+
+    return [
+        {
+            key: value
+            for key, value in message.items()
+            if not key.startswith(_PROMPT_CACHE_METADATA_PREFIX)
+        }
+        for message in messages
+    ]
+
+
 def _is_openrouter_url(base_url: str) -> bool:
     """Recognize OpenRouter by hostname without matching lookalike domains."""
     try:
@@ -47,6 +85,15 @@ def _is_openrouter_url(base_url: str) -> bool:
     except (TypeError, ValueError):
         return False
     return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+
+def _is_anthropic_url(base_url: str) -> bool:
+    """Recognize Anthropic-owned endpoints without matching lookalike domains."""
+    try:
+        host = (urlparse(base_url).hostname or "").rstrip(".").lower()
+    except (TypeError, ValueError):
+        return False
+    return host == "anthropic.com" or host.endswith(".anthropic.com")
 
 
 def _is_openrouter_anthropic_model(model: str) -> bool:
@@ -116,12 +163,18 @@ class PromptCacheController:
     ) -> None:
         self.base_url = base_url
         self._context_getter = context_getter or (lambda: ("default", "unknown"))
-        self._capabilities: Dict[Tuple[str, str, str], str] = {}
-        self._announced: set[Tuple[str, str, str]] = set()
+        self._capabilities: Dict[Tuple[str, str, str, str], str] = {}
+        self._announced: set[Tuple[str, str, str, str]] = set()
         self._extra_body_unsupported_protocols: set[str] = set()
 
-    def _key(self, model: str, protocol: str, modality: str) -> Tuple[str, str, str]:
-        return protocol, model, modality
+    def _capability_key(
+        self,
+        model: str,
+        protocol: str,
+        modality: str,
+        cache_mode: PromptCacheMode,
+    ) -> Tuple[str, str, str, str]:
+        return protocol, model, modality, cache_mode
 
     def _uses_automatic_cache(self, model: str, protocol: str, modality: str) -> bool:
         return protocol == "anthropic" or (
@@ -144,23 +197,43 @@ class PromptCacheController:
         digest = hashlib.sha256(str(session_id).encode("utf-8")).hexdigest()[:32]
         return f"scai-{digest}"
 
-    def describe(self, model: str, protocol: str, modality: str = "text") -> Dict[str, Any]:
-        key = self._key(model, protocol, modality)
+    def describe(
+        self,
+        model: str,
+        protocol: str,
+        modality: str = "text",
+        cache_mode: PromptCacheMode = "auto",
+    ) -> Dict[str, Any]:
+        key = self._capability_key(model, protocol, modality, cache_mode)
         automatic = self._uses_automatic_cache(model, protocol, modality)
         capability = self._capabilities.get(key)
-        if automatic and not self._extra_body_supported(protocol):
+        cache_requested = cache_mode == "explicit" or (
+            cache_mode == "auto" and automatic
+        )
+        if (
+            cache_mode == "auto"
+            and automatic
+            and not self._extra_body_supported(protocol)
+        ):
             capability = capability or "sdk_unsupported"
         cache_control_enabled = (
-            automatic
-            and self._extra_body_supported(protocol)
+            cache_requested
+            and (
+                cache_mode == "explicit"
+                or self._extra_body_supported(protocol)
+            )
             and capability != "unsupported"
         )
         return {
             "protocol": protocol,
             "modality": modality,
-            "strategy": "automatic" if automatic else "provider_managed",
+            "strategy": (
+                cache_mode
+                if cache_mode != "auto"
+                else "automatic" if automatic else "provider_managed"
+            ),
             "capability": (
-                capability if automatic else "provider_managed"
+                capability if cache_requested else "provider_managed"
             ) or "probing",
             "cache_control_enabled": cache_control_enabled,
             "session_affinity": self._session_affinity_id(protocol) is not None,
@@ -169,17 +242,24 @@ class PromptCacheController:
                 if (
                     cache_control_enabled
                     and _is_openrouter_url(self.base_url)
+                    and protocol == "anthropic"
                 )
                 else None
             ),
         }
 
-    def _announce(self, model: str, protocol: str, modality: str) -> None:
-        key = self._key(model, protocol, modality)
+    def _announce(
+        self,
+        model: str,
+        protocol: str,
+        modality: str,
+        cache_mode: PromptCacheMode,
+    ) -> None:
+        key = (protocol, model, modality, cache_mode)
         if key in self._announced:
             return
         self._announced.add(key)
-        state = self.describe(model, protocol, modality)
+        state = self.describe(model, protocol, modality, cache_mode)
         _session_id, agent_name = self._context_getter()
         logger.info(
             "[%s] Prompt cache policy model=%s protocol=%s modality=%s "
@@ -198,6 +278,7 @@ class PromptCacheController:
         model: str,
         protocol: str,
         modality: str,
+        cache_mode: PromptCacheMode,
     ) -> Tuple[Dict[str, Any], bool]:
         prepared = dict(params)
         raw_extra = prepared.get("extra_body")
@@ -207,19 +288,29 @@ class PromptCacheController:
         if affinity_id is not None:
             extra_body.setdefault("session_id", affinity_id)
 
-        key = self._key(model, protocol, modality)
-        automatic = (
-            self._extra_body_supported(protocol)
-            and self._uses_automatic_cache(model, protocol, modality)
+        key = self._capability_key(model, protocol, modality, cache_mode)
+        cache_enabled = (
+            cache_mode != "disabled"
             and self._capabilities.get(key) != "unsupported"
+            and (
+                cache_mode == "explicit"
+                or (
+                    self._extra_body_supported(protocol)
+                    and self._uses_automatic_cache(model, protocol, modality)
+                )
+            )
         )
-        if automatic:
+        if cache_mode == "auto" and cache_enabled:
             extra_body.setdefault("cache_control", dict(_CACHE_CONTROL))
+        elif cache_mode != "auto":
+            extra_body.pop("cache_control", None)
 
         if extra_body:
             prepared["extra_body"] = extra_body
-        self._announce(model, protocol, modality)
-        return prepared, automatic
+        else:
+            prepared.pop("extra_body", None)
+        self._announce(model, protocol, modality, cache_mode)
+        return prepared, cache_enabled
 
     async def request(
         self,
@@ -229,9 +320,24 @@ class PromptCacheController:
         model: str,
         protocol: str,
         modality: str = "text",
+        cache_mode: PromptCacheMode = "auto",
+        fallback_params: Optional[Mapping[str, Any]] = None,
     ) -> Any:
-        prepared, automatic = self._prepare(params, model, protocol, modality)
-        key = self._key(model, protocol, modality)
+        key = self._capability_key(model, protocol, modality, cache_mode)
+        if cache_mode == "explicit" and fallback_params is None:
+            raise ValueError("explicit prompt caching requires fallback_params")
+        if (
+            cache_mode == "explicit"
+            and self._capabilities.get(key) == "unsupported"
+        ):
+            source_params = fallback_params
+            effective_mode: PromptCacheMode = "disabled"
+        else:
+            source_params = params
+            effective_mode = cache_mode
+        prepared, cache_enabled = self._prepare(
+            source_params, model, protocol, modality, effective_mode
+        )
         try:
             result = await create(**prepared)
         except Exception as error:
@@ -241,7 +347,7 @@ class PromptCacheController:
                 and _EXTRA_BODY_TYPE_ERROR_RE.search(str(error))
             ):
                 self._extra_body_unsupported_protocols.add(protocol)
-                if automatic:
+                if cache_mode == "auto" and cache_enabled:
                     self._capabilities[key] = "unsupported"
                 _session_id, agent_name = self._context_getter()
                 logger.warning(
@@ -256,7 +362,7 @@ class PromptCacheController:
                 fallback = dict(params)
                 fallback.pop("extra_body", None)
                 return await create(**fallback)
-            if not automatic or not is_prompt_cache_rejection(error):
+            if not cache_enabled or not is_prompt_cache_rejection(error):
                 raise
 
             self._capabilities[key] = "unsupported"
@@ -270,9 +376,18 @@ class PromptCacheController:
                 type(error).__name__,
                 str(error)[:200],
             )
-            fallback, _ = self._prepare(params, model, protocol, modality)
+            fallback_source = (
+                fallback_params if cache_mode == "explicit" else params
+            )
+            fallback, _ = self._prepare(
+                fallback_source,
+                model,
+                protocol,
+                modality,
+                "disabled" if cache_mode == "explicit" else "auto",
+            )
             return await create(**fallback)
 
-        if automatic:
+        if cache_enabled:
             self._capabilities[key] = "supported"
         return result
