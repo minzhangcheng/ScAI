@@ -2,7 +2,7 @@
 import json
 import pytest
 from backend.utils.blob_store import externalize_blobs, inline_blobs, BLOB_REF_PREFIX, MIN_BLOB_LEN
-from backend.models.schemas import AnalysisState, PublicationFigure
+from backend.models.schemas import AnalysisState, PublicationFigure, WebSocketMessage
 from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
 
 
@@ -82,6 +82,45 @@ def test_session_roundtrip_strips_base64_from_json(tmp_path, monkeypatch):
     assert loaded is not None
     figure = loaded.publication_figures[0]
     assert figure.png_base64 == STRIPPED_FIGURE_PLACEHOLDER
+
+
+def test_session_roundtrip_restores_round_summary_text_blobs(tmp_path, monkeypatch):
+    import backend.services.session_store as ss
+
+    sid = "round-summary-text-session"
+    session_file = tmp_path / sid / "session.json"
+    monkeypatch.setattr(ss, "get_session_metadata_path", lambda s: session_file)
+    monkeypatch.setattr(ss, "resolve_session_metadata_path", lambda s: session_file)
+
+    summary = "Round summary text. " * 80
+    integration_summary = "Integration report text. " * 100
+    state = AnalysisState(id=sid, user_id="u")
+    state.realtime_messages = [WebSocketMessage(
+        type="round_summary",
+        content={
+            "round": 4,
+            "phase": "integration",
+            "summary": summary,
+            "integration_report_summary": integration_summary,
+            "legacy_binary": BLOB_REF_PREFIX + ("a" * 64),
+        },
+    )]
+
+    ss.save_session_to_disk(sid, state)
+
+    persisted_content = json.loads(session_file.read_text(encoding="utf-8"))[
+        "realtime_messages"
+    ][0]["content"]
+    assert persisted_content["summary"].startswith(BLOB_REF_PREFIX)
+    assert persisted_content["integration_report_summary"].startswith(BLOB_REF_PREFIX)
+    assert persisted_content["legacy_binary"] == STRIPPED_FIGURE_PLACEHOLDER
+
+    loaded = ss.load_session_from_disk(sid)
+    assert loaded is not None
+    loaded_content = loaded.realtime_messages[0].content
+    assert loaded_content["summary"] == summary
+    assert loaded_content["integration_report_summary"] == integration_summary
+    assert loaded_content["legacy_binary"] == STRIPPED_FIGURE_PLACEHOLDER
 
 
 def test_async_save_offloads_blob_io_to_worker_thread(tmp_path, monkeypatch):

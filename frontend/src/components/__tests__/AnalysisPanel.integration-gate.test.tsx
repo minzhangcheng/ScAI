@@ -1,7 +1,8 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AnalysisPanel } from '../AnalysisPanel'
-import { useAppStore, type Message, type Session } from '../../stores/appStore'
+import { STRIPPED_FIGURE_PLACEHOLDER } from '../../constants/storage'
+import { useAppStore, type Message, type RoundResult, type Session } from '../../stores/appStore'
 
 const sessionMocks = vi.hoisted(() => ({
   startAnalysis: vi.fn(),
@@ -70,6 +71,48 @@ const innovationWaitingSummary: Message = {
   },
 }
 
+const authoritativeIntegrationRound: RoundResult = {
+  round: 4,
+  summary: 'Authoritative integration round summary.',
+  phase: 'integration',
+  pathologyFindings: [],
+  bioinformaticsFindings: [],
+  biochemistryFindings: [],
+  literatureFindings: [],
+  crossModalCandidates: [],
+  integrationCandidates: [{ direction: 'Authoritative candidate direction' }],
+  integrationReportSummary: 'Authoritative full integration summary.',
+  roundStatus: 'completed',
+  evidenceStatus: 'substantive',
+  evidenceExecutionIds: [],
+  evidenceNotes: [],
+  evidenceGateFindings: [],
+  lineageId: 'main',
+  directionKey: '',
+  resultIdentityKey: 'main:integration:4:',
+}
+
+const strippedIntegrationRoundMessage: Message = {
+  id: 'round-4-integration',
+  type: 'round_summary',
+  agent: 'pi',
+  timestamp: '2026-09-15T00:52:27Z',
+  content: {
+    round: 4,
+    max_rounds: 3,
+    phase: 'integration',
+    status: 'completed',
+    summary: STRIPPED_FIGURE_PLACEHOLDER,
+    integration_report_summary: STRIPPED_FIGURE_PLACEHOLDER,
+    integration_candidates: [{ direction: 'Authoritative candidate direction' }],
+    findings: [],
+    data_requests: {},
+    lineage_id: 'main',
+    direction_key: '',
+    result_identity_key: 'main:integration:4:',
+  },
+}
+
 describe('AnalysisPanel integration gate lifecycle', () => {
   beforeEach(() => {
     sessionMocks.continueRound.mockClear()
@@ -109,6 +152,23 @@ describe('AnalysisPanel integration gate lifecycle', () => {
     await waitFor(() => {
       expect(screen.queryByText(/Stale integration direction/i)).not.toBeInTheDocument()
     })
+  })
+
+  it('uses authoritative round text when persisted realtime history contains image sentinels', async () => {
+    useAppStore.setState({
+      currentSession: {
+        ...makeSession('running', 'innovation'),
+        currentRound: 4,
+        roundResults: [authoritativeIntegrationRound],
+      },
+      messages: [strippedIntegrationRoundMessage],
+    })
+
+    render(<AnalysisPanel />)
+
+    expect(await screen.findByText(authoritativeIntegrationRound.summary)).toBeInTheDocument()
+    expect(screen.getByText(authoritativeIntegrationRound.integrationReportSummary!)).toBeInTheDocument()
+    expect(screen.queryByText(STRIPPED_FIGURE_PLACEHOLDER)).not.toBeInTheDocument()
   })
 
   it('restores the ordinary feedback dialog and Continue action after stale gate history replay', async () => {

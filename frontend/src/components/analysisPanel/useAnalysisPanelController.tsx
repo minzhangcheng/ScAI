@@ -4,6 +4,7 @@ import { BookOpen, Code2, Eye, FlaskConical, Microscope, Palette, Users, Wrench 
 import { generateId, useConfig, useSession, useUserConfig } from '../../hooks/useApi'
 import { useCountdownTimer } from '../../hooks/useCountdownTimer'
 import { useTranslation } from '../../i18n/translations'
+import { STRIPPED_FIGURE_PLACEHOLDER } from '../../constants/storage'
 import { useAppStore, type Message, type Session } from '../../stores/appStore'
 import type { RoundSummary } from '../../types'
 import { resultIdentityKey } from '../../utils/roundKey'
@@ -19,6 +20,12 @@ import type { ExplorationReportData, PlanReviewData, RoundSummaryContent } from 
 import { useAnalysisPanelEffects } from './useAnalysisPanelEffects'
 
 const MAX_EXPLORATION_ROUND = 1
+
+function isUnavailableRoundText(value: string | undefined): boolean {
+  const normalized = value?.trim() || ''
+  return normalized === STRIPPED_FIGURE_PLACEHOLDER
+    || normalized.startsWith('@scai-blob:')
+}
 
 /** Transient UI state owned by one exact session/branch pair. */
 function useOwnedValue<T>(initialValue: T, ownerKey: string | null) {
@@ -92,7 +99,20 @@ function buildRoundSummaries(messages: Message[], currentSession: Session | null
   }
   for (const result of currentSession?.roundResults || []) {
     const identity = resultIdentityKey(result)
-    if (summaries.has(identity)) continue
+    const existing = summaries.get(identity)
+    if (existing) {
+      summaries.set(identity, {
+        ...existing,
+        summary: isUnavailableRoundText(existing.summary) && result.summary
+          ? result.summary
+          : existing.summary,
+        integrationReportSummary: isUnavailableRoundText(existing.integrationReportSummary)
+          && result.integrationReportSummary
+          ? result.integrationReportSummary
+          : existing.integrationReportSummary,
+      })
+      continue
+    }
     summaries.set(identity, {
       round: result.round,
       summary: result.summary || '',

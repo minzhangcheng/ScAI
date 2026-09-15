@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.57.5 · **Last updated**: 2026-09-15
+**Version**: 0.57.6 · **Last updated**: 2026-09-15
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,22 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.57.x — (2026-09-14 onward)**
+
+- `0.57.6` — Repairs post-restart Analysis rendering for long textual round
+  summaries. Durable realtime history now preserves blob handles for
+  `summary` and `integration_report_summary` until load-time inlining, while
+  non-text payloads remain image-sanitized. The Analysis panel falls back to
+  canonical `roundResults` when replayed realtime history contains `[image]` or
+  unresolved blob sentinels, preventing placeholders from replacing authoritative
+  integration text. The focused backend regression passed `1/1` at
+  `test-results/20260915T030058Z-2051192/evidence.json`; the related blob,
+  session, and realtime durability set passed `9/9` at
+  `test-results/20260915T025541Z-2034975/evidence.json`; the frontend suite passed
+  `355/355` tests in 149 suites at
+  `test-results/20260915T025727Z-d608a6860ec9-frontend/evidence.json`; and version
+  consistency passed `8/8` at
+  `test-results/20260915T030909Z-2069404/evidence.json`. No image build, registry
+  push, deployment, or historical-session mutation was performed.
 
 - `0.57.5` — Aligns the supplementary executor's PI capability contract and
   prompt with the v0.57.1 live-AnnData checkpoint model. Approved supplementary

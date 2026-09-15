@@ -319,10 +319,30 @@ def _strip_legacy_blob_references(value: Any, *, realtime: bool = False) -> Any:
     if isinstance(value, list):
         return [_strip_legacy_blob_references(item, realtime=realtime) for item in value]
     if isinstance(value, dict):
+        round_summary_text_fields = (
+            {"summary", "integration_report_summary"}
+            if realtime and value.get("type") == "round_summary"
+            else set()
+        )
         return {
-            key: _strip_legacy_blob_references(
-                item,
-                realtime=realtime or key == "realtime_messages",
+            key: (
+                {
+                    content_key: _strip_legacy_blob_references(
+                        content_value,
+                        realtime=(
+                            content_key not in round_summary_text_fields
+                            or not isinstance(content_value, str)
+                        ),
+                    )
+                    for content_key, content_value in item.items()
+                }
+                if key == "content"
+                and round_summary_text_fields
+                and isinstance(item, dict)
+                else _strip_legacy_blob_references(
+                    item,
+                    realtime=realtime or key == "realtime_messages",
+                )
             )
             for key, item in value.items()
         }
