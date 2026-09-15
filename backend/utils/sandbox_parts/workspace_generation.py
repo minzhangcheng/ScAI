@@ -130,6 +130,7 @@ def stage_workspace_copy(
 
     incoming = pair_dir / f"{WORKSPACE_COPY_DIRNAME}.incoming"
     shutil.rmtree(incoming, ignore_errors=True)
+    incoming.mkdir(parents=True, exist_ok=True)
     previous = _link_source_for(generation_root, exclude=pair_dir)
 
     for base, _dirs, files in os.walk(workspace):

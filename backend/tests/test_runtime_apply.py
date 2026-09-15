@@ -452,6 +452,17 @@ def test_a_rollback_removes_the_files_written_after_the_generation():
     assert not (workspace / "figures" / "later.png").exists()
 
 
+def test_an_empty_workspace_is_restored_as_empty():
+    sid = "sess-empty-workspace"
+    _states, pair = _generation_pair(sid, 44)
+    workspace = _generation_workspace(sid, pair, {})
+
+    (workspace / "written-later.txt").write_text("from the discarded future")
+
+    assert runtime_apply.restore_generation_pair(sid, revision=44) is True
+    assert not (workspace / "written-later.txt").exists()
+
+
 def test_a_file_nothing_touched_is_left_where_it_is():
     """The common case, and it must cost no copy."""
     sid = "sess-ws-untouched"
