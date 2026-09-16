@@ -9,6 +9,7 @@ from backend.config import SystemConfig
 from backend.models.schemas import AgentType, AnalysisState, ContextBudgetObservation
 from backend.utils.context_budget import append_observation
 from backend.utils.llm_client_parts.prompt_cache import (
+    PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
     PROMPT_CACHE_STABLE_BOUNDARY_KEY,
     PromptCachePlan,
 )
@@ -100,6 +101,39 @@ async def test_pi_history_chat_can_disable_cache_without_marking_the_user():
     request = client.calls[0]
     assert request["prompt_cache_plan"] == disabled
     assert PROMPT_CACHE_STABLE_BOUNDARY_KEY not in request["messages"][-1]
+
+
+@pytest.mark.asyncio
+async def test_bioinformatics_standalone_chat_caches_only_the_stable_system():
+    state = AnalysisState(user_id="user-1")
+    client = _Client(prompt_cache_plan=PromptCachePlan())
+
+    await _agent(
+        state, client, AgentType.BIOINFORMATICS
+    ).chat_without_history("build a plan")
+
+    request = client.calls[0]
+    assert request["prompt_cache_plan"] == PromptCachePlan()
+    assert request["messages"][-1] == {
+        "role": "user",
+        "content": "build a plan",
+        PROMPT_CACHE_EPHEMERAL_TAIL_KEY: True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pi_standalone_chat_propagates_disabled_cache_without_marker():
+    state = AnalysisState(user_id="user-1")
+    disabled = PromptCachePlan(
+        mode="disabled", prefer_anthropic_messages=False
+    )
+    client = _Client(prompt_cache_plan=disabled)
+
+    await _agent(state, client).chat_without_history("review")
+
+    request = client.calls[0]
+    assert request["prompt_cache_plan"] == disabled
+    assert PROMPT_CACHE_EPHEMERAL_TAIL_KEY not in request["messages"][-1]
 
 
 @pytest.mark.asyncio

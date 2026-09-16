@@ -21,6 +21,7 @@ from ..utils.llm_client import (
     retry_replay_safe_llm_call,
 )
 from ..utils.llm_client_parts.prompt_cache import (
+    PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
     PROMPT_CACHE_STABLE_BOUNDARY_KEY,
     PromptCachePlan,
 )
@@ -384,21 +385,44 @@ class BaseAgent(ABC):
 
         try:
             self._set_llm_context(client)
+            model = self.model
             prompt = system_prompt or self.system_prompt
+            prompt_cache_plan = None
+            cache_plan_for_history = getattr(
+                client, "prompt_cache_plan_for_history", None
+            )
+            if (
+                self.agent_type in {AgentType.PI, AgentType.BIOINFORMATICS}
+                and callable(cache_plan_for_history)
+            ):
+                candidate = cache_plan_for_history(model)
+                if isinstance(candidate, PromptCachePlan):
+                    prompt_cache_plan = candidate
+            user_message = {"role": "user", "content": message}
+            if (
+                prompt_cache_plan is not None
+                and prompt_cache_plan.mode == "explicit"
+            ):
+                # Standalone calls share only their stable system prompt. The
+                # request body is task-specific and must not extend the cache
+                # breakpoint merely because the endpoint supports caching.
+                user_message[PROMPT_CACHE_EPHEMERAL_TAIL_KEY] = True
             messages = [
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": message}
+                user_message,
             ]
             dispatch = await self._apply_context_budget(messages)
 
             actual_temp = temperature if temperature is not None else self.config.temperature
 
             kwargs: dict = {
-                "model": self.model,
+                "model": model,
                 "messages": dispatch.messages,
                 "temperature": actual_temp,
                 "prefer_stream": True,
             }
+            if prompt_cache_plan is not None:
+                kwargs["prompt_cache_plan"] = prompt_cache_plan
             if timeout is not None:
                 kwargs["timeout"] = timeout
             if max_retries is not None:
@@ -422,7 +446,7 @@ class BaseAgent(ABC):
             response = await retry_replay_safe_llm_call(
                 dispatch_request,
                 agent_name=self._agent_label(),
-                model_name=str(self.model or ""),
+                model_name=str(model or ""),
                 llm_server=str(getattr(client, "base_url", "") or ""),
                 on_retry=on_retry,
             )

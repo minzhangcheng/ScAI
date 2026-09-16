@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError, BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError
 
 from ..llm_logger import get_llm_logger, LLMInteraction
+from .prompt_cache import PromptCacheMode, PromptCachePlan
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +283,7 @@ class ClientStreamVisionMixin:
         non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
         system_prompt: Optional[str] = None,
         stream: bool = False,
+        cache_mode: PromptCacheMode = "auto",
     ) -> LLMResponse:
         messages = _inject_english_enforcement(
             ([{"role": "system", "content": system_prompt}]
@@ -302,7 +304,9 @@ class ClientStreamVisionMixin:
             temperature=temperature,
             max_tokens=max_tokens,
             base_url=self.base_url,
-            cache=self._prompt_cache_log_context(model, "chat", "vision"),
+            cache=self._prompt_cache_log_context(
+                model, "chat", "vision", cache_mode
+            ),
         )
 
         start_time = time.time()
@@ -317,7 +321,12 @@ class ClientStreamVisionMixin:
 
         def _build_vision_requests():
             make_request, make_request_no_temp = self._build_request_pair(
-                base_params, model, temperature, max_tokens, modality="vision"
+                base_params,
+                model,
+                temperature,
+                max_tokens,
+                modality="vision",
+                cache_mode=cache_mode,
             )
             if not stream:
                 return make_request, make_request_no_temp
@@ -434,6 +443,7 @@ class ClientStreamVisionMixin:
         request_timeout: Optional[float] = None,
         system_prompt: Optional[str] = None,
         prefer_stream: bool = False,
+        prompt_cache_plan: Optional[PromptCachePlan] = None,
     ) -> LLMResponse:
         """
         Send chat request with images to OpenAI-compatible API with automatic retry on timeout.
@@ -449,11 +459,20 @@ class ClientStreamVisionMixin:
                 (Responses, Chat Completions or Anthropic), falling back to the
                 non-streaming request when the endpoint rejects streaming or
                 the stream ends before its first event
+            prompt_cache_plan: Optional request-scoped cache plan. Explicit
+                plans cache the stable system prompt only; non-Anthropic
+                fallbacks keep cache writes disabled.
 
         Returns:
             LLMResponse object
         """
         normalized_images = [normalize_image_input(image)[0] for image in images]
+        cache_mode: PromptCacheMode = (
+            prompt_cache_plan.mode if prompt_cache_plan is not None else "auto"
+        )
+        fallback_cache_mode: PromptCacheMode = (
+            "disabled" if prompt_cache_plan is not None else "auto"
+        )
         log_msgs = [{"role": "user", "content": f"[{len(normalized_images)} images] + {text_prompt[:500]}"}]
         probe_timeout = request_timeout or DEFAULT_REQUEST_TIMEOUT
         stream_cache_key = _probe_key(self.base_url, model, VISION_MODALITY)
@@ -498,6 +517,8 @@ class ClientStreamVisionMixin:
                 "timeout": request_timeout,
                 "skip_temperature": skip_temperature,
                 "system_prompt": system_prompt,
+                "prompt_cache_plan": prompt_cache_plan,
+                "cache_mode": cache_mode,
             }
             return await _vision_stream_first(
                 "anthropic",
@@ -523,6 +544,7 @@ class ClientStreamVisionMixin:
                 ),
                 "non_retryable_predicate": non_retryable_predicate,
                 "system_prompt": system_prompt,
+                "cache_mode": fallback_cache_mode,
             }
             return await _vision_stream_first(
                 "chat",
@@ -541,6 +563,7 @@ class ClientStreamVisionMixin:
                 "timeout": request_timeout,
                 "skip_temperature": skip_temperature,
                 "system_prompt": system_prompt,
+                "cache_mode": fallback_cache_mode,
             }
             if not responses_stream_enabled:
                 return await adapter.complete_vision(**kwargs)
@@ -577,4 +600,5 @@ class ClientStreamVisionMixin:
             temperature=temperature,
             max_tokens=max_tokens,
             request_timeout=request_timeout,
+            prompt_cache_plan=prompt_cache_plan,
         )

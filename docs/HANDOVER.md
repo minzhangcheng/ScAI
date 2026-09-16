@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.57.10 · **Last updated**: 2026-09-16
+**Version**: 0.57.11 · **Last updated**: 2026-09-16
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,17 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.57.x — (2026-09-14 onward)**
+
+- `0.57.11` — Optimizes PI and Bioinformatics standalone LLM calls by caching
+  only stable system prefixes on compatible Anthropic routes. Bioinformatics
+  figure-revision requests now keep dynamic code, feedback, and images outside
+  the cache breakpoint; Responses/Chat fallback paths disable automatic cache
+  writes while retaining session affinity. PI/Gemini provider-managed caching
+  and the high-hit Bioinformatics tool loop remain unchanged. The focused cache,
+  vision, adapter, context, and figure regression set passed `239/239` via
+  `scripts/scai-test fast` at
+  `test-results/20260916T004839Z-336260/evidence.json`; no image build,
+  deployment, or historical-session mutation was performed.
 
 - `0.57.10` — Adds protocol-aware prompt-cache handling for PI history. Explicit
   Anthropic caching is limited to confirmed compatible routes, while explicit

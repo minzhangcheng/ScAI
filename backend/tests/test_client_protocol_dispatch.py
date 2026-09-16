@@ -95,6 +95,64 @@ async def test_cache_planned_openrouter_tools_prefer_anthropic_messages():
 
 
 @pytest.mark.asyncio
+async def test_cache_planned_openrouter_vision_prefers_anthropic_messages():
+    base_url = "https://openrouter.ai/api/v1"
+    model = "anthropic/claude-sonnet-5"
+    c = _client(base_url)
+    anthropic = MagicMock()
+    anthropic.complete_vision = AsyncMock(return_value=LLMResponse(
+        content="done", model=model, usage={}, raw_response=None,
+    ))
+    responses = MagicMock()
+    responses.complete_vision = AsyncMock()
+    c._anthropic_adapter = anthropic
+    c._responses_adapter = responses
+
+    result = await c.chat_with_vision(
+        model=model,
+        text_prompt="dynamic review",
+        images=["aW1hZ2U="],
+        system_prompt="stable system",
+        prompt_cache_plan=PromptCachePlan(),
+    )
+
+    assert result.content == "done"
+    responses.complete_vision.assert_not_awaited()
+    request = anthropic.complete_vision.await_args.kwargs
+    assert request["cache_mode"] == "explicit"
+    assert request["prompt_cache_plan"] == PromptCachePlan()
+    assert llm_mod._PROBE_CACHE[(base_url, model, "vision")] == "anthropic"
+
+
+@pytest.mark.asyncio
+async def test_disabled_cache_plan_reaches_explicit_responses_vision():
+    c = _client("https://openrouter.ai/api/v1/responses")
+    model = "anthropic/claude-sonnet-5"
+    responses = MagicMock()
+    responses.complete_vision = AsyncMock(return_value=LLMResponse(
+        content="done", model=model, usage={}, raw_response=None,
+    ))
+    anthropic = MagicMock()
+    anthropic.complete_vision = AsyncMock()
+    c._responses_adapter = responses
+    c._anthropic_adapter = anthropic
+    disabled = PromptCachePlan(
+        mode="disabled", prefer_anthropic_messages=False
+    )
+
+    await c.chat_with_vision(
+        model=model,
+        text_prompt="dynamic review",
+        images=["aW1hZ2U="],
+        system_prompt="stable system",
+        prompt_cache_plan=disabled,
+    )
+
+    anthropic.complete_vision.assert_not_awaited()
+    assert responses.complete_vision.await_args.kwargs["cache_mode"] == "disabled"
+
+
+@pytest.mark.asyncio
 async def test_cache_plan_respects_explicit_responses_endpoint_and_disables_cache():
     c = _client("https://openrouter.ai/api/v1/responses")
     responses = MagicMock()

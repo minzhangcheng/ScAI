@@ -33,6 +33,7 @@ from backend.services.report.artifacts import (
 )
 from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
 from backend.utils.llm_client import BadRequestError, UpstreamExhaustedError
+from backend.utils.llm_client_parts.prompt_cache import PromptCachePlan
 
 BLOCKING = [{
     "kind": "text_over_text", "severity": "block", "text": "Con FXR/bile",
@@ -1050,6 +1051,9 @@ class _PromptLLM:
         self.calls.append(("vision", kwargs))
         return SimpleNamespace(content="revised vision code")
 
+    def prompt_cache_plan_for_history(self, _model):
+        return PromptCachePlan()
+
 
 class _PromptAgent(FiguresMixin):
     def __init__(self):
@@ -1288,6 +1292,7 @@ async def test_figure_revision_prompt_has_shared_stable_prefix_and_unchanged_dyn
     calls = agent.llm_client.calls
     assert [kind for kind, _ in calls] == ["chat", "vision"]
     assert calls[1][1]["prefer_stream"] is True
+    assert calls[1][1]["prompt_cache_plan"] == PromptCachePlan()
     plain_prompt = calls[0][1]["messages"][0]["content"]
     vision_prompt = calls[1][1]["text_prompt"]
     original_marker = "**Original Code:**"

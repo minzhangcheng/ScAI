@@ -26,6 +26,7 @@ from datetime import datetime
 import aiofiles
 
 from ...constants import NO_OUTPUT_TOKEN_CAP
+from ...utils.llm_client_parts.prompt_cache import PromptCachePlan
 from ..base import BaseAgent, AgentConfig
 from ...utils.settings_provider import AgentSettingsProvider
 from ...utils.sandbox import (
@@ -697,6 +698,13 @@ Return only the Python code:{note}"""
                     system_prompt=self.system_prompt,
                     prefer_stream=True,
                 )
+                cache_plan_for_history = getattr(
+                    self.llm_client, "prompt_cache_plan_for_history", None
+                )
+                if callable(cache_plan_for_history):
+                    candidate = cache_plan_for_history(self.model)
+                    if isinstance(candidate, PromptCachePlan):
+                        vision_kwargs["prompt_cache_plan"] = candidate
                 response = await self._call_figure_revision_llm(
                     lambda: self.llm_client.chat_with_vision(**vision_kwargs)
                 )

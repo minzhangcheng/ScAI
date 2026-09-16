@@ -505,6 +505,7 @@ class OpenAICompatibleClient(
         request_timeout: Optional[float] = None,
         system_prompt: Optional[str] = None,
         prefer_stream: bool = False,
+        prompt_cache_plan: Optional[PromptCachePlan] = None,
     ) -> LLMResponse:
         self._begin_request()
         try:
@@ -518,6 +519,7 @@ class OpenAICompatibleClient(
                 request_timeout=request_timeout,
                 system_prompt=system_prompt,
                 prefer_stream=prefer_stream,
+                prompt_cache_plan=prompt_cache_plan,
             )
         finally:
             self._end_request()

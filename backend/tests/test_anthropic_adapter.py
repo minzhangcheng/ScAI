@@ -326,6 +326,44 @@ async def test_anthropic_text_explicit_cache_rejection_rebuilds_without_markers(
 
 
 @pytest.mark.asyncio
+async def test_anthropic_vision_explicit_cache_marks_only_stable_system():
+    dump = {
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn",
+        "usage": {},
+    }
+    response = MagicMock()
+    response.model_dump.return_value = dump
+    response.model = "claude-x"
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.create = AsyncMock(return_value=response)
+    adapter = _AnthropicAdapter.__new__(_AnthropicAdapter)
+    adapter.client = client
+    adapter.agent_name = "bioinformatics"
+    adapter._prompt_cache_controller = PromptCacheController(
+        "https://openrouter.ai/api/v1",
+        context_getter=lambda: ("session", "bioinformatics"),
+    )
+
+    result = await adapter.complete_vision(
+        model="anthropic/claude-x",
+        text_prompt="dynamic review",
+        images=["aW1hZ2U="],
+        temperature=0.2,
+        max_tokens=1000,
+        system_prompt="stable system",
+        prompt_cache_plan=PromptCachePlan(),
+        cache_mode="explicit",
+    )
+
+    assert result.content == "ok"
+    request = client.messages.create.await_args.kwargs
+    assert "cache_control" in str(request["system"])
+    assert "cache_control" not in str(request["messages"])
+
+
+@pytest.mark.asyncio
 async def test_anthropic_adapter_none_tool_choice_omits_tools():
     dump = {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn", "usage": {}}
     client = _fake_anthropic(dump)

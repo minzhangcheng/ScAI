@@ -32,6 +32,7 @@ from .protocol import _NO_BACKGROUND_ENDPOINT, _anthropic_messages_translate, _a
 from .responses import LLMResponse, LLMToolResponse, _tool_calls_to_raw_assistant
 from .retry import DEFAULT_REQUEST_TIMEOUT
 from .prompt_cache import (
+    PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
     PromptCacheController,
     PromptCacheMode,
     PromptCachePlan,
@@ -453,23 +454,57 @@ class _AnthropicAdapter:
     async def complete_vision(self, model, text_prompt, images, temperature,
                               max_tokens, timeout=None, skip_temperature=False,
                               system_prompt=None, stream=False,
-                              defer_stream=False) -> LLMResponse:
+                              defer_stream=False,
+                              prompt_cache_plan: Optional[PromptCachePlan] = None,
+                              cache_mode: PromptCacheMode = "auto") -> LLMResponse:
         content = [{"type": "text", "text": text_prompt}]
         for img_b64 in images:
             mime = _detect_image_mime_type(img_b64)
             content.append({"type": "image", "source": {
                 "type": "base64", "media_type": mime, "data": img_b64}})
+        user_message = {"role": "user", "content": content}
+        if (
+            prompt_cache_plan is not None
+            and prompt_cache_plan.mode == "explicit"
+        ):
+            user_message[PROMPT_CACHE_EPHEMERAL_TAIL_KEY] = True
         messages = _inject_english_enforcement(
             ([{"role": "system", "content": system_prompt}]
              if system_prompt else [])
-            + [{"role": "user", "content": content}]
+            + [user_message]
         )
-        params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
+        params = self._build_params(
+            model,
+            messages,
+            temperature,
+            max_tokens,
+            skip_temperature=skip_temperature,
+            prompt_cache_plan=prompt_cache_plan,
+        )
         if timeout is not None:
             params["timeout"] = timeout
         if stream:
             params["stream"] = True
-        resp = await self._create(params, model=model, modality="vision")
+        fallback_params = None
+        if cache_mode == "explicit":
+            fallback_params = self._build_params(
+                model,
+                messages,
+                temperature,
+                max_tokens,
+                skip_temperature=skip_temperature,
+            )
+            if timeout is not None:
+                fallback_params["timeout"] = timeout
+            if stream:
+                fallback_params["stream"] = True
+        resp = await self._create(
+            params,
+            model=model,
+            modality="vision",
+            cache_mode=cache_mode,
+            fallback_params=fallback_params,
+        )
         if stream:
             started = await _start_stream(
                 resp,
@@ -825,7 +860,8 @@ class _ResponsesAdapter:
     async def complete_vision(self, model, text_prompt, images, temperature,
                               max_tokens, timeout=None, skip_temperature=False,
                               system_prompt=None, stream=False,
-                              defer_stream=False) -> LLMResponse:
+                              defer_stream=False,
+                              cache_mode: PromptCacheMode = "auto") -> LLMResponse:
         content = [{"type": "input_text", "text": text_prompt}]
         for img_b64 in images:
             mime = _detect_image_mime_type(img_b64)
@@ -839,7 +875,9 @@ class _ResponsesAdapter:
             model, messages, temperature, max_tokens, stream=stream,
             timeout=timeout, skip_temperature=skip_temperature,
         )
-        resp = await self._create_responses_with_fallback(params, modality="vision")
+        resp = await self._create_responses_with_fallback(
+            params, modality="vision", cache_mode=cache_mode
+        )
         if stream:
             started = await _start_stream(
                 resp,
