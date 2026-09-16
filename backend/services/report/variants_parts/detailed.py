@@ -210,7 +210,9 @@ def generate_detailed_report_segment_html(
         if workspace_dir and workspace_dir.exists():
             ensure_legacy_artifact_inventory(state, workspace_dir)
             fig_desc_map = _build_figure_description_map(segment_steps)
-            eligible_figures = eligible_artifacts(state.publication_figures)
+            eligible_figures = eligible_artifacts(
+                state.publication_figures, state=state
+            )
             excluded_stems = excluded_artifact_stems(
                 state.publication_figures,
                 eligible_figures,
@@ -233,6 +235,7 @@ def generate_detailed_report_segment_html(
                 workspace_dir,
                 report_only=True,
                 round_numbers={0, segment_round},
+                state=state,
             )
             discovered.extend(prepare_discovered_figures(
                 discover_figures_in_workspace(workspace_dir),
@@ -242,6 +245,7 @@ def generate_detailed_report_segment_html(
                 allow_unregistered_diagnostics=False,
                 registry_version=state.artifact_registry_version,
                 legacy_artifacts=state.legacy_artifacts,
+                state=state,
             ))
             if discovered:
                 rendered_blocks = []

@@ -81,6 +81,7 @@ class ExecutorLoopContext:
     executor_run_scope_id: str | None = None
     executor_settlement_scope_id: str | None = None
     supplementary_request_id: str | None = None
+    figure_followup_scope: dict | None = None
     attempt_execution_ids: list = None
     pending_dispatch: dict | None = None
     resolved_adata_source_context: dict | None = None

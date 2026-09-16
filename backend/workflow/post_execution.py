@@ -130,6 +130,12 @@ class PostExecutionReviewMixin:
     ) -> Dict[str, Any]:
         """Close figure tasks through durable PI decisions and one bounded pass."""
         materialize_missing_figure_tasks(analysis_state, contract)
+        from ..services.figure_followup import (
+            MAX_SCOPE_TASKS,
+            build_figure_followup_scope,
+            create_needs_new_analysis_request,
+            persist_figure_followup_scope,
+        )
         plan_id = getattr(analysis_state.current_plan, "id", None)
         lineage = analysis_state.restore_branch_id or "main"
         tasks = [
@@ -175,15 +181,86 @@ class PostExecutionReviewMixin:
                 task.followup_finished_at = datetime.now()
             elif task.pi_disposition == "accept_best":
                 select_existing.append(task)
-            elif task.followup_started_at or task.status == "in_progress":
+            elif task.pi_disposition == "needs_new_analysis":
+                request = create_needs_new_analysis_request(analysis_state, task)
+                task.status = "blocked"
+                task.pi_report_note = (
+                    "This figure requires new scientific analysis and was not run "
+                    "during figure follow-up. A separately reviewable request was "
+                    f"recorded as {request['id']}."
+                )
+                task.followup_finished_at = datetime.now()
+            elif (
+                task.pi_disposition == "targeted_redraw"
+                and (task.followup_started_at or task.status == "in_progress")
+            ):
                 # A prior invocation may have dispatched code before interruption.
                 # Resume closure using existing candidates, without granting a new
                 # execution budget or replaying a possibly completed tool call.
                 select_existing.append(task)
-            else:
+            elif task.pi_disposition == "targeted_redraw":
                 task.status = "in_progress"
                 task.followup_started_at = datetime.now()
                 targeted.append(task)
+            else:
+                task.status = "blocked"
+                task.pi_report_note = "The PI figure disposition is not supported."
+
+        parent_run_scope = str(
+            getattr(
+                analysis_state.current_plan,
+                "bioinformatics_run_scope_id",
+                "",
+            )
+            or plan_id
+            or "unplanned"
+        )
+        followup_scope = None
+        if targeted:
+            deferred_targeted = targeted[MAX_SCOPE_TASKS:]
+            targeted = targeted[:MAX_SCOPE_TASKS]
+            for task in deferred_targeted:
+                task.status = "pending"
+                task.followup_started_at = None
+                task.updated_at = datetime.now()
+            lineage = analysis_state.restore_branch_id or "main"
+            followup_scope_id = "figure_scope_" + hashlib.sha256(
+                (
+                    f"{lineage}|{parent_run_scope}|{planning_stage}|"
+                    + ",".join(sorted(task.id for task in targeted))
+                ).encode("utf-8")
+            ).hexdigest()
+            followup_scope = build_figure_followup_scope(
+                analysis_state, targeted, run_scope_id=followup_scope_id
+            )
+            task_entries = {
+                entry.get("task_id"): entry
+                for entry in followup_scope.get("tasks", [])
+                if isinstance(entry, dict)
+            }
+            supported = []
+            for task in targeted:
+                entry = task_entries.get(task.id)
+                if entry and entry.get("eligible_execution_ids"):
+                    supported.append(task)
+                else:
+                    task.status = "blocked"
+                    task.pi_report_note = (
+                        "No pre-existing successful ordinary execution receipt is "
+                        "bound to this completed plan step; figure follow-up did "
+                        "not dispatch an analysis or render."
+                    )
+                    task.followup_finished_at = datetime.now()
+            targeted = supported
+            if targeted:
+                followup_scope = build_figure_followup_scope(
+                    analysis_state,
+                    targeted,
+                    run_scope_id=str(followup_scope["run_scope_id"]),
+                )
+                persist_figure_followup_scope(analysis_state, followup_scope)
+            else:
+                followup_scope = None
 
         if not await self._persist_review_state(analysis_state):
             # Nothing has been dispatched. An unacknowledged lifecycle transition
@@ -205,61 +282,33 @@ class PostExecutionReviewMixin:
             ]
             instruction = (
                 "Complete only the PI-directed publication-figure tasks below. "
-                "Use loaded session objects and existing results. Do not rerun "
-                "unrelated analysis or introduce new scientific claims. Each task "
-                "owns ONE DISTINCT output. Use a distinct filename for each task. "
-                "Call generate_publication_figure with the exact logical_figure_id, "
-                "plan_step_id, and a supporting evidence_execution_id. Existing "
-                "execution receipts remain available. Normal PI review applies. "
-                "After attempting these tasks, call report_findings with a concise "
-                "artifact-delivery summary.\n\n" + "\n".join(lines)
+                "Use only objects already present in the committed runtime and the "
+                "pre-existing execution receipts named in the task scope. Do not "
+                "load data, perform or persist scientific analysis, or introduce "
+                "new scientific claims. Each task owns ONE DISTINCT output. Use a "
+                "distinct filename for each task. Call generate_publication_figure "
+                "with its exact figure_task_id, logical_figure_id, plan_step_id, "
+                "and a supporting evidence_execution_id. Normal PI figure review "
+                "applies. After attempting every task, call "
+                "complete_figure_followup with an exact delivered/unresolved task "
+                "partition and a concise render summary.\n\n" + "\n".join(lines)
             )
             try:
-                parent_run_scope = str(
-                    getattr(
-                        analysis_state.current_plan,
-                        "bioinformatics_run_scope_id",
-                        "",
-                    )
-                    or plan_id
-                    or "unplanned"
-                )
-                followup_scope = "figure_scope_" + hashlib.sha256(
-                    (
-                        f"{lineage}|{parent_run_scope}|{planning_stage}|"
-                        + ",".join(sorted(task.id for task in targeted))
-                    ).encode("utf-8")
-                ).hexdigest()
                 redraw_result = await self.bioinformatics_agent.run_autonomous_analysis(
                     analysis_state, instruction,
                     max_steps=min(40, max(12, len(targeted) * 8)),
                     figure_review_callback=self._figure_review_callback,
-                    supervisor_callback=self._supervisor_callback,
+                    supervisor_callback=None,
                     resume_from_checkpoint=True,
                     planning_stage=planning_stage,
                     figure_followup=True,
                     run_kind="figure_followup",
-                    run_scope_id=followup_scope,
-                    settlement_scope_id=getattr(
-                        analysis_state.current_plan,
-                        "bioinformatics_settlement_scope_id",
-                        None,
-                    ),
+                    run_scope_id=str(followup_scope["run_scope_id"]),
                 )
             except Exception as exc:
                 logger.warning("[%s] figure follow-up failed: %s", self.session_id, exc)
                 redraw_result = {"status": "failed", "error": str(exc)}
 
-            from ..models.schemas import AnalysisStep, CodeExecution
-            for key, model in (("code_history", CodeExecution), ("analysis_log", AnalysisStep)):
-                destination = getattr(analysis_state, key)
-                known = {item.id for item in destination}
-                for item in redraw_result.get(key, []) or []:
-                    item = model(**item) if isinstance(item, dict) else item
-                    if item.id not in known:
-                        item.round_number = analysis_state.current_round
-                        destination.append(item)
-                        known.add(item.id)
             select_existing.extend(targeted)
 
         for task in select_existing:
@@ -296,11 +345,8 @@ class PostExecutionReviewMixin:
             "targeted_task_ids": [task.id for task in targeted],
             "redraw_status": redraw_result.get("status"),
             "figures": list(redraw_result.get("figures", []) or []),
-            "attempt_execution_ids": list(
-                redraw_result.get("attempt_execution_ids") or []
-            ),
-            "settlement_attempt_execution_ids": list(
-                redraw_result.get("settlement_attempt_execution_ids") or []
+            "figure_attempt_execution_ids": list(
+                redraw_result.get("figure_attempt_execution_ids") or []
             ),
             "executor_run_scope_id": redraw_result.get("executor_run_scope_id"),
             "executor_settlement_scope_id": redraw_result.get(
@@ -473,6 +519,7 @@ class PostExecutionReviewMixin:
                     ) or 0
                 ) or None,
                 semantic_reconciliation=reconciliation,
+                analysis_state=analysis_state,
             )
             summary = audit.summary()
             logger.info(

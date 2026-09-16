@@ -150,6 +150,76 @@ async def test_import_phase_order_from_bind_through_publication(
     import_jobs.pop(import_job_id, None)
 
 
+def test_import_finalization_revalidates_v2_figures_without_upgrading_legacy(
+    monkeypatch,
+):
+    from backend.models.schemas import (
+        AnalysisState,
+        FigureReviewStatus,
+        PublicationFigure,
+    )
+    from backend.routes.export_import_parts import import_tar
+    from backend.services import session_lifecycle
+
+    invalid = PublicationFigure(
+        id="dangling-imported-figure",
+        name="dangling",
+        description="Imported figure with no source receipt",
+        figure_type="heatmap",
+        png_path="/missing/dangling.jpg",
+        pdf_path="/missing/dangling.pdf",
+        review_status=FigureReviewStatus.APPROVED,
+        plan_id="plan-imported",
+        round_number=2,
+        provenance_schema_version=2,
+        producer_run_kind="ordinary",
+        source_execution_id="missing-imported-execution",
+        source_execution_run_kind="ordinary",
+        source_execution_validated=True,
+    )
+    legacy = PublicationFigure(
+        id="legacy-imported-figure",
+        name="legacy",
+        description="Pre-provenance figure",
+        figure_type="umap",
+        png_path="/missing/legacy.jpg",
+        pdf_path="/missing/legacy.pdf",
+    )
+    known_invalid_legacy = PublicationFigure(
+        id="14fc685e-9ffa-4bd2-bc03-2d92da0a9c87",
+        name="doublet_score_distribution_per_sample",
+        description="Persisted legacy incident artifact",
+        figure_type="histogram",
+        png_path="/missing/known-invalid.jpg",
+        pdf_path="/missing/known-invalid.pdf",
+        plan_id="014b3726-7baa-44b2-a0e4-d78366063654",
+        plan_step_id=3,
+        plan_requirement_key="plan.3.1",
+        round_number=2,
+        source_execution_id="a4989f32-064d-4c1d-b2ef-d47e153dd6ee",
+    )
+    state = AnalysisState(
+        id="import-provenance",
+        user_id="owner",
+        publication_figures=[invalid, legacy, known_invalid_legacy],
+    )
+    monkeypatch.setattr(
+        session_lifecycle, "bind_import_generation", lambda _state: None
+    )
+
+    import_tar._finalize_imported_state(state, imported_runtime=True)
+
+    assert "missing from durable code history" in (
+        invalid.provenance_validation_reason or ""
+    )
+    assert invalid.source_execution_validated is True
+    assert legacy.provenance_schema_version is None
+    assert legacy.provenance_validation_reason is None
+    assert "Known legacy figure was invalidated" in (
+        known_invalid_legacy.provenance_validation_reason or ""
+    )
+
+
 # --- The catch-all destination: anything under the data root was writable ---
 
 

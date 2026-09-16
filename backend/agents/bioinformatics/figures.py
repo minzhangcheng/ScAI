@@ -374,6 +374,10 @@ class FiguresMixin:
         plan_requirement_key: Optional[str] = None,
         supervisor_binding_decision: Optional[str] = None,
         supervisor_binding_reason: Optional[str] = None,
+        producer_run_kind: str = "ordinary",
+        producer_run_scope_id: Optional[str] = None,
+        figure_followup_task_id: Optional[str] = None,
+        figure_followup_scope: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Handle generate_publication_figure tool call.
@@ -415,6 +419,10 @@ class FiguresMixin:
             supervisor_binding_decision=supervisor_binding_decision,
             supervisor_binding_reason=supervisor_binding_reason,
             dependencies=dependencies,
+            producer_run_kind=producer_run_kind,
+            producer_run_scope_id=producer_run_scope_id,
+            figure_followup_task_id=figure_followup_task_id,
+            figure_followup_scope=figure_followup_scope,
         )
         attempt, error = await prepare_figure_request(request)
         if error:

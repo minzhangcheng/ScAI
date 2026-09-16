@@ -346,6 +346,7 @@ def clone_publication_figures_for_branch(
     branch_id: str,
     source_lineage_id: str = "main",
     workspace_path: Any = None,
+    state: Any = None,
 ):
     """Preserve source records and add branch-local copies of inherited figures."""
     target = branch_id or "main"
@@ -354,7 +355,7 @@ def clone_publication_figures_for_branch(
     if target == source:
         return output
     source_heads = [
-        figure for figure in eligible_artifacts(output)
+        figure for figure in eligible_artifacts(output, state=state)
         if (getattr(figure, "lineage_id", None) or "main") == source
         and has_frozen_publication_pair(figure)
     ]
@@ -952,4 +953,7 @@ def build_lineage_report_state(
         report_state.sandbox_state = sandbox_state
     if target != "main":
         _restrict_unowned_branch_figures(report_state, workspace_path)
+    from backend.services.figure_followup import revalidate_publication_figures
+
+    revalidate_publication_figures(report_state)
     return report_state

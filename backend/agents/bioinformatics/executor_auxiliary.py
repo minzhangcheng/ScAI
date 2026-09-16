@@ -84,36 +84,72 @@ async def finalize_run(context) -> dict:
         saved_figure_count,
     )
     _run_attempt_ids = list(getattr(context, "attempt_execution_ids", None) or [])
-    _scope_id = getattr(context, "executor_settlement_scope_id", None)
-    try:
-        _attempt_map = dict(
-            context.analysis_state.bioinformatics_settlement_attempt_ids or {}
+    _run_kind = str(getattr(context, "executor_run_kind", "ordinary") or "ordinary")
+    _run_scope_id = str(getattr(context, "executor_run_scope_id", "") or "")
+    _settlement_scope_id = getattr(context, "executor_settlement_scope_id", None)
+    _scope_id = _settlement_scope_id
+    _figure_attempt_ids: list[str] = []
+    _settlement_attempt_ids: list[str] = []
+    if _run_kind == "figure_followup":
+        _scope_id = None
+        _figure_map = dict(
+            getattr(context.analysis_state, "figure_attempt_execution_ids", None)
+            or {}
         )
-    except Exception:
-        _attempt_map = {}
-    _persisted = list(_attempt_map.get(_scope_id, []) or [])
-    _settlement_attempt_ids = sorted(set(_persisted) | set(_run_attempt_ids))
-    if _scope_id:
-        _attempt_map[str(_scope_id)] = _settlement_attempt_ids
-        context.analysis_state.bioinformatics_settlement_attempt_ids = _attempt_map
-        # Persist the reached-kernel accumulator before the workflow can route
-        # to a plan revision or terminal settlement.  The scoped executor
-        # checkpoint remains the fallback if this Host-state write fails.
-        try:
-            await context.analysis_state.increment_version()
-            from backend.services.session_store import async_save_session
+        _persisted_figure = list(_figure_map.get(_run_scope_id, []) or [])
+        _figure_attempt_ids = sorted(set(_persisted_figure) | set(_run_attempt_ids))[-256:]
+        if _run_scope_id and _figure_attempt_ids:
+            _figure_map[_run_scope_id] = _figure_attempt_ids
+            # Bound by scope count without converting these audit IDs into
+            # analytical settlement evidence.
+            context.analysis_state.figure_attempt_execution_ids = dict(
+                list(_figure_map.items())[-128:]
+            )
+            try:
+                await context.analysis_state.increment_version()
+                from backend.services.session_store import async_save_session
 
-            await async_save_session(
-                str(context.analysis_state.id),
-                context.analysis_state,
-                force=True,
+                await async_save_session(
+                    str(context.analysis_state.id),
+                    context.analysis_state,
+                    force=True,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not force-save figure-attempt IDs for %s: %s",
+                    _run_scope_id,
+                    exc,
+                )
+    else:
+        try:
+            _attempt_map = dict(
+                context.analysis_state.bioinformatics_settlement_attempt_ids or {}
             )
-        except Exception as exc:
-            logger.warning(
-                "Could not force-save executor settlement attempts for %s: %s",
-                _scope_id,
-                exc,
-            )
+        except Exception:
+            _attempt_map = {}
+        _persisted = list(_attempt_map.get(_scope_id, []) or [])
+        _settlement_attempt_ids = sorted(set(_persisted) | set(_run_attempt_ids))
+        if _scope_id:
+            _attempt_map[str(_scope_id)] = _settlement_attempt_ids
+            context.analysis_state.bioinformatics_settlement_attempt_ids = _attempt_map
+            # Persist the reached-kernel accumulator before the workflow can route
+            # to a plan revision or terminal settlement.  The scoped executor
+            # checkpoint remains the fallback if this Host-state write fails.
+            try:
+                await context.analysis_state.increment_version()
+                from backend.services.session_store import async_save_session
+
+                await async_save_session(
+                    str(context.analysis_state.id),
+                    context.analysis_state,
+                    force=True,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not force-save executor settlement attempts for %s: %s",
+                    _scope_id,
+                    exc,
+                )
     if context.completed:
         # Keep the exact transcript until the workflow has durably settled the
         # corresponding AnnData boundary.  `completed=True` prevents a retry
@@ -146,6 +182,12 @@ async def finalize_run(context) -> dict:
         "candidate_evidence_execution_ids": context.reported_evidence_ids,
         "evidence_gate_findings": context.evidence_gate_findings,
         "figure_contract": figure_contract.summary(),
+        "executor_run_kind": _run_kind,
+        "executor_run_scope_id": _run_scope_id or None,
+        "executor_settlement_scope_id": _scope_id,
+        "attempt_execution_ids": _run_attempt_ids,
+        "settlement_attempt_execution_ids": _settlement_attempt_ids,
+        "figure_attempt_execution_ids": _figure_attempt_ids,
         "cohort_identity": dict(
             (context.analysis_state.sandbox_state or {}).get(
                 "cohort_identity_v1", {}
@@ -162,14 +204,9 @@ async def finalize_run(context) -> dict:
         "plan_revision_context": (
             context.plan_revision_context if context.plan_revision_needed else {}
         ),
-        "executor_run_kind": getattr(context, "executor_run_kind", "ordinary"),
-        "executor_run_scope_id": getattr(context, "executor_run_scope_id", None),
-        "executor_settlement_scope_id": _scope_id,
         "supplementary_request_id": getattr(
             context, "supplementary_request_id", None
         ),
-        "attempt_execution_ids": _run_attempt_ids,
-        "settlement_attempt_execution_ids": _settlement_attempt_ids,
         "resolved_adata_source_context": dict(
             getattr(context, "resolved_adata_source_context", None) or {}
         ),

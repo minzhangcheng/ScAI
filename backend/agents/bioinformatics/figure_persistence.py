@@ -152,7 +152,7 @@ def upsert_publication_figure(
         state.publication_figures[existing_idx] = figure
     else:
         state.publication_figures.append(figure)
-    if not bindings.is_report_eligible(figure):
+    if not bindings.is_report_eligible(figure, state=state):
         return
     refreshed_stems = {
         Path(str(figure.name)).stem,
@@ -169,7 +169,7 @@ def upsert_publication_figure(
         for item in state.publication_figures
         if item is not figure
         and bindings.logical_figure_key(item) == family_key
-        and bindings.is_report_eligible(item)
+        and bindings.is_report_eligible(item, state=state)
     ]
     prior_head = next(
         (

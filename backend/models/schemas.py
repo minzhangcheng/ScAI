@@ -83,6 +83,10 @@ from .schema_parts.session import (  # noqa: F401
     AgentRoundCache,
     DetailedReportSegment,
     FigureRequirement,
+    AcceptedFoundationStep,
+    AcceptedFoundationInventory,
+    FoundationReference,
+    PlanAnalysisScope,
     PlanStep,
     AnalysisPlan,
     SpeciesTissueQualification,
@@ -279,6 +283,9 @@ class AnalysisState(BaseModel):
     # Collaborative analysis planning
     current_plan: Optional[AnalysisPlan] = None
     plan_dialogue_history: List[Dict[str, Any]] = Field(default_factory=list)  # PI↔生信对话记录
+    accepted_foundation_inventories: List[AcceptedFoundationInventory] = Field(
+        default_factory=list, max_length=8
+    )
 
     # Initial inputs
     initial_instruction: str = ""
@@ -326,6 +333,10 @@ class AnalysisState(BaseModel):
     adata_live_bindings: List[AdataLiveBindingRecord] = Field(default_factory=list)
     # Host-internal accumulator for not-yet-settled executor attempt IDs.
     bioinformatics_settlement_attempt_ids: Dict[str, List[str]] = Field(
+        default_factory=dict
+    )
+    # Figure rendering attempts are audit metadata, never analytical evidence.
+    figure_attempt_execution_ids: Dict[str, List[str]] = Field(
         default_factory=dict
     )
 
@@ -1026,6 +1037,16 @@ class AnalysisState(BaseModel):
              "plan_requirement_key": f.get("plan_requirement_key"), "submitted_plan_step_id": f.get("submitted_plan_step_id"),
              "supervisor_binding_decision": f.get("supervisor_binding_decision"), "supervisor_binding_reason": f.get("supervisor_binding_reason"),
              "source_execution_id": f.get("source_execution_id"),
+             "provenance_schema_version": f.get("provenance_schema_version"),
+             "producer_run_kind": f.get("producer_run_kind"),
+             "producer_run_scope_id": f.get("producer_run_scope_id"),
+             "source_execution_run_kind": f.get("source_execution_run_kind"),
+             "source_execution_validated": f.get("source_execution_validated"),
+             "source_preparation_id": f.get("source_preparation_id"),
+             "figure_followup_task_id": f.get("figure_followup_task_id"),
+             "provenance_validation_reason": f.get(
+                 "provenance_validation_reason"
+             ),
              "purpose": f.get("purpose", "result"),
              "logical_figure_id": f.get("logical_figure_id"),
              "render_attempt_id": f.get("render_attempt_id"),
@@ -1076,7 +1097,9 @@ class AnalysisState(BaseModel):
         )
 
         current_figures = [
-            figure for figure in eligible_artifacts(self.publication_figures)
+            figure for figure in eligible_artifacts(
+                self.publication_figures, state=self
+            )
             if (getattr(figure, "lineage_id", None) or "main")
             == (self.restore_branch_id or "main")
             and archival_render_available(figure)

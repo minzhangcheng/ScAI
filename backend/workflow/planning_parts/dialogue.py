@@ -403,6 +403,9 @@ async def finalize_planning_dialogue(self, ctx, state):
                 dialogue_history,
                 current_plan=seed_plan,
             )
+            from ...services.plan_scope import validate_innovation_plan_scope
+
+            validate_innovation_plan_scope(analysis_state, final_plan)
             populate_plan_scope(final_plan, analysis_state)
             analysis_state.current_plan = final_plan
             analysis_state.plan_dialogue_history = dialogue_history

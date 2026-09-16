@@ -1,6 +1,9 @@
 """Shared response helpers for collaboration and lookup tools."""
 from __future__ import annotations
 
+import hashlib
+from uuid import uuid4
+
 from .executor_dispatch import ToolAction
 from .shared import current_execution_identity_error
 from ...services.figure_contract import (
@@ -14,6 +17,76 @@ def bind_facade(facade) -> None:
     globals().update(
         {name: value for name, value in vars(facade).items() if not name.startswith("__")}
     )
+
+
+async def _persist_figure_followup_attempt(context, tool_call) -> str:
+    """Durably account for one scoped render before entering the renderer."""
+    from ...services.figure_followup import get_figure_followup_scope
+    from ...services.session_store import async_save_session, load_session_from_disk
+
+    state = context.state
+    run_scope_id = str(getattr(context, "executor_run_scope_id", "") or "").strip()
+    if not run_scope_id or len(run_scope_id) > 240:
+        raise ValueError("Figure follow-up has no bounded run scope ID.")
+    if get_figure_followup_scope(state, run_scope_id) is None:
+        raise ValueError("Figure follow-up has no persisted run scope.")
+
+    tool_call_id = str(getattr(tool_call, "id", "") or "").strip() or uuid4().hex
+    attempt_id = "figure_attempt_" + hashlib.sha256(
+        f"{run_scope_id}\0{tool_call_id}".encode("utf-8")
+    ).hexdigest()[:32]
+    attempt_ids = list(getattr(context, "attempt_execution_ids", None) or [])
+    if attempt_id not in attempt_ids:
+        attempt_ids.append(attempt_id)
+    context.attempt_execution_ids = attempt_ids[-256:]
+
+    attempt_map = dict(
+        getattr(state, "figure_attempt_execution_ids", None) or {}
+    )
+    scoped_ids = list(attempt_map.get(run_scope_id, []) or [])
+    if attempt_id not in scoped_ids:
+        scoped_ids.append(attempt_id)
+    attempt_map.pop(run_scope_id, None)
+    attempt_map[run_scope_id] = scoped_ids[-256:]
+    while len(attempt_map) > 128:
+        oldest = next(iter(attempt_map))
+        attempt_map.pop(oldest, None)
+    state.figure_attempt_execution_ids = attempt_map
+
+    await state.increment_version()
+    acknowledged = await async_save_session(str(state.id), state, force=True)
+    if acknowledged is False:
+        raise RuntimeError("Session persistence did not acknowledge the figure attempt.")
+    persisted = load_session_from_disk(str(state.id))
+    persisted_ids = list(
+        (getattr(persisted, "figure_attempt_execution_ids", None) or {}).get(
+            run_scope_id, []
+        )
+    )
+    if attempt_id not in persisted_ids:
+        raise RuntimeError("Figure-attempt persistence could not be verified from disk.")
+    return attempt_id
+
+
+async def _record_figure_followup_attempt(context, tool_call) -> bool:
+    try:
+        await _persist_figure_followup_attempt(context, tool_call)
+        return True
+    except Exception as exc:
+        tool_result = (
+            "Figure follow-up render was not started because its audit attempt "
+            f"could not be persisted: {str(exc)[:1000]}"
+        )
+        context.messages.append({
+            "role": "tool", "tool_call_id": tool_call.id, "content": tool_result,
+        })
+        context.analysis_log.append(AnalysisStep(
+            step_number=context.step_count,
+            step_type="tool_error",
+            agent_reasoning=context.agent_reasoning,
+            text_content=tool_result[:2000],
+        ))
+        return False
 
 
 def species_validation_response(state, assessment, action=None) -> str:
@@ -554,6 +627,14 @@ async def handle_lookup_documentation(context, tool_call) -> ToolAction:
 async def handle_publication_figure(context, tool_call) -> ToolAction:
     args = tool_call.arguments
     state = context.state
+    figure_followup = (
+        str(getattr(context, "executor_run_kind", "ordinary") or "")
+        == "figure_followup"
+    )
+    if figure_followup and not await _record_figure_followup_attempt(
+        context, tool_call,
+    ):
+        return ToolAction.CONTINUE
     code = args.get("code", "")
     figure_name = args.get(
         "figure_name", f"figure_{len(state.publication_figures) + 1}"
@@ -592,8 +673,12 @@ async def handle_publication_figure(context, tool_call) -> ToolAction:
         char if char.isalnum() or char == "_" else "_" for char in figure_name
     )
     active_lineage = getattr(state, "restore_branch_id", None) or "main"
+    source_receipts = [
+        *(getattr(state, "code_history", None) or []),
+        *(getattr(context.agent, "code_history", None) or []),
+    ]
     source_execution = next((
-        execution for execution in context.agent.code_history
+        execution for execution in source_receipts
         if str(getattr(execution, "id", "") or "") == source_execution_id
     ), None)
     source_error = current_execution_identity_error(state, source_execution)
@@ -604,7 +689,71 @@ async def handle_publication_figure(context, tool_call) -> ToolAction:
     purpose = "supplementary"
     plan = getattr(state, "current_plan", None)
     requirements = collect_plan_figure_requirements(plan)
-    if requirements:
+    figure_task_id = str(args.get("figure_task_id") or "").strip()
+    figure_task = None
+    if figure_followup:
+        from ...services.figure_followup import get_figure_followup_scope
+        from ...services.execution_evidence import execution_is_current_receipt
+
+        scope = getattr(context, "figure_followup_scope", None) or get_figure_followup_scope(
+            state, getattr(context, "executor_run_scope_id", None)
+        )
+        figure_task = next(
+            (
+                item for item in ((scope or {}).get("tasks") or [])
+                if isinstance(item, dict) and item.get("task_id") == figure_task_id
+            ),
+            None,
+        )
+        followup_error = None
+        if not scope:
+            followup_error = "Figure follow-up has no persisted pre-dispatch scope."
+        elif not figure_task_id or figure_task is None:
+            followup_error = "figure_task_id is missing or outside the persisted scope."
+        elif source_error:
+            followup_error = source_error
+        elif source_execution_id not in (figure_task.get("eligible_execution_ids") or []):
+            followup_error = (
+                "Source execution was not eligible before figure follow-up began."
+            )
+        elif str(getattr(source_execution, "executor_run_kind", "") or "") != "ordinary":
+            followup_error = "Figure follow-up requires an ordinary pre-existing source receipt."
+        elif not execution_is_current_receipt(
+            source_execution,
+            round_number=int(scope.get("round_number", 0) or 0),
+            plan_id=str(scope.get("plan_id") or ""),
+            lineage_id=str(scope.get("lineage_id") or "main"),
+        ):
+            followup_error = "Source execution is not a successful current schema-v2 receipt."
+        elif malformed_plan_step or plan_step_id != int(figure_task.get("plan_step_id", 0) or 0):
+            followup_error = "plan_step_id does not match the persisted figure task."
+        elif not logical_figure_id or logical_figure_id != str(
+            figure_task.get("logical_figure_id") or ""
+        ):
+            followup_error = "logical_figure_id does not match the persisted figure task."
+        elif (
+            str(getattr(source_execution, "adata_source_preparation_id", "") or "") or None
+        ) != (str(scope.get("source_preparation_id") or "") or None):
+            followup_error = "Source preparation does not match the persisted figure scope."
+        if followup_error:
+            tool_result = f"Figure follow-up request rejected: {followup_error}"
+            context.messages.append({
+                "role": "tool", "tool_call_id": tool_call.id, "content": tool_result,
+            })
+            context.analysis_log.append(AnalysisStep(
+                step_number=context.step_count,
+                step_type="tool_error",
+                agent_reasoning=context.agent_reasoning,
+                text_content=tool_result[:2000],
+            ))
+            return ToolAction.CONTINUE
+        binding_decision = "accept"
+        binding_reason = "Bound to the persisted pre-follow-up figure task scope."
+        requirement_key = str(figure_task.get("plan_requirement_key") or "") or None
+        plan_step_id = int(figure_task["plan_step_id"])
+        logical_figure_id = str(figure_task.get("logical_figure_id") or "")
+        purpose = "result"
+    elif requirements:
         callback = getattr(context.agent, "figure_plan_binding_callback", None)
         if callback is not None:
             try:
@@ -731,6 +880,15 @@ async def handle_publication_figure(context, tool_call) -> ToolAction:
             plan_requirement_key=requirement_key,
             supervisor_binding_decision=binding_decision,
             supervisor_binding_reason=binding_reason,
+            producer_run_kind=str(
+                getattr(context, "executor_run_kind", "ordinary") or "ordinary"
+            ),
+            producer_run_scope_id=getattr(context, "executor_run_scope_id", None),
+            figure_followup_task_id=figure_task_id if figure_followup else None,
+            figure_followup_scope=(
+                getattr(context, "figure_followup_scope", None)
+                if figure_followup else None
+            ),
         )
         current_figure = next((
             figure for figure in reversed(state.publication_figures)
@@ -759,3 +917,76 @@ async def handle_publication_figure(context, tool_call) -> ToolAction:
         pub_figure_result=(tool_result or "")[:2000],
     ))
     return ToolAction.CONTINUE
+
+
+async def handle_complete_figure_followup(context, tool_call) -> ToolAction:
+    """Persist a bounded delivery partition for the current figure scope."""
+    from ...services.figure_followup import (
+        get_figure_followup_scope,
+        record_figure_followup_completion,
+        validate_publication_figure_provenance,
+    )
+
+    args = tool_call.arguments
+    state = context.state
+    run_scope_id = str(getattr(context, "executor_run_scope_id", "") or "")
+    scope = getattr(context, "figure_followup_scope", None) or get_figure_followup_scope(
+        state, run_scope_id
+    )
+    delivered = [str(item) for item in args.get("delivered_task_ids") or []]
+    unresolved = [str(item) for item in args.get("unresolved_task_ids") or []]
+    if (
+        str(getattr(context, "executor_run_kind", "ordinary") or "")
+        != "figure_followup"
+    ) or not scope:
+        result = "Completion action is available only for a persisted figure-follow-up scope."
+    else:
+        result = None
+        for task_id in delivered:
+            figure = next(
+                (
+                    item for item in reversed(state.publication_figures or [])
+                    if getattr(item, "figure_followup_task_id", None) == task_id
+                    and getattr(item, "producer_run_scope_id", None) == run_scope_id
+                    and getattr(item, "producer_status", "published") == "published"
+                ),
+                None,
+            )
+            reason = (
+                validate_publication_figure_provenance(state, figure)
+                if figure is not None else "No published figure record is bound to this task."
+            )
+            if reason:
+                result = f"Task {task_id} cannot be marked delivered: {reason}"
+                break
+        if result is None:
+            try:
+                completion = record_figure_followup_completion(
+                    state,
+                    run_scope_id,
+                    delivered_task_ids=delivered,
+                    unresolved_task_ids=unresolved,
+                    summary=str(args.get("summary") or ""),
+                )
+                await state.increment_version()
+                from ...services.session_store import async_save_session
+
+                await async_save_session(str(state.id), state, force=True)
+                result = (
+                    "Figure follow-up completion was recorded for "
+                    f"{len(completion['delivered_task_ids'])} delivered and "
+                    f"{len(completion['unresolved_task_ids'])} unresolved task(s)."
+                )
+                context.completed = True
+            except ValueError as exc:
+                result = f"Figure follow-up completion rejected: {exc}"
+    context.messages.append({
+        "role": "tool", "tool_call_id": tool_call.id, "content": result,
+    })
+    context.analysis_log.append(AnalysisStep(
+        step_number=context.step_count,
+        step_type="complete_figure_followup",
+        agent_reasoning=context.agent_reasoning,
+        text_content=result[:2000],
+    ))
+    return ToolAction.BREAK if context.completed else ToolAction.CONTINUE

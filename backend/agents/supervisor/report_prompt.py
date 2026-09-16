@@ -105,7 +105,7 @@ def _build_report_prompt(
     """
     attribution = attribution or {}
     figure_metadata_by_stem = figure_metadata_by_stem or publication_figure_metadata(
-        state.publication_figures, report_only=True,
+        state.publication_figures, report_only=True, state=state,
     )
     figure_lines = []
     for name in figure_map:
@@ -450,7 +450,7 @@ def _build_analysis_narrative(
         lines.append("")
 
     # Publication figures
-    eligible_figures = eligible_artifacts(state.publication_figures)
+    eligible_figures = eligible_artifacts(state.publication_figures, state=state)
     if eligible_figures:
         lines.append("=== Publication Figures ===")
         for pf in eligible_figures:
@@ -622,7 +622,9 @@ async def prepare_report_generation(
     # Collect figure paths from workspace and publication figures
     figure_map = self._collect_figure_paths(all_records, workspace_path, state=analysis_state)
     figure_metadata_by_stem = publication_figure_metadata(
-        analysis_state.publication_figures, report_only=True,
+        analysis_state.publication_figures,
+        report_only=True,
+        state=analysis_state,
     )
 
     # Collect table paths from workspace

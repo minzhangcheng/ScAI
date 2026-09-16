@@ -164,6 +164,7 @@ def audit_plan_execution(
     target_cohort_digest: Optional[str] = None,
     target_cohort_generation: Optional[int] = None,
     semantic_reconciliation: Optional[Mapping[str, Any]] = None,
+    analysis_state: Any = None,
 ) -> PlanAudit:
     """Audit an approved plan against this round's execution evidence.
 
@@ -188,6 +189,7 @@ def audit_plan_execution(
         publication_figures,
         round_number,
         target_lineage_id=target_lineage_id,
+        state=analysis_state,
     )
     planning_stage = str(getattr(plan, "stage", "") or "")
     plan_id = str(getattr(plan, "id", "") or "")
@@ -276,6 +278,7 @@ def audit_plan_execution(
             plan_phase,
             inherited_plan_ids_by_step,
             target_lineage_id,
+            source_state=analysis_state,
         )
         step_id = int(getattr(step, "id", 0) or 0)
         title = str(getattr(step, "title", "") or "")[:300]

@@ -145,6 +145,7 @@ class FiguresMixin:
         invalidated_stems: Optional[set[str]] = None,
         artifact_registry_version: Optional[int] = None,
         legacy_artifacts: Optional[List[Any]] = None,
+        state: Any = None,
     ) -> List[Dict[str, Any]]:
         """
         Scan the WORKSPACE directory for existing images from analysis phase.
@@ -158,14 +159,16 @@ class FiguresMixin:
         existing_figures = []
         seen_filenames = set()
 
-        eligible_publication_figures = eligible_artifacts(publication_figures)
+        eligible_publication_figures = eligible_artifacts(
+            publication_figures, state=state
+        )
         excluded_publication_stems = excluded_artifact_stems(
             publication_figures,
             eligible_publication_figures,
             invalidated_stems=invalidated_stems,
         )
         metadata_by_stem = publication_figure_metadata(
-            eligible_publication_figures, report_only=True,
+            eligible_publication_figures, report_only=True, state=state,
         )
         records_by_stem: Dict[str, Any] = {}
         for figure in eligible_publication_figures:
@@ -248,6 +251,7 @@ class FiguresMixin:
             allow_unregistered_diagnostics=False,
             registry_version=artifact_registry_version,
             legacy_artifacts=legacy_artifacts,
+            state=state,
         )
         admitted_by_stem = {
             Path(str(candidate.get("path") or "")).stem: candidate

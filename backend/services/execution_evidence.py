@@ -5,6 +5,9 @@ import re
 from typing import Any, Optional
 
 
+PLAN_LINKED_RECEIPT_STATUSES = frozenset({"candidate", "confirmed", "bound"})
+
+
 GENE_INDEX_ALIGNMENT_GUIDANCE = (
     "After mapping feature IDs to gene symbols, first check index.is_unique. "
     "Collapse duplicate raw-count rows with groupby(level=0).sum(); for already "

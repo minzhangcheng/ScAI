@@ -445,7 +445,7 @@ class AnalysisLogMixin:
             eligible_artifacts,
             excluded_artifact_stems,
         )
-        for fig in eligible_artifacts(state.publication_figures):
+        for fig in eligible_artifacts(state.publication_figures, state=state):
             pub_figures.append({
                 "name": fig.name,
                 "description": fig.description,

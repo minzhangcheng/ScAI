@@ -5,6 +5,7 @@ from pathlib import Path
 
 from backend.models.schemas import (
     AnalysisState,
+    CodeExecution,
     FigureReviewStatus,
     PublicationFigure,
     PublicationTable,
@@ -90,6 +91,72 @@ def test_table_eligibility_uses_producer_receipt_not_semantic_plan_credit():
 
     assert is_report_eligible(table) is True
     assert is_report_eligible(missing_receipt) is False
+
+
+def test_schema_v2_figure_selection_revalidates_durable_source_receipt():
+    figure = _figure(
+        "linked-result",
+        FigureReviewStatus.APPROVED,
+        plan_id="plan-current",
+        plan_step_id=4,
+        round_number=2,
+        lineage_id="main",
+        provenance_schema_version=2,
+        producer_run_kind="ordinary",
+        source_execution_id="execution-current",
+        source_execution_run_kind="ordinary",
+        source_execution_validated=True,
+    )
+    receipt = CodeExecution(
+        id="execution-current",
+        code="compute_declared_result()",
+        round_number=2,
+        plan_id="plan-current",
+        plan_step_ids=[4],
+        plan_binding_status="confirmed",
+        evidence_schema_version=2,
+        executor_run_kind="ordinary",
+        execution_status="succeeded",
+    )
+    state = AnalysisState(
+        id="figure-provenance",
+        user_id="user",
+        current_round=2,
+        code_history=[receipt],
+    )
+
+    assert is_report_eligible(figure) is False
+    assert "Analysis state is required" in figure.provenance_validation_reason
+    assert is_report_eligible(figure, state=state) is True
+    assert figure.provenance_validation_reason is None
+
+    state.code_history = []
+    assert is_report_eligible(figure, state=state) is False
+    assert "missing from durable code history" in figure.provenance_validation_reason
+
+
+def test_known_legacy_scai6_figure_is_not_report_eligible():
+    figure = _figure(
+        "doublet_score_distribution_per_sample",
+        FigureReviewStatus.APPROVED,
+        id="14fc685e-9ffa-4bd2-bc03-2d92da0a9c87",
+        plan_id="014b3726-7baa-44b2-a0e4-d78366063654",
+        plan_step_id=3,
+        plan_requirement_key="plan.3.1",
+        round_number=2,
+        source_execution_id="a4989f32-064d-4c1d-b2ef-d47e153dd6ee",
+    )
+    state = AnalysisState(
+        id="legacy-scai6-export",
+        user_id="user",
+        current_round=2,
+        publication_figures=[figure],
+    )
+
+    assert is_report_eligible(figure, state=state) is False
+    assert "Known legacy figure was invalidated" in (
+        figure.provenance_validation_reason or ""
+    )
 
 
 def test_technically_valid_unavailable_review_is_reportable_but_not_approved():

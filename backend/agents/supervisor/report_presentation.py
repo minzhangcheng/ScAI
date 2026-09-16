@@ -16,7 +16,9 @@ async def build_report_figures(self, ctx, analysis_state):
 
     # Build figures list for report
     report_figures = []
-    eligible_records = eligible_artifacts(analysis_state.publication_figures)
+    eligible_records = eligible_artifacts(
+        analysis_state.publication_figures, state=analysis_state
+    )
     records_by_stem: Dict[str, Any] = {}
     for record in eligible_records:
         stems = set(artifact_stems([record]))
@@ -343,7 +345,8 @@ def prepare_html_render(
     pub_fig_descriptions_by_stem: Dict[str, Dict[str, str]] = {}
     analysis_state = report.get("_analysis_state")
     eligible_figures = eligible_artifacts(
-        analysis_state.publication_figures if analysis_state else []
+        analysis_state.publication_figures if analysis_state else [],
+        state=analysis_state,
     )
     if eligible_figures:
         for pf in eligible_figures:

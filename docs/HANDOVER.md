@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.57.12 · **Last updated**: 2026-09-16
+**Version**: 0.58.1 · **Last updated**: 2026-09-16
 
 ## 1. Runtime Architecture
 
@@ -348,6 +348,20 @@ six minutes per occurrence rather than blocking.
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.58.x — (2026-09-16 onward)**
+
+- `0.58.1` — Adds a versioned Innovation plan-scope contract backed by a
+  bounded accepted-foundation inventory, so later-round plans identify reused
+  or explicitly revised prior work with resolvable references. Figure
+  follow-up is constrained to pre-existing scoped evidence, isolated disposable
+  rendering, and separate attempt accounting rather than analytical settlement.
+  The focused plan-scope, figure-follow-up, restore/report, and version set
+  passed `347/347` via `scripts/scai-test fast` at
+  `test-results/20260916T154540Z-2217554/evidence.json`. `backend-full` recorded
+  6,439 passed, 35 skipped, and 3 failed; the same three failure nodes appeared
+  in the earlier full run at `test-results/20260916T132325Z-1922537/evidence.json`.
+  No image build, deployment, or historical session recovery was performed.
 
 **0.57.x — (2026-09-14 onward)**
 

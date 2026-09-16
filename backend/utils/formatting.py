@@ -291,11 +291,16 @@ _PLAN_STEP_FIELDS = (
     ("Required figures", "figure_requirements"),
     ("Text-only exception", "allow_text_only"),
     ("Text-only reason", "text_only_reason"),
+    ("Analysis scope", "analysis_scope"),
     ("Rationale", "rationale"),
 )
 
 
 def _collapse(value: Any) -> str:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, ensure_ascii=False, sort_keys=True)
     return " ".join(str(value or "").split())
 
 

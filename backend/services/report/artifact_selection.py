@@ -151,7 +151,7 @@ def compact_figure_event_payload(figure: Any, *, review_status: str | None=None,
         ),
     }
 
-def is_report_eligible(artifact: Any, *, bindings) -> bool:
+def is_report_eligible(artifact: Any, *, state: Any = None, bindings) -> bool:
     """Return whether a reviewed artifact is current enough for final reports."""
     Any = getattr(bindings, 'Any')
     Mapping = getattr(bindings, 'Mapping')
@@ -162,6 +162,17 @@ def is_report_eligible(artifact: Any, *, bindings) -> bool:
     has_frozen_publication_pair = getattr(bindings, 'has_frozen_publication_pair')
     is_diagnostic = getattr(bindings, 'is_diagnostic')
     layout_was_measured = getattr(bindings, 'layout_was_measured')
+    is_figure = (
+        "figure_type" in artifact or "png_path" in artifact
+        if isinstance(artifact, Mapping)
+        else hasattr(artifact, "figure_type") or hasattr(artifact, "png_path")
+    )
+    if is_figure:
+        provenance_error = getattr(
+            bindings, "publication_figure_provenance_error", None
+        )
+        if provenance_error is None or provenance_error(state, artifact):
+            return False
     if str(_artifact_value(artifact, "producer_status", "published") or "published") != "published":
         return False
     data_drift_advisory = is_data_drift_invalidation(artifact)
@@ -169,11 +180,6 @@ def is_report_eligible(artifact: Any, *, bindings) -> bool:
         return False
     if _artifact_value(artifact, "invalidated_at", None) and not data_drift_advisory:
         return False
-    is_figure = (
-        "figure_type" in artifact or "png_path" in artifact
-        if isinstance(artifact, Mapping)
-        else hasattr(artifact, "figure_type") or hasattr(artifact, "png_path")
-    )
     if not is_figure and _artifact_value(
         artifact, "plan_binding_status", None
     ) is not None:
@@ -231,7 +237,9 @@ def logical_figure_key(artifact: Any, *, bindings) -> tuple[str, str]:
         logical_id = f"record:{_artifact_value(artifact, 'id', id(artifact))}"
     return lineage, logical_id
 
-def published_head_artifacts(artifacts: Iterable[Any] | None, *, bindings) -> list[Any]:
+def published_head_artifacts(
+    artifacts: Iterable[Any] | None, *, state: Any = None, bindings
+) -> list[Any]:
     """Collapse report-eligible revisions to one archival head per logical figure.
 
     Pending or failed redraws are absent from the eligible input, so the previous
@@ -242,7 +250,10 @@ def published_head_artifacts(artifacts: Iterable[Any] | None, *, bindings) -> li
     _artifact_value = getattr(bindings, '_artifact_value')
     is_report_eligible = getattr(bindings, 'is_report_eligible')
     logical_figure_key = getattr(bindings, 'logical_figure_key')
-    eligible = [artifact for artifact in (artifacts or []) if is_report_eligible(artifact)]
+    eligible = [
+        artifact for artifact in (artifacts or [])
+        if is_report_eligible(artifact, state=state)
+    ]
     eligible_ids = {
         str(_artifact_value(artifact, "id", "")) for artifact in eligible
         if str(_artifact_value(artifact, "id", ""))
@@ -272,14 +283,23 @@ def published_head_artifacts(artifacts: Iterable[Any] | None, *, bindings) -> li
     selected_ids = {id(entry[1]) for entry in best.values()}
     return [artifact for artifact in eligible if id(artifact) in selected_ids]
 
-def eligible_artifacts(artifacts: Iterable[Any] | None, *, bindings) -> list[Any]:
+def eligible_artifacts(
+    artifacts: Iterable[Any] | None, *, state: Any = None, bindings
+) -> list[Any]:
     """Return the single reportable published head of every logical artifact."""
     Any = getattr(bindings, 'Any')
     Iterable = getattr(bindings, 'Iterable')
     published_head_artifacts = getattr(bindings, 'published_head_artifacts')
-    return published_head_artifacts(artifacts)
+    return published_head_artifacts(artifacts, state=state)
 
-def eligible_artifact_by_id(artifacts: Iterable[Any] | None, artifact_id: str, *, lineage_id: str | None=None, bindings) -> Any | None:
+def eligible_artifact_by_id(
+    artifacts: Iterable[Any] | None,
+    artifact_id: str,
+    *,
+    lineage_id: str | None = None,
+    state: Any = None,
+    bindings,
+) -> Any | None:
     """Resolve an API/download ID only through the explicit eligible head set."""
     Any = getattr(bindings, 'Any')
     Iterable = getattr(bindings, 'Iterable')
@@ -290,7 +310,7 @@ def eligible_artifact_by_id(artifacts: Iterable[Any] | None, artifact_id: str, *
     return next(
         (
             artifact
-            for artifact in eligible_artifacts(artifacts)
+            for artifact in eligible_artifacts(artifacts, state=state)
             if str(_artifact_value(artifact, "id", "")) == target
             and str(_artifact_value(artifact, "lineage_id", None) or "main")
             == lineage

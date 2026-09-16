@@ -428,6 +428,7 @@ async def persist_round_result(self, ctx):
         capture_and_persist_boundary,
         clear_settlement_scope_callback,
     )
+    from ...services.plan_scope import capture_accepted_foundation_inventory
 
     _plan = getattr(analysis_state, "current_plan", None)
     _prep_ids = []
@@ -456,6 +457,36 @@ async def persist_round_result(self, ctx):
                 )
                 or []
             )
+    _inventory_error = []
+    _clear_settlement = clear_settlement_scope_callback(
+        analysis_state,
+        bioinformatics_result.get("executor_settlement_scope_id"),
+    )
+
+    def _settle_round_checkpoint(outcome):
+        changed = _clear_settlement(outcome)
+        if (
+            int(analysis_state.current_round or 0) == 1
+            and str(getattr(_plan, "stage", "full") or "full") == "full"
+            and outcome.available
+        ):
+            try:
+                capture_accepted_foundation_inventory(
+                    analysis_state,
+                    _plan,
+                    outcome.record,
+                    provenance="captured",
+                )
+                changed = True
+            except Exception as exc:
+                _inventory_error.append(str(exc)[:500])
+                logger.warning(
+                    "[%s] Round 1 full-plan foundation inventory capture failed: %s",
+                    self.session_id,
+                    exc,
+                )
+        return changed
+
     _capture_outcome = await capture_and_persist_boundary(
         self,
         analysis_state,
@@ -488,10 +519,7 @@ async def persist_round_result(self, ctx):
         ),
         execution_ids_at_capture=tuple(_evidence_ids),
         attempt_execution_ids_at_capture=tuple(_attempt_ids),
-        before_state_save=clear_settlement_scope_callback(
-            analysis_state,
-            bioinformatics_result.get("executor_settlement_scope_id"),
-        ),
+        before_state_save=_settle_round_checkpoint,
         executor_checkpoint_name=bioinformatics_result.get(
             "executor_checkpoint_name"
         ),
@@ -503,6 +531,13 @@ async def persist_round_result(self, ctx):
         round_result.evidence_notes = list(round_result.evidence_notes or []) + [
             "No canonical AnnData checkpoint was captured at this boundary "
             f"({_capture_outcome.disclosure})."
+        ]
+    elif _inventory_error:
+        round_result.evidence_notes = list(round_result.evidence_notes or []) + [
+            "The Round 1 full-plan checkpoint was captured, but accepted foundation "
+            "identity could not be sealed; a later Innovation plan requires "
+            "reconstruction from retained approved-plan and execution records. "
+            + _inventory_error[0]
         ]
     if int(getattr(analysis_state, "current_round", 0) or 0) == 1 and not any(
         str(getattr(record, "boundary", "")) == "stage1_complete"

@@ -87,6 +87,7 @@ async def generate_report_staged(
             report_state, "artifact_registry_version", None
         ),
         legacy_artifacts=getattr(report_state, "legacy_artifacts", None),
+        state=report_state,
     )
     existing_tables = generator._scan_existing_tables(
         publication_tables=getattr(report_state, "publication_tables", None),

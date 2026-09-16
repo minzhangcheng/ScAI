@@ -61,10 +61,18 @@ class PlanningMixin:
         planning_review.bind_facade(sys.modules[__name__])
         return await planning_review._report_direction_coverage_gaps(self, analysis_state)
 
-    async def _approve_plan(self, state, plan, analysis_state, action):
+    async def _approve_plan(
+        self, state, plan, analysis_state, action, *,
+        allow_legacy_approved: bool = False,
+    ):
         planning_review.bind_facade(sys.modules[__name__])
         return await planning_review._approve_plan(
-            self, state, plan, analysis_state, action
+            self,
+            state,
+            plan,
+            analysis_state,
+            action,
+            allow_legacy_approved=allow_legacy_approved,
         )
 
     async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:

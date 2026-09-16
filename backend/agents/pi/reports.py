@@ -72,7 +72,9 @@ class ReportsMixin:
         # actually see.
         figures_info = []
         renderable_figures = [
-            fig for fig in eligible_artifacts(state.publication_figures)
+            fig for fig in eligible_artifacts(
+                state.publication_figures, state=state
+            )
             if archival_render_available(fig)
         ]
         for i, fig in enumerate(renderable_figures):

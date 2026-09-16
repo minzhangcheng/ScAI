@@ -21,6 +21,10 @@ _EXCLUDED_FIELDS = {
     "adata_source_preparations",
     "adata_live_bindings",
     "bioinformatics_settlement_attempt_ids",
+    # Foundation snapshots and figure render-attempt IDs are Host-internal
+    # provenance/accounting records, not client-editable session fields.
+    "accepted_foundation_inventories",
+    "figure_attempt_execution_ids",
     # Host-internal bound on the execution-driven replan cycle. The client
     # learns the outcome from the round's status and its gate observations;
     # the raw attempt counter is bookkeeping.

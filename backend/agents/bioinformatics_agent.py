@@ -62,6 +62,7 @@ from .bioinformatics.executor_checkpoints import (
 )
 from .bioinformatics.executor_collaboration import (
     handle_annotate_clusters,
+    handle_complete_figure_followup,
     handle_consult_pi,
     handle_lookup_documentation,
     handle_publication_figure,
@@ -259,6 +260,8 @@ from .bioinformatics.shared import (  # noqa: F401
     validate_mechanism_program_payload,
     TOOLS,
     KNOWN_TOOL_NAMES,
+    FIGURE_FOLLOWUP_TOOLS,
+    FIGURE_FOLLOWUP_TOOL_NAMES,
     build_gate_skip_note,
     count_saved_figures,
     AgentType,

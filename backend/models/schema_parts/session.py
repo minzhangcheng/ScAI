@@ -234,6 +234,57 @@ class FigureRequirement(BaseModel):
         }.get(normalized, normalized)
 
 
+class AcceptedFoundationStep(BaseModel):
+    """One completed Round 1 step with retained technical provenance."""
+
+    plan_step_id: int = Field(gt=0)
+    title: str = Field(default="", max_length=300)
+    method: str = Field(default="", max_length=600)
+    status: Literal["completed"] = "completed"
+    evidence_execution_ids: List[str] = Field(default_factory=list, max_length=64)
+    figure_requirement_keys: List[str] = Field(default_factory=list, max_length=64)
+
+
+class AcceptedFoundationInventory(BaseModel):
+    """Bounded, host-observed identity of a prior accepted foundation."""
+
+    inventory_id: str = Field(min_length=1, max_length=240)
+    schema_version: Literal[1] = 1
+    round_number: int = Field(ge=1)
+    plan_id: str = Field(min_length=1, max_length=240)
+    planning_stage: Literal["stage1", "stage2", "full"]
+    lineage_id: str = Field(default="main", min_length=1, max_length=240)
+    inherited_from_lineage_id: Optional[str] = Field(default=None, max_length=240)
+    provenance: Literal["captured", "reconstructed", "inherited"] = "captured"
+    adata_checkpoint_id: Optional[str] = Field(default=None, max_length=240)
+    adata_source_preparation_ids: List[str] = Field(default_factory=list, max_length=32)
+    cohort_digest: Optional[str] = Field(default=None, max_length=128)
+    steps: List[AcceptedFoundationStep] = Field(default_factory=list, max_length=128)
+    observed_adata_structure: Dict[str, List[str]] = Field(default_factory=dict)
+    accepted_at: datetime = Field(default_factory=datetime.now)
+
+
+class FoundationReference(BaseModel):
+    """Exact prior foundation identities used by one declared plan scope."""
+
+    inventory_id: str = Field(min_length=1, max_length=240)
+    round_number: int = Field(ge=1)
+    plan_id: str = Field(min_length=1, max_length=240)
+    plan_step_ids: List[int] = Field(default_factory=list, max_length=128)
+    execution_ids: List[str] = Field(default_factory=list, max_length=256)
+    checkpoint_id: Optional[str] = Field(default=None, max_length=240)
+
+
+class PlanAnalysisScope(BaseModel):
+    """Host-checkable declaration of a step's relationship to prior work."""
+
+    relationship: Literal["new", "reuse", "revise"]
+    cohort_scope: Literal["full", "subset"]
+    foundation_refs: List[FoundationReference] = Field(default_factory=list, max_length=16)
+    reason: str = Field(default="", max_length=2000)
+    requested_by: Optional[Literal["user", "pi"]] = None
+
+
 class PlanStep(BaseModel):
     """A single step in an analysis plan."""
     id: int
@@ -252,6 +303,7 @@ class PlanStep(BaseModel):
     # explicit ``figure_requirements`` entry.
     text_only_reason: str = ""
     depends_on: List[int] = []
+    analysis_scope: Optional[PlanAnalysisScope] = None
     status: str = "pending"  # pending | in_progress | completed | skipped
     executed_at: Optional[datetime] = None
 
@@ -267,6 +319,8 @@ class AnalysisPlan(BaseModel):
     status: PlanStatus = "draft"
     revision_of: Optional[str] = None  # parent plan ID if this is a revision
     revision_reason: Optional[str] = None  # why this plan was revised
+    scope_contract_version: Optional[int] = None
+    foundation_inventory_id: Optional[str] = None
     round_number: int = 0
     direction: str = ""
     direction_key: str = ""

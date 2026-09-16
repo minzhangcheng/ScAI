@@ -31,6 +31,18 @@ async def run_autonomous_analysis(
     *,
     bindings,
 ):
+    requested_run_kind = str(run_kind or "").strip()
+    if figure_followup and requested_run_kind not in {"", "figure_followup"}:
+        raise ValueError(
+            "figure_followup conflicts with the requested executor run kind."
+        )
+    effective_figure_followup = bool(
+        figure_followup or requested_run_kind == "figure_followup"
+    )
+    effective_run_kind = (
+        "figure_followup" if effective_figure_followup else run_kind
+    )
+
     executor_loop.bind_facade(bindings.facade)
     executor_collaboration.bind_facade(bindings.facade)
     executor_auxiliary.bind_facade(bindings.facade)
@@ -42,9 +54,19 @@ async def run_autonomous_analysis(
     parent = {
         name: getattr(agent, name, None)
         for name in ("code_history", "analysis_context", "last_result")
-    } if figure_followup else {}
+    } if effective_figure_followup else {}
+    main_sandbox = (
+        getattr(agent, "sandbox", None) if effective_figure_followup else None
+    )
+    disposable_runtime = None
     context = None
     try:
+        if effective_figure_followup:
+            from backend.services.figure_followup_runtime import FigureFollowupRuntime
+
+            disposable_runtime = FigureFollowupRuntime(main_sandbox, state)
+            agent.sandbox = await disposable_runtime.__aenter__()
+            agent.code_history = list(getattr(state, "code_history", None) or [])
         context = await executor_loop.prepare_loop_context(
             agent, state, initial_instruction,
             max_steps=max_steps,
@@ -52,11 +74,11 @@ async def run_autonomous_analysis(
             supervisor_callback=supervisor_callback,
             resume_from_checkpoint=resume_from_checkpoint,
             planning_stage=planning_stage,
-            figure_followup=figure_followup,
+            figure_followup=effective_figure_followup,
             adata_source=adata_source,
             run_scope_id=run_scope_id,
             settlement_scope_id=settlement_scope_id,
-            run_kind=run_kind,
+            run_kind=effective_run_kind,
             supplementary_request_id=supplementary_request_id,
         )
         return await executor_loop.run_turn_loop(context)
@@ -70,7 +92,9 @@ async def run_autonomous_analysis(
         if not isinstance(exc, AdataSourcePreparationError):
             raise
         effective_kind = (
-            "figure_followup" if figure_followup else str(run_kind or "ordinary")
+            "figure_followup"
+            if effective_figure_followup
+            else str(run_kind or "ordinary")
         )
         request_record = {}
         plan = None if effective_kind == "supplementary" else getattr(
@@ -140,20 +164,12 @@ async def run_autonomous_analysis(
             },
         }
     finally:
-        if figure_followup:
-            # Preserve receipts even on cancellation, before restoring the parent
-            # executor's in-memory context. Kernel objects remain shared.
-            known = {item.id for item in state.code_history}
-            for item in agent.code_history:
-                if item.id not in known:
-                    state.code_history.append(item)
-                    known.add(item.id)
-            if context is not None:
-                known = {item.id for item in state.analysis_log}
-                for item in context.analysis_log:
-                    if item.id not in known:
-                        item.round_number = state.current_round
-                        state.analysis_log.append(item)
-                        known.add(item.id)
+        if effective_figure_followup:
+            # Figure rendering is an isolated capability. Restore the parent's
+            # live handle before discarding the disposable kernel; never merge
+            # its namespace, executor transcript, or analysis log.
+            agent.sandbox = main_sandbox
+            if disposable_runtime is not None:
+                await disposable_runtime.__aexit__(None, None, None)
             for name, value in parent.items():
                 setattr(agent, name, value)

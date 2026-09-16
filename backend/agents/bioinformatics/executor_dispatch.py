@@ -62,6 +62,7 @@ class ToolRuntime:
     attempt_execution_ids: list = field(default_factory=list)
     pending_dispatch: dict | None = None
     resolved_adata_source_context: dict = field(default_factory=dict)
+    figure_followup_scope: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ class ToolDispatchContext:
     )
     propagate_exceptions: tuple[type[BaseException], ...] = ()
     error_formatter: Callable[[BaseException], str] = str
+    allowed_tool_names: frozenset[str] | None = None
 
 
 def parse_error_message(tool_call) -> str:
@@ -114,6 +116,20 @@ async def dispatch_tool(context: ToolDispatchContext, tool_call) -> ToolDispatch
     handlers one family at a time without changing transcript behavior.
     """
     tool_name = tool_call.name
+    if (
+        context.allowed_tool_names is not None
+        and tool_name not in context.allowed_tool_names
+    ):
+        content = (
+            f"ERROR: Tool '{tool_name}' is not available in this execution scope. "
+            "Use only the tools listed for the current task."
+        )
+        context.logger.warning(
+            "[Bioinformatics] Tool '%s' denied by run-kind allowlist",
+            tool_name,
+        )
+        append_tool_message(context, tool_call, content)
+        return ToolDispatchResult(DispatchStatus.REJECTED, tool_name, content)
     if tool_call.parse_error:
         content = parse_error_message(tool_call)
         context.logger.warning("[Bioinformatics] %s", content)

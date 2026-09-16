@@ -16,6 +16,7 @@ def resolved_record_figure_candidates(
     *,
     report_only: bool = True,
     round_numbers: Optional[set[int]] = None,
+    state: Any = None,
 ) -> list[dict[str, Any]]:
     """Return normalized candidates resolved through artifact-owned bytes.
 
@@ -24,7 +25,7 @@ def resolved_record_figure_candidates(
     this record-first tier before their legacy workspace scan.
     """
     records = (
-        eligible_artifacts(publication_figures)
+        eligible_artifacts(publication_figures, state=state)
         if report_only
         else gallery_artifacts(publication_figures)
     )

@@ -61,7 +61,8 @@ def _collect_current_evidence(
     ]
     figures = [
         item for item in eligible_artifacts(
-            getattr(analysis_state, "publication_figures", None) or []
+            getattr(analysis_state, "publication_figures", None) or [],
+            state=analysis_state,
         )
         if _matches_current_identity(item, identity)
     ][-30:]

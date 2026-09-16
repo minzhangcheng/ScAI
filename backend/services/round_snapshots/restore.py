@@ -561,7 +561,12 @@ def _arm(state, capsule: dict, source_session_id: str, snapshot: str, channels: 
     """
     from backend.config import get_session_workspace
     from backend.models.schemas import TaskStatus
+    from backend.services.figure_followup import revalidate_publication_figures
     from backend.services.report.lineage import clone_publication_figures_for_branch
+    from backend.services.plan_scope import (
+        clone_foundation_inventories_for_branch,
+        resolve_foundation_inventory,
+    )
     from backend.workflow.direction_coverage import clone_round_results_for_branch
     from backend.workflow.restore_targets import (
         stable_restore_branch_id,
@@ -604,9 +609,20 @@ def _arm(state, capsule: dict, source_session_id: str, snapshot: str, channels: 
         branch_id=branch_id,
         source_lineage_id=source_lineage_id,
         workspace_path=get_session_workspace(state.id),
+        state=state,
     )
+    # Legacy staged sessions may have only the successful Round 1 boundary and
+    # candidate receipts. Reconstruct while those records still belong to the
+    # source lineage, then clone the bounded inventory into the child.
+    resolve_foundation_inventory(state, reconstruct=True)
     state.restore_branch_id = branch_id
     state.restore_branch_label = branch_label
+    revalidate_publication_figures(state)
+    clone_foundation_inventories_for_branch(
+        state,
+        source_lineage_id=source_lineage_id,
+        branch_id=branch_id,
+    )
     state.last_restored_snapshot_id = origin
     state.restore_provenance_snapshot_id = origin
     state.status = TaskStatus(capsule["restored_status"])

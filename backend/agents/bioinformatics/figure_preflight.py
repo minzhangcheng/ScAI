@@ -166,6 +166,10 @@ class FigureRequestContext:
     supervisor_binding_decision: Optional[str]
     supervisor_binding_reason: Optional[str]
     dependencies: FigureDependencies
+    producer_run_kind: str = "ordinary"
+    producer_run_scope_id: Optional[str] = None
+    figure_followup_task_id: Optional[str] = None
+    figure_followup_scope: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -186,6 +190,9 @@ class FigureAttemptState:
     attempt_dir: Path | None = None
     staged_jpg_path: Path | None = None
     staged_pdf_path: Path | None = None
+    render_attempt_dir: Path | None = None
+    render_jpg_path: Path | None = None
+    render_pdf_path: Path | None = None
     jpg_path: Path | None = None
     pdf_path: Path | None = None
     guarded_code: str = ""
@@ -227,11 +234,28 @@ async def prepare_figure_request(
     logger.info(
         "[Bioinformatics] Generating publication figure: %s", request.figure_name
     )
+    if request.producer_run_kind == "figure_followup":
+        from ...services.figure_followup import validate_plotting_only_code
+
+        capability_error = validate_plotting_only_code(request.code)
+        if capability_error:
+            return None, f"Figure follow-up request rejected: {capability_error}"
     is_valid, error_msg = agent._validate_code(request.code)
     if not is_valid:
         return None, f"Error: Code validation failed - {error_msg}"
 
-    figures_dir = Path(agent.sandbox.working_dir) / "figures"
+    runtime_figures_dir = Path(agent.sandbox.working_dir) / "figures"
+    figures_dir = runtime_figures_dir
+    if request.producer_run_kind == "figure_followup":
+        try:
+            from ...config import get_session_workspace
+
+            figures_dir = get_session_workspace(request.state.id) / "figures"
+        except Exception as exc:
+            logger.exception(
+                "Could not resolve owner figure workspace for follow-up render"
+            )
+            return None, f"Could not resolve figure follow-up publication workspace: {exc}"
     try:
         from ...config import get_session_workspace
 
@@ -266,7 +290,9 @@ async def prepare_figure_request(
         logical_id = f"render:{uuid.uuid4()}"
     prior_attempts = [
         item
-        for item in deps.get("eligible_artifacts")(request.state.publication_figures)
+        for item in deps.get("eligible_artifacts")(
+            request.state.publication_figures, state=request.state
+        )
         if (getattr(item, "lineage_id", None) or "main") == active_lineage
         and str(getattr(item, "logical_figure_id", None) or "") == logical_id
     ]
@@ -287,7 +313,7 @@ async def prepare_figure_request(
     )
     import uuid
 
-    return FigureAttemptState(
+    attempt = FigureAttemptState(
         request=request,
         figures_dir=figures_dir,
         safe_name=safe_name,
@@ -301,4 +327,13 @@ async def prepare_figure_request(
         render_attempt_id=str(uuid.uuid4()),
         current_code=request.code,
         revision_count=starting_revision_count,
-    ), None
+    )
+    if request.producer_run_kind == "figure_followup":
+        (
+            attempt.render_attempt_dir,
+            attempt.render_jpg_path,
+            attempt.render_pdf_path,
+        ) = deps.get("_new_render_attempt_paths")(
+            runtime_figures_dir, safe_name, attempt.render_attempt_id
+        )
+    return attempt, None

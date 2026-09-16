@@ -253,7 +253,7 @@ def build_annotation_sections(
 
     # --- Build figure description map ---
     figure_desc_map = bindings._build_figure_description_map(state.analysis_log)
-    eligible_figures = bindings.eligible_artifacts(state.publication_figures)
+    eligible_figures = bindings.eligible_artifacts(state.publication_figures, state=state)
     excluded_figure_stems = bindings.excluded_artifact_stems(
         state.publication_figures,
         eligible_figures,
@@ -275,6 +275,7 @@ def build_annotation_sections(
             allow_unregistered_diagnostics=True,
             registry_version=state.artifact_registry_version,
             legacy_artifacts=state.legacy_artifacts,
+            state=state,
         )
     discovered_by_name = {
         bindings.Path(candidate["path"]).name: candidate for candidate in discovered_figures
@@ -588,6 +589,7 @@ def generate_exploration_report_html(
                 state.publication_figures,
                 workspace_dir,
                 report_only=True,
+                state=state,
             )
             discovered.extend(bindings.prepare_discovered_figures(
                 bindings.discover_figures_in_workspace(workspace_dir),
@@ -597,6 +599,7 @@ def generate_exploration_report_html(
                 allow_unregistered_diagnostics=False,
                 registry_version=state.artifact_registry_version,
                 legacy_artifacts=state.legacy_artifacts,
+                state=state,
             ))
             for candidate in discovered:
                 img_file = bindings.Path(candidate["path"])

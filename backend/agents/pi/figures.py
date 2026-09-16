@@ -169,6 +169,9 @@ Allowed dispositions:
 - accept_best: at least one existing candidate is useful enough for the report with
   explicit reservations. The candidates will be shown to you in a separate visual
   selection call; do not pick an id here.
+- needs_new_analysis: a new measurement, source load, filtering, model fit, or other
+  analytical decision is required before the requested figure can be made. This
+  records a later planning request; it does not run analysis now.
 - omit: no current candidate should enter the report and targeted work is not useful
   or feasible now. Explain the omission for the report handoff.
 
@@ -178,7 +181,7 @@ task. Use targeted_redraw only when the instruction is executable from the loade
 session and names the required visual output.
 
 Return ONLY a JSON array with one item per task:
-[{{"task_id":"...","disposition":"targeted_redraw|accept_best|omit",
+[{{"task_id":"...","disposition":"targeted_redraw|accept_best|omit|needs_new_analysis",
 "instruction":"required only for targeted_redraw","rationale":"PI reasoning",
 "report_note":"concise limitation or omission note"}}]"""
         valid_ids = {task.id for task in tasks[:12]}
@@ -200,7 +203,9 @@ Return ONLY a JSON array with one item per task:
                 disposition = str(item.get("disposition") or "").strip().lower()
                 if task_id not in valid_ids or task_id in seen:
                     continue
-                if disposition not in {"targeted_redraw", "accept_best", "omit"}:
+                if disposition not in {
+                    "targeted_redraw", "accept_best", "omit", "needs_new_analysis",
+                }:
                     continue
                 if disposition == "accept_best" and not candidate_counts.get(task_id, 0):
                     continue

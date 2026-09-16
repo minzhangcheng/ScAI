@@ -268,6 +268,14 @@ TOOLS = [
                             "receive plan credit."
                         ),
                     }
+                    ,
+                    "figure_task_id": {
+                        "type": "string",
+                        "description": (
+                            "Host-owned figure follow-up task ID. Required only in the "
+                            "restricted figure-follow-up pass; omit during ordinary analysis."
+                        ),
+                    }
                 },
                 "required": [
                     "code",
@@ -277,6 +285,37 @@ TOOLS = [
                 ]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_figure_followup",
+            "description": (
+                "Finish the bounded publication-figure delivery pass. This action "
+                "records only which scoped tasks were delivered or remain unresolved; "
+                "it does not submit scientific findings."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "delivered_task_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 240},
+                        "maxItems": 12,
+                    },
+                    "unresolved_task_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 240},
+                        "maxItems": 12,
+                    },
+                    "summary": {"type": "string", "maxLength": 1200},
+                },
+                "required": [
+                    "delivered_task_ids", "unresolved_task_ids", "summary",
+                ],
+                "additionalProperties": False,
+            },
+        },
     },
     {
         "type": "function",
@@ -920,4 +959,12 @@ PROFILING_TOOLS = [_TOOL_BY_NAME["execute_code"], REGISTER_SAMPLE_COUNTS_TOOL]
 
 PROFILING_TOOL_NAMES: frozenset[str] = frozenset(
     t["function"]["name"] for t in PROFILING_TOOLS
+)
+
+FIGURE_FOLLOWUP_TOOLS = [
+    _TOOL_BY_NAME["generate_publication_figure"],
+    _TOOL_BY_NAME["complete_figure_followup"],
+]
+FIGURE_FOLLOWUP_TOOL_NAMES: frozenset[str] = frozenset(
+    tool["function"]["name"] for tool in FIGURE_FOLLOWUP_TOOLS
 )

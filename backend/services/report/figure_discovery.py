@@ -296,6 +296,7 @@ def publication_figure_metadata(
     publication_figures: Iterable[Any] | None,
     *,
     report_only: bool = True,
+    state: Any = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Index authoritative figure metadata by every known filename stem.
 
@@ -304,7 +305,10 @@ def publication_figure_metadata(
     resolver; ``report_only`` remains for API compatibility.
     """
     figures = list(publication_figures or [])
-    kept = eligible_artifacts(figures) if report_only else gallery_artifacts(figures)
+    kept = (
+        eligible_artifacts(figures, state=state)
+        if report_only else gallery_artifacts(figures)
+    )
     indexed: Dict[str, Dict[str, Any]] = {}
     for figure in kept:
         status = getattr(figure, "review_status", None)
@@ -357,6 +361,7 @@ def prepare_discovered_figures(
     allow_unregistered_diagnostics: bool = False,
     registry_version: int | None = None,
     legacy_artifacts: Iterable[Any] | None = None,
+    state: Any = None,
 ) -> List[Dict[str, Any]]:
     """Apply eligibility and authoritative metadata to discovered files.
 
@@ -367,7 +372,10 @@ def prepare_discovered_figures(
     reports require such a diagnostic to have an eligible publication record.
     """
     figures = list(publication_figures or [])
-    eligible = eligible_artifacts(figures) if report_only else gallery_artifacts(figures)
+    eligible = (
+        eligible_artifacts(figures, state=state)
+        if report_only else gallery_artifacts(figures)
+    )
     kept = (
         [figure for figure in eligible if archival_render_available(figure)]
         if report_only else eligible
@@ -376,7 +384,7 @@ def prepare_discovered_figures(
         figures, kept, invalidated_stems=invalidated_stems,
     )
     metadata_by_stem = publication_figure_metadata(
-        figures, report_only=report_only,
+        figures, report_only=report_only, state=state,
     )
     kept_stems = artifact_stems(kept)
     metadata_by_stem = {
@@ -527,6 +535,7 @@ def ensure_legacy_artifact_inventory(state: Any, workspace: Path) -> list[Any]:
         allow_unregistered_diagnostics=False,
         registry_version=None,
         legacy_artifacts=existing,
+        state=state,
     )
     known_ids = {str(getattr(item, "id", "") or "") for item in existing}
     for candidate in prepared:
@@ -586,6 +595,7 @@ def resolve_state_figure_candidates(
         allow_unregistered_diagnostics=False,
         registry_version=getattr(state, "artifact_registry_version", None),
         legacy_artifacts=getattr(state, "legacy_artifacts", None),
+        state=state,
     )
 
     represented_ids = {
@@ -624,7 +634,10 @@ def resolve_state_figure_candidates(
         })
         represented_ids.add(legacy_id)
 
-    kept = eligible_artifacts(records) if report_only else gallery_artifacts(records)
+    kept = (
+        eligible_artifacts(records, state=state)
+        if report_only else gallery_artifacts(records)
+    )
     for record in kept:
         record_id = str(getattr(record, "id", "") or "")
         if not record_id or record_id in represented_ids:

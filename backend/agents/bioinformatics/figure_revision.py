@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
+from types import SimpleNamespace
 
 from .figure_persistence import abandon_render, guard_attempt_await
 from .figure_preflight import FigureAttemptState
@@ -65,16 +67,36 @@ async def execute_revision_candidate(
 ):
     deps = attempt.deps
     agent = attempt.agent
+    figure_followup = attempt.request.producer_run_kind == "figure_followup"
+    if figure_followup:
+        from ...services.figure_followup import validate_plotting_only_code
+
+        capability_error = validate_plotting_only_code(source)
+        if capability_error:
+            return SimpleNamespace(
+                output="",
+                error=f"Figure follow-up revision rejected: {capability_error}",
+            ), None
+
     candidate_id = str(uuid.uuid4())
+    candidate_figures_dir = (
+        Path(agent.sandbox.working_dir) / "figures"
+        if figure_followup
+        else attempt.figures_dir
+    )
     candidate_dir, candidate_jpg, candidate_pdf = deps.get(
         "_new_render_attempt_paths"
-    )(attempt.figures_dir, attempt.safe_name, candidate_id)
-    instrumented_source, candidate_sensitive_call_count = deps.get(
-        "instrument_expression_contract_calls"
-    )(source)
-    candidate_preinstall_runtime = deps.get(
-        "has_direct_expression_contract_call"
-    )(source)
+    )(candidate_figures_dir, attempt.safe_name, candidate_id)
+    if figure_followup:
+        instrumented_source, candidate_sensitive_call_count = source, 0
+        candidate_preinstall_runtime = False
+    else:
+        instrumented_source, candidate_sensitive_call_count = deps.get(
+            "instrument_expression_contract_calls"
+        )(source)
+        candidate_preinstall_runtime = deps.get(
+            "has_direct_expression_contract_call"
+        )(source)
     runtime_code = deps.get("build_expression_runtime_code")
     guarded_source = (
         instrumented_source
@@ -96,9 +118,11 @@ async def execute_revision_candidate(
             deps.get("_discard_render_attempt")(candidate_dir)
             return runtime_setup, None
 
-    representation_will_change = deps.get("mutates_expression_representation")(
-        source
-    )
+    representation_will_change = False
+    if not figure_followup:
+        representation_will_change = deps.get("mutates_expression_representation")(
+            source
+        )
     preexisting_versions = (
         deps.get("workspace_artifact_versions")(agent.sandbox.working_dir)
         if representation_will_change
@@ -116,37 +140,39 @@ async def execute_revision_candidate(
                 wrapper, skip_safety_check=True
             )
         finally:
-            try:
-                (
-                    _invalidated_count,
-                    _stale_stems,
-                    candidate_staleness_note,
-                ) = deps.get("record_executed_representation_change")(
-                    attempt.state,
-                    source,
-                    agent.sandbox.working_dir,
-                    preexisting_versions,
-                    execution_started=execution_started,
-                )
-                if candidate_staleness_note:
-                    attempt.staleness_note = candidate_staleness_note
-            except Exception as provenance_error:
-                deps.get("logger").warning(
-                    "[Bioinformatics] Could not record revised figure expression "
-                    "representation invalidation: %s",
-                    deps.get("compact_traceback")(
-                        str(provenance_error), max_chars=1000
-                    ),
-                )
+            if not figure_followup:
+                try:
+                    (
+                        _invalidated_count,
+                        _stale_stems,
+                        candidate_staleness_note,
+                    ) = deps.get("record_executed_representation_change")(
+                        attempt.state,
+                        source,
+                        agent.sandbox.working_dir,
+                        preexisting_versions,
+                        execution_started=execution_started,
+                    )
+                    if candidate_staleness_note:
+                        attempt.staleness_note = candidate_staleness_note
+                except Exception as provenance_error:
+                    deps.get("logger").warning(
+                        "[Bioinformatics] Could not record revised figure expression "
+                        "representation invalidation: %s",
+                        deps.get("compact_traceback")(
+                            str(provenance_error), max_chars=1000
+                        ),
+                    )
     except BaseException:
         deps.get("_discard_render_attempt")(candidate_dir)
         raise
-    contracts = deps.get("parse_expression_contracts")(candidate_result.output)
-    if contracts:
-        deps.get("record_expression_contract")(attempt.state, contracts)
-    candidate_result.output = deps.get("strip_expression_contract_markers")(
-        candidate_result.output
-    )
+    if not figure_followup:
+        contracts = deps.get("parse_expression_contracts")(candidate_result.output)
+        if contracts:
+            deps.get("record_expression_contract")(attempt.state, contracts)
+        candidate_result.output = deps.get("strip_expression_contract_markers")(
+            candidate_result.output
+        )
     if candidate_result.error:
         candidate_result.error = deps.get("compact_traceback")(
             candidate_result.error, max_chars=3000

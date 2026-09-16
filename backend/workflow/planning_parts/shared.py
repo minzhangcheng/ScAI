@@ -48,6 +48,8 @@ def _plan_semantic_text(plan: Optional[AnalysisPlan]) -> str:
         return ""
     payload = {
         "overview": plan.overview,
+        "scope_contract_version": plan.scope_contract_version,
+        "foundation_inventory_id": plan.foundation_inventory_id,
         "steps": [
             {
                 "title": step.title,
@@ -62,6 +64,11 @@ def _plan_semantic_text(plan: Optional[AnalysisPlan]) -> str:
                 "text_only_reason": step.text_only_reason,
                 "rationale": step.rationale,
                 "depends_on": sorted(step.depends_on),
+                "analysis_scope": (
+                    step.analysis_scope.model_dump(mode="json")
+                    if step.analysis_scope is not None
+                    else None
+                ),
             }
             for step in plan.steps
         ],

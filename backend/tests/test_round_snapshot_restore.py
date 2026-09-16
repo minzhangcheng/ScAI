@@ -583,6 +583,8 @@ async def test_restore_inherits_rounds_and_frozen_figures_into_its_branch(captur
             plan_binding_status="confirmed",
             execution_status="succeeded",
             lineage_id="main",
+            executor_run_kind="ordinary",
+            plan_step_ids=[7],
             analysis_generation=1,
             cohort_generation=3,
             cohort_digest=cohort_digest,
@@ -695,10 +697,15 @@ async def test_restore_inherits_rounds_and_frozen_figures_into_its_branch(captur
                 logical_figure_id="logical-inherited-result",
                 round_number=3,
                 plan_id="plan-main",
+                plan_step_id=7,
                 analysis_generation=1,
                 cohort_generation=3,
                 cohort_digest=cohort_digest,
                 source_execution_id=execution.id,
+                provenance_schema_version=2,
+                producer_run_kind="ordinary",
+                source_execution_run_kind="ordinary",
+                source_execution_validated=True,
             )
         ]
 

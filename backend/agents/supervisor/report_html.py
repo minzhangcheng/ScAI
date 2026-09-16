@@ -388,7 +388,7 @@ class ReportHtmlMixin:
             ensure_legacy_artifact_inventory(state, workspace_path)
 
         eligible_figures = eligible_artifacts(
-            state.publication_figures if state else []
+            state.publication_figures if state else [], state=state
         )
         report_target_lineage = str(
             ((getattr(state, "sandbox_state", None) or {}).get(
@@ -424,6 +424,7 @@ class ReportHtmlMixin:
             legacy_artifacts=(
                 getattr(state, "legacy_artifacts", None) if state else None
             ),
+            state=state,
         )
         admitted_by_stem = {
             Path(str(candidate.get("path") or "")).stem: candidate

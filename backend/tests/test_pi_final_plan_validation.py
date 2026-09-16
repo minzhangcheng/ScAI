@@ -7,7 +7,16 @@ import pytest
 from pydantic import ValidationError
 
 from backend.agents.pi_agent import PIAgent
-from backend.models.schemas import AnalysisPlan, AnalysisState, FigureRequirement, PlanStep
+from backend.models.schemas import (
+    AcceptedFoundationInventory,
+    AcceptedFoundationStep,
+    AnalysisPhase,
+    AnalysisPlan,
+    AnalysisState,
+    FigureRequirement,
+    PlanAnalysisScope,
+    PlanStep,
+)
 
 
 def _make_pi_agent() -> PIAgent:
@@ -53,6 +62,94 @@ def _plan_payload(platform_baseline: str = "") -> str:
         "key_decision_points": ["Select the stable resolution"],
         "expected_runtime": "~1 step",
     })
+
+
+def _innovation_state(*, current_plan=None) -> AnalysisState:
+    inventory = AcceptedFoundationInventory(
+        inventory_id="foundation-v1-r1",
+        round_number=1,
+        plan_id="round1-plan",
+        planning_stage="stage1",
+        adata_checkpoint_id="checkpoint-r1",
+        steps=[AcceptedFoundationStep(
+            plan_step_id=4,
+            title="Accepted clustering baseline",
+            method="scanpy.tl.leiden",
+            evidence_execution_ids=["receipt-r1-step4"],
+        )],
+    )
+    return AnalysisState(
+        user_id="test-user",
+        current_round=2,
+        analysis_phase=AnalysisPhase.INNOVATION,
+        current_plan=current_plan,
+        accepted_foundation_inventories=[inventory],
+    )
+
+
+def _innovation_plan_payload(*, with_scope: bool) -> str:
+    step = {
+        "id": 1,
+        "title": "Targeted subset analysis",
+        "method": "scanpy.tl.leiden",
+        "input": "Accepted measurements for the selected subset.",
+        "expected_output": "A subset sensitivity result.",
+        "figure_requirements": [],
+        "allow_text_only": True,
+        "text_only_reason": "This is a planning validation fixture.",
+        "rationale": "Use prior results for a bounded sensitivity analysis.",
+        "depends_on": [],
+    }
+    if with_scope:
+        step["analysis_scope"] = {
+            "relationship": "reuse",
+            "cohort_scope": "subset",
+            "foundation_refs": [{
+                "inventory_id": "foundation-v1-r1",
+                "round_number": 1,
+                "plan_id": "round1-plan",
+                "plan_step_ids": [4],
+                "execution_ids": ["receipt-r1-step4"],
+                "checkpoint_id": "checkpoint-r1",
+            }],
+            "reason": "Reuse the accepted measurements for a targeted subset.",
+        }
+    return json.dumps({
+        "overview": "Targeted innovation analysis",
+        "steps": [step],
+        "scope_contract_version": 1,
+        "foundation_inventory_id": "foundation-v1-r1",
+        "key_decision_points": [],
+        "expected_runtime": "1 step",
+    })
+
+
+def _valid_innovation_seed() -> AnalysisPlan:
+    return AnalysisPlan(
+        phase="innovation",
+        stage="full",
+        status="approved",
+        scope_contract_version=1,
+        foundation_inventory_id="foundation-v1-r1",
+        steps=[PlanStep(
+            id=1,
+            title="Existing subset analysis",
+            method="scanpy.tl.leiden",
+            analysis_scope=PlanAnalysisScope(
+                relationship="reuse",
+                cohort_scope="subset",
+                foundation_refs=[{
+                    "inventory_id": "foundation-v1-r1",
+                    "round_number": 1,
+                    "plan_id": "round1-plan",
+                    "plan_step_ids": [4],
+                    "execution_ids": ["receipt-r1-step4"],
+                    "checkpoint_id": "checkpoint-r1",
+                }],
+                reason="Reuse the accepted measurements.",
+            ),
+        )],
+    )
 
 
 @pytest.mark.parametrize(("alias", "canonical"), [
@@ -152,3 +249,50 @@ async def test_final_plan_twice_invalid_uses_valid_seed_or_raises_without_one():
         )
     assert type(exc_info.value).__name__ == "PlanGenerationFailure"
     assert no_seed_agent.chat.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_innovation_finalization_receives_contract_and_repairs_invalid_scope():
+    agent = _make_pi_agent()
+    state = _innovation_state()
+    agent.chat = AsyncMock(side_effect=[
+        _innovation_plan_payload(with_scope=False),
+        _innovation_plan_payload(with_scope=True),
+    ])
+
+    plan = await agent.generate_final_plan_from_dialogue(
+        state,
+        [{"round": 1, "pi_decision": "revise"}],
+    )
+
+    assert agent.chat.await_count == 2
+    first_prompt = agent.chat.call_args_list[0].args[0]
+    repair_prompt = agent.chat.call_args_list[1].args[0]
+    assert "Innovation Scope Contract v1" in first_prompt
+    assert "foundation-v1-r1" in first_prompt
+    assert "missing analysis_scope" in repair_prompt
+    assert plan.scope_contract_version == 1
+    assert plan.steps[0].analysis_scope.foundation_refs[0].execution_ids == [
+        "receipt-r1-step4"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_invalid_innovation_finalization_does_not_fall_back_to_seed_plan():
+    agent = _make_pi_agent()
+    seed = _valid_innovation_seed()
+    state = _innovation_state(current_plan=seed)
+    agent.chat = AsyncMock(side_effect=[
+        _innovation_plan_payload(with_scope=False),
+        _innovation_plan_payload(with_scope=False),
+    ])
+
+    with pytest.raises(Exception) as exc_info:
+        await agent.generate_final_plan_from_dialogue(
+            state,
+            [],
+            current_plan=seed,
+        )
+
+    assert type(exc_info.value).__name__ == "PlanGenerationFailure"
+    assert agent.chat.await_count == 2

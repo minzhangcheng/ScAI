@@ -21,7 +21,7 @@ from openai import AsyncOpenAI
 import pytest
 
 from backend.agents.bioinformatics.figures import FiguresMixin
-from backend.models.schemas import AnalysisState, FigureReviewStatus
+from backend.models.schemas import AnalysisState, CodeExecution, FigureReviewStatus
 from backend.models.schemas import PublicationFigure
 from backend.services.figure_layout import LAYOUT_LINT_SENTINEL, blocking_violations
 from backend.services.report.artifacts import (
@@ -749,10 +749,21 @@ async def test_generated_record_inherits_current_plan_id(tmp_path):
         user_id="u",
         current_plan={"id": "approved-plan", "phase": "innovation"},
     )
+    state.code_history = [CodeExecution(
+        id="source-execution",
+        code="compute_approved_result()",
+        plan_id="approved-plan",
+        plan_step_ids=[7],
+        plan_binding_status="confirmed",
+        evidence_schema_version=2,
+        executor_run_kind="ordinary",
+        execution_status="succeeded",
+    )]
 
     await agent._handle_generate_publication_figure(
         code="plot()", figure_name="f", description="d", figure_type="heatmap",
         state=state, review_callback=None, plan_step_id=7,
+        source_execution_id="source-execution",
     )
 
     figure = state.publication_figures[0]

@@ -274,6 +274,9 @@ def _finalize_imported_state(
     except Exception:
         logger.exception("AnnData checkpoint catalog reconciliation failed")
     _mark_runtime_availability_after_import(state, imported_pkl=imported_runtime)
+    from backend.services.figure_followup import revalidate_publication_figures
+
+    revalidate_publication_figures(state)
     # Nothing can own a session that is being created right now.
     sanitize_legacy_state(state, workflow_active=False)
     _normalize_imported_status(state)

@@ -10,7 +10,9 @@ import pytest
 from backend.models.schemas import (
     AnalysisPlan,
     AnalysisState,
+    CodeExecution,
     FigureReviewStatus,
+    PlanStep,
     PublicationFigure,
 )
 from backend.services.figure_contract import (
@@ -49,6 +51,50 @@ def _candidate(*, logical_id: str, requirement_key: str) -> PublicationFigure:
     )
 
 
+def _add_eligible_source(state: AnalysisState, *, execution_id: str = "source"):
+    """Install one durable source receipt linked to a completed plan step."""
+    from backend.agents import bioinformatics_agent as facade
+    from backend.agents.bioinformatics import executor_execute
+
+    state.current_plan.steps = [PlanStep(
+        id=2, title="Compute the declared contrast", method="approved method",
+        status="completed",
+    )]
+    executor_execute.bind_facade(facade)
+    purpose, step_ids, binding_status, binding_reason = (
+        executor_execute.execution_plan_binding(state, {
+            "execution_purpose": "planned",
+            "plan_step_ids": [2],
+        })
+    )
+    receipt = executor_execute.build_code_execution_receipt(
+        state,
+        "compute_contrast()",
+        SimpleNamespace(output="contrast computed", error=None, figures=[]),
+        0.1,
+        purpose,
+        step_ids,
+        {"cohort_generation": 0, "cohort_digest": None},
+        [],
+        binding_status,
+        binding_reason,
+        [],
+        executor_context=SimpleNamespace(
+            executor_run_kind="ordinary",
+            executor_run_scope_id="ordinary-run",
+            executor_settlement_scope_id="ordinary-settlement",
+            supplementary_request_id=None,
+            resolved_adata_source_context={},
+            adata_source=state.current_plan.adata_source,
+        ),
+        input_cohort={},
+        execution_id=execution_id,
+    )
+    assert receipt.plan_binding_status == "candidate"
+    state.code_history = [receipt]
+    return receipt
+
+
 @pytest.mark.asyncio
 async def test_targeted_missing_figure_falls_back_to_explicit_pi_selection():
     state = AnalysisState(
@@ -58,6 +104,7 @@ async def test_targeted_missing_figure_falls_back_to_explicit_pi_selection():
     state.current_plan = AnalysisPlan(
         id="plan-1", phase="innovation", status="approved", steps=[],
     )
+    _add_eligible_source(state)
     requirement = RequiredFigure(
         key="plan.2.1",
         figure_type="volcano",

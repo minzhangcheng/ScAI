@@ -87,6 +87,22 @@ If any step's method, input, or rationale references "for downstream", "to suppo
 ## Stage Scope (Stage 2)
 This plan is for **Stage 2**. Stage 2 covers downstream analyses (DEG, GO/KEGG, cell communication, RNA velocity, trajectory, etc.) and may load any data those analyses need. Do NOT flag Stage 2-specific steps as out of scope here."""
 
+        from ...services.plan_scope import (
+            is_innovation_scope,
+            render_innovation_scope_context,
+        )
+
+        if is_innovation_scope(state, plan):
+            stage_scope_section += "\n\n" + render_innovation_scope_context(
+                state, plan=plan
+            ) + """
+
+Review the semantic relationship between each step and its own declaration.
+When a plan's stated goal requires rebuilding a prior foundation but the step
+declares new/reuse, return revise and explain the contradiction to the planner.
+Host validation checks only structured declarations and exact technical
+references; method-family wording alone is not a reason to reject a plan."""
+
         prompt = f"""You are reviewing a bioinformatics analysis plan for a single-cell RNA-seq study.
 
 ## Plan Overview
@@ -224,6 +240,36 @@ IMPORTANT: Be specific in your feedback. Reference exact step IDs. If you approv
         if seed_plan is not None and seed_plan.stage:
             stage = seed_plan.stage
 
+        from ...services.plan_scope import (
+            innovation_inventory_id,
+            is_innovation_scope,
+            render_innovation_scope_context,
+        )
+
+        scope_contract_version = (
+            1 if is_innovation_scope(analysis_state, phase=phase) else None
+        )
+        foundation_inventory_id = (
+            innovation_inventory_id(analysis_state)
+            if scope_contract_version
+            else None
+        )
+        scope_context = render_innovation_scope_context(
+            analysis_state, phase=phase
+        )
+        scope_step_schema = ""
+        scope_plan_schema = ""
+        if scope_contract_version:
+            scope_step_schema = (
+                ', "analysis_scope": {"relationship": "new", '
+                '"cohort_scope": "full", "foundation_refs": [], '
+                '"reason": "", "requested_by": null}'
+            )
+            scope_plan_schema = (
+                f'    "scope_contract_version": 1,\n'
+                f'    "foundation_inventory_id": {json.dumps(foundation_inventory_id)},\n'
+            )
+
         recent = dialogue_history[-5:] if dialogue_history else []
         history_summary = "\n\n".join(
             f"Round {entry.get('round', '?')}: PI decision={entry.get('pi_decision', '?')}\n"
@@ -257,6 +303,8 @@ dialogue history below — no more discussion is permitted.
 ## Current Complete Plan
 {current_plan_json}
 
+{scope_context}
+
 ## Dialogue History (most recent rounds)
 {history_summary}
 
@@ -274,9 +322,10 @@ Respond ONLY with JSON in this schema:
           "figure_requirements": [{{"figure_type": "umap", "description": "...", "minimum_count": 1, "platform_baseline": ""}}],
           "allow_text_only": false,
           "text_only_reason": "",
-          "rationale": "...", "depends_on": []}},
+          "rationale": "...", "depends_on": []{scope_step_schema}}},
         ...
     ],
+{scope_plan_schema}
     "key_decision_points": ["...", "..."],
     "expected_runtime": "~N steps",
     "adata_source": null
@@ -298,7 +347,12 @@ Respond ONLY with JSON in this schema:
                     stage=stage,
                     seed_plan=seed_plan,
                     termination_reason=termination_reason,
+                    scope_contract_version=scope_contract_version,
+                    foundation_inventory_id=foundation_inventory_id,
                 )
+                from ...services.plan_scope import validate_innovation_plan_scope
+
+                validate_innovation_plan_scope(analysis_state, plan)
             except Exception as exc:
                 last_validation_error = exc
                 if attempt == 1:
@@ -325,7 +379,12 @@ Remember: ``platform_baseline`` must be exactly ``\"\"``, ``\"annotation\"``,
             )
             return plan
 
-        if seed_plan is not None and seed_plan.steps and seed_plan.status != "rejected":
+        if (
+            scope_contract_version is None
+            and seed_plan is not None
+            and seed_plan.steps
+            and seed_plan.status != "rejected"
+        ):
             fallback = seed_plan.model_copy(deep=True)
             fallback.status = "pi_reviewing"
             fallback.revision_reason = (

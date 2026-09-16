@@ -8,7 +8,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pytest
 from unittest.mock import AsyncMock
 
-from backend.models.schemas import AnalysisState, AnalysisPlan, PlanStep, TaskStatus
+from backend.models.schemas import (
+    AcceptedFoundationInventory,
+    AcceptedFoundationStep,
+    AnalysisPhase,
+    AnalysisState,
+    AnalysisPlan,
+    PlanStep,
+    TaskStatus,
+)
 from backend.services.figure_contract import visual_plan_inheritance_for_plan
 
 
@@ -86,7 +94,7 @@ class TestApprovePlanStatus:
     ):
         parent = AnalysisPlan(
             id="parent-plan",
-            phase="innovation",
+            phase="exploration",
             steps=[PlanStep(
                 id=3,
                 title="Differential expression",
@@ -100,7 +108,7 @@ class TestApprovePlanStatus:
         revised = AnalysisPlan(
             id="revised-plan",
             revision_of=parent.id,
-            phase="innovation",
+            phase="exploration",
             steps=[parent.steps[0].model_copy(deep=True)],
         )
         await wf._approve_plan(state_dict, revised, analysis_state, "approved")
@@ -108,6 +116,52 @@ class TestApprovePlanStatus:
         assert visual_plan_inheritance_for_plan(analysis_state, revised) == {
             3: (parent.id,),
         }
+
+    @pytest.mark.parametrize("action", ["approved", "skipped"])
+    @pytest.mark.asyncio
+    async def test_invalid_innovation_scope_cannot_transition_through_approval(
+        self, wf, state_dict, action
+    ):
+        analysis_state = AnalysisState(
+            user_id="test",
+            current_round=2,
+            analysis_phase=AnalysisPhase.INNOVATION,
+            status=TaskStatus.WAITING_PLAN_REVIEW,
+            accepted_foundation_inventories=[AcceptedFoundationInventory(
+                inventory_id="foundation-v1-r1",
+                round_number=1,
+                plan_id="round1-plan",
+                planning_stage="stage1",
+                steps=[AcceptedFoundationStep(
+                    plan_step_id=4,
+                    title="Accepted baseline",
+                    method="scanpy.tl.leiden",
+                    evidence_execution_ids=["receipt-r1-step4"],
+                )],
+            )],
+        )
+        plan = AnalysisPlan(
+            phase="innovation",
+            stage="full",
+            status="user_reviewing",
+            scope_contract_version=1,
+            foundation_inventory_id="foundation-v1-r1",
+            steps=[PlanStep(id=1, title="Missing scope", method="scanpy")],
+        )
+
+        approved = await wf._approve_plan(
+            state_dict, plan, analysis_state, action
+        )
+
+        assert approved is False
+        assert state_dict["plan_approved"] is False
+        assert "corrected Innovation scope" in state_dict["user_plan_feedback"]
+        assert plan.status == "user_reviewing"
+        assert analysis_state.current_plan is None
+        assert analysis_state.bioinformatics_settlement_attempt_ids == {}
+        wf._send_state_sync.assert_awaited_once_with(
+            analysis_state, "plan_scope_validation_failed"
+        )
 
     @pytest.mark.asyncio
     async def test_approve_plan_state_sync_before_plan_approved_message(self, wf, plan, analysis_state, state_dict):

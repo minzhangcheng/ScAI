@@ -8,6 +8,7 @@ import pytest
 
 from backend.models.schemas import (
     AnalysisPlan,
+    CodeExecution,
     FigureReviewStatus,
     PlanStep,
     PublicationFigure,
@@ -17,6 +18,10 @@ from backend.services.figure_contract import (
     collect_plan_figure_requirements,
     record_plan_figure_inheritance,
     visual_plan_inheritance_for_plan,
+)
+from backend.services.figure_followup import (
+    build_figure_followup_scope,
+    persist_figure_followup_scope,
 )
 from backend.agents.bioinformatics_agent import TOOLS
 from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
@@ -107,6 +112,159 @@ def test_structured_requirements_need_linked_report_eligible_figures():
     assert audit_figure_contract(
         state, planning_stage="full", include_stage_baseline=False
     ).passed
+
+
+def test_schema_v2_dangling_source_is_reported_and_cannot_close_requirement():
+    plan = AnalysisPlan(
+        phase="innovation",
+        steps=[PlanStep(
+            id=7,
+            title="Score response programs",
+            method="approved method",
+            figure_requirements=[{"figure_type": "umap"}],
+        )],
+    )
+    figure = _figure("dangling_umap", "umap", step_id=7)
+    figure.provenance_schema_version = 2
+    figure.producer_run_kind = "figure_followup"
+    figure.producer_run_scope_id = "followup-1"
+    figure.source_execution_id = "missing-execution"
+    figure.source_execution_run_kind = "ordinary"
+    figure.source_execution_validated = True
+    state = _state(plan, [figure])
+    state.code_history = []
+
+    audit = audit_figure_contract(
+        state, planning_stage="full", include_stage_baseline=False
+    )
+
+    assert not audit.passed
+    assert audit.missing[0].requirement.figure_type == "umap"
+    assert audit.ineligible_figures == [{
+        "figure_id": figure.id,
+        "name": figure.name,
+        "reason": "Figure source execution missing-execution is missing from durable code history.",
+    }]
+    assert "missing from durable code history" in figure.provenance_validation_reason
+
+
+def test_known_legacy_scai6_figure_is_preserved_but_cannot_close_requirement():
+    plan = AnalysisPlan(
+        id="014b3726-7baa-44b2-a0e4-d78366063654",
+        phase="innovation",
+        steps=[PlanStep(
+            id=3,
+            title="Doublet score distribution",
+            method="Plot the accepted measurement",
+            figure_requirements=[{"figure_type": "histogram"}],
+        )],
+    )
+    figure = _figure(
+        "doublet_score_distribution_per_sample",
+        "histogram",
+        step_id=3,
+        plan_id=plan.id,
+    )
+    figure.id = "14fc685e-9ffa-4bd2-bc03-2d92da0a9c87"
+    figure.source_execution_id = "a4989f32-064d-4c1d-b2ef-d47e153dd6ee"
+    figure.plan_requirement_key = "plan.3.1"
+    state = _state(plan, [figure])
+    state.code_history = []
+
+    audit = audit_figure_contract(
+        state, planning_stage="full", include_stage_baseline=False
+    )
+
+    assert not audit.passed
+    assert audit.eligible_figure_names == []
+    assert audit.ineligible_figures[0]["figure_id"] == figure.id
+    assert "Known legacy figure was invalidated" in (
+        figure.provenance_validation_reason or ""
+    )
+
+
+def test_legacy_figure_followup_receipt_cannot_source_scientific_result():
+    plan = AnalysisPlan(
+        id="legacy-plan",
+        phase="innovation",
+        steps=[PlanStep(
+            id=3,
+            title="Existing result",
+            method="Plot the accepted measurement",
+            figure_requirements=[{"figure_type": "histogram"}],
+        )],
+    )
+    figure = _figure("legacy_followup_result", "histogram", step_id=3)
+    figure.source_execution_id = "legacy-followup-execution"
+    state = _state(plan, [figure])
+    state.code_history = [CodeExecution(
+        id="legacy-followup-execution",
+        code="plot_existing_result()",
+        executor_run_kind="figure_followup",
+    )]
+
+    audit = audit_figure_contract(
+        state, planning_stage="full", include_stage_baseline=False
+    )
+
+    assert not audit.passed
+    assert "legacy figure-follow-up execution" in (
+        figure.provenance_validation_reason or ""
+    )
+
+
+def test_figure_followup_producer_can_close_requirement_from_eligible_source():
+    step = PlanStep(
+        id=7,
+        title="Score response programs",
+        method="approved method",
+        status="completed",
+        figure_requirements=[{"figure_type": "umap"}],
+    )
+    plan = AnalysisPlan(phase="innovation", steps=[step])
+    figure = _figure("followup_umap", "umap", step_id=7)
+    state = _state(plan, [figure])
+    requirement = collect_plan_figure_requirements(plan)[0]
+    receipt = CodeExecution(
+        id="ordinary-source",
+        code="compute_approved_result()",
+        round_number=2,
+        plan_id=plan.id,
+        plan_step_ids=[7],
+        plan_binding_status="confirmed",
+        evidence_schema_version=2,
+        executor_run_kind="ordinary",
+        execution_status="succeeded",
+    )
+    state.code_history = [receipt]
+    task = {
+        "id": "followup-task",
+        "logical_figure_id": figure.logical_figure_id or "logical-figure",
+        "plan_requirement_key": requirement.key,
+        "plan_step_id": 7,
+    }
+    scope = build_figure_followup_scope(
+        state, [task], run_scope_id="followup-run"
+    )
+    persist_figure_followup_scope(state, scope)
+    figure.logical_figure_id = task["logical_figure_id"]
+    figure.plan_requirement_key = requirement.key
+    figure.provenance_schema_version = 2
+    figure.producer_run_kind = "figure_followup"
+    figure.producer_run_scope_id = "followup-run"
+    figure.figure_followup_task_id = "followup-task"
+    figure.source_execution_id = receipt.id
+    figure.source_execution_run_kind = "ordinary"
+    figure.source_execution_validated = True
+    state.current_plan = plan
+    state.code_history = [receipt]
+
+    audit = audit_figure_contract(
+        state, planning_stage="full", include_stage_baseline=False
+    )
+
+    assert audit.passed
+    assert audit.eligible_figure_names == [figure.name]
 
 
 def test_exact_plan_id_allows_transitional_figure_without_step_id():

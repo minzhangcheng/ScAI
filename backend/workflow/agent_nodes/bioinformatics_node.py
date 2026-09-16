@@ -510,14 +510,6 @@ async def collect_bioinformatics_results(self, ctx, result):
     for figure_name in figure_followup.get("figures", []) or []:
         if figure_name not in all_figures:
             all_figures.append(figure_name)
-    followup_attempts = list(
-        figure_followup.get("settlement_attempt_execution_ids") or []
-    )
-    if followup_attempts:
-        result["settlement_attempt_execution_ids"] = sorted({
-            *list(result.get("settlement_attempt_execution_ids") or []),
-            *followup_attempts,
-        })
     checkpoint_names = [
         str(name)
         for name in (
@@ -769,8 +761,37 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
             capture_and_persist_boundary,
             clear_settlement_scope_callback,
         )
+        from ...services.plan_scope import capture_accepted_foundation_inventory
 
         source_context = result.get("resolved_adata_source_context") or {}
+        inventory_error = []
+        clear_settlement = clear_settlement_scope_callback(
+            analysis_state, result.get("executor_settlement_scope_id")
+        )
+
+        def settle_stage1_checkpoint(outcome):
+            changed = clear_settlement(outcome)
+            if (
+                int(analysis_state.current_round or 0) == 1
+                and outcome.available
+            ):
+                try:
+                    capture_accepted_foundation_inventory(
+                        analysis_state,
+                        analysis_state.current_plan,
+                        outcome.record,
+                        provenance="captured",
+                    )
+                    changed = True
+                except Exception as exc:
+                    inventory_error.append(str(exc)[:500])
+                    logger.warning(
+                        "[%s] Round 1 foundation inventory capture failed: %s",
+                        self.session_id,
+                        exc,
+                    )
+            return changed
+
         capture_outcome = await capture_and_persist_boundary(
             self,
             analysis_state,
@@ -800,9 +821,7 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
             attempt_execution_ids_at_capture=tuple(
                 result.get("settlement_attempt_execution_ids") or []
             ),
-            before_state_save=clear_settlement_scope_callback(
-                analysis_state, result.get("executor_settlement_scope_id")
-            ),
+            before_state_save=settle_stage1_checkpoint,
             executor_checkpoint_name=result.get("executor_checkpoint_name"),
             executor_checkpoint_names=result.get("executor_checkpoint_names"),
         )
@@ -816,6 +835,18 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
                 await self._send_message("status", notice, AgentType.PI)
             except Exception:
                 logger.warning("could not surface Stage 1 checkpoint disclosure")
+        elif inventory_error:
+            notice = (
+                "The Stage 1 AnnData checkpoint was captured, but accepted foundation "
+                "identity could not be sealed. A later Innovation plan will require "
+                "reconstruction from retained approved-plan and execution records. "
+                + inventory_error[0]
+            )
+            result_state["foundation_inventory_notice"] = notice
+            try:
+                await self._send_message("status", notice, AgentType.PI)
+            except Exception:
+                logger.warning("could not surface foundation inventory disclosure")
 
     if action in ("revision", "incomplete"):
         # Stay in the current stage and keep current_plan intact: after the

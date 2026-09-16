@@ -218,6 +218,18 @@ class PublicationFigure(BaseModel):
     cohort_generation: int = 0
     cohort_digest: Optional[str] = None
     source_execution_id: Optional[str] = None
+    # Version 2 binds a new plan-result figure to a validated execution receipt.
+    # Optional defaults preserve historical artifacts without inventing lineage.
+    provenance_schema_version: Optional[int] = None
+    producer_run_kind: Optional[Literal[
+        "ordinary", "supplementary", "figure_followup", "platform",
+    ]] = None
+    producer_run_scope_id: Optional[str] = None
+    source_execution_run_kind: Optional[str] = None
+    source_execution_validated: Optional[bool] = None
+    source_preparation_id: Optional[str] = None
+    figure_followup_task_id: Optional[str] = None
+    provenance_validation_reason: Optional[str] = None
     expression_provenance: Dict[str, Any] = Field(default_factory=dict)
     is_current: bool = True
     invalidated_at: Optional[datetime] = None
@@ -304,7 +316,7 @@ class FigureRevisionTask(BaseModel):
     attempt_count: int = 0
     max_attempts: int = Field(default=2, ge=1, le=6)
     pi_disposition: Optional[Literal[
-        "targeted_redraw", "accept_best", "omit",
+        "targeted_redraw", "accept_best", "omit", "needs_new_analysis",
     ]] = None
     pi_rationale: Optional[str] = None
     pi_report_note: Optional[str] = None

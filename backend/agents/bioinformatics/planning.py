@@ -195,6 +195,41 @@ class PlanGenerationFailure(RuntimeError):
         )
 
 
+def _plan_scope_prompt(state: Any, phase: str) -> dict[str, Any]:
+    from ...services.plan_scope import (
+        innovation_inventory_id,
+        is_innovation_scope,
+        render_innovation_scope_context,
+    )
+
+    contract_version = 1 if is_innovation_scope(state, phase=phase) else None
+    inventory_id = innovation_inventory_id(state) if contract_version else None
+    context = render_innovation_scope_context(state, phase=phase)
+    return {
+        "context": f"\n{context}\n",
+        "step_instruction": (
+            "\n- **analysis_scope**: Required in Innovation; declare relationship, "
+            "cohort_scope, exact foundation_refs, reason, and requested_by for revise."
+            if contract_version else ""
+        ),
+        "step_schema": (
+            ',\n            "analysis_scope": {"relationship": "new", '
+            '"cohort_scope": "full", "foundation_refs": [], '
+            '"reason": "", "requested_by": null}'
+            if contract_version else ""
+        ),
+        "plan_schema": (
+            ",\n    \"scope_contract_version\": 1, "
+            f"\"foundation_inventory_id\": {json.dumps(inventory_id)}"
+            if contract_version else ""
+        ),
+        "plan_fields": {
+            "scope_contract_version": contract_version,
+            "foundation_inventory_id": inventory_id,
+        },
+    }
+
+
 class PlanningMixin:
     """Analysis-plan generation, incremental revision, and checkpoint discovery."""
 
@@ -528,6 +563,7 @@ Completed steps MUST NOT be changed:
 You are REVISING the remaining steps based on new findings."""
 
         stage_guidance = _stage_guidance_text(planning_stage)
+        scope_prompt = _plan_scope_prompt(state, phase)
 
         data_desc = truncate_for_llm(
             state.build_experimental_design_summary(),
@@ -619,8 +655,7 @@ Overview: {bounded_overview}
 
 Tasks:
 {tasks_text}
-{stage_guidance}
-{previous_context}
+{stage_guidance}{scope_prompt["context"]}{previous_context}
 {revision_context}
 
 ## Evidence Policy
@@ -648,7 +683,7 @@ Generate a detailed, method-level analysis plan. For each step specify:
 - **text_only_reason**: Required when allow_text_only is true; explain why a
   meaningful data-result visualization is not applicable to this special task.
 - **rationale**: Why this step is needed (biological/analytical justification)
-- **depends_on**: List of step IDs that must complete before this step
+- **depends_on**: List of step IDs that must complete before this step{scope_prompt["step_instruction"]}
 
 Rules:
 - Each step should be ONE distinct analytical action
@@ -682,12 +717,12 @@ Return the plan as a JSON object:
             "allow_text_only": false,
             "text_only_reason": "",
             "rationale": "...",
-            "depends_on": []
+            "depends_on": []{scope_prompt["step_schema"]}
         }},
         ...
     ],
     "key_decision_points": ["..."],
-    "expected_runtime": "~N analysis steps"
+    "expected_runtime": "~N analysis steps"{scope_prompt["plan_schema"]}
 }}"""
 
         # Planning is a bounded, explicit context assembled by the workflow.
@@ -716,7 +751,7 @@ Return the plan as a JSON object:
                 allow_text_only=s.get("allow_text_only", False),
                 text_only_reason=s.get("text_only_reason", ""),
                 rationale=s.get("rationale", ""),
-                depends_on=s.get("depends_on", []),
+                depends_on=s.get("depends_on", []), analysis_scope=s.get("analysis_scope"),
             ))
 
         plan = AnalysisPlan(
@@ -750,6 +785,7 @@ Return the plan as a JSON object:
                 if existing_plan is not None
                 else f"settle_scope_{uuid.uuid4().hex}"
             ),
+            **scope_prompt["plan_fields"],
         )
 
         logger.info(f"[Bioinformatics] Generated plan: {len(steps)} steps, phase={phase}, stage={planning_stage}")
@@ -853,6 +889,21 @@ Return the plan as a JSON object:
             )
 
         research_context = self._research_context_block(state)
+        from ...services.plan_scope import (
+            innovation_inventory_id,
+            is_innovation_scope,
+            render_innovation_scope_context,
+        )
+
+        scope_context = render_innovation_scope_context(state, plan=current_plan)
+        scope_contract_version = (
+            1 if is_innovation_scope(state, current_plan) else None
+        )
+        foundation_inventory_id = (
+            innovation_inventory_id(state, current_plan)
+            if scope_contract_version
+            else None
+        )
         stage_guidance = _stage_guidance_text(current_plan.stage or "full")
         affected_query = truncate_for_llm(
             "\n".join(
@@ -871,6 +922,13 @@ Return the plan as a JSON object:
         )
         decision_guidance = self._method_decision_guidance_block(decision_query)
 
+        scope_plan_schema = ""
+        if scope_contract_version:
+            scope_plan_schema = (
+                f'    "scope_contract_version": 1,\n'
+                f'    "foundation_inventory_id": {json.dumps(foundation_inventory_id)},\n'
+            )
+
         prompt = f"""Revise an analysis plan based on PI feedback. Only modify affected steps — completed steps are locked.
 {research_context}
 {goals_context}
@@ -882,6 +940,7 @@ Return the plan as a JSON object:
 
 ## Steps To Revise
 {affected_text}
+{scope_context}
 {stage_guidance}{decision_guidance}
 
 ## Evidence Policy
@@ -910,14 +969,18 @@ Return the plan as a JSON object:
   allow_text_only=true only for genuinely narrative or special tasks with no
   meaningful visual representation, keep figure_requirements empty, and provide
   a concrete text_only_reason.
+- Preserve analysis_scope on completed steps. Every Innovation step must return
+  a complete analysis_scope declaration; keep references exact and declare
+  foundation revisions with PI/user authority and a reason.
 - A caution about how strongly a result may be interpreted is not a reason to stop measuring it.
 
 Return the FULL revised plan as JSON (include ALL steps, both completed and revised):
 {{
-    "overview": "Updated strategy summary",
+            "overview": "Updated strategy summary",
     "steps": [
         // ALL steps (completed + revised + new), in execution order
     ],
+{scope_plan_schema}
     "key_decision_points": ["updated list"],
     "expected_runtime": "~N steps"
 }}"""
@@ -967,6 +1030,10 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                 ),
                 rationale=s.get("rationale", ""),
                 depends_on=s.get("depends_on", []),
+                analysis_scope=s.get(
+                    "analysis_scope",
+                    getattr(original, "analysis_scope", None) if original else None,
+                ),
                 status="pending",
             ))
 
@@ -1003,6 +1070,16 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
             bioinformatics_run_scope_id=current_plan.bioinformatics_run_scope_id,
             bioinformatics_settlement_scope_id=(
                 current_plan.bioinformatics_settlement_scope_id
+            ),
+            scope_contract_version=(
+                scope_contract_version
+                if scope_contract_version is not None
+                else current_plan.scope_contract_version
+            ),
+            foundation_inventory_id=(
+                foundation_inventory_id
+                if scope_contract_version is not None
+                else current_plan.foundation_inventory_id
             ),
         )
 

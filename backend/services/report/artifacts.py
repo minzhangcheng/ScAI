@@ -377,9 +377,44 @@ def figure_reservation_notice(artifact: Any) -> dict[str, Any]:
 
 
 
-def is_report_eligible(artifact: Any) -> bool:
+def publication_figure_provenance_error(state: Any, figure: Any) -> str | None:
+    """Revalidate figure provenance against its owning session when possible."""
+    version = _artifact_value(figure, "provenance_schema_version", None)
+    if state is None:
+        if version is None:
+            return str(
+                _artifact_value(figure, "provenance_validation_reason", None) or ""
+            ) or None
+        reason = "Analysis state is required to revalidate schema-v2 figure provenance."
+    else:
+        from backend.services.figure_followup import (
+            validate_publication_figure_provenance as _validate,
+        )
+
+        reason = _validate(state, figure)
+    if reason:
+        if isinstance(figure, dict):
+            figure["provenance_validation_reason"] = str(reason)[:1000]
+        else:
+            try:
+                figure.provenance_validation_reason = str(reason)[:1000]
+            except (AttributeError, TypeError, ValueError):
+                pass
+    elif isinstance(figure, dict):
+        figure.pop("provenance_validation_reason", None)
+    elif getattr(figure, "provenance_validation_reason", None):
+        try:
+            figure.provenance_validation_reason = None
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return reason
+
+
+def is_report_eligible(artifact: Any, *, state: Any = None) -> bool:
     """Return whether a reviewed artifact is current enough for final reports."""
-    return artifact_selection.is_report_eligible(artifact, bindings=sys.modules[__name__])
+    return artifact_selection.is_report_eligible(
+        artifact, state=state, bindings=sys.modules[__name__]
+    )
 
 
 
@@ -393,19 +428,27 @@ def logical_figure_key(artifact: Any) -> tuple[str, str]:
 
 
 
-def published_head_artifacts(artifacts: Iterable[Any] | None) -> list[Any]:
+def published_head_artifacts(
+    artifacts: Iterable[Any] | None, *, state: Any = None
+) -> list[Any]:
     """Collapse report-eligible revisions to one archival head per logical figure.
 
     Pending or failed redraws are absent from the eligible input, so the previous
     reportable revision remains the head until a replacement actually qualifies.
     """
-    return artifact_selection.published_head_artifacts(artifacts, bindings=sys.modules[__name__])
+    return artifact_selection.published_head_artifacts(
+        artifacts, state=state, bindings=sys.modules[__name__]
+    )
 
 
 
-def eligible_artifacts(artifacts: Iterable[Any] | None) -> list[Any]:
+def eligible_artifacts(
+    artifacts: Iterable[Any] | None, *, state: Any = None
+) -> list[Any]:
     """Return the single reportable published head of every logical artifact."""
-    return artifact_selection.eligible_artifacts(artifacts, bindings=sys.modules[__name__])
+    return artifact_selection.eligible_artifacts(
+        artifacts, state=state, bindings=sys.modules[__name__]
+    )
 
 
 
@@ -414,9 +457,16 @@ def eligible_artifact_by_id(
     artifact_id: str,
     *,
     lineage_id: str | None = None,
+    state: Any = None,
 ) -> Any | None:
     """Resolve an API/download ID only through the explicit eligible head set."""
-    return artifact_selection.eligible_artifact_by_id(artifacts, artifact_id, lineage_id=lineage_id, bindings=sys.modules[__name__])
+    return artifact_selection.eligible_artifact_by_id(
+        artifacts,
+        artifact_id,
+        lineage_id=lineage_id,
+        state=state,
+        bindings=sys.modules[__name__],
+    )
 
 
 

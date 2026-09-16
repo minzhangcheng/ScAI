@@ -66,6 +66,8 @@ from ..bioinformatics.mechanism_validation import (  # noqa: F401
 from ..bioinformatics.tool_schemas import (  # noqa: F401
     TOOLS,
     KNOWN_TOOL_NAMES,
+    FIGURE_FOLLOWUP_TOOLS,
+    FIGURE_FOLLOWUP_TOOL_NAMES,
 )
 
 

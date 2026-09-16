@@ -255,6 +255,15 @@ class TestAnalysisStateApiDictRoundTrip:
                 png_base64=preview,
                 preview_sha256=preview_sha256,
                 round_number=3,
+                provenance_schema_version=2,
+                producer_run_kind="figure_followup",
+                producer_run_scope_id="figure-run-1",
+                source_execution_id="source-execution-1",
+                source_execution_run_kind="ordinary",
+                source_execution_validated=True,
+                source_preparation_id="preparation-1",
+                figure_followup_task_id="figure-task-1",
+                provenance_validation_reason="Source receipt is missing.",
                 layout_violations=[{"kind": "text_over_text", "severity": "block"}],
             ),
             PublicationFigure(
@@ -275,6 +284,16 @@ class TestAnalysisStateApiDictRoundTrip:
         blocked, diagnostic = api["publication_figures"]
         assert blocked["round"] == 3
         assert blocked["layout_blocking"] is True
+        assert blocked["provenance_schema_version"] == 2
+        assert blocked["producer_run_kind"] == "figure_followup"
+        assert blocked["producer_run_scope_id"] == "figure-run-1"
+        assert blocked["source_execution_run_kind"] == "ordinary"
+        assert blocked["source_execution_validated"] is True
+        assert blocked["source_preparation_id"] == "preparation-1"
+        assert blocked["figure_followup_task_id"] == "figure-task-1"
+        assert blocked["provenance_validation_reason"] == (
+            "Source receipt is missing."
+        )
         # An unattributed figure reports no round rather than "round 0".
         assert diagnostic["round"] is None
         assert diagnostic["layout_blocking"] is False

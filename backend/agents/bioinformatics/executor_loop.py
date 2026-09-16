@@ -171,6 +171,10 @@ async def start_turn(context) -> TurnStart:
         )
     request_messages = [dict(message) for message in context.messages]
     prompt_cache_plan = None
+    figure_followup = (
+        getattr(context, "executor_run_kind", "ordinary") == "figure_followup"
+    )
+    request_tools = FIGURE_FOLLOWUP_TOOLS if figure_followup else TOOLS
     state = getattr(context.agent, "_current_analysis_state", None)
     if state is not None:
         input_anchor = context.agent._build_authoritative_input_anchor(state)
@@ -191,7 +195,7 @@ async def start_turn(context) -> TurnStart:
             anchor_count=context.agent._context_anchor_count(request_messages),
             summarize=context.agent._summarize_dropped_messages,
             model=context.agent.model,
-            tools=TOOLS,
+            tools=request_tools,
             tool_choice=effective_tool_choice,
             temperature=context.agent.config.temperature,
             prefer_stream=True,
@@ -240,16 +244,24 @@ async def start_turn(context) -> TurnStart:
                 agent_name="bioinformatics",
             )
         if not _reactive_compacted:
+            retry_instruction = (
+                "call generate_publication_figure for a scoped render or "
+                "complete_figure_followup when every assigned figure task has "
+                "been attempted. Do not request new analysis."
+                if figure_followup
+                else (
+                    "call execute_code to run the next analysis step, call another "
+                    "appropriate tool, or call report_findings if every assigned "
+                    "task is already complete."
+                )
+            )
             context.messages.append({
                 "role": "user",
                 "content": (
                     f"[System] Your previous reply was empty — no text and no "
                     f"tool call (attempt {context.empty_response_count}). An empty turn "
                     f"is not a valid step. You MUST respond now with exactly one "
-                    f"concrete action: call execute_code to run the next analysis "
-                    f"step, call another appropriate tool, or call report_findings "
-                    f"if every assigned task is already complete. Do not return an "
-                    f"empty message."
+                    f"concrete action: {retry_instruction} Do not return an empty message."
                 ),
             })
         await asyncio.sleep(context.agent._empty_retry_backoff(context.empty_response_count))
@@ -282,9 +294,16 @@ async def start_turn(context) -> TurnStart:
             context.agent._raise_text_only_exhausted(context.text_response_count)
         context.messages.append({
             "role": "user",
-            "content": "Please continue the analysis. If you have completed your analysis, "
-                       "call the report_findings tool with your key findings. "
-                       "Do NOT respond with text only - you must use a tool."
+            "content": (
+                "Continue only with the scoped publication-figure tasks. Call "
+                "generate_publication_figure for a task or "
+                "complete_figure_followup when each task was attempted. Do not "
+                "perform analysis or request new measurements."
+                if figure_followup else
+                "Please continue the analysis. If you have completed your analysis, "
+                "call the report_findings tool with your key findings. "
+                "Do NOT respond with text only - you must use a tool."
+            )
         })
         return TurnStart()
     return TurnStart(response=response)
@@ -294,6 +313,9 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
     self = context.agent
     state = context.analysis_state
     messages = context.messages
+    figure_followup = (
+        getattr(context, "executor_run_kind", "ordinary") == "figure_followup"
+    )
     analysis_log = context.analysis_log
     step_count = context.step_count
     planning_stage = context.planning_stage
@@ -386,6 +408,7 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
         resolved_adata_source_context=dict(
             getattr(context, "resolved_adata_source_context", None) or {}
         ),
+        figure_followup_scope=getattr(context, "figure_followup_scope", None),
     )
     dispatch_context = ToolDispatchContext(
         messages=messages,
@@ -412,6 +435,9 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
             "generate_publication_figure": functools.partial(
                 handle_publication_figure, tool_runtime
             ),
+            "complete_figure_followup": functools.partial(
+                handle_complete_figure_followup, tool_runtime
+            ),
             "fetch_gene_set": functools.partial(
                 handle_fetch_gene_set, tool_runtime
             ),
@@ -436,6 +462,9 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
         },
         propagate_exceptions=(UpstreamExhaustedError,),
         error_formatter=lambda exc: compact_traceback(str(exc), max_chars=3000),
+        allowed_tool_names=(
+            FIGURE_FOLLOWUP_TOOL_NAMES if figure_followup else None
+        ),
     )
     for tool_call in response.tool_calls:
         tool_name = tool_call.name
@@ -837,6 +866,14 @@ async def prepare_loop_context(
         _scope_state = dict(getattr(state, "sandbox_state", None) or {})
         _scope_state["supplementary_requests_v1"] = _request_map
         state.sandbox_state = _scope_state
+    elif _run_kind == "figure_followup":
+        _source_owner_plan = getattr(state, "current_plan", None)
+        _resolved_run_scope = str(run_scope_id or "").strip()
+        if not _resolved_run_scope:
+            raise ValueError("Figure follow-up requires a persisted run scope")
+        # This identity scopes only a disposable executor checkpoint. It is not
+        # an analytical settlement owner and is never added to the main ledger.
+        _resolved_settlement_scope = _resolved_run_scope
     else:
         _source_owner_plan = getattr(state, "current_plan", None)
         _owner_scope_key = (
@@ -893,7 +930,10 @@ async def prepare_loop_context(
             _scope_state = dict(getattr(state, "sandbox_state", None) or {})
             _scope_state["executor_owner_scopes_v1"] = _owner_scopes
             state.sandbox_state = _scope_state
-    if _resolved_settlement_scope not in state.bioinformatics_settlement_attempt_ids:
+    if (
+        _run_kind != "figure_followup"
+        and _resolved_settlement_scope not in state.bioinformatics_settlement_attempt_ids
+    ):
         state.bioinformatics_settlement_attempt_ids[_resolved_settlement_scope] = []
         _owner_state_changed = True
     if _owner_state_changed:
@@ -902,11 +942,12 @@ async def prepare_loop_context(
 
         await async_save_session(str(state.id), state, force=True)
 
-    await executor_runtime.prepare_sandbox(
-        self,
-        state,
-        bindings=sys.modules[__name__],
-    )
+    if _run_kind != "figure_followup":
+        await executor_runtime.prepare_sandbox(
+            self,
+            state,
+            bindings=sys.modules[__name__],
+        )
 
     # Apply or verify the selected AnnData source after the runtime is
     # restored/started and before the executor restores its transcript.  A
@@ -927,9 +968,27 @@ async def prepare_loop_context(
     elif isinstance(_source_selection, dict):
         _source_selection = AdataSourceSelection.model_validate(_source_selection)
     _preparation = None
-    if _source_selection is not None and getattr(
-        _source_selection, "mode", "current"
-    ) != "current":
+    _figure_scope = None
+    if _run_kind == "figure_followup":
+        from backend.services.figure_followup import get_figure_followup_scope
+
+        _figure_scope = get_figure_followup_scope(state, _resolved_run_scope)
+        if _figure_scope is None:
+            raise ValueError("Figure follow-up has no persisted capability scope")
+        _prep_id = str(_figure_scope.get("source_preparation_id") or "")
+        _preparation = next(
+            (
+                record
+                for record in (getattr(state, "adata_source_preparations", None) or [])
+                if str(getattr(record, "preparation_id", "") or "") == _prep_id
+            ),
+            None,
+        ) if _prep_id else None
+    if (
+        _run_kind != "figure_followup"
+        and _source_selection is not None
+        and getattr(_source_selection, "mode", "current") != "current"
+    ):
         from backend.services.adata_checkpoints import (
             ensure_adata_source_prepared,
         )
@@ -982,15 +1041,16 @@ async def prepare_loop_context(
             _preparation, "ancestor_checkpoint_id", None
         ),
     }
-    _sandbox_state = dict(getattr(state, "sandbox_state", None) or {})
-    _sandbox_state["resolved_adata_source_context_v1"] = dict(
-        _resolved_source_context
-    )
-    state.sandbox_state = _sandbox_state
-    await state.increment_version()
-    from backend.services.session_store import async_save_session
+    if _run_kind != "figure_followup":
+        _sandbox_state = dict(getattr(state, "sandbox_state", None) or {})
+        _sandbox_state["resolved_adata_source_context_v1"] = dict(
+            _resolved_source_context
+        )
+        state.sandbox_state = _sandbox_state
+        await state.increment_version()
+        from backend.services.session_store import async_save_session
 
-    await async_save_session(str(state.id), state, force=True)
+        await async_save_session(str(state.id), state, force=True)
 
     # Build the scoped executor checkpoint identity only after runtime and
     # source resolution, so a transcript can never cross run/source/request.
@@ -1243,6 +1303,7 @@ async def prepare_loop_context(
         executor_run_scope_id=_resolved_run_scope,
         executor_settlement_scope_id=_resolved_settlement_scope,
         supplementary_request_id=supplementary_request_id,
+        figure_followup_scope=_figure_scope,
         attempt_execution_ids=list(
             (checkpoint or {}).get("attempt_execution_ids") or []
         ) if checkpoint_valid else [],

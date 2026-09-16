@@ -19,6 +19,7 @@ from typing import Any, Iterable, List, Mapping, Optional
 from backend.services.report.artifacts import (
     archival_render_available,
     is_report_eligible,
+    publication_figure_provenance_error,
 )
 
 
@@ -220,6 +221,7 @@ class FigureContractAudit:
     requirements: List[RequiredFigure] = field(default_factory=list)
     missing: List[MissingFigure] = field(default_factory=list)
     eligible_figure_names: List[str] = field(default_factory=list)
+    ineligible_figures: List[dict[str, str]] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -232,6 +234,7 @@ class FigureContractAudit:
             "n_missing": len(self.missing),
             "missing": [item.as_dict() for item in self.missing],
             "eligible_figure_names": list(self.eligible_figure_names),
+            "ineligible_figures": list(self.ineligible_figures),
         }
 
 
@@ -660,7 +663,12 @@ def stage_baseline_requirements(state: Any, planning_stage: str) -> List[Require
 
 
 def _current_eligible_figures(
-    figures: Iterable[Any], round_number: int, *, lineage_id: str = "main"
+    figures: Iterable[Any],
+    round_number: int,
+    *,
+    state: Any = None,
+    lineage_id: str = "main",
+    audit: FigureContractAudit | None = None,
 ) -> List[Any]:
     """Return report-eligible figures attributable to this exact round.
 
@@ -678,7 +686,19 @@ def _current_eligible_figures(
         figure_round = int(getattr(figure, "round_number", 0) or 0)
         if figure_round != int(round_number or 0):
             continue
-        if is_report_eligible(figure) and archival_render_available(figure):
+        provenance_error = publication_figure_provenance_error(state, figure)
+        if provenance_error:
+            if audit is not None:
+                audit.ineligible_figures.append({
+                    "figure_id": str(getattr(figure, "id", "") or ""),
+                    "name": str(getattr(figure, "name", "") or ""),
+                    "reason": provenance_error[:1000],
+                })
+            continue
+        if (
+            is_report_eligible(figure, state=state)
+            and archival_render_available(figure)
+        ):
             result.append(figure)
     return result
 
@@ -828,15 +848,17 @@ def audit_figure_contract(
         requirements = requirements + stage_baseline_requirements(state, planning_stage)
 
     round_number = int(getattr(state, "current_round", 0) or 0)
+    audit = FigureContractAudit(requirements=requirements)
     figures = _current_eligible_figures(
         getattr(state, "publication_figures", None) or [],
         round_number,
+        state=state,
         lineage_id=(getattr(state, "restore_branch_id", None) or "main"),
+        audit=audit,
     )
-    audit = FigureContractAudit(
-        requirements=requirements,
-        eligible_figure_names=[str(getattr(fig, "name", "") or "") for fig in figures],
-    )
+    audit.eligible_figure_names = [
+        str(getattr(fig, "name", "") or "") for fig in figures
+    ]
     consumed: set[int] = set()
     for requirement in requirements:
         reusable_baseline = requirement.key.startswith("stage1.")

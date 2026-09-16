@@ -43,9 +43,43 @@ async def _report_direction_coverage_gaps(self, analysis_state) -> None:
     )
 
 async def _approve_plan(
-    self, state: WorkflowState, plan, analysis_state, action: str
-) -> None:
+    self,
+    state: WorkflowState,
+    plan,
+    analysis_state,
+    action: str,
+    *,
+    allow_legacy_approved: bool = False,
+) -> bool:
     """Mark plan as approved and notify frontend."""
+    from ...services.plan_scope import (
+        PlanScopeValidationError,
+        validate_innovation_plan_scope,
+    )
+
+    try:
+        validate_innovation_plan_scope(
+            analysis_state,
+            plan,
+            allow_legacy_approved=allow_legacy_approved,
+        )
+    except PlanScopeValidationError as exc:
+        detail = str(exc)[:1200]
+        state["plan_approved"] = False
+        state["user_plan_feedback"] = (
+            "Host technical validation requires a corrected Innovation scope "
+            f"declaration: {detail}"
+        )
+        await self._send_message(
+            "error",
+            "This Innovation plan was not approved because its structured foundation "
+            f"references are invalid: {detail}. The planner will make one bounded correction.",
+            AgentType.PI,
+        )
+        self._set_status(analysis_state, TaskStatus.RUNNING)
+        await self._send_state_sync(analysis_state, "plan_scope_validation_failed")
+        return False
+
     populate_plan_scope(plan, analysis_state)
     if not getattr(plan, "bioinformatics_run_scope_id", None):
         plan.bioinformatics_run_scope_id = f"run_scope_{uuid.uuid4().hex}"
@@ -73,6 +107,7 @@ async def _approve_plan(
     if state.get("plan_revision_needed"):
         state["plan_revision_resume"] = True
         state["plan_revision_needed"] = False
+    return True
 
 async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
     """Present the analysis plan to the user for review and approval.
@@ -103,6 +138,21 @@ async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
         analysis_state.status = TaskStatus.FAILED
         await self._send_state_sync(analysis_state, "planning_aborted")
         return state
+
+    allow_legacy_approved = (
+        str(getattr(plan, "status", "")) == "approved"
+        and getattr(plan, "scope_contract_version", None) is None
+    )
+
+    async def approve_reviewed_plan(action: str) -> None:
+        kwargs = (
+            {"allow_legacy_approved": True}
+            if allow_legacy_approved
+            else {}
+        )
+        await self._approve_plan(
+            state, plan, analysis_state, action, **kwargs
+        )
 
     # Wipe any action/event left behind by a previous gate invocation in the
     # same workflow (e.g. stage1's approve still sitting in the slot when
@@ -173,11 +223,11 @@ async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
         user_input = action.get("user_input", "")
 
         if action_type == "approve":
-            await self._approve_plan(state, plan, analysis_state, "approved")
+            await approve_reviewed_plan("approved")
             break
 
         elif action_type == "skip":
-            await self._approve_plan(state, plan, analysis_state, "skipped")
+            await approve_reviewed_plan("skipped")
             break
 
         elif action_type == "modify" and user_input:
@@ -193,7 +243,7 @@ async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
             )
 
             if pi_judgment["action"] == "proceed_to_execution":
-                await self._approve_plan(state, plan, analysis_state, "approved_after_clarification")
+                await approve_reviewed_plan("approved_after_clarification")
                 break
 
             elif pi_judgment["action"] == "clarify_with_user":

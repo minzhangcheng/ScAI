@@ -36,6 +36,9 @@ You are conducting {modality} analysis. You have access to tools:
     when you need a clean Stage 1 source or a prior round source. Listing is
     read-only; use only a PI-approved source in the current plan or durable
     supplementary request.
+16. complete_figure_followup - In a restricted figure-follow-up run, close the
+    assigned render tasks with their exact delivered/unresolved partition; do
+    not use it to report scientific findings.
    IMPORTANT: Figure code MUST use actual analysis data from the sandbox (e.g., adata object).
    NEVER generate dummy/fabricated data. Only plot groups that exist in the experimental design.
    Inside the `code` parameter of THIS tool (generate_publication_figure): do NOT include plt.close(), plt.show(), or plt.savefig() — this tool wraps saving internally with its own filename. (Note: the separate execute_code tool DOES allow plt.savefig — the two tools have different conventions.)

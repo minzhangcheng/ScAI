@@ -1,6 +1,7 @@
 """Context isolation and plan-revision resume tests for BioinformaticsAgent."""
 
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,11 +21,18 @@ from backend.models.schemas import (
     AgentType,
     AnalysisPlan,
     AnalysisState,
+    CodeExecution,
     DataFile,
     PlanStep,
 )
+from backend.services.figure_contract import (
+    FigureContractAudit,
+    MissingFigure,
+    RequiredFigure,
+)
 from backend.tests.split_facade import setattr_facade
 from backend.utils.llm_client import LLMToolResponse, ToolCall
+from backend.workflow.post_execution import PostExecutionReviewMixin
 
 
 def _plan(*, plan_id: str, revision_of: str | None = None) -> AnalysisPlan:
@@ -100,6 +108,118 @@ def _bare_agent(monkeypatch, tmp_path) -> BioinformaticsAgent:
         "requires_recompute": False,
     }
     return agent
+
+
+@pytest.mark.asyncio
+async def test_figure_followup_scope_id_resolves_in_real_loop_preparation(
+    monkeypatch,
+    tmp_path,
+):
+    agent = _bare_agent(monkeypatch, tmp_path)
+    agent.refresh_runtime_config_if_needed = MagicMock()
+    agent.sandbox.session_id = "test-session"
+    executor_loop.bind_facade(bioinformatics_facade)
+
+    state = AnalysisState(
+        id="test-session", user_id="test-user", current_round=3,
+    )
+    state.current_plan = AnalysisPlan(
+        id="plan-1",
+        phase="innovation",
+        status="approved",
+        bioinformatics_run_scope_id="parent-run",
+        steps=[PlanStep(
+            id=2, title="Compute the declared contrast", method="approved method",
+            status="completed",
+        )],
+    )
+    state.code_history = [CodeExecution(
+        id="source-execution",
+        code="compute_contrast()",
+        round_number=3,
+        plan_id="plan-1",
+        plan_step_ids=[2],
+        plan_binding_status="confirmed",
+        evidence_schema_version=2,
+        executor_run_kind="ordinary",
+        lineage_id="main",
+        execution_status="succeeded",
+    )]
+    requirement = RequiredFigure(
+        key="plan.2.1",
+        figure_type="volcano",
+        description="Effect size versus adjusted significance",
+        plan_step_id=2,
+        plan_id="plan-1",
+        require_plan_link=True,
+    )
+    contract = FigureContractAudit(
+        requirements=[requirement],
+        missing=[MissingFigure(requirement=requirement)],
+    )
+
+    pi = SimpleNamespace(
+        decide_figure_followups=AsyncMock(),
+        select_fallback_figure=AsyncMock(return_value=None),
+    )
+
+    async def decide_with_real_task(_state, tasks, _candidate_counts):
+        return [{
+            "task_id": tasks[0].id,
+            "disposition": "targeted_redraw",
+            "instruction": "Render the linked contrast as a volcano plot.",
+            "rationale": "The result exists and the missing deliverable is useful.",
+        }]
+
+    pi.decide_figure_followups.side_effect = decide_with_real_task
+    prepared_contexts = []
+
+    async def prepare_real_context(current_state, instruction, **kwargs):
+        context = await executor_loop.prepare_loop_context(
+            agent,
+            current_state,
+            instruction,
+            max_steps=kwargs["max_steps"],
+            figure_review_callback=kwargs["figure_review_callback"],
+            supervisor_callback=kwargs["supervisor_callback"],
+            resume_from_checkpoint=kwargs["resume_from_checkpoint"],
+            planning_stage=kwargs["planning_stage"],
+            figure_followup=kwargs["figure_followup"],
+            run_scope_id=kwargs["run_scope_id"],
+            run_kind=kwargs["run_kind"],
+        )
+        prepared_contexts.append(context)
+        return {
+            "status": "completed",
+            "figures": [],
+            "code_history": [],
+            "analysis_log": [],
+            "executor_run_scope_id": context.executor_run_scope_id,
+            "executor_settlement_scope_id": context.executor_settlement_scope_id,
+        }
+
+    agent.run_autonomous_analysis = AsyncMock(side_effect=prepare_real_context)
+    host = PostExecutionReviewMixin.__new__(PostExecutionReviewMixin)
+    host.session_id = state.id
+    host.pi_agent = pi
+    host.bioinformatics_agent = agent
+    host._figure_review_callback = AsyncMock()
+    host._supervisor_callback = AsyncMock()
+    host.state_callback = AsyncMock(return_value=True)
+
+    result = await host._run_figure_followup(state, contract, "full")
+
+    persisted_scopes = state.sandbox_state["figure_followup_scopes_v1"]
+    assert result["redraw_status"] == "completed"
+    assert len(prepared_contexts) == 1
+    context = prepared_contexts[0]
+    assert context.executor_run_scope_id in persisted_scopes
+    assert context.figure_followup_scope == persisted_scopes[
+        context.executor_run_scope_id
+    ]
+    assert agent.run_autonomous_analysis.await_args.kwargs["run_scope_id"] == (
+        context.executor_run_scope_id
+    )
 
 
 @pytest.mark.asyncio

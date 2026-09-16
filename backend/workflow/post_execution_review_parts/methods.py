@@ -333,6 +333,7 @@ def eligible_current_round_figures(
     round_number: int,
     *,
     target_lineage_id: str = "main",
+    state: Any = None,
 ) -> List[Any]:
     """Current-round ``PublicationFigure`` records fit for a final report.
 
@@ -355,8 +356,10 @@ def eligible_current_round_figures(
             artifact_round = 0
         if artifact_round != current:
             continue
-        candidate = _artifact_for_eligibility(figure)
-        if is_report_eligible(candidate) and archival_render_available(candidate):
+        if (
+            is_report_eligible(figure, state=state)
+            and archival_render_available(figure)
+        ):
             eligible.append(figure)
     return eligible
 
@@ -447,6 +450,7 @@ def _audit_step_figure_requirements(
     plan_phase: str = "",
     inherited_plan_ids_by_step: Optional[Mapping[int, Sequence[str]]] = None,
     target_lineage_id: str = "main",
+    source_state: Any = None,
 ) -> Tuple[Set[str], List[str]]:
     """Return (planned types, missing types) from the shared contract."""
     requirements = _step_figure_requirements(
@@ -480,7 +484,7 @@ def _audit_step_figure_requirements(
     # objects and persisted state are untouched. The strict current-round/report
     # filter above runs before the shared matcher, so its legacy round-zero
     # compatibility cannot let an older artifact satisfy this round's plan.
-    state = SimpleNamespace(
+    state = source_state or SimpleNamespace(
         current_round=int(round_number or 0),
         publication_figures=[_artifact_for_eligibility(fig) for fig in eligible_figures],
         restore_branch_id=str(target_lineage_id or "main"),

@@ -144,6 +144,8 @@ def build_validated_final_plan(
     stage: str,
     seed_plan: Optional[AnalysisPlan],
     termination_reason: str,
+    scope_contract_version: Optional[int] = None,
+    foundation_inventory_id: Optional[str] = None,
 ) -> AnalysisPlan:
     """Build a unilateral plan through the same host schema boundary."""
     from ..bioinformatics.planning import PlanningMixin
@@ -208,6 +210,8 @@ def build_validated_final_plan(
             run_scope_id or f"run_scope_{uuid.uuid4().hex}"
         ),
         bioinformatics_settlement_scope_id=settlement_scope_id,
+        scope_contract_version=scope_contract_version,
+        foundation_inventory_id=foundation_inventory_id,
     )
 
 
