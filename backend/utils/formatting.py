@@ -296,11 +296,24 @@ _PLAN_STEP_FIELDS = (
 )
 
 
+def _json_model_default(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    raise TypeError(
+        f"Object of type {value.__class__.__name__} is not JSON serializable"
+    )
+
+
 def _collapse(value: Any) -> str:
     if hasattr(value, "model_dump"):
         value = value.model_dump(mode="json")
     if isinstance(value, (dict, list)):
-        value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        value = json.dumps(
+            value,
+            default=_json_model_default,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
     return " ".join(str(value or "").split())
 
 

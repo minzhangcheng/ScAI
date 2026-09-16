@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.58.1 · **Last updated**: 2026-09-16
+**Version**: 0.58.2 · **Last updated**: 2026-09-17
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,14 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.58.x — (2026-09-16 onward)**
+
+- `0.58.2` — Fixes plan prompt rendering when `figure_requirements` contains
+  Pydantic `FigureRequirement` models nested in a list. The JSON normalization
+  path now serializes those models before PI review, preventing a local
+  `TypeError` from aborting planning before the PI LLM request. The focused
+  rendering/planning regression set passed `10/10` via `scripts/scai-test fast`
+  at `test-results/20260916T162407Z-2315576/evidence.json`; no image build,
+  deployment, or historical-session mutation was performed.
 
 - `0.58.1` — Adds a versioned Innovation plan-scope contract backed by a
   bounded accepted-foundation inventory, so later-round plans identify reused

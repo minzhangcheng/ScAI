@@ -16,7 +16,12 @@ from backend.agents.bioinformatics.planning import render_pi_modifications
 from backend.utils.formatting import render_plan_steps
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.models.schema_parts.outputs import ExplorationReport
-from backend.models.schemas import AnalysisPlan, AnalysisState, PlanStep
+from backend.models.schemas import (
+    AnalysisPlan,
+    AnalysisState,
+    FigureRequirement,
+    PlanStep,
+)
 from backend.utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 
 DIRECTION = "Determine whether perturbation X drives program Y"
@@ -138,6 +143,21 @@ def test_rendered_steps_carry_every_field():
     assert "Per-nucleus modeA, modeB, and modeC scores" in block
     assert "Distinguishes modeA from modeB" in block
     assert "Depends on: [1]" in block
+
+
+def test_rendered_steps_json_normalize_figure_requirements():
+    plan = _rich_plan()
+    plan.steps[1].figure_requirements = [FigureRequirement(
+        figure_type="violin",
+        description="Compare modeA scores across states.",
+        minimum_count=2,
+    )]
+
+    block = render_plan_steps(plan.steps, budget=100_000)
+
+    assert '"description": "Compare modeA scores across states."' in block
+    assert '"figure_type": "violin"' in block
+    assert '"minimum_count": 2' in block
 
 
 def test_untagged_render_labels_each_step_with_its_own_status():
