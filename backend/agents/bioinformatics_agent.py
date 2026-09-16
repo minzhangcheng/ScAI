@@ -416,6 +416,8 @@ class BioinformaticsAgent(
         # Cooperative pause gate, populated by the workflow before each run.
         # When CLEAR, the autonomous loop blocks between steps until SET.
         self._pause_event: Optional[asyncio.Event] = None
+        self._pause_turn_active = False
+        self._pause_gate_deferred = False
 
 
 

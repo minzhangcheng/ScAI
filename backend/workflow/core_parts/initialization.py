@@ -187,6 +187,9 @@ def __init__(
     # signal_resume(). Defaults to running so first run() is not blocked.
     self._pause_event = asyncio.Event()
     self._pause_event.set()
+    # Serializes pause persistence with the workflow-owned work that follows
+    # the autonomous Bioinformatics loop (review, figure follow-up, PI summary).
+    self._pause_bioinformatics_tail_lock = asyncio.Lock()
 
     # Event for blocking between rounds (wait for user input or continue signal)
     self._continue_event = asyncio.Event()
@@ -615,6 +618,17 @@ async def initialize(self):
     logger.info(f"[{self.session_id}] Workflow graph built")
     await _rebuild_supplementary_queue(self)
 
+async def _wait_for_retry_pause_gate(self):
+    """Park retries unless the current Bioinformatics phase must drain first."""
+    bioinformatics_agent = getattr(self, "bioinformatics_agent", None)
+    if (
+        getattr(bioinformatics_agent, "_pause_turn_active", False)
+        or getattr(bioinformatics_agent, "_pause_gate_deferred", False)
+    ):
+        return
+    await self._pause_event.wait()
+
+
 def _install_retry_notifiers(self):
     """Set retry notification and pause-gate callbacks on all LLM clients.
 
@@ -651,7 +665,7 @@ def _install_retry_notifiers(self):
         # This is a lifecycle gate, not a notification.  Do not swallow
         # cancellation or other failures: a paused workflow must not begin
         # another request until signal_resume() releases this event.
-        await self._pause_event.wait()
+        await _wait_for_retry_pause_gate(self)
 
     # Set on the global client
     self.llm_manager.openrouter.on_retry = _on_retry

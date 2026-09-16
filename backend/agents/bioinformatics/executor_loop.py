@@ -5,6 +5,7 @@ continue to affect a resumed executor without creating an import cycle.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 
@@ -29,7 +30,12 @@ def _supervisor_feedback_key(feedback: str) -> str:
     ).hexdigest()
 
 
-async def start_turn(context) -> TurnStart:
+async def _wait_for_pause_gate(context) -> None:
+    # Workflow-owned post-execution work may invoke a nested autonomous run.
+    # Its tail lock is the pause boundary, so the nested run must finish rather
+    # than park while pause() is waiting for that same tail lock.
+    if getattr(context.agent, "_pause_gate_deferred", False):
+        return
     if context.agent._pause_event is not None and not context.agent._pause_event.is_set():
         logger.info(
             f"[Bioinformatics] Pause requested at step {context.step_count}, "
@@ -45,6 +51,10 @@ async def start_turn(context) -> TurnStart:
             await context.agent._notify("status", "Analysis resumed")
         except Exception:
             pass
+
+
+async def start_turn(context) -> TurnStart:
+    await _wait_for_pause_gate(context)
     context.step_count += 1
     context.force_break = False  # Reset per-iteration
     # Two independent reasons to checkpoint here. The periodic one is the
@@ -1291,20 +1301,38 @@ async def prepare_loop_context(
 
 
 async def run_turn_loop(context) -> Dict[str, Any]:
+    turn_lock = getattr(context.agent, "_pause_turn_lock", None)
+    if turn_lock is None:
+        turn_lock = asyncio.Lock()
+        context.agent._pause_turn_lock = turn_lock
     while (
         context.step_count < context.max_steps
         and not context.completed
     ):
-        turn_start = await start_turn(context)
-        if turn_start.exit is LoopExit.TERMINAL:
-            break
-        if turn_start.response is None:
-            continue
-        response = turn_start.response
-        agent_reasoning = response.content[:2000] if response.content else None
+        # Wait outside the turn lock so pause() can acquire it and persist the
+        # quiescent runtime. Recheck after acquisition to close the race where
+        # pause is requested between this wait and the lock hand-off.
+        await _wait_for_pause_gate(context)
+        async with turn_lock:
+            pause_event = context.agent._pause_event
+            if pause_event is not None and not pause_event.is_set():
+                continue
+            context.agent._pause_turn_active = True
+            try:
+                turn_start = await start_turn(context)
+                if turn_start.exit is LoopExit.TERMINAL:
+                    return await finalize_run(context)
+                if turn_start.response is None:
+                    continue
+                response = turn_start.response
+                agent_reasoning = response.content[:2000] if response.content else None
 
-        effects = await process_response(context, response, agent_reasoning)
-        loop_exit = await finish_turn(context, effects)
-        if loop_exit is not LoopExit.CONTINUE:
-            break
+                effects = await process_response(context, response, agent_reasoning)
+                loop_exit = await finish_turn(context, effects)
+                if loop_exit is not LoopExit.CONTINUE:
+                    return await finalize_run(context)
+                if context.completed or context.step_count >= context.max_steps:
+                    return await finalize_run(context)
+            finally:
+                context.agent._pause_turn_active = False
     return await finalize_run(context)

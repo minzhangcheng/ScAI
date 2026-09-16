@@ -1,6 +1,8 @@
 """SingleCellAnalysisWorkflow execution method owners."""
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
+
 
 def bind_facade(facade) -> None:
     globals().update(
@@ -663,56 +665,72 @@ async def pause(
             "still_blocked": False,
         }
 
-    # The first graph checkpoint may not exist yet.  The lifecycle state is
-    # nevertheless authoritative and must record the pause before success
-    # is exposed; otherwise the cleared cooperative gate leaves a durable
-    # RUNNING session that can never advance.
-    self._set_status(analysis_state, TaskStatus.PAUSED)
+    # The tail lock covers workflow-owned review/follow-up work after the
+    # autonomous loop; the turn lock covers one autonomous LLM/tool turn.
+    # Acquire in that order so a nested figure-followup run can drain while its
+    # enclosing tail phase owns the first lock. Retry gates also drain while
+    # either phase is active, so neither phase can wait on the pause event while
+    # pause() is waiting for its lock.
+    tail_lock = getattr(self, "_pause_bioinformatics_tail_lock", None)
+    turn_lock = getattr(
+        getattr(self, "bioinformatics_agent", None), "_pause_turn_lock", None,
+    )
+    async with AsyncExitStack() as pause_boundary:
+        if tail_lock is not None:
+            await pause_boundary.enter_async_context(tail_lock)
+        if turn_lock is not None:
+            await pause_boundary.enter_async_context(turn_lock)
 
-    # Save sandbox state including Python session using dill. The Jupyter
-    # kernel is single-threaded, so this queues behind any in-flight
-    # execute() and captures a clean post-step snapshot.
-    if self.sandbox:
-        try:
-            saved = await self.sandbox.save_session()
-            persistence = self.sandbox.sync_runtime_persistence_state(
-                analysis_state
-            )
-            if not saved or persistence.get("status") == "failed":
-                raise RuntimeError(
-                    "runtime persistence did not commit a current generation"
-                )
-        except Exception:
-            logger.warning(
-                "[%s] Pause could not persist the runtime; keeping the "
-                "previous committed generation",
-                self.session_id,
-                exc_info=True,
-            )
-            # The pause could not persist the runtime. The previous committed
-            # generation stands, coherence reports the state as stale, and the
-            # UI carries a persistent non-blocking warning (spec 5.1). Arming a
-            # dialog and holding the pause is the gate this replaced.
+        # The first graph checkpoint may not exist yet.  The lifecycle state is
+        # nevertheless authoritative and must record the pause before success
+        # is exposed; otherwise the cleared cooperative gate leaves a durable
+        # RUNNING session that can never advance.
+        self._set_status(analysis_state, TaskStatus.PAUSED)
+
+        # Save sandbox state including Python session using dill. The Jupyter
+        # kernel is single-threaded, so this queues behind any in-flight
+        # execute() and captures a clean post-step snapshot.
+        if self.sandbox:
             try:
-                self.sandbox.sync_runtime_persistence_state(analysis_state)
+                saved = await self.sandbox.save_session()
+                persistence = self.sandbox.sync_runtime_persistence_state(
+                    analysis_state
+                )
+                if not saved or persistence.get("status") == "failed":
+                    raise RuntimeError(
+                        "runtime persistence did not commit a current generation"
+                    )
             except Exception:
                 logger.warning(
-                    "[%s] Could not synchronise runtime persistence after a "
-                    "failed pause save",
+                    "[%s] Pause could not persist the runtime; keeping the "
+                    "previous committed generation",
                     self.session_id,
                     exc_info=True,
                 )
-        # Independent of the dump (spec 5.1): a failed runtime save must not
-        # take the notebook with it.
-        try:
-            self.sandbox.notebook_state.save()
-        except Exception:
-            logger.warning(
-                "[%s] Notebook save failed while pausing",
-                self.session_id,
-                exc_info=True,
-            )
-        logger.info(f"[{self.session_id}] Sandbox pause persistence attempted")
+                # The pause could not persist the runtime. The previous committed
+                # generation stands, coherence reports the state as stale, and the
+                # UI carries a persistent non-blocking warning (spec 5.1). Arming a
+                # dialog and holding the pause is the gate this replaced.
+                try:
+                    self.sandbox.sync_runtime_persistence_state(analysis_state)
+                except Exception:
+                    logger.warning(
+                        "[%s] Could not synchronise runtime persistence after a "
+                        "failed pause save",
+                        self.session_id,
+                        exc_info=True,
+                    )
+            # Independent of the dump (spec 5.1): a failed runtime save must not
+            # take the notebook with it.
+            try:
+                self.sandbox.notebook_state.save()
+            except Exception:
+                logger.warning(
+                    "[%s] Notebook save failed while pausing",
+                    self.session_id,
+                    exc_info=True,
+                )
+            logger.info(f"[{self.session_id}] Sandbox pause persistence attempted")
 
     logger.info(f"[{self.session_id}] Workflow paused successfully")
     return {

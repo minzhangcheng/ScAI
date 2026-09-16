@@ -878,5 +878,18 @@ async def run_bioinformatics_analysis(self, state):
         self, state, started["_continue"]
     )
     result = await execute_bioinformatics_analysis(self, ctx)
-    await collect_bioinformatics_results(self, ctx, result)
-    return await finalize_bioinformatics_analysis(self, ctx, result)
+    tail_lock = getattr(self, "_pause_bioinformatics_tail_lock", None)
+    if tail_lock is None:
+        await collect_bioinformatics_results(self, ctx, result)
+        return await finalize_bioinformatics_analysis(self, ctx, result)
+
+    async with tail_lock:
+        # pause() may have won the tail-lock race after the autonomous loop.
+        # In that case remain parked until Resume rather than starting review.
+        await self._pause_event.wait()
+        self.bioinformatics_agent._pause_gate_deferred = True
+        try:
+            await collect_bioinformatics_results(self, ctx, result)
+            return await finalize_bioinformatics_analysis(self, ctx, result)
+        finally:
+            self.bioinformatics_agent._pause_gate_deferred = False

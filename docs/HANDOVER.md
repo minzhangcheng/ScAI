@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.57.11 · **Last updated**: 2026-09-16
+**Version**: 0.57.12 · **Last updated**: 2026-09-16
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,15 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.57.x — (2026-09-14 onward)**
+
+- `0.57.12` — Makes Pause wait for the active Bioinformatics turn and its
+  workflow-owned review/follow-up work before saving the kernel runtime. Retry
+  gates drain the active phase without blocking Pause, and Agent status chips
+  show a static pause icon while the session is paused. The focused
+  pause/runtime/version set passed `64/64` via `scripts/scai-test fast` at
+  `test-results/20260916T081722Z-1200860/evidence.json`; all frontend tests
+  passed `357/357` across 151 suites, and the production build passed. No image
+  build or deployment was performed.
 
 - `0.57.11` — Optimizes PI and Bioinformatics standalone LLM calls by caching
   only stable system prefixes on compatible Anthropic routes. Bioinformatics
