@@ -50,6 +50,19 @@ def render_pi_modifications(pi_modifications: Any, *, max_chars: int = 8_000) ->
     return truncate_for_llm("\n".join(lines), max_chars=max_chars)
 
 
+def normalize_plan_step_aliases(value: dict) -> dict:
+    """Accept known structural aliases without overriding explicit fields."""
+    step = dict(value)
+    for alias, canonical in (
+        ("step_id", "id"),
+        ("output", "expected_output"),
+        ("required_figures", "figure_requirements"),
+    ):
+        if canonical not in step and alias in step:
+            step[canonical] = step[alias]
+    return step
+
+
 def _normalize_plan_boundary(value: Any) -> dict:
     """Normalize model-shaped planner fields before schema validation."""
     if not isinstance(value, dict):
@@ -81,7 +94,7 @@ def _normalize_plan_boundary(value: Any) -> dict:
         if not isinstance(raw_step, dict):
             normalized_steps.append(raw_step)
             continue
-        step = dict(raw_step)
+        step = normalize_plan_step_aliases(raw_step)
         for field in (
             "title",
             "method",

@@ -27,6 +27,37 @@ def _make_state() -> AnalysisState:
     return AnalysisState(user_id="test-user")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("canonical_present", [False, True])
+async def test_revision_preserves_figure_aliases_without_overriding_explicit_fields(canonical_present):
+    agent = _make_agent()
+    seed = AnalysisPlan(
+        phase="exploration", stage="full",
+        steps=[PlanStep(id=7, title="Score", method="Score the selected measurements")],
+    )
+    step = {
+        "step_id": 7, "title": "Score", "method": "Score the selected measurements",
+        "input": "Selected measurements", "output": "Score distribution",
+        "rationale": "Describe the selected measurements", "depends_on": [],
+        "required_figures": [{"figure_type": "violin", "description": "Score distribution"}],
+    }
+    if canonical_present:
+        step.update(id=7, expected_output="Explicit output", figure_requirements=[],
+                    allow_text_only=True, text_only_reason="Explicit PI choice")
+    agent.chat_without_history = AsyncMock(return_value=json.dumps({"steps": [step]}))
+
+    plan = await agent.revise_plan_incrementally(_make_state(), seed, "Clarify the output")
+
+    assert agent.chat_without_history.await_count == 1
+    assert plan.steps[0].id == 7
+    if canonical_present:
+        assert plan.steps[0].expected_output == "Explicit output"
+        assert plan.steps[0].figure_requirements == []
+    else:
+        assert plan.steps[0].expected_output == "Score distribution"
+        assert plan.steps[0].figure_requirements[0].figure_type == "violin"
+
+
 def _client_backed_agent(chat_side_effect):
     """An agent whose replay budget is the real one.
 

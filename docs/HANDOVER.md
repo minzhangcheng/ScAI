@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.58.3 · **Last updated**: 2026-09-17
+**Version**: 0.58.4 · **Last updated**: 2026-09-18
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,17 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.58.x — (2026-09-16 onward)**
+
+- `0.58.4` — Repairs bounded plan generation after model schema drift and
+  malformed Innovation foundation references. Planner boundaries now accept the
+  observed `step_id`, `output`, and `required_figures` aliases while preserving
+  explicit canonical fields. Foundation-reference validation identifies the
+  affected step and reference index and reports the received and expected full
+  inventory IDs, and final-plan failures retain that underlying validation
+  detail. The focused plan-generation and version-consistency regressions passed
+  `58/58` via `scripts/scai-test fast` at
+  `test-results/20260917T225228Z-1336372/evidence.json`; no image build,
+  deployment, or historical-session mutation was performed.
 
 - `0.58.3` — Removes active cohort/generation equality from current-plan
   execution evidence, figure adoption, and Innovation baseline lookup, so

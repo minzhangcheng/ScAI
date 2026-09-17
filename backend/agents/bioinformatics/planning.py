@@ -182,14 +182,14 @@ from .shared import (  # noqa: F401
 
 
 class PlanGenerationFailure(RuntimeError):
-    """Bounded, typed signal that a planner produced no executable plan."""
+    """Bounded, typed signal that a planner failed plan validation."""
 
     def __init__(self, detail: str, *, phase: str = "", stage: str = "full"):
         self.detail = str(detail or "missing or invalid steps")
         self.phase = str(phase)
         self.stage = str(stage)
         super().__init__(
-            "Bioinformatics plan generation produced no executable steps after "
+            "Plan generation failed validation after "
             f"the bounded JSON repair attempt (phase={self.phase}, "
             f"stage={self.stage}): {self.detail}"
         )

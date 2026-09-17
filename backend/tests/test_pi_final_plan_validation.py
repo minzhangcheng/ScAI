@@ -296,3 +296,53 @@ async def test_invalid_innovation_finalization_does_not_fall_back_to_seed_plan()
 
     assert type(exc_info.value).__name__ == "PlanGenerationFailure"
     assert agent.chat.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+async def test_truncated_foundation_id_repair_preserves_identity_and_reports_cause(repair_succeeds):
+    agent = _make_pi_agent()
+    state = _innovation_state()
+    valid = _innovation_plan_payload(with_scope=True)
+    invalid = valid.replace("foundation-v1-r1", "foundation-v1-r")
+    agent.chat = AsyncMock(side_effect=[invalid, valid if repair_succeeds else invalid])
+
+    if repair_succeeds:
+        plan = await agent.generate_final_plan_from_dialogue(state, [])
+        assert plan.steps[0].analysis_scope.foundation_refs[0].inventory_id == "foundation-v1-r1"
+    else:
+        from backend.agents.bioinformatics.planning import PlanGenerationFailure
+
+        with pytest.raises(PlanGenerationFailure) as exc_info:
+            await agent.generate_final_plan_from_dialogue(state, [])
+        message = str(exc_info.value)
+        assert "unknown inventory_id" in message
+        assert "no executable steps" not in message
+        assert "expected 'foundation-v1-r1'" in message
+
+    assert agent.chat.await_count == 2
+    repair = agent.chat.call_args_list[1].args[0]
+    assert "Innovation step 1 analysis_scope.foundation_refs[0]" in repair
+    assert "received 'foundation-v1-r'" in repair
+    assert "expected 'foundation-v1-r1'" in repair
+
+
+@pytest.mark.asyncio
+async def test_final_plan_preserves_aliased_output_figures_and_step_dependencies():
+    agent = _make_pi_agent()
+    payload = json.loads(_plan_payload())
+    step = payload["steps"][0]
+    step["step_id"] = 7
+    del step["id"]
+    step["output"] = step.pop("expected_output")
+    step["required_figures"] = step.pop("figure_requirements")
+    payload["steps"].append({**step, "step_id": 9, "depends_on": [7]})
+    agent.chat = AsyncMock(return_value=json.dumps(payload))
+
+    plan = await agent.generate_final_plan_from_dialogue(AnalysisState(user_id="test"), [])
+
+    assert agent.chat.await_count == 1
+    assert [s.id for s in plan.steps] == [7, 9]
+    assert plan.steps[1].depends_on == [7]
+    assert plan.steps[0].expected_output == "Stable cluster labels"
+    assert plan.steps[0].figure_requirements[0].description == "Primary cluster overview"

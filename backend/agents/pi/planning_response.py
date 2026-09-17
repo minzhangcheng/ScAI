@@ -99,6 +99,8 @@ def select_valid_plan_seed(
 
 def _normalize_final_payload(value: Any) -> Dict[str, Any]:
     """Normalize scalar/mapping/list/null fields without making decisions."""
+    from ..bioinformatics.planning_support import normalize_plan_step_aliases
+
     data = dict(value) if isinstance(value, dict) else {}
     data["overview"] = coerce_json_text(data.get("overview"))
     data["expected_runtime"] = coerce_json_text(data.get("expected_runtime"))
@@ -116,7 +118,7 @@ def _normalize_final_payload(value: Any) -> Dict[str, Any]:
         if not isinstance(raw_step, dict):
             normalized_steps.append(raw_step)
             continue
-        step = dict(raw_step)
+        step = normalize_plan_step_aliases(raw_step)
         for field in (
             "title",
             "method",

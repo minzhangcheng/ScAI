@@ -512,7 +512,11 @@ def _validate_reference(
 ) -> None:
     data = _normalize_reference(reference)
     if str(data.get("inventory_id") or "") != inventory.inventory_id:
-        raise PlanScopeValidationError("foundation reference names an unknown inventory_id")
+        raise PlanScopeValidationError(
+            "foundation reference names an unknown inventory_id: "
+            f"received {data.get('inventory_id')!r}; "
+            f"expected {inventory.inventory_id!r}. Copy the complete ID exactly."
+        )
     if int(data.get("round_number", 0) or 0) != inventory.round_number:
         raise PlanScopeValidationError("foundation reference round_number does not match inventory")
     if str(data.get("plan_id") or "") != inventory.plan_id:
@@ -601,7 +605,7 @@ def validate_innovation_plan_scope(
         if len(refs) > _MAX_FOUNDATION_REFERENCES:
             raise PlanScopeValidationError("analysis_scope has too many foundation references")
         ref_keys = []
-        for reference in refs:
+        for reference_index, reference in enumerate(refs):
             data = _normalize_reference(reference)
             key = (
                 str(data.get("inventory_id") or ""),
@@ -611,7 +615,13 @@ def validate_innovation_plan_scope(
                 str(data.get("checkpoint_id") or ""),
             )
             ref_keys.append(key)
-            _validate_reference(reference, inventory)
+            try:
+                _validate_reference(reference, inventory)
+            except PlanScopeValidationError as exc:
+                raise PlanScopeValidationError(
+                    f"Innovation step {getattr(step, 'id', '?')} "
+                    f"analysis_scope.foundation_refs[{reference_index}]: {exc}"
+                ) from exc
         if len(ref_keys) != len(set(ref_keys)):
             raise PlanScopeValidationError("analysis_scope has duplicate foundation references")
         relationship = str(getattr(scope, "relationship", "") or "")

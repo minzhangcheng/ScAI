@@ -396,7 +396,8 @@ Remember: ``platform_baseline`` must be exactly ``\"\"``, ``\"annotation\"``,
         from ..bioinformatics.planning import PlanGenerationFailure
 
         raise PlanGenerationFailure(
-            "PI failed to generate a schema-valid final plan after one repair attempt",
+            "PI failed to generate a schema-valid final plan after one repair attempt: "
+            f"{last_validation_error}",
             phase=phase,
             stage=stage,
         ) from last_validation_error
