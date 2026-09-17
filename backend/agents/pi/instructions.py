@@ -439,7 +439,9 @@ IMPORTANT:
   2. Rationale: WHY this is biologically relevant to the chosen direction (state the underlying hypothesis).
   3. Expected Outcome: what specific patterns or values would confirm OR reject the hypothesis.
 - Include both hypothesis-confirming AND exploratory analyses.
-- Do NOT repeat analyses already completed in Round 1 (basic pipeline, annotation, etc.).
+- Reuse completed Round 1 analyses by default. You may explicitly approve revisions
+  when scientifically justified. A data change alone does not require repeating QC,
+  clustering, annotation, or the full pipeline; assess the affected dependencies.
 - The Jupyter kernel retains all Round 1 variables — build upon existing results.
 - **Literature Verification Loop**: in `literature_topics`, explicitly ask the Literature Agent to search PubMed for recent evidence that SUPPORTS or REFUTES each bioinformatics task's hypothesis, and to flag any contradictory evidence prominently in its summary.
 - {self._LITERATURE_TOPIC_FORMAT_RULE}

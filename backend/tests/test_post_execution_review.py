@@ -224,7 +224,6 @@ def test_host_execution_linkage_is_observation_not_plan_completion():
         {"execution_purpose": "supplementary", "plan_binding_status": "supplementary"},
         {"execution_status": "failed", "error": "boom"},
         {"code": ""},
-        {"cohort_digest": "b" * 64},
     ],
 )
 def test_ineligible_v2_receipt_never_falls_back_to_keyword_inference(overrides):
@@ -251,7 +250,7 @@ def test_ineligible_v2_receipt_never_falls_back_to_keyword_inference(overrides):
     assert audit.steps[0].verifiable is False
 
 
-def test_semantic_reconciliation_cannot_cross_cohort_generations():
+def test_semantic_reconciliation_preserves_links_across_cohort_generations():
     plan = AnalysisPlan(
         id="generation-plan",
         phase="innovation",
@@ -273,8 +272,8 @@ def test_semantic_reconciliation_cannot_cross_cohort_generations():
         semantic_reconciliation=reconciliation,
     )
 
-    assert audit.steps[0].status == "pending"
-    assert audit.steps[0].verifiable is False
+    assert audit.steps[0].status == "completed"
+    assert audit.evidence_mode == "supervisor_semantic"
 
 
 @pytest.mark.asyncio
@@ -1336,3 +1335,33 @@ def test_empty_review_meta_shape():
     assert meta["review_reason"] == "nothing to do"
     assert meta["review_plan"] == {} and meta["review_result"] == {}
     assert meta["plan_audit"] == {} and meta["supplementary_findings"] == []
+
+
+def test_plan_audit_retains_successful_steps_before_data_changes():
+    plan = AnalysisPlan(
+        id="evolving-plan", phase="innovation",
+        steps=[PlanStep(id=1, title="Markers", method="sc.tl.rank_genes_groups"),
+               PlanStep(id=2, title="Filter", method="Filter the approved subset")],
+    )
+    receipts = [
+        _receipt(plan, analysis_generation=1, cohort_generation=1),
+        _receipt(plan, id="receipt-2", plan_step_ids=[2],
+                 analysis_generation=2, cohort_generation=2, cohort_digest="b" * 64),
+    ]
+    audit = audit_plan_execution(
+        plan, receipts, round_number=2,
+        target_cohort_generation=2, target_cohort_digest="b" * 64,
+    )
+    assert [s.technical_linkage for s in audit.steps] == ["execution_linked"] * 2
+    assert audit.summary()["unmet_families"] == []
+
+
+def test_plan_audit_keeps_source_preparation_boundary():
+    plan = AnalysisPlan(
+        id="prepared-plan", phase="innovation", adata_source_preparation_id="prep-new",
+        steps=[PlanStep(id=1, title="Markers", method="sc.tl.rank_genes_groups")],
+    )
+    audit = audit_plan_execution(
+        plan, [_receipt(plan, adata_source_preparation_id="prep-old")], round_number=2,
+    )
+    assert audit.steps[0].technical_linkage == "not_linked"

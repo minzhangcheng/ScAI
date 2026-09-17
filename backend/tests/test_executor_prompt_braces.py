@@ -26,3 +26,12 @@ def test_harmony_block_checks_both_orientations_and_never_blames_filtering():
     assert "adata.obsm['X_pca_harmony'] = Z" in text
     assert "ho.Z_corr.T" not in text
     assert "filter cells between" not in text
+
+
+def test_data_changes_are_pi_observations_not_blanket_rerun_instructions():
+    text = _prompt()
+    assert "The PI decides whether any analysis or figure needs revision" in text
+    assert "Approved mutation and rebinding are allowed" in text
+    assert "regenerate every downstream" not in text
+    assert "runtime invalidates earlier" not in text
+    assert "before annotations are confirmed through annotate_clusters" in text

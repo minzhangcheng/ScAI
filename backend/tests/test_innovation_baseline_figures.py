@@ -459,9 +459,6 @@ def test_service_probe_allowlist_comes_from_current_receipt_outputs():
     _receipt(round_number=2),
     _receipt(plan_id="plan-old"),
     _receipt(lineage_id="branch-old"),
-    _receipt(analysis_generation=3),
-    _receipt(cohort_generation=1),
-    _receipt(cohort_digest="e" * 64),
     _receipt(execution_status="failed"),
     _receipt(error="execution failed"),
     _receipt(evidence_schema_version=1),
@@ -721,3 +718,29 @@ def test_the_object_carrying_the_rounds_score_wins_over_the_bigger_one():
     assert parsed is not None
     assert parsed["var"] == "adata_subset"
     assert "copper_signature_score" in parsed["score_keys"]
+
+
+@pytest.mark.parametrize("receipt", [
+    _receipt(analysis_generation=3),
+    _receipt(cohort_generation=1),
+    _receipt(cohort_digest="e" * 64),
+])
+def test_baseline_probes_retained_outputs_after_data_changes(receipt):
+    import asyncio
+
+    agent = _Agent(_Sandbox(_Result(output=_probe_line())))
+    assert asyncio.run(ensure_innovation_baseline_figures(
+        agent, _State(code_history=[receipt]),
+    ))
+    assert "'adata'" in agent.sandbox.codes[0]
+    assert agent.figure_calls
+
+
+def test_baseline_rejects_a_different_source_preparation():
+    import asyncio
+
+    state = _State(code_history=[_receipt(adata_source_preparation_id="prep-old")])
+    state.current_plan.adata_source_preparation_id = "prep-new"
+    agent = _Agent(_Sandbox(_Result(output=_probe_line())))
+    assert asyncio.run(ensure_innovation_baseline_figures(agent, state)) == {}
+    assert agent.sandbox.codes == []

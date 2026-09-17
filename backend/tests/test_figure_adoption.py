@@ -460,10 +460,15 @@ def test_verified_candidates_precede_unverified_workspace_context(
     assert all(item.source_execution_id is None for item in candidates[1:])
 
 
-def test_adopted_identity_is_copied_from_the_current_receipt(
+def test_adopted_identity_uses_source_receipt_after_data_changes(
     workspace, tmp_path
 ):
     state = _state(tmp_path)
+    # A later approved mutation must not erase this file's earlier writer.
+    state.sandbox_state["analysis_generation"] = 5
+    state.sandbox_state["cohort_identity_v1"] = {
+        "cohort_generation": 3, "cohort_digest": "e" * 64,
+    }
     state.analysis_log = [AnalysisStep(
         step_number=7,
         step_type="execute_code",
@@ -619,3 +624,13 @@ def test_adoption_failure_cannot_break_the_node():
     body = inspect.getsource(AgentNodesMixin._adopt_workspace_figures)
     assert "except Exception" in body
     assert body.count("try:") >= 1
+
+
+def test_adoption_rejects_a_different_source_preparation(workspace, tmp_path):
+    state = _state(tmp_path)
+    state.current_plan.adata_source_preparation_id = "prep-new"
+    state.code_history[0].adata_source_preparation_id = "prep-old"
+    candidate = _cand(workspace, "volcano_primary")
+    assert adopt_bindings(
+        state, [FigureBinding(3, "volcano", candidate.name, "c")], [candidate],
+    ) == []

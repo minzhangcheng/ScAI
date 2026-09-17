@@ -299,8 +299,8 @@ class IntrospectionMixin:
 
         Existing callers that do not name a preferred variable retain the legacy
         first-available behavior. Supplementary execution supplies the durable
-        foundation name (or the legacy ``adata`` convention) and can require an
-        exact match when the session has a sealed canonical object.
+        resolved source name (or the legacy ``adata`` convention) and can require
+        an exact match for an explicitly selected working binding.
         """
         if not self.sandbox:
             return {}

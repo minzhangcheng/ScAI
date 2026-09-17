@@ -663,28 +663,16 @@ def _active_receipt_identity(state: Any) -> Optional[Dict[str, Any]]:
     plan_id = str(
         getattr(getattr(state, "current_plan", None), "id", "") or ""
     ).strip()
-    sandbox_state = getattr(state, "sandbox_state", None)
-    cohort = (
-        sandbox_state.get("cohort_identity_v1")
-        if isinstance(sandbox_state, Mapping)
-        else None
-    )
-    if not plan_id or not isinstance(sandbox_state, Mapping):
-        return None
-    if not isinstance(cohort, Mapping):
-        return None
-    if "cohort_generation" not in cohort or "cohort_digest" not in cohort:
+    if not plan_id:
         return None
     try:
         return {
             "round_number": int(getattr(state, "current_round", 0) or 0),
             "plan_id": plan_id,
             "lineage_id": getattr(state, "restore_branch_id", None) or "main",
-            "analysis_generation": int(
-                sandbox_state.get("analysis_generation", 0) or 0
+            "adata_source_preparation_id": getattr(
+                state.current_plan, "adata_source_preparation_id", None
             ),
-            "cohort_generation": int(cohort.get("cohort_generation", 0) or 0),
-            "cohort_digest": str(cohort.get("cohort_digest") or ""),
         }
     except (TypeError, ValueError):
         return None
@@ -706,12 +694,11 @@ def _receipt_matches_current(receipt: Any, active: Mapping[str, Any]) -> bool:
             == active["plan_id"]
             and (_entry_value(receipt, "lineage_id", None) or "main")
             == active["lineage_id"]
-            and int(_entry_value(receipt, "analysis_generation", 0) or 0)
-            == active["analysis_generation"]
-            and int(_entry_value(receipt, "cohort_generation", 0) or 0)
-            == active["cohort_generation"]
-            and str(_entry_value(receipt, "cohort_digest", "") or "")
-            == active["cohort_digest"]
+            and (
+                not active["adata_source_preparation_id"]
+                or _entry_value(receipt, "adata_source_preparation_id")
+                == active["adata_source_preparation_id"]
+            )
         )
     except (TypeError, ValueError):
         return False

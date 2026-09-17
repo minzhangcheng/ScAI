@@ -535,7 +535,7 @@ async def persist_round_result(self, ctx):
     elif _inventory_error:
         round_result.evidence_notes = list(round_result.evidence_notes or []) + [
             "The Round 1 full-plan checkpoint was captured, but accepted foundation "
-            "identity could not be sealed; a later Innovation plan requires "
+            "inventory could not be recorded; a later Innovation plan requires "
             "reconstruction from retained approved-plan and execution records. "
             + _inventory_error[0]
         ]

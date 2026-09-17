@@ -242,7 +242,7 @@ PI's analysis goals for this round:
 {code_history_context}
 
 This is Round {analysis_state.current_round}. The Jupyter kernel retains all variables from previous rounds.
-Focus on PI's specific goals above — do NOT re-run completed steps (QC, clustering, cell annotation, etc.).
+Follow PI's specific goals above. Reuse completed QC, clustering, and annotation unless the approved plan explicitly requests revision. Data changes alone do not require repetition.
 Call report_findings ONLY after completing ALL assigned tasks above."""
 
     # On resume the agent restores its own conversation from the checkpoint,
@@ -838,7 +838,7 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
         elif inventory_error:
             notice = (
                 "The Stage 1 AnnData checkpoint was captured, but accepted foundation "
-                "identity could not be sealed. A later Innovation plan will require "
+                "inventory could not be recorded. A later Innovation plan will require "
                 "reconstruction from retained approved-plan and execution records. "
                 + inventory_error[0]
             )

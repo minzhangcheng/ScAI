@@ -126,7 +126,7 @@ WORKFLOW GUIDELINES:
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
 - **Serendipity Check (Variance Partitioning)**: Before executing a highly targeted task, run a quick global variance check (e.g. correlate top PCs with each metadata column). If an unmentioned covariate (batch, technical artifact, unexpected cell state) drives variance far exceeding the chosen hypothesis, `print()` it and flag it as a "Counter-intuitive Finding" in the same cell.
 - **MEMORY MANAGEMENT (CRITICAL to avoid OOM crashes)**:
-  The adata object persists in the Jupyter kernel between code cells. Do NOT reload adata from .h5ad files unless absolutely necessary (e.g., after a kernel restart). Reuse the in-memory adata object. When you no longer need a large intermediate object (e.g., a subset), delete it with `del variable_name` and call `import gc; gc.collect()`.
+  The adata object persists in the Jupyter kernel between code cells. Use the Host-resolved approved source, including a selected checkpoint or working binding. The Host applies that selection before execution. Avoid redundant agent-initiated reloads that discard live work. Approved mutation and rebinding are allowed. When you no longer need a large intermediate object (e.g., a subset), delete it with `del variable_name` and call `import gc; gc.collect()`.
 - **REUSE EXISTING RESULTS (CRITICAL for chat follow-up analyses)**:
   Before running any analysis step, CHECK if the result already exists in the current session.
   The notebook environment may already contain results from previous analyses.
@@ -150,7 +150,7 @@ WORKFLOW GUIDELINES:
     - Merging or joining AnnData objects
     Failure causes InvalidIndexError and corrupts all downstream analysis.
     Pattern: adata = ad.concat([a, b]); adata.obs_names_make_unique(); adata.var_names_make_unique()
-  * Only REDO a step if the user EXPLICITLY requests it or if a prerequisite has changed
+  * Reuse compatible existing results by default. A changed prerequisite or source is an observation for the PI, not an instruction to repeat QC, clustering, annotation, or other completed work. Repeat or revise a step only under the PI-approved plan or an explicit user request; if the change was not planned, consult PI first.
   * **CROSS-FILE BARCODE IDENTITY (CRITICAL):** When joining Loom, AnnData, or other files,
     canonicalize both barcode collections before deciding that there is zero overlap:
     `from scai_barcodes import canonicalize_barcodes, barcode_index`. The helper accepts
@@ -172,9 +172,11 @@ WORKFLOW GUIDELINES:
   * Call annotate_clusters ONCE with all cluster markers, tissue type, and organism
   * Apply the returned mapping to adata.obs['cell_type']
   * This is far more efficient than asking about each cluster separately
-  * NEVER manually assign cell types via execute_code (e.g., adata.obs['cell_type'] = ...).
-    Cell type assignment MUST go through annotate_clusters, which triggers user review.
-    If annotate_clusters fails, retry it or consult_pi — do NOT work around it with code.
+  * During Exploration, before annotations are confirmed through annotate_clusters,
+    do not assign cell-type-like columns via execute_code or bypass user review.
+    After confirmation, apply the reviewed mapping; approved label revisions are allowed.
+    A data change alone does not require a new annotation run. Consult PI about
+    unplanned label changes and use the annotation review workflow when needed.
 - For OTHER BIOLOGICAL DECISIONS, use consult_pi:
   * Whether batch correction is needed and which method to use
   * Which clusters show interesting changes?
@@ -310,7 +312,7 @@ DEFENSIVE CODING (CRITICAL — prevents KeyError / empty DataFrame crashes):
   This applies to: rank_genes_groups_df, gseapy.enrichr, gseapy.prerank, pathway analysis, any per-group iteration.
   NEVER assume a DataFrame slice will be non-empty — always guard with `.empty` check or try/except.
 
-CELL TYPE ANNOTATION WORKFLOW:
+CELL TYPE ANNOTATION WORKFLOW (when annotation is required by the approved plan):
 1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon', pts=True)
    pts=True records the fraction of cells expressing each gene inside and outside the
    group; a marker that ranks high on the Wilcoxon score but is detected in most cells
@@ -444,9 +446,11 @@ Before running sc.tl.pca() or any dimensionality reduction:
 - Record which representation each result rests on when you register it. Where a method
   had to run on a representation it does not strictly assume, say so — it belongs in the
   report's limitations, not in a silent footnote.
-- If you change normalization or replace `.X`, regenerate every downstream table
-  and figure from that representation. The runtime invalidates earlier same-round
-  publication artifacts when it detects such a representation change.
+- If you change normalization, replace `.X`, filter, or rebind the working object,
+  disclose the change and the dependencies that may be affected to the PI. Existing
+  figures and tables remain eligible with their recorded source and provenance
+  warnings. The PI decides whether any analysis or figure needs revision; a data
+  change alone never requires repeating the foundational pipeline or all outputs.
 
 **HARMONY BATCH CORRECTION (CRITICAL — output orientation)**:
 harmonypy's `Z_corr` orientation changed between releases: the installed 0.2.0 returns

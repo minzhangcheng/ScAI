@@ -205,19 +205,13 @@ def audit_plan_execution(
         and (getattr(execution, "lineage_id", None) or "main")
         == target_lineage_id
     ]
+    # Legacy target_cohort arguments remain accepted for facade callers. They
+    # describe provenance, never eligibility after an approved data change.
+    preparation_id = getattr(plan, "adata_source_preparation_id", None)
     receipt_records = [
-        execution
-        for execution in plan_receipt_records
-        if (
-            target_cohort_digest is None
-            or str(getattr(execution, "cohort_digest", "") or "")
-            == str(target_cohort_digest)
-        )
-        and (
-            target_cohort_generation is None
-            or int(getattr(execution, "cohort_generation", 0) or 0)
-            == int(target_cohort_generation)
-        )
+        execution for execution in plan_receipt_records
+        if not preparation_id
+        or getattr(execution, "adata_source_preparation_id", None) == preparation_id
     ]
     eligible_receipt_records = [
         execution
@@ -232,16 +226,7 @@ def audit_plan_execution(
         == int(round_number)
         and str(semantic_reconciliation.get("lineage_id") or "main")
         == target_lineage_id
-        and (
-            target_cohort_digest is None
-            or str(semantic_reconciliation.get("cohort_digest") or "")
-            == str(target_cohort_digest)
-        )
-        and (
-            target_cohort_generation is None
-            or int(semantic_reconciliation.get("cohort_generation") or 0)
-            == int(target_cohort_generation)
-        )
+
     )
     semantic_links = {
         int(item.get("plan_step_id")): item

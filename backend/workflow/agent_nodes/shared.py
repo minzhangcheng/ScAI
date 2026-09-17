@@ -144,9 +144,11 @@ IMPORTANT: After completing steps 1-10, call report_findings with a summary of:
 
 These Stage 1 findings will be used by PI to plan Stage 2 downstream analysis.
 
-FOUNDATION HANDOFF: The final accepted annotated atlas must remain bound to the
-live canonical variable `adata`. Include `adata` in `persistent_outputs` for the
-last Stage 1 execution that establishes it. Do not hand Stage 2 a guessed filename.
+STAGE 1 HANDOFF: Operate on the Host-resolved approved source. When establishing
+the canonical Stage 1 atlas, bind the final accepted atlas to the live canonical variable `adata`.
+Include `adata` in `persistent_outputs` for that execution. The Host captures canonical
+`adata` at the boundary; a working copy stays separate unless promotion is approved.
+PI-approved mutation and rebinding are allowed. Do not hand Stage 2 a guessed filename.
 """
 
 
@@ -272,7 +274,9 @@ ANALYSIS REQUIREMENTS:
 
     instr += """
 You may skip irrelevant cell populations and focus on those relevant to the hypothesis.
-Do NOT re-run completed steps from Round 1 (QC, clustering, cell annotation, etc.).
+Reuse completed Round 1 work by default. Repeat QC, clustering, or annotation only
+when the PI-approved plan or an explicit user request calls for it. Data changes
+alone do not require repeating those steps.
 """
     return instr
 
@@ -295,12 +299,12 @@ accepted annotated atlas is available in the live kernel; use the
 Host-resolved source binding reported in the approved-plan context. The kernel retains the
 live `adata` and all unrelated variables from previous rounds.
 
-Do NOT re-run QC, clustering, or cell type annotation, and do NOT repeat
-normalization or embedding unless the approved plan explicitly asks for it. If
-the plan selected a working binding, operate on that resolved variable; mutating
-or rebinding live analysis state is allowed under the approved plan. Append
-downstream outputs under new, uniquely named keys and proceed to downstream
-analysis ONLY:"""
+Reuse QC, clustering, cell type annotation, normalization, and embedding by default;
+repeat or revise them only when the approved plan explicitly asks for it. A changed
+source alone is not a reason to repeat them; disclose compatibility questions to PI.
+If the plan selected a working binding, operate on that resolved variable. Mutating,
+replacing existing fields, or rebinding live analysis state is allowed under the
+approved plan. Use distinct keys for separate outputs and follow the approved scope:"""
     downstream_menu = """2. The downstream analyses the PI-approved plan calls for. Where the plan leaves the
    method open, these are available and appropriate to single-cell data — pick from
    them by what the question needs, not by working down the list:

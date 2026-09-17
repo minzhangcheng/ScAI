@@ -17,7 +17,7 @@ def test_stage2_is_downstream_only():
     txt = build_phase_instruction(planning_stage="stage2", analysis_phase="exploration",
                                   has_bulk=False, has_scrna=True, direction="")
     assert "STAGE 2" in txt
-    assert "Do NOT re-run QC, clustering, or cell type annotation" in txt
+    assert "repeat or revise them only when the approved plan explicitly asks for it" in txt
     assert "differential expression" in txt.lower()
     # The two concrete downstream recipes are offered as options, not defaults.
     assert "get_pseudobulk" in txt

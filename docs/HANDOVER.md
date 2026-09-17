@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.58.2 · **Last updated**: 2026-09-17
+**Version**: 0.58.3 · **Last updated**: 2026-09-17
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,18 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.58.x — (2026-09-16 onward)**
+
+- `0.58.3` — Removes active cohort/generation equality from current-plan
+  execution evidence, figure adoption, and Innovation baseline lookup, so
+  successful receipts and outputs remain citable after an approved `adata`
+  mutation, filtering operation, or rebind. Keeps plan, round, lineage, and
+  selected source-preparation boundaries intact. Aligns executor, Stage 1,
+  Stage 2, and PI instructions with the approved live-object mutation contract:
+  data changes are disclosed to the PI and do not automatically require
+  repeating QC, clustering, annotation, or every downstream figure. The focused
+  regression set passed `157/157` via `scripts/scai-test fast` at
+  `test-results/20260917T003311Z-3125475/evidence.json`; no image build,
+  deployment, or historical-session mutation was performed.
 
 - `0.58.2` — Fixes plan prompt rendering when `figure_requirements` contains
   Pydantic `FigureRequirement` models nested in a list. The JSON normalization

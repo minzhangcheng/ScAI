@@ -183,7 +183,7 @@ class LifecycleMixin:
                 instruction = (
                     f"[IMPORTANT — Previous round completed these analyses: {prev_context}. "
                     f"The Jupyter kernel retains all variables from previous rounds. "
-                    f"Do NOT repeat QC, clustering, or annotation. Build upon existing results.]\n\n"
+                    f"Reuse QC, clustering, and annotation by default; repeat or revise them only under the PI-approved plan or an explicit user request. Data changes alone do not require repetition.]\n\n"
                     + instruction
                 )
 

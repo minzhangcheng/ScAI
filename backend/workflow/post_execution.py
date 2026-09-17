@@ -504,20 +504,6 @@ class PostExecutionReviewMixin:
                 target_lineage_id=(
                     getattr(analysis_state, "restore_branch_id", None) or "main"
                 ),
-                target_cohort_digest=str(
-                    (
-                        (getattr(analysis_state, "sandbox_state", None) or {})
-                        .get("cohort_identity_v1", {})
-                        .get("cohort_digest", "")
-                    ) or ""
-                ) or None,
-                target_cohort_generation=int(
-                    (
-                        (getattr(analysis_state, "sandbox_state", None) or {})
-                        .get("cohort_identity_v1", {})
-                        .get("cohort_generation", 0)
-                    ) or 0
-                ) or None,
                 semantic_reconciliation=reconciliation,
                 analysis_state=analysis_state,
             )
