@@ -1,6 +1,7 @@
 """Detailed-report figure, persistence, and HTML presentation phases."""
 from __future__ import annotations
 
+from backend.utils.report_math import embed_report_math
 
 def bind_facade(facade) -> None:
     globals().update(
@@ -775,7 +776,7 @@ def persist_html_render(self, ctx):
 
     html_file = output_path / "report.html"
     with open(html_file, "w", encoding="utf-8") as f:
-        f.write(html_content)
+        f.write(embed_report_math(html_content))
 
     # Copy figures to output for download links
     figures_out = output_path / "figures"

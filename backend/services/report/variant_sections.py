@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from backend.models.schemas import AnalysisState
+from backend.utils.report_math import embed_report_math
 
 
 def generate_integration_report_html(
@@ -125,7 +126,7 @@ def generate_integration_report_html(
     html_path = reports_dir / "integration_report.html"
     tmp_path = html_path.with_suffix(".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
+        f.write(embed_report_math(html_content))
     bindings.os.replace(str(tmp_path), str(html_path))
 
     bindings.logger.info(f"Integration report HTML saved to: {html_path}")
@@ -214,7 +215,7 @@ def generate_annotation_context_report_html(
     reports_dir.mkdir(parents=True, exist_ok=True)
     html_path = reports_dir / "annotation_context_report.html"
     with open(html_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
+        f.write(embed_report_math(html_content))
 
     bindings.logger.info(f"Annotation context report HTML saved to: {html_path}")
     return str(html_path)
@@ -788,7 +789,7 @@ def generate_exploration_report_html(
     reports_dir.mkdir(parents=True, exist_ok=True)
     html_path = reports_dir / "exploration_report.html"
     with open(html_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
+        f.write(embed_report_math(html_content))
 
     bindings.logger.info(f"Exploration report HTML saved to: {html_path}")
     return str(html_path)

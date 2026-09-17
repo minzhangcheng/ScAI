@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from .report_css import REPORT_CSS
+from .report_math import embed_report_math, protect_report_math, restore_report_math
 
 
 def _build_figure_description_map(analysis_log) -> Dict[str, str]:
@@ -72,6 +73,7 @@ def markdown_to_html(text: str) -> str:
     if not text:
         return ""
 
+    text, math = protect_report_math(text)
     # Escape HTML entities first to prevent XSS
     text = html_module.escape(text)
 
@@ -127,7 +129,7 @@ def markdown_to_html(text: str) -> str:
     text = text.replace('\n\n', '</p><p>')
     text = text.replace('\n', '<br>')
 
-    return text
+    return restore_report_math(text, math)
 
 
 # HTML Template fragments for the report.
@@ -217,7 +219,7 @@ def render_report_html(context: dict) -> str:
     context.setdefault("report_status_line_html", "")
     head = _HEAD_PRE_CSS.format(**context)
     body = _HEAD_POST_CSS_BODY.format(**context)
-    return head + REPORT_CSS + body
+    return embed_report_math(head + REPORT_CSS + body)
 
 
 # Backwards-compat shim: old callers may still pass the full template to

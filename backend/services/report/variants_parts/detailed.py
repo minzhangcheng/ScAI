@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from backend.utils.report_html import markdown_to_html, _build_figure_description_map
+from backend.utils.report_math import embed_report_math
 from backend.utils.image_utils import compress_image_to_base64
 from backend.services.report.artifacts import (
     artifact_stems,
@@ -415,7 +416,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
     output_path = reports_dir / "detailed_report.html"
     tmp_path = output_path.with_suffix(".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(html)
+        f.write(embed_report_math(html))
     os.replace(str(tmp_path), str(output_path))
 
     state.detailed_report_html_path = str(output_path)

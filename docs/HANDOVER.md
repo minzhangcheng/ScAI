@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.58.4 · **Last updated**: 2026-09-18
+**Version**: 0.58.5 · **Last updated**: 2026-09-18
 
 ## 1. Runtime Architecture
 
@@ -350,6 +350,17 @@ six minutes per occurrence rather than blocking.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.58.x — (2026-09-16 onward)**
+
+- `0.58.5` — Adds LaTeX/TeX math rendering to the integrated report view and
+  generated, regenerated, literature, exploration, annotation, integration,
+  and detailed HTML reports. Markdown conversion protects inline and display
+  math from emphasis/table parsing; exported reports embed a pinned KaTeX
+  renderer that produces native MathML without network dependencies. Report
+  generation no longer doubles TeX grouping braces. Focused backend report
+  regressions passed `17/17` via `scripts/scai-test fast`; the isolated
+  frontend suite passed `361/361` with the TypeScript/Vite build, and
+  `git diff --check` passed. No image build, deployment, or historical-session
+  mutation was performed.
 
 - `0.58.4` — Repairs bounded plan generation after model schema drift and
   malformed Innovation foundation references. Planner boundaries now accept the

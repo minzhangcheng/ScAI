@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from backend.utils.report_html import markdown_to_html
+from backend.utils.report_math import embed_report_math
 
 LITERATURE_REPORT_FILENAME = "literature_report.html"
 LITERATURE_REPORT_LABEL = "Literature Research Report"
@@ -59,7 +60,7 @@ def build_literature_report_html(literature_reports: List[Union[Dict[str, Any], 
         )
 
     body = "\n".join(blocks)
-    return f"""<!DOCTYPE html>
+    return embed_report_math(f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -79,7 +80,7 @@ def build_literature_report_html(literature_reports: List[Union[Dict[str, Any], 
 <h1>Literature Research Report</h1>
 {body}
 </body>
-</html>"""
+</html>""")
 
 
 def write_literature_report(

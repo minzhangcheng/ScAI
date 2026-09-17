@@ -499,35 +499,27 @@ def _write_html_report(
             f'<span class="section-type specific">{"Appendix"}</span></li>'
         )
 
-    # Escape curly braces in content to prevent str.format() crash on LLM output
-    def _safe_format_value(v: str) -> str:
-        return v.replace("{", "{{").replace("}", "}}")
-
-    # Build full HTML — protect against unescaped braces in dynamic content
+    # Format values are not parsed again: preserve TeX braces in report content.
     try:
         html_content = bindings.render_report_html({
             "language": "en",
-            "title": _safe_format_value(report.get("title", "Analysis Report")),
+            "title": report.get("title", "Analysis Report"),
             "generated_at": ("Generated: ") + report.get("generated_at", ""),
-            "report_limitations_html": _safe_format_value(
-                bindings.render_technical_review_notice_html(report)
-                + bindings.render_report_limitations_html(report)
-            ),
-            "report_status_line_html": _safe_format_value(
-                bindings.render_report_status_line_html(report)
-            ),
+            "report_limitations_html": (bindings.render_technical_review_notice_html(report)
+                + bindings.render_report_limitations_html(report)),
+            "report_status_line_html": bindings.render_report_status_line_html(report),
             "toc_title": "Table of Contents",
-            "toc_items": _safe_format_value("\n".join(toc_items)),
-            "graphic_abstract_html": _safe_format_value(ga_html),
+            "toc_items": "\n".join(toc_items),
+            "graphic_abstract_html": ga_html,
             "abstract_title": "Abstract",
-            "abstract": _safe_format_value(abstract_html),
-            "cluster_annotations_html": _safe_format_value(ca_html),
-            "sections_html": _safe_format_value("\n".join(sections_html)),
+            "abstract": abstract_html,
+            "cluster_annotations_html": ca_html,
+            "sections_html": "\n".join(sections_html),
             "conclusions_title": "Conclusions",
-            "conclusions": _safe_format_value(conclusions_html),
-            "analysis_log_html": _safe_format_value(analysis_log_html),
-            "score_definitions_html": _safe_format_value(score_definitions_html),
-            "appendix_html": _safe_format_value(appendix_html),
+            "conclusions": conclusions_html,
+            "analysis_log_html": analysis_log_html,
+            "score_definitions_html": score_definitions_html,
+            "appendix_html": appendix_html,
         })
     except (KeyError, ValueError, IndexError) as e:
         bindings.logger.error(f"HTML template formatting failed: {e}, falling back to plain report")

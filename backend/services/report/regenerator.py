@@ -999,10 +999,6 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     abstract_html = markdown_to_html(report.get("abstract", ""))
     conclusions_html = markdown_to_html(report.get("conclusions", ""))
 
-    # Escape curly braces in content to prevent str.format() crash on LLM output
-    def _safe_format_value(v: str) -> str:
-        return v.replace("{", "{{").replace("}", "}}")
-
     # Analysis log is no longer shown in the main report
     analysis_log_html = ""
 
@@ -1030,27 +1026,23 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     # Build full HTML
     html_content = render_report_html({
         "language": language,
-        "title": _safe_format_value(report.get("title", "Analysis Report")),
+        "title": report.get("title", "Analysis Report"),
         "generated_at": "Generated: " + report.get("generated_at", datetime.now().isoformat()),
-        "report_limitations_html": _safe_format_value(
-            render_technical_review_notice_html(report)
-            + render_report_limitations_html(report)
-        ),
-        "report_status_line_html": _safe_format_value(
-            render_report_status_line_html(report)
-        ),
+        "report_limitations_html": (render_technical_review_notice_html(report)
+            + render_report_limitations_html(report)),
+        "report_status_line_html": render_report_status_line_html(report),
         "toc_title": "Table of Contents",
-        "toc_items": _safe_format_value("\n".join(toc_items)),
-        "graphic_abstract_html": _safe_format_value(graphic_abstract_html),
+        "toc_items": "\n".join(toc_items),
+        "graphic_abstract_html": graphic_abstract_html,
         "abstract_title": "Abstract",
-        "abstract": _safe_format_value(abstract_html),
+        "abstract": abstract_html,
         "cluster_annotations_html": "",
-        "sections_html": _safe_format_value("\n".join(sections_html)),
+        "sections_html": "\n".join(sections_html),
         "conclusions_title": "Conclusions",
-        "conclusions": _safe_format_value(conclusions_html),
-        "analysis_log_html": _safe_format_value(analysis_log_html),
-        "score_definitions_html": _safe_format_value(score_definitions_html),
-        "appendix_html": _safe_format_value(appendix_html),
+        "conclusions": conclusions_html,
+        "analysis_log_html": analysis_log_html,
+        "score_definitions_html": score_definitions_html,
+        "appendix_html": appendix_html,
     })
 
     # Save HTML file

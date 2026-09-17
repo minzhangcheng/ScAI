@@ -46,6 +46,7 @@ from ...services.report.quality import (
 # Rich HTML report CSS (extracted to utils/report_css.py for separation of concerns)
 # ---------------------------------------------------------------------------
 from ...utils.report_css import REPORT_CSS as _REPORT_CSS  # noqa: E402
+from ...utils.report_math import protect_report_math, restore_report_math
 
 from .shared import (  # noqa: F401
     _SPECIFIC_SECTION_IDS,
@@ -84,6 +85,7 @@ class ReportHtmlMixin:
             return ""
         import html as html_module
 
+        text, math = protect_report_math(text)
         # Extract code blocks and inline code before escaping to avoid double-escaping
         code_blocks = []
         def _save_code_block(m):
@@ -132,7 +134,7 @@ class ReportHtmlMixin:
         text = text.replace('\n', '<br/>\n')
         # Clean up double <br/> in pre blocks
         text = re.sub(r'(<pre>.*?</pre>)', lambda m: m.group(0).replace('<br/>\n', '\n'), text, flags=re.DOTALL)
-        return text
+        return restore_report_math(text, math)
 
     def _build_appendix(self, state: AnalysisState, stats: Dict, record_files=None, reports_dir=None) -> Dict:
         """Build appendix metadata for the report."""

@@ -10,6 +10,20 @@ licences travel with the packages and are recorded in `requirements.txt`,
 
 ---
 
+## KaTeX
+
+- **Project**: KaTeX
+- **Source**: https://www.npmjs.com/package/katex/v/0.16.47
+- **Version**: 0.16.47 (also pinned in `frontend/package.json`)
+- **Licence**: MIT; full notice in `backend/static/vendor/katex/LICENSE`
+
+`backend/static/vendor/katex/katex.min.js` is the unmodified npm distribution
+file `dist/katex.min.js`. HTML reports embed it to render TeX as native MathML
+without network, stylesheet, or font downloads. When updating KaTeX, copy this
+file and its licence from the same version used by the frontend.
+
+---
+
 ## bioSkills
 
 - **Project**: bioSkills
