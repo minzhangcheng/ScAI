@@ -65,7 +65,9 @@ async def build_report_figures(self, ctx, analysis_state):
             "path": str(fig_path),
             "category": metadata.get("type") or self._categorize_figure(fig_name),
             "name": metadata.get("publication_name") or Path(fig_name).stem,
-            "description": metadata.get("description") or "",
+            "description": ctx.get("saved_figure_captions", {}).get(
+                fig_name, metadata.get("description") or "",
+            ),
             "interpretation": metadata.get("interpretation") or "",
             "plan_step_id": metadata.get("plan_step_id"),
             "plan_id": metadata.get("plan_id"),
@@ -181,6 +183,8 @@ async def assemble_and_persist_report(self, ctx, analysis_state):
         "sections": filtered_sections,
         "conclusions": conclusions,
         "figures": report_figures,
+        "round_chapter_captions": ctx.get("saved_figure_captions", {}),
+        "round_chapter_artifacts": sorted(ctx.get("reserved_names", set())),
         "tables": table_list,
         "graphic_abstract_path": ga_path,  # Path for zip download
         "generated_at": datetime.now().isoformat(),
@@ -402,6 +406,7 @@ def prepare_html_render(
         )
         display_name = fig_desc.get("name", fig_name.replace("_", " ").rsplit(".", 1)[0].title())
         description = fig_desc.get("description", "")
+        description = report.get("round_chapter_captions", {}).get(fig_name, description)
         interpretation = fig_desc.get("interpretation", "")
         reservation_html = render_figure_reservation_notice_html(
             fig_desc.get("reservation_notice")
@@ -623,6 +628,8 @@ def render_html_sections(self, ctx):
         for fig_name in figure_b64_cache:
             if fig_name in placed_figures:
                 continue
+            if fig_name in ctx["report"].get("round_chapter_captions", {}):
+                continue
             if fig_name.lower() in raw_content.lower():
                 fig_html = _build_figure_html(fig_name)
                 if fig_html:
@@ -633,6 +640,8 @@ def render_html_sections(self, ctx):
         remaining_tbl_parts = []
         for tbl_filename in table_lookup:
             if tbl_filename in placed_tables:
+                continue
+            if tbl_filename in ctx["report"].get("round_chapter_artifacts", []):
                 continue
             if tbl_filename.lower() in raw_content.lower():
                 tbl_html = _build_table_html(tbl_filename)

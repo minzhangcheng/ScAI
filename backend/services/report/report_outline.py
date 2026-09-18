@@ -171,7 +171,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
     """
     rounds = _sorted_rounds(state)
     innovation = [rr for rr in rounds if _phase_of(rr) == "innovation"]
-    if not innovation:
+    if not innovation and not any(getattr(rr, "report_chapter", None) for rr in rounds):
         return _legacy_outline(state)
 
     exploration_rounds = tuple(
@@ -205,7 +205,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
 
     # Innovation and integration rounds, in round order. An integration round is
     # a gate when innovation work follows it, and the closing chapter otherwise.
-    last_innovation_round = int(innovation[-1].round_number)
+    last_innovation_round = int(innovation[-1].round_number) if innovation else 0
     direction_index = 0
     gate_index = 0
     final_integration_seen = False

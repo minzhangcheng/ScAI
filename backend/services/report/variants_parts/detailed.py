@@ -24,8 +24,73 @@ from backend.services.report.figure_discovery import (
 )
 from backend.models.schemas import AnalysisState
 from .figure_records import resolved_record_figure_candidates
+from ..round_chapters import report_artifact_names
 
 logger = __import__('logging').getLogger(__name__)
+
+
+def _render_saved_chapter(state, chapter):
+    """Use the same saved blocks, captions and ordering as the final report."""
+    from backend.config import get_session_workspace
+    from backend.services.report.artifacts import figure_reservation_notice
+    from backend.services.report.quality import render_figure_reservation_notice_html
+
+    workspace = get_session_workspace(state.id)
+    candidates = resolved_record_figure_candidates(
+        state.publication_figures, workspace, state=state,
+    )
+    figures = {Path(c["path"]).name: Path(c["path"]) for c in candidates}
+    tables = eligible_artifacts(state.publication_tables, state=state)
+    table_names = [{"filename": Path(t.csv_path).name, "table_id": t.id} for t in tables]
+    names = report_artifact_names(state, figures, table_names)
+    figure_records = {f.id: f for f in state.publication_figures}
+    table_records = {Path(t.csv_path).name: t for t in tables}
+    notices = {
+        names[aid]: figure_reservation_notice(record)
+        for aid, record in figure_records.items() if aid in names
+    }
+    def render(kind, name, caption):
+        escaped_caption = html_module.escape(caption)
+        if kind == "FIGURE":
+            path = figures.get(name)
+            try:
+                image = compress_image_to_base64(path, max_width=1000, quality=82)
+            except Exception:
+                return f'<p>Recorded figure unavailable: {html_module.escape(name)}. {escaped_caption}</p>'
+            return (
+                f'<div class="figure-item" data-figure-key="{html_module.escape(name, quote=True)}">'
+                f'<img src="{image}" /><p class="caption">{escaped_caption}</p>'
+                + render_figure_reservation_notice_html(notices.get(name, {})) + '</div>'
+            )
+        table = table_records.get(name)
+        if table is None:
+            return f'<p>Recorded table unavailable: {html_module.escape(name)}. {escaped_caption}</p>'
+        columns = table.columns
+        headers = ''.join(f'<th>{html_module.escape(str(c))}</th>' for c in columns)
+        rows = ''.join(
+            '<tr>' + ''.join(f'<td>{html_module.escape(str(row.get(c, "")))}</td>' for c in columns) + '</tr>'
+            for row in table.preview_data[:10]
+        )
+        return f'<p>{escaped_caption}</p><table><thead><tr>{headers}</tr></thead><tbody>{rows}</tbody></table>'
+
+    artifacts = {a.artifact_id: a for a in chapter.artifacts}
+    parts = [f'<h3>{html_module.escape(chapter.title)}</h3>']
+    parts.extend(f'<p>{html_module.escape(note)}</p>' for note in chapter.assembly_notes)
+    for block in chapter.blocks:
+        parts.append(markdown_to_html(block.text))
+        for aid in block.artifact_ids:
+            artifact = artifacts.get(aid)
+            if artifact is None:
+                continue
+            name = names.get(aid)
+            if name is None:
+                parts.append('<p>Recorded artifact unavailable: '
+                             + html_module.escape(f'{artifact.filename}. {artifact.caption}') + '</p>')
+            else:
+                parts.append(render(artifact.kind.upper(), name, artifact.caption))
+    if chapter.conclusions:
+        parts.append('<h3>Round Conclusions</h3>' + markdown_to_html(chapter.conclusions))
+    return '\n'.join(parts)
 
 
 def _record_value(record: Any, key: str, default: Any = None) -> Any:
@@ -155,6 +220,11 @@ def generate_detailed_report_segment_html(
 
     if round_result is not None:
         parts.append(_technical_evidence_observations_html(state, round_result))
+
+    if round_result is not None and getattr(round_result, "report_chapter", None):
+        parts.append(_render_saved_chapter(state, round_result.report_chapter))
+        parts.append('</div>')
+        return "\n".join(parts)
 
     # --- Section: Agent Findings (from graph_state if available) ---
     if graph_state:

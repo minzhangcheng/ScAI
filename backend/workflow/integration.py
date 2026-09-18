@@ -9,6 +9,7 @@ from typing import List
 
 from ..models.schemas import AnalysisPhase, TaskStatus, RoundResult, AgentType
 from ..utils.direction_payload import merge_unpursued_candidates
+from ..models.schema_parts.round_report import RoundReportBlock, RoundReportChapter
 from .helpers import build_integration_gate_payload
 from .retry import with_retry
 from .state import WorkflowState
@@ -149,6 +150,10 @@ class IntegrationMixin:
             phase="integration",
             pi_summary=summary_preview,
             integration_report_summary=integration_report or "",
+            report_chapter=RoundReportChapter(
+                title=f"Integration Cycle {analysis_state.integration_cycle}",
+                blocks=[RoundReportBlock(text=integration_report or summary_preview)],
+            ),
             integration_candidates=list(scored_candidates) if scored_candidates else [],
             round_status="completed",
             evidence_status="substantive" if integration_report else "empty",
