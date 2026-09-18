@@ -11,7 +11,7 @@ from backend.routes.reports_parts import html_views
 from backend.routes.serialization import serialize_round_results
 from backend.tests.test_pi_synthesis_cross_modal import _make_wf_for_synthesis
 from backend.tests.test_round_report_chapters import _chapter, _state
-from backend.workflow.synthesis import _should_build_innovation_segment
+from backend.workflow.synthesis import _should_build_innovation_segment, _reusable_innovation_segment_id
 
 
 @pytest.mark.asyncio
@@ -92,7 +92,8 @@ def test_retry_reuses_identity_bound_report_without_crossing_branches():
     state = AnalysisState(user_id="u", current_round=2, detailed_report_segments=[segment])
     retry = RoundResult(round_number=2, phase="innovation", result_identity_key=key)
     assert not _should_build_innovation_segment(state, retry)
-    assert retry.report_segment_id == segment.id
+    assert retry.report_segment_id is None
+    assert _reusable_innovation_segment_id(state, retry) == segment.id
     other = RoundResult(round_number=2, phase="innovation", result_identity_key="child:innovation:2:direction")
     assert _should_build_innovation_segment(state, other)
     assert other.report_segment_id is None

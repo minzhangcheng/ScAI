@@ -5,7 +5,7 @@ from ...constants import NO_OUTPUT_TOKEN_CAP
 from ...services.report.quality import build_quality_disclosures
 from ...services.report.round_chapters import (
     merge_reusable_sections, reusable_sections, reuse_context, saved_figure_captions,
-    reserved_artifact_names,
+    reserved_artifact_names, report_artifact_names,
 )
 
 
@@ -653,7 +653,14 @@ async def prepare_report_generation(
         figure_paths=figure_map,
     )
 
-    saved_sections = reusable_sections(analysis_state, outline, figure_map, table_list)
+    chapter_artifact_ids = {
+        a.artifact_id for r in analysis_state.round_results if r.report_chapter
+        for a in r.report_chapter.artifacts
+    }
+    artifact_names = report_artifact_names(
+        analysis_state, figure_map, table_list, artifact_ids=chapter_artifact_ids,
+    )
+    saved_sections = reusable_sections(analysis_state, outline, figure_map, table_list, names=artifact_names)
     saved_ids = {section["id"] for section in saved_sections}
     writing_outline = [section for section in outline if section.id not in saved_ids]
     saved_context = reuse_context(saved_sections)
@@ -725,7 +732,7 @@ async def prepare_report_generation(
         "reserved_names": reserved_names, "writing_figures": writing_figures,
         "writing_tables": writing_tables,
         "writing_outline": writing_outline,
-        "saved_figure_captions": saved_figure_captions(analysis_state, figure_map, table_list),
+        "saved_figure_captions": saved_figure_captions(analysis_state, figure_map, table_list, names=artifact_names),
     }
 
 async def _request_unwritten_sections(
@@ -899,7 +906,13 @@ async def parse_and_place_report(
     # sections; forcing it through an outline it was never written against
     # would only scramble it. Its figures fall through to the supplementary
     # section, which is the honest presentation for a failed report.
-    if not used_fallback or saved_sections:
+    if used_fallback and saved_sections:
+        saved_ids = {s["id"] for s in saved_sections}
+        ordered_saved = sorted(saved_sections, key=lambda s: next(
+            i for i, item in enumerate(outline) if item.id == s["id"]
+        ))
+        sections = [s for s in sections if s.get("id") not in saved_ids] + ordered_saved
+    if not used_fallback:
         # The alignment below keeps a section the model skipped only when it
         # owns a figure, so a body that stopped early silently loses whole
         # chapters — and with them their analysis rounds. Give the writer one

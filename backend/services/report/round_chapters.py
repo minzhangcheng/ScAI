@@ -112,9 +112,6 @@ def assemble_round_chapter(raw, catalog, summary, round_number):
         )
         if not chapter.title.strip() or not any(b.text.strip() for b in chapter.blocks):
             raise ValueError("Empty chapter")
-        if any(re.search(r"\[(?:FIGURE|TABLE)(?:_CAPTION)?:|!\[|<img\b", b.text, re.I)
-               for b in chapter.blocks):
-            raise ValueError("Unstructured image reference")
     except (ValidationError, ValueError, KeyError, TypeError):
         chapter = RoundReportChapter(
             title=f"Round {round_number} Findings",
@@ -125,6 +122,19 @@ def assemble_round_chapter(raw, catalog, summary, round_number):
                 "and artifact captions are shown without a new interpretation."
             ],
         )
+    # Neutralize unstructured media syntax without discarding PI prose.
+    for owner, field in [(chapter, "title"), (chapter, "conclusions"),
+                         *((block, "text") for block in chapter.blocks)]:
+        text = getattr(owner, field)
+        cleaned = re.sub(r"\[(?:FIGURE|TABLE)(?:_CAPTION)?\s*:[^\]]*\]", "", text, flags=re.I)
+        cleaned = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", cleaned)
+        cleaned = re.sub(r"<img\b[^>]*>", "", cleaned, flags=re.I)
+        cleaned = cleaned.replace("![", "[")
+        if cleaned != text:
+            setattr(owner, field, cleaned)
+            note = "Unstructured media markup was removed; PI prose and catalog references were retained."
+            if note not in chapter.assembly_notes:
+                chapter.assembly_notes.append(note)
     known = {item.artifact_id for item in catalog}
     seen = set()
     for block in chapter.blocks:
@@ -176,10 +186,16 @@ def chapter_markdown(chapter, names):
     return "\n\n".join(parts)
 
 
-def report_artifact_names(state, figure_map, tables):
+def report_artifact_names(state, figure_map, tables, *, artifact_ids=None):
     """Bind saved IDs to the report collector's resolved render names."""
     names = {}
     for figure in eligible_artifacts(state.publication_figures, state=state):
+        lineage = getattr(figure, "lineage_id", "main")
+        source_id = (figure.id[:-(len(lineage) + 1)]
+                     if getattr(figure, "inherited_from_lineage_id", None)
+                     and figure.id.endswith(f":{lineage}") else figure.id)
+        if artifact_ids is not None and not {figure.id, source_id} & artifact_ids:
+            continue
         stems = artifact_stems([figure])
         # Recovered previews can have a materialized suffix. Check exact bytes
         # even for matching stems: two records can have reused one filename.
@@ -200,14 +216,17 @@ def report_artifact_names(state, figure_map, tables):
                 and figure.id in names and figure.id.endswith(f":{lineage}")):
             names.setdefault(figure.id[:-(len(lineage) + 1)], names[figure.id])
     for table in eligible_artifacts(state.publication_tables, state=state):
+        if artifact_ids is not None and table.id not in artifact_ids:
+            continue
         name = Path(table.csv_path).name
         if any(t.get("table_id") == table.id for t in tables):
             names[table.id] = name
     return names
 
 
-def saved_figure_captions(state, figure_map, tables):
-    names = report_artifact_names(state, figure_map, tables)
+def saved_figure_captions(state, figure_map, tables, *, names=None):
+    if names is None:
+        names = report_artifact_names(state, figure_map, tables)
     return {
         names[a.artifact_id]: a.caption
         for r in state.round_results if getattr(r, "report_chapter", None)
@@ -216,9 +235,10 @@ def saved_figure_captions(state, figure_map, tables):
     }
 
 
-def reusable_sections(state, outline, figure_map, tables):
+def reusable_sections(state, outline, figure_map, tables, *, names=None):
     """Project saved chapters into the final outline without another LLM call."""
-    names = report_artifact_names(state, figure_map, tables)
+    if names is None:
+        names = report_artifact_names(state, figure_map, tables)
     rounds = {report_result_identity(r): r for r in state.round_results}
     sections = []
     for section in outline:
@@ -294,7 +314,7 @@ def merge_reusable_sections(generated, saved):
     for section in merged:
         section["content"] = re.sub(
             r'\[(FIGURE|TABLE):\s*([^\]]+)\]\s*(?:\[\1_CAPTION:\s*[^\]]*\])?',
-            lambda m: "" if Path(m.group(2).strip()).stem in reserved_stems[m.group(1)] else m.group(0),
-            section.get("content", ""),
+            lambda m: "" if Path(m.group(2).strip()).stem in reserved_stems[m.group(1).upper()] else m.group(0),
+            section.get("content", ""), flags=re.I,
         )
     return merged + saved

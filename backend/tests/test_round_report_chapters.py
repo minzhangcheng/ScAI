@@ -179,7 +179,8 @@ def test_round_chapter_retains_table_references(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", [False, True])
-async def test_final_assembly_keeps_saved_chapter_despite_model_rewrite(tmp_path, fallback):
+@pytest.mark.parametrize("marker", ["FIGURE", "figure", "FiGuRe"])
+async def test_final_assembly_keeps_saved_chapter_despite_model_rewrite(tmp_path, fallback, marker):
     state = _state(tmp_path)
     state.round_results = [RoundResult(round_number=1, report_chapter=_chapter(state))]
     outline = build_report_outline(state)
@@ -192,7 +193,7 @@ async def test_final_assembly_keeps_saved_chapter_despite_model_rewrite(tmp_path
          "analysis_type": s.analysis_type, "figures": [], "tables": []}
         for s in outline
     ]
-    generated[0]["content"] += "\n[FIGURE: baseline.jpg]\n[FIGURE_CAPTION: Wrong caption.]"
+    generated[0]["content"] += f"\n[{marker}: baseline.jpg]\n[{marker}_CAPTION: Wrong caption.]"
     agent = SupervisorAgent.__new__(SupervisorAgent)
     agent.session_id = state.id
     agent._validate_report_content = lambda _: True

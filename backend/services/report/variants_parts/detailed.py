@@ -3,6 +3,7 @@
 Moved verbatim out of backend/services/report/variants.py.
 """
 import os
+import hashlib
 import html as html_module
 import re
 from datetime import datetime
@@ -33,20 +34,26 @@ def _render_saved_chapter(state, chapter):
     """Use the same saved blocks, captions and ordering as the final report."""
     from backend.config import get_session_workspace
     from backend.services.report.artifacts import figure_reservation_notice
-    from backend.services.report.quality import render_figure_reservation_notice_html
+    from backend.services.report.quality import render_figure_reservation_notice_html, render_artifact_drift_notice_html
 
     workspace = get_session_workspace(state.id)
+    artifact_ids = {a.artifact_id for a in chapter.artifacts}
     candidates = resolved_record_figure_candidates(
         state.publication_figures, workspace, state=state,
-    )
+    ) if artifact_ids else []
     figures = {Path(c["path"]).name: Path(c["path"]) for c in candidates}
     tables = eligible_artifacts(state.publication_tables, state=state)
     table_names = [{"filename": Path(t.csv_path).name, "table_id": t.id} for t in tables]
-    names = report_artifact_names(state, figures, table_names)
+    names = report_artifact_names(state, figures, table_names, artifact_ids=artifact_ids)
     figure_records = {f.id: f for f in state.publication_figures}
     table_records = {Path(t.csv_path).name: t for t in tables}
     notices = {
         names[aid]: figure_reservation_notice(record)
+        for aid, record in figure_records.items() if aid in names
+    }
+    keys = {Path(c["path"]).name: c.get("record_stem") or c["name"] for c in candidates}
+    drift_notices = {
+        names[aid]: render_artifact_drift_notice_html(record)
         for aid, record in figure_records.items() if aid in names
     }
     def render(kind, name, caption):
@@ -58,9 +65,10 @@ def _render_saved_chapter(state, chapter):
             except Exception:
                 return f'<p>Recorded figure unavailable: {html_module.escape(name)}. {escaped_caption}</p>'
             return (
-                f'<div class="figure-item" data-figure-key="{html_module.escape(name, quote=True)}">'
+                f'<div class="figure-item" data-figure-key="{html_module.escape(keys[name], quote=True)}">'
                 f'<img src="{image}" /><p class="caption">{escaped_caption}</p>'
-                + render_figure_reservation_notice_html(notices.get(name, {})) + '</div>'
+                + render_figure_reservation_notice_html(notices.get(name, {}))
+                + drift_notices.get(name, "") + '</div>'
             )
         table = table_records.get(name)
         if table is None:
@@ -396,19 +404,33 @@ def generate_detailed_report_segment_html(
 def _deduplicate_detailed_figure_blocks(html: str) -> str:
     """Keep the first occurrence of each keyed detailed-report figure block."""
     seen_figure_keys: set[str] = set()
-    figure_block_re = re.compile(
-        r'<div class="figure-item" data-figure-key="([^"]+)">.*?</div>',
-        re.DOTALL,
-    )
-
-    def _dedupe_figure(match: re.Match) -> str:
+    starts = re.compile(r'<div class="figure-item" data-figure-key="([^"]+)">')
+    div_tags = re.compile(r"<div\b[^>]*>|</div>", re.I)
+    parts, cursor = [], 0
+    for match in starts.finditer(html):
+        if match.start() < cursor:
+            continue
+        depth, end = 1, None
+        for tag in div_tags.finditer(html, match.end()):
+            depth += -1 if tag.group().lower() == "</div>" else 1
+            if depth == 0:
+                end = tag.end()
+                break
+        if end is None:
+            continue
         key = html_module.unescape(match.group(1))
-        if key in seen_figure_keys:
-            return ""
-        seen_figure_keys.add(key)
-        return match.group(0)
-
-    return figure_block_re.sub(_dedupe_figure, html)
+        # Frozen bytes identify the embedded image even when old chapters used
+        # filenames and galleries used stems. Same-name revisions remain distinct.
+        source = re.search(r'<img\b[^>]*\bsrc="([^"]+)"', html[match.end():end])
+        if source:
+            key = "render:" + hashlib.sha256(source.group(1).encode()).hexdigest()
+        parts.append(html[cursor:match.start()])
+        if key not in seen_figure_keys:
+            parts.append(html[match.start():end])
+            seen_figure_keys.add(key)
+        cursor = end
+    parts.append(html[cursor:])
+    return "".join(parts)
 
 def render_detailed_report_document(state, *, segment=None, supplements=()) -> str:
     """Wrap retained HTML in a standalone document without regenerating findings."""
@@ -426,6 +448,24 @@ def render_detailed_report_document(state, *, segment=None, supplements=()) -> s
     # A figure can be visible at several workflow gates. Keep its first segment
     # occurrence so the combined report does not repeat the same image gallery.
     segments_html = _deduplicate_detailed_figure_blocks(segments_html)
+    # Stored chapter HTML is immutable; later provenance notices are appended
+    # independently so downloading a frozen chapter still discloses data changes.
+    from ..quality import render_artifact_drift_notice_html
+    segment_ids = {item.id for item in segments}
+    referenced_ids = {
+        a.artifact_id for r in state.round_results
+        if r.report_segment_id in segment_ids and r.report_chapter
+        for a in r.report_chapter.artifacts
+    }
+    updates = []
+    for artifact in [*state.publication_figures, *state.publication_tables]:
+        if artifact.id not in referenced_ids:
+            continue
+        notice = render_artifact_drift_notice_html(artifact)
+        if notice and notice not in segments_html:
+            updates.append(f'<h4>{html_module.escape(artifact.name)}</h4>' + notice)
+    if updates:
+        segments_html += '<section><h3>Updated Artifact Disclosures</h3>' + "".join(updates) + '</section>'
 
     toc_items = "".join(
         f'<li><a href="#{seg.phase}">{html_module.escape(seg.title)}'

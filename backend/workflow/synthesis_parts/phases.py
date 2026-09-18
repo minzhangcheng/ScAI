@@ -557,7 +557,10 @@ async def persist_round_result(self, ctx):
 
     # P1: innovation rounds also get an incremental detailed-report segment.
     # Exploration round is already covered at the exploration_complete call above.
-    if _should_build_innovation_segment(analysis_state, round_result):
+    reusable_segment_id = _reusable_innovation_segment_id(analysis_state, round_result)
+    if reusable_segment_id is not None:
+        round_result.report_segment_id = reusable_segment_id
+    elif round_result.phase == "innovation":
         try:
             await self._build_and_save_detailed_segment(
                 analysis_state,

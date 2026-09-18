@@ -463,36 +463,27 @@ def _multi_direction_analysis_completed(analysis_state) -> bool:
 
 
 
-def _should_build_innovation_segment(analysis_state, round_result) -> bool:
-    """Whether to build a detailed-report segment for the just-completed round.
-
-    Keys off round_result.phase (captured before the exploration→innovation
-    transition) rather than analysis_state.analysis_phase, which is already
-    flipped to INNOVATION at the end of the exploration round and would
-    otherwise spawn a spurious 'innovation_round_1' segment for round 1.
-
-    Reuse an identical chapter on retry; revisions must refresh its report.
-    """
+def _reusable_innovation_segment_id(analysis_state, round_result) -> Optional[str]:
+    """Return the unchanged report's ID without mutating the round result."""
     if round_result.phase != "innovation":
-        return False
-    phase = f"innovation_round_{analysis_state.current_round}"
-    from ...services.report.round_chapters import round_chapter_digest
-    from ...services.report.report_outline import report_result_identity
+        return None
+    from ...services.report.round_chapters import round_chapter_digest, round_segment_index
 
-    digest = round_chapter_digest(round_result)
-    for segment in reversed(analysis_state.detailed_report_segments):
-        if segment.phase != phase:
-            continue
-        if segment.result_identity_key:
-            if segment.result_identity_key != report_result_identity(round_result):
-                continue
-            if segment.chapter_sha256 != digest:
-                return True
-            round_result.report_segment_id = segment.id
-            return False
-        if not digest:
-            return False  # Preserve the legacy no-chapter retry behavior.
-    return True
+    index = round_segment_index(
+        analysis_state, f"innovation_round_{analysis_state.current_round}", round_result,
+    )
+    if index is None:
+        return None
+    segment = analysis_state.detailed_report_segments[index]
+    if segment.chapter_sha256 == round_chapter_digest(round_result):
+        return segment.id
+    return None
+
+
+def _should_build_innovation_segment(analysis_state, round_result) -> bool:
+    """Compatibility predicate: only changed innovation chapters need building."""
+    return (round_result.phase == "innovation"
+            and _reusable_innovation_segment_id(analysis_state, round_result) is None)
 
 
 def _direction_result_is_coverage_eligible(result: RoundResult) -> bool:

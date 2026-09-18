@@ -2,6 +2,11 @@
 from __future__ import annotations
 
 from backend.utils.report_math import embed_report_math
+from backend.services.report.quality import render_artifact_drift_notice_html
+
+
+from backend.services.report.section_badges import section_badge as _section_badge
+
 
 def bind_facade(facade) -> None:
     globals().update(
@@ -336,9 +341,7 @@ def prepare_html_render(
     # Build TOC
     toc_items = []
     for sec in sections:
-        a_type = sec.get("analysis_type", "general")
-        type_class = "general" if a_type == "general" else "specific"
-        type_label = "General" if a_type == "general" else "Specific"
+        type_class, type_label = _section_badge(sec)
         toc_items.append(
             f'<li><a href="#{html_module.escape(sec["id"])}">'
             f'{html_module.escape(sec["title"])}</a>'
@@ -362,6 +365,7 @@ def prepare_html_render(
                 "description": pf.description or "",
                 "interpretation": pf.interpretation or "",
                 "reservation_notice": figure_reservation_notice(pf),
+                "drift_notice_html": render_artifact_drift_notice_html(pf),
             }
             if fname:
                 pub_fig_descriptions[fname] = metadata
@@ -411,6 +415,7 @@ def prepare_html_render(
         reservation_html = render_figure_reservation_notice_html(
             fig_desc.get("reservation_notice")
         )
+        reservation_html += fig_desc.get("drift_notice_html", "")
         if not description and not interpretation:
             interpretation = caption
 
@@ -649,9 +654,7 @@ def render_html_sections(self, ctx):
                     placed_tables.add(tbl_filename)
                     remaining_tbl_parts.append(tbl_html)
 
-        a_type = sec.get("analysis_type", "general")
-        type_class = "general" if a_type == "general" else "specific"
-        type_label = "General" if a_type == "general" else "Specific"
+        type_class, type_label = _section_badge(sec)
 
         sec_html = f'''
         <div class="section" id="{html_module.escape(sec["id"])}">

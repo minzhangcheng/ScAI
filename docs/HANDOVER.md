@@ -293,6 +293,12 @@ global methods and synthesis sections. Older single-pass sessions without saved
 chapters retain the type-organised outline described in historical release notes.
 Round downloads preserve their link across chapter revisions and include explicitly
 associated supplementary segments; session reloads retain the download identifier.
+Annotation-gate supplements capture their intended round identity before synthesis
+and attach when that round is saved. Frozen captions remain unchanged while later
+recorded data-drift notices are disclosed separately. Invalid inline media markup
+is removed from PI prose with an assembly note, without discarding the chapter.
+Degraded final reports retain the fallback summary and saved chapters without
+materializing empty sections from the planned outline.
 
 Two detailed-report generators must remain aligned: `backend/agents/supervisor_agent.py` is the live generation path, while `backend/services/report/generator.py` is the fallback. Shared report services provide planning, sections, figures, rendering, scoring, variants, and regeneration. Exploration and integrated reports use the workflow/report variants alongside the detailed HTML report.
 

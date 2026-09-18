@@ -713,6 +713,14 @@ async def _build_and_save_detailed_segment(
         state.detailed_report_segments[previous_index] = segment
     if round_result is not None:
         round_result.report_segment_id = segment.id
+        # Annotation-gate supplements can predate the first RoundResult.
+        # Bind only their captured identity, never a round-number-only guess.
+        round_result.report_supplement_ids = list(dict.fromkeys(
+            round_result.report_supplement_ids + [
+                item.id for item in state.detailed_report_segments
+                if item.supplement_owner_key == report_result_identity(round_result)
+            ]
+        ))
 
     try:
         generate_combined_detailed_report_html(state)

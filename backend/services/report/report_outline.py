@@ -211,7 +211,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
     if exploration_rounds:
         sections.append(OutlineSection(
             "exploration_findings", "exploration", "Phase 1 Exploration Findings",
-            exploration_rounds, analysis_type="specific",
+            exploration_rounds, analysis_type="general",
             result_keys=tuple(report_result_identity(rr) for rr in rounds if _phase_of(rr) == "exploration"),
             guidance=(
                 "What the unbiased first pass found: composition, cell states and quality "
@@ -283,11 +283,14 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
         # threads together; it owns no figures of its own.
         sections.append(OutlineSection(
             "integrated_findings", "integration_final",
-            "Integrated Findings Across All Phases", (), analysis_type="specific",
+            "Integrated Findings Across All Phases" if innovation else "Exploration Synthesis", (), analysis_type="specific",
             figure_policy=FIGURE_POLICY_TEXT_ONLY,
             guidance=(
                 "Cross-phase synthesis: connections between the directions pursued, and "
                 "how the innovation findings validate or extend the exploration results"
+                if innovation else
+                "Synthesize the completed exploration findings, their uncertainty and "
+                "limitations. No innovation directions were executed; do not imply otherwise."
             ),
         ))
 

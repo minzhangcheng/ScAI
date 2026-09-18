@@ -545,7 +545,16 @@ async def _run_supplementary_analysis(
         and result.lineage_id == (state.restore_branch_id or "main")
         and (context != "round" or result.phase != "integration")
     ), None)
-    if report_round is not None and report_round.report_segment_id:
+    from ...models.schemas import RoundResult
+    from ...services.report.report_outline import report_result_identity
+    owner = report_round or RoundResult(
+        round_number=state.current_round,
+        phase=str(getattr(state.analysis_phase, "value", state.analysis_phase)),
+        lineage_id=state.restore_branch_id or "main",
+        direction=state.current_round_direction or "",
+    )
+    segment.supplement_owner_key = report_result_identity(owner)
+    if report_round is not None:
         # Supplementary segments keep their own content and order. Associate
         # them explicitly rather than collecting every segment with this number.
         report_round.report_supplement_ids.append(segment.id)
