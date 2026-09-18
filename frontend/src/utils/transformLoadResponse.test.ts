@@ -567,3 +567,10 @@ describe('transformLoadResponse — LLM intervention gate', () => {
     expect(useAppStore.getState().showLlmTimeoutDialog).toBe(false)
   })
 })
+
+describe('round report download identity', () => {
+  it('retains the saved segment on reload and websocket transformation', () => {
+    const [round] = transformRoundResults([{ round: 2, phase: 'innovation', report_segment_id: 'saved-round' }])
+    expect(round.reportSegmentId).toBe('saved-round')
+  })
+})

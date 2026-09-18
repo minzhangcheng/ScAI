@@ -8,6 +8,7 @@ import uuid
 import re
 import html as html_module
 from urllib.parse import quote as url_quote
+from backend.services.report.section_badges import section_badge
 from pathlib import Path
 from datetime import datetime
 
@@ -660,9 +661,7 @@ def _render_regenerated_sections(
     # Render table of contents and report sections.
     toc_items = []
     for section in report.get("sections", []):
-        analysis_type = section.get("analysis_type", "general")
-        type_class = "general" if analysis_type == "general" else "specific"
-        type_label = "General" if analysis_type == "general" else "Specific"
+        type_class, type_label = section_badge(section)
 
         toc_items.append(
             f'<li><a href="#{html_module.escape(section["id"])}">{html_module.escape(section["title"])}</a>'
@@ -672,9 +671,7 @@ def _render_regenerated_sections(
     # Generate sections HTML
     sections_html = []
     for section in report.get("sections", []):
-        analysis_type = section.get("analysis_type", "general")
-        type_class = "general" if analysis_type == "general" else "specific"
-        type_label = "General" if analysis_type == "general" else "Specific"
+        type_class, type_label = section_badge(section)
 
         content_html = markdown_to_html(section.get("content", ""))
 

@@ -417,6 +417,10 @@ def _upsert_round_result(
     if target_index is None:
         normalized.append(result)
     else:
+        result.report_segment_id = result.report_segment_id or normalized[target_index].report_segment_id
+        result.report_supplement_ids = list(dict.fromkeys(
+            normalized[target_index].report_supplement_ids + result.report_supplement_ids
+        ))
         normalized[target_index] = result
     results[:] = normalized
     return result
@@ -459,22 +463,27 @@ def _multi_direction_analysis_completed(analysis_state) -> bool:
 
 
 
-def _should_build_innovation_segment(analysis_state, round_result) -> bool:
-    """Whether to build a detailed-report segment for the just-completed round.
-
-    Keys off round_result.phase (captured before the exploration→innovation
-    transition) rather than analysis_state.analysis_phase, which is already
-    flipped to INNOVATION at the end of the exploration round and would
-    otherwise spawn a spurious 'innovation_round_1' segment for round 1.
-
-    Deduplicates by phase to stay idempotent across node retries.
-    """
+def _reusable_innovation_segment_id(analysis_state, round_result) -> Optional[str]:
+    """Return the unchanged report's ID without mutating the round result."""
     if round_result.phase != "innovation":
-        return False
-    phase = f"innovation_round_{analysis_state.current_round}"
-    return not any(
-        s.phase == phase for s in analysis_state.detailed_report_segments
+        return None
+    from ...services.report.round_chapters import round_chapter_digest, round_segment_index
+
+    index = round_segment_index(
+        analysis_state, f"innovation_round_{analysis_state.current_round}", round_result,
     )
+    if index is None:
+        return None
+    segment = analysis_state.detailed_report_segments[index]
+    if segment.chapter_sha256 == round_chapter_digest(round_result):
+        return segment.id
+    return None
+
+
+def _should_build_innovation_segment(analysis_state, round_result) -> bool:
+    """Compatibility predicate: only changed innovation chapters need building."""
+    return (round_result.phase == "innovation"
+            and _reusable_innovation_segment_id(analysis_state, round_result) is None)
 
 
 def _direction_result_is_coverage_eligible(result: RoundResult) -> bool:
@@ -637,6 +646,7 @@ def build_round_summary_payload(
         "round": round_result.round_number,
         "max_rounds": effective_max_rounds,
         "summary": round_result.pi_summary,
+        "report_segment_id": round_result.report_segment_id,
         "pathology_findings": round_result.pathology_findings,
         "pathology_coverage": [
             item.model_dump(mode="json")

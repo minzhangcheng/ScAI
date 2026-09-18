@@ -848,3 +848,17 @@ def render_technical_review_notice_html(report: Dict[str, Any] | None) -> str:
         + "</ul><p>Report generation continued; these notices disclose technical "
         "review state and retained figure reservations only.</p></div>"
     )
+
+
+def render_artifact_drift_notice_html(artifact):
+    """Disclose recorded data changes without rewriting the saved caption."""
+    from .artifacts import data_drift_warning
+    from html import escape
+    provenance = getattr(artifact, "expression_provenance", None) or {}
+    notices = list(dict.fromkeys(str(provenance[k]) for k in (
+        "cohort_change_warning", "representation_change_warning"
+    ) if provenance.get(k)))
+    legacy_notice = data_drift_warning(artifact)
+    if legacy_notice and legacy_notice not in notices:
+        notices.append(legacy_notice)
+    return "".join(f'<p class="artifact-drift-notice" role="note">{escape(n)}</p>' for n in notices)

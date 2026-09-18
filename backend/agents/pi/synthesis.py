@@ -8,6 +8,9 @@ import json
 import logging
 
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from ...services.report.round_chapters import (
+    assemble_round_chapter, chapter_prompt, round_artifact_catalog,
+)
 from ..prompt_blocks import build_integration_block
 from ...utils.direction_payload import (
     build_direction_projection_block,
@@ -182,6 +185,10 @@ INNOVATION PHASE — focused synthesis:
 - Suggest deeper follow-up analyses within this specific direction
 """
 
+        # Compose the reusable chapter in this same PI synthesis call.
+        catalog = round_artifact_catalog(state)
+        prompt += chapter_prompt(catalog)
+
         # Try up to 2 times if response is empty
         max_retries = 2
         response = ""
@@ -213,6 +220,10 @@ INNOVATION PHASE — focused synthesis:
                 biochemistry_findings=data.get("biochemistry_findings", []),
                 literature_findings=data.get("literature_findings", []),
                 pi_summary=data.get("summary", ""),
+                report_chapter=assemble_round_chapter(
+                    data.get("report_chapter"), catalog,
+                    data.get("summary", ""), state.current_round,
+                ),
                 conflicts=data.get("conflicts", []),
                 next_steps=self._extract_next_steps(data),
                 new_findings=data.get("new_findings", True),
@@ -222,11 +233,20 @@ INNOVATION PHASE — focused synthesis:
                 reanalysis_agents=reanalysis_next,
             )
 
-        # If we have a response but couldn't parse JSON, use it as summary
+        # The raw response remains in the recorded LLM exchange. Do not turn
+        # malformed JSON or unexpected prose into a report-ready conclusion.
         if response and response.strip():
+            summary = (
+                f"Round {state.current_round} PI synthesis could not be parsed. "
+                "No synthesized conclusion is available; retained agent findings "
+                "and artifact captions remain available for review."
+            )
             return RoundResult(
                 round_number=state.current_round,
-                pi_summary=response,
+                pi_summary=summary,
+                report_chapter=assemble_round_chapter(
+                    None, catalog, summary, state.current_round,
+                ),
                 new_findings=True,
                 reanalysis_agents=[]
             )
@@ -236,6 +256,10 @@ INNOVATION PHASE — focused synthesis:
         return RoundResult(
             round_number=state.current_round,
             pi_summary=f"Round {state.current_round} analysis completed. Results collected from agents pending synthesis.",
+            report_chapter=assemble_round_chapter(
+                None, catalog, "PI synthesis was unavailable; no new conclusion was recorded.",
+                state.current_round,
+            ),
             new_findings=True,
             reanalysis_agents=[]
         )

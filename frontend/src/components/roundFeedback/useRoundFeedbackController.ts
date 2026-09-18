@@ -5,6 +5,7 @@ import { useCountdownTimer } from '../../hooks/useCountdownTimer'
 import { useTranslation, type Language } from '../../i18n/translations'
 import type { TreatmentGroup } from '../../stores/appStore'
 import type { RoundSummary } from '../../types'
+import { fetchAndDownload } from '../../utils/download'
 import {
   CUSTOM_TYPE_SENTINEL, getTypeOptions, hasCustomOption,
 } from '../../utils/dataTypes'
@@ -21,6 +22,7 @@ export interface RoundFeedbackDialogProps {
   roundNumber: number
   maxRounds: number
   roundSummary: RoundSummary
+  reportUrl?: string
   language: Language
   countdownSeconds: number  // -1=manual skip only, 0=no wait (auto-skip), positive=countdown
   treatmentGroups: TreatmentGroup[]
@@ -36,6 +38,7 @@ export function useRoundFeedbackController({
   roundNumber,
   maxRounds,
   roundSummary,
+  reportUrl,
   language,
   countdownSeconds,
   treatmentGroups,
@@ -52,6 +55,8 @@ export function useRoundFeedbackController({
   const [userInput, setUserInput] = useState('')
   const [files, setFiles] = useState<UploadedFileWithAgent[]>([])
   const [sending, setSending] = useState(false)
+  const [downloadingReport, setDownloadingReport] = useState(false)
+  const [reportDownloadError, setReportDownloadError] = useState('')
   const [customTypeError, setCustomTypeError] = useState('')
   const [showSupplementaryInput, setShowSupplementaryInput] = useState(false)
   const [timerPaused, setTimerPaused] = useState(false)
@@ -91,6 +96,18 @@ export function useRoundFeedbackController({
   const toggleTimerPause = useCallback(() => {
     setTimerPaused(prev => !prev)
   }, [])
+  const handleDownloadReport = useCallback(async () => {
+    if (!reportUrl || downloadingReport) return
+    setDownloadingReport(true)
+    setReportDownloadError('')
+    try {
+      await fetchAndDownload(reportUrl, `round_${roundNumber}_report.html`)
+    } catch (error) {
+      setReportDownloadError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setDownloadingReport(false)
+    }
+  }, [reportUrl, roundNumber, downloadingReport])
   const handleSkip = useCallback(async () => {
     await onSkip()
   }, [onSkip])
@@ -176,6 +193,7 @@ export function useRoundFeedbackController({
     roundSummary.dataRequests.other?.length > 0
   )
   return {
+    reportUrl, downloadingReport, reportDownloadError, handleDownloadReport,
     bioinformaticsFindings, biochemistryFindings, customTypeError, dropdownRef, fileInputRef,
     files, handleFileSelect, handleInputChange, handleSend, handleSkip, hasCountdown,
     hasDataRequests, isLastRound, isManualMode, isSupplementaryRunning, language,

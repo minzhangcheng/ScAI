@@ -191,6 +191,7 @@ def test_parse_uses_outline_titles_and_types():
     content = (
         "## [direction_1] Section Title\nbody one\n\n"
         "## [methods] Section Title\nbody two\n"
+        "## [exploration_findings] Baseline findings\nbody three\n"
     )
     sections = agent._parse_report_sections(content, "en", outline=outline)
     by_id = {s["id"]: s for s in sections}
@@ -199,6 +200,37 @@ def test_parse_uses_outline_titles_and_types():
     assert by_id["direction_1"]["analysis_type"] == "specific"
     assert by_id["methods"]["title"] == "Methods"
     assert by_id["methods"]["analysis_type"] == "general"
+    assert by_id["exploration_findings"]["analysis_type"] == "general"
+
+
+def test_html_round_badges_match_in_toc_and_body(tmp_path):
+    agent = _agent()
+    agent.session_id = "s"
+    sections = agent._parse_report_sections(
+        "## [methods] Methods\nMethods text\n"
+        "## [exploration_findings] Baseline findings\nExploration text\n"
+        "## [direction_1] Targeted findings\nInnovation text\n"
+        "## [integrated_findings] Synthesis\nIntegration text\n",
+        "en", outline=_outline(),
+    )
+    out = tmp_path / "reports"
+    out.mkdir()
+    html_path = agent._generate_html_report(
+        {"title": "T", "figures": [], "tables": []},
+        sections, "abstract", "conclusions", [], {},
+        {"total_steps_monitored": 0, "steps_with_technical_issues": 0,
+         "pi_escalations": 0},
+        "en", out, tmp_path / "workspace",
+    )
+    html = Path(html_path).read_text(encoding="utf-8")
+    for type_class, label in [
+        ("general", "General / Exploration"),
+        ("specific", "Specific / Innovation"),
+        ("specific", "Integration"),
+        ("general", "General"),
+    ]:
+        assert f'class="section-type {type_class}">{label}</span>' in html
+        assert f'class="analysis-type-badge {type_class}">{label}</span>' in html
 
 
 def test_parse_without_outline_keeps_legacy_behaviour():

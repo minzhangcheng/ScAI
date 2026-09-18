@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.58.5 · **Last updated**: 2026-09-18
+**Version**: 0.59.1 · **Last updated**: 2026-09-18
 
 ## 1. Runtime Architecture
 
@@ -287,6 +287,24 @@ that rank, while the API, CLI and prune use the derived `deletion_order`.
 
 ## 10. Reports and Operations
 
+New analyses save PI-authored round chapters, including single-pass exploration.
+Their final reports reuse those chapters under the round-based outline and add
+global methods and synthesis sections. Older single-pass sessions without saved
+chapters retain the type-organised outline described in historical release notes.
+Round downloads preserve their link across chapter revisions and include explicitly
+associated supplementary segments; session reloads retain the download identifier.
+Annotation-gate supplements capture their intended round identity before synthesis
+and attach when that round is saved. Frozen captions remain unchanged while later
+recorded data-drift notices are disclosed separately. Invalid inline media markup
+is removed from PI prose with an assembly note, without discarding the chapter.
+Degraded final reports retain the fallback summary and saved chapters without
+materializing empty sections from the planned outline.
+Saved references reserve exact render names; distinct registered renders sharing a
+stem remain available to other chapters, with byte-bound metadata. Unknown
+extension aliases cannot steal saved references. Global writing receives bounded
+chapter excerpts when necessary, while published chapters remain complete. The
+report JSON records initial and continuation `saved_context_budget` observations.
+
 Two detailed-report generators must remain aligned: `backend/agents/supervisor_agent.py` is the live generation path, while `backend/services/report/generator.py` is the fallback. Shared report services provide planning, sections, figures, rendering, scoring, variants, and regeneration. Exploration and integrated reports use the workflow/report variants alongside the detailed HTML report.
 
 Publication figures pass two reviewers of different standing before a report can carry them. The vision reviewers *judge*: PI `review_figure` (`agents/pi/figures.py`) is the blocking one, while `SupervisorAgent` evaluates any step that produced a figure and is advisory only — its verdict appends a `[Supervisor]` message and cannot reject anything, because `force_skip` derives from `code_error` alone and a figure that rendered has none. The linter *measures*: `services/figure_layout.py` supplies source injected into the publication-figure wrapper, which draws the figure inside the kernel before `savefig`, asks the renderer for every text artist's window extent, and prints one `__SCAI_LAYOUT_LINT__` line. It runs in the kernel because only the kernel holds a live `Figure`; the backend ever sees JPEG bytes. Every violation carries its own `severity`: `text_over_text` and `text_over_foreign_axes` can block or advise according to what collided, `tick_label_collision` blocks, and `tiny_text` advises. There is deliberately no out-of-canvas check because every report save uses `bbox_inches='tight'`. Consumers must read `severity`, never infer it from `kind`. A blocking violation is not overridable by either reviewer while revision budget remains, and `is_report_eligible` rejects it regardless of `review_status`. An absent verdict means unverified, not clean — `lint_ran()` distinguishes them.
@@ -348,6 +366,30 @@ six minutes per occurrence rather than blocking.
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.59.x — (2026-09-18 onward)**
+
+- `0.59.1` — Merges the report optimization work. PI synthesis now saves each
+  round's chapter with finding-to-artifact references, reading order, captions,
+  conclusions, and limitations. Final reports reuse those chapters and write
+  global methods and synthesis around them, including for new single-pass
+  exploration runs; older sessions without chapters keep their legacy outline.
+  The results confirmation dialog offers an authenticated standalone round
+  report download that survives reloads and retains a stable link across
+  revisions. Supplementary analysis is linked by round identity, including
+  annotation-gate work completed before the first synthesis. Exact artifact
+  binding prevents same-name replacement images from borrowing saved evidence;
+  distinct registered renders sharing a stem retain their own inline positions
+  and captions. Figure/table reservations are separate and embedded images are
+  deduplicated without damaging nested HTML. Later data-drift notices remain
+  visible alongside frozen captions. Malformed synthesis is disclosed rather
+  than published as raw output, and invalid inline media markup is neutralized
+  without discarding PI prose. Degraded reports retain saved chapters without
+  adding empty outline sections; all three HTML render paths share chapter
+  badges. Global writing and continuation requests use budgeted chapter excerpts
+  with recorded truncation, while published chapter bodies remain complete.
+  Legacy segments are adopted only when ownership is unambiguous; historical
+  sessions and ambiguous duplicate segments are not automatically rewritten.
 
 **0.58.x — (2026-09-16 onward)**
 

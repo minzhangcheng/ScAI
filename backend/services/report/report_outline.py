@@ -70,6 +70,7 @@ class OutlineSection:
     analysis_type: str = "general"
     guidance: str = ""
     figure_policy: str = FIGURE_POLICY_PREFER
+    result_keys: Tuple[str, ...] = ()
 
     @property
     def owns_figures(self) -> bool:
@@ -87,6 +88,20 @@ class OutlineSection:
     @property
     def is_brief(self) -> bool:
         return self.kind == "integration_gate"
+
+
+def report_result_identity(result: Any) -> str:
+    """Use the workflow identity, including for records written before it existed."""
+    from backend.workflow.direction_coverage import build_result_identity_key, normalize_direction_key
+
+    return getattr(result, "result_identity_key", "") or build_result_identity_key(
+        getattr(result, "lineage_id", "") or "main",
+        getattr(result, "phase", "") or "exploration",
+        int(result.round_number),
+        getattr(result, "direction_key", "") or normalize_direction_key(
+            getattr(result, "direction", "") or ""
+        ),
+    )
 
 
 def _phase_of(rr: Any) -> str:
@@ -165,13 +180,13 @@ def _legacy_outline(state: Any) -> List[OutlineSection]:
 def build_report_outline(state: Any) -> List[OutlineSection]:
     """Derive the report outline from the rounds that actually ran.
 
-    Returns sections in presentation order. When no innovation round is present
-    the legacy type-organised outline is returned unchanged, so single-pass
-    analyses keep the report shape they have always had.
+    Saved PI chapters use the round-based outline, including single-pass runs.
+    Older single-pass sessions without saved chapters keep their type-organised
+    outline. Global sections provide methodology and cross-round context.
     """
     rounds = _sorted_rounds(state)
     innovation = [rr for rr in rounds if _phase_of(rr) == "innovation"]
-    if not innovation:
+    if not innovation and not any(getattr(rr, "report_chapter", None) for rr in rounds):
         return _legacy_outline(state)
 
     exploration_rounds = tuple(
@@ -196,7 +211,8 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
     if exploration_rounds:
         sections.append(OutlineSection(
             "exploration_findings", "exploration", "Phase 1 Exploration Findings",
-            exploration_rounds, analysis_type="specific",
+            exploration_rounds, analysis_type="general",
+            result_keys=tuple(report_result_identity(rr) for rr in rounds if _phase_of(rr) == "exploration"),
             guidance=(
                 "What the unbiased first pass found: composition, cell states and quality "
                 "characteristics of the data, plus the research directions it motivated"
@@ -205,7 +221,8 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
 
     # Innovation and integration rounds, in round order. An integration round is
     # a gate when innovation work follows it, and the closing chapter otherwise.
-    last_innovation_round = int(innovation[-1].round_number)
+    last_innovation_round = int(innovation[-1].round_number) if innovation else 0
+    last_integration = next((rr for rr in reversed(rounds) if _phase_of(rr) == "integration"), None)
     direction_index = 0
     gate_index = 0
     final_integration_seen = False
@@ -220,6 +237,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
             sections.append(OutlineSection(
                 f"direction_{direction_index}", "direction",
                 f"Innovation Round {rn}", (rn,), analysis_type="specific",
+                result_keys=(report_result_identity(rr),),
                 guidance=(
                     f"Innovation round {rn} — research direction: {short}. State the "
                     f"hypothesis, the targeted analyses run against it, the findings and "
@@ -228,12 +246,13 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
                 ),
             ))
         elif phase == "integration":
-            if rn < last_innovation_round:
+            if rn < last_innovation_round or rr is not last_integration:
                 gate_index += 1
                 sections.append(OutlineSection(
                     f"integration_gate_{gate_index}", "integration_gate",
                     f"Integration Cycle {gate_index}", (rn,),
                     figure_policy=FIGURE_POLICY_TEXT_ONLY,
+                    result_keys=(report_result_identity(rr),),
                     guidance=(
                         f"Integration cycle {gate_index} (round {rn}) — a hinge between "
                         f"directions, not a findings chapter. Answer exactly two questions: "
@@ -249,6 +268,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
                     "integrated_findings", "integration_final",
                     "Integrated Findings Across All Phases", (rn,), analysis_type="specific",
                     figure_policy=FIGURE_POLICY_TEXT_ONLY,
+                    result_keys=(report_result_identity(rr),),
                     guidance=(
                         "Closing cross-direction synthesis: how the directions converge, "
                         "which mechanisms they jointly support, where they remain in "
@@ -263,11 +283,14 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
         # threads together; it owns no figures of its own.
         sections.append(OutlineSection(
             "integrated_findings", "integration_final",
-            "Integrated Findings Across All Phases", (), analysis_type="specific",
+            "Integrated Findings Across All Phases" if innovation else "Exploration Synthesis", (), analysis_type="specific",
             figure_policy=FIGURE_POLICY_TEXT_ONLY,
             guidance=(
                 "Cross-phase synthesis: connections between the directions pursued, and "
                 "how the innovation findings validate or extend the exploration results"
+                if innovation else
+                "Synthesize the completed exploration findings, their uncertainty and "
+                "limitations. No innovation directions were executed; do not imply otherwise."
             ),
         ))
 

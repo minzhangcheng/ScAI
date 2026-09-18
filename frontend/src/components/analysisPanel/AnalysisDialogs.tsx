@@ -128,6 +128,11 @@ export function AnalysisDialogs({ controller }: AnalysisDialogsProps) {
           roundNumber={feedbackRoundData.round}
           maxRounds={maxRounds}
           roundSummary={feedbackRoundData}
+          reportUrl={feedbackRoundData.reportSegmentId
+            ? withReportBranch(
+              `/api/session/${currentSession.id}/round-report/${encodeURIComponent(feedbackRoundData.reportSegmentId)}/html`,
+              currentSession.restoreBranchId,
+            ) : undefined}
           language={language}
           countdownSeconds={roundWaitSeconds}
           treatmentGroups={currentSession.treatmentGroups || []}

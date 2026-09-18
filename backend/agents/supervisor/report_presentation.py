@@ -2,6 +2,11 @@
 from __future__ import annotations
 
 from backend.utils.report_math import embed_report_math
+from backend.services.report.quality import render_artifact_drift_notice_html
+
+
+from backend.services.report.section_badges import section_badge as _section_badge
+
 
 def bind_facade(facade) -> None:
     globals().update(
@@ -38,8 +43,8 @@ async def build_report_figures(self, ctx, analysis_state):
     }
     for fig_name, fig_path in figure_map.items():
         stem = Path(fig_name).stem
-        record = records_by_stem.get(stem) or records_by_stem.get(fig_path.stem)
-        metadata = figure_metadata_by_stem.get(stem, {})
+        record = ctx.get("figure_records_by_name", {}).get(fig_name) or records_by_stem.get(stem) or records_by_stem.get(fig_path.stem)
+        metadata = figure_metadata_by_stem.get(fig_name, figure_metadata_by_stem.get(stem, {}))
         legacy_record = legacy_by_stem.get(stem) or legacy_by_stem.get(fig_path.stem)
         if record is not None:
             metadata = {
@@ -65,7 +70,9 @@ async def build_report_figures(self, ctx, analysis_state):
             "path": str(fig_path),
             "category": metadata.get("type") or self._categorize_figure(fig_name),
             "name": metadata.get("publication_name") or Path(fig_name).stem,
-            "description": metadata.get("description") or "",
+            "description": ctx.get("saved_figure_captions", {}).get(
+                fig_name, metadata.get("description") or "",
+            ),
             "interpretation": metadata.get("interpretation") or "",
             "plan_step_id": metadata.get("plan_step_id"),
             "plan_id": metadata.get("plan_id"),
@@ -181,6 +188,10 @@ async def assemble_and_persist_report(self, ctx, analysis_state):
         "sections": filtered_sections,
         "conclusions": conclusions,
         "figures": report_figures,
+        "round_chapter_captions": ctx.get("saved_figure_captions", {}),
+        "round_chapter_artifacts": sorted(ctx.get("reserved_names", set())),
+        "saved_context_budget": ctx.get("saved_context_budget", {}),
+        "saved_context_budget_retries": ctx.get("saved_context_budget_retries", []),
         "tables": table_list,
         "graphic_abstract_path": ga_path,  # Path for zip download
         "generated_at": datetime.now().isoformat(),
@@ -332,9 +343,7 @@ def prepare_html_render(
     # Build TOC
     toc_items = []
     for sec in sections:
-        a_type = sec.get("analysis_type", "general")
-        type_class = "general" if a_type == "general" else "specific"
-        type_label = "General" if a_type == "general" else "Specific"
+        type_class, type_label = _section_badge(sec)
         toc_items.append(
             f'<li><a href="#{html_module.escape(sec["id"])}">'
             f'{html_module.escape(sec["title"])}</a>'
@@ -358,6 +367,7 @@ def prepare_html_render(
                 "description": pf.description or "",
                 "interpretation": pf.interpretation or "",
                 "reservation_notice": figure_reservation_notice(pf),
+                "drift_notice_html": render_artifact_drift_notice_html(pf),
             }
             if fname:
                 pub_fig_descriptions[fname] = metadata
@@ -402,10 +412,12 @@ def prepare_html_render(
         )
         display_name = fig_desc.get("name", fig_name.replace("_", " ").rsplit(".", 1)[0].title())
         description = fig_desc.get("description", "")
+        description = report.get("round_chapter_captions", {}).get(fig_name, description)
         interpretation = fig_desc.get("interpretation", "")
         reservation_html = render_figure_reservation_notice_html(
             fig_desc.get("reservation_notice")
         )
+        reservation_html += fig_desc.get("drift_notice_html", "")
         if not description and not interpretation:
             interpretation = caption
 
@@ -621,7 +633,9 @@ def render_html_sections(self, ctx):
         # Fallback: embed figures referenced by filename in text but without markers
         remaining_fig_parts = []
         for fig_name in figure_b64_cache:
-            if fig_name in placed_figures:
+            if fig_name in placed_figures or sec.get("saved_round_chapter"):
+                continue
+            if fig_name in ctx["report"].get("round_chapter_captions", {}):
                 continue
             if fig_name.lower() in raw_content.lower():
                 fig_html = _build_figure_html(fig_name)
@@ -632,7 +646,9 @@ def render_html_sections(self, ctx):
         # Fallback: embed tables referenced by filename in text but without markers
         remaining_tbl_parts = []
         for tbl_filename in table_lookup:
-            if tbl_filename in placed_tables:
+            if tbl_filename in placed_tables or sec.get("saved_round_chapter"):
+                continue
+            if tbl_filename in ctx["report"].get("round_chapter_artifacts", []):
                 continue
             if tbl_filename.lower() in raw_content.lower():
                 tbl_html = _build_table_html(tbl_filename)
@@ -640,9 +656,7 @@ def render_html_sections(self, ctx):
                     placed_tables.add(tbl_filename)
                     remaining_tbl_parts.append(tbl_html)
 
-        a_type = sec.get("analysis_type", "general")
-        type_class = "general" if a_type == "general" else "specific"
-        type_label = "General" if a_type == "general" else "Specific"
+        type_class, type_label = _section_badge(sec)
 
         sec_html = f'''
         <div class="section" id="{html_module.escape(sec["id"])}">

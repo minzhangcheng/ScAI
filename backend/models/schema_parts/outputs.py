@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 from .analysis import CrossModalSynthesis, DataDrivenMechanismProgram
 from .enums import AgentType, FigureReviewStatus
 from .session import tolerant_from_llm_dict
+from .round_report import RoundReportChapter
 
 
 class ExplorationReport(BaseModel):
@@ -67,6 +68,9 @@ class RoundResult(BaseModel):
     biochemistry_findings: List[str] = Field(default_factory=list)
     literature_findings: List[str] = Field(default_factory=list)
     pi_summary: str = ""
+    report_chapter: Optional[RoundReportChapter] = None
+    report_segment_id: Optional[str] = None
+    report_supplement_ids: List[str] = Field(default_factory=list)
     conflicts: List[Dict[str, Any]] = Field(default_factory=list)
     next_steps: List[str] = Field(default_factory=list)
     new_findings: bool = True

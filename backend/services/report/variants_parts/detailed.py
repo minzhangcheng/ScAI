@@ -3,6 +3,7 @@
 Moved verbatim out of backend/services/report/variants.py.
 """
 import os
+import hashlib
 import html as html_module
 import re
 from datetime import datetime
@@ -24,8 +25,80 @@ from backend.services.report.figure_discovery import (
 )
 from backend.models.schemas import AnalysisState
 from .figure_records import resolved_record_figure_candidates
+from ..round_chapters import report_artifact_names
 
 logger = __import__('logging').getLogger(__name__)
+
+
+def _render_saved_chapter(state, chapter):
+    """Use the same saved blocks, captions and ordering as the final report."""
+    from backend.config import get_session_workspace
+    from backend.services.report.artifacts import figure_reservation_notice
+    from backend.services.report.quality import render_figure_reservation_notice_html, render_artifact_drift_notice_html
+
+    workspace = get_session_workspace(state.id)
+    artifact_ids = {a.artifact_id for a in chapter.artifacts}
+    candidates = resolved_record_figure_candidates(
+        state.publication_figures, workspace, state=state,
+    ) if artifact_ids else []
+    figures = {Path(c["path"]).name: Path(c["path"]) for c in candidates}
+    tables = eligible_artifacts(state.publication_tables, state=state)
+    table_names = [{"filename": Path(t.csv_path).name, "table_id": t.id} for t in tables]
+    names = report_artifact_names(state, figures, table_names, artifact_ids=artifact_ids)
+    figure_records = {f.id: f for f in state.publication_figures}
+    table_records = {Path(t.csv_path).name: t for t in tables}
+    notices = {
+        names[aid]: figure_reservation_notice(record)
+        for aid, record in figure_records.items() if aid in names
+    }
+    keys = {Path(c["path"]).name: c.get("record_stem") or c["name"] for c in candidates}
+    drift_notices = {
+        names[aid]: render_artifact_drift_notice_html(record)
+        for aid, record in figure_records.items() if aid in names
+    }
+    def render(kind, name, caption):
+        escaped_caption = html_module.escape(caption)
+        if kind == "FIGURE":
+            path = figures.get(name)
+            try:
+                image = compress_image_to_base64(path, max_width=1000, quality=82)
+            except Exception:
+                return f'<p>Recorded figure unavailable: {html_module.escape(name)}. {escaped_caption}</p>'
+            return (
+                f'<div class="figure-item" data-figure-key="{html_module.escape(keys[name], quote=True)}">'
+                f'<img src="{image}" /><p class="caption">{escaped_caption}</p>'
+                + render_figure_reservation_notice_html(notices.get(name, {}))
+                + drift_notices.get(name, "") + '</div>'
+            )
+        table = table_records.get(name)
+        if table is None:
+            return f'<p>Recorded table unavailable: {html_module.escape(name)}. {escaped_caption}</p>'
+        columns = table.columns
+        headers = ''.join(f'<th>{html_module.escape(str(c))}</th>' for c in columns)
+        rows = ''.join(
+            '<tr>' + ''.join(f'<td>{html_module.escape(str(row.get(c, "")))}</td>' for c in columns) + '</tr>'
+            for row in table.preview_data[:10]
+        )
+        return f'<p>{escaped_caption}</p><table><thead><tr>{headers}</tr></thead><tbody>{rows}</tbody></table>'
+
+    artifacts = {a.artifact_id: a for a in chapter.artifacts}
+    parts = [f'<h3>{html_module.escape(chapter.title)}</h3>']
+    parts.extend(f'<p>{html_module.escape(note)}</p>' for note in chapter.assembly_notes)
+    for block in chapter.blocks:
+        parts.append(markdown_to_html(block.text))
+        for aid in block.artifact_ids:
+            artifact = artifacts.get(aid)
+            if artifact is None:
+                continue
+            name = names.get(aid)
+            if name is None:
+                parts.append('<p>Recorded artifact unavailable: '
+                             + html_module.escape(f'{artifact.filename}. {artifact.caption}') + '</p>')
+            else:
+                parts.append(render(artifact.kind.upper(), name, artifact.caption))
+    if chapter.conclusions:
+        parts.append('<h3>Round Conclusions</h3>' + markdown_to_html(chapter.conclusions))
+    return '\n'.join(parts)
 
 
 def _record_value(record: Any, key: str, default: Any = None) -> Any:
@@ -155,6 +228,11 @@ def generate_detailed_report_segment_html(
 
     if round_result is not None:
         parts.append(_technical_evidence_observations_html(state, round_result))
+
+    if round_result is not None and getattr(round_result, "report_chapter", None):
+        parts.append(_render_saved_chapter(state, round_result.report_chapter))
+        parts.append('</div>')
+        return "\n".join(parts)
 
     # --- Section: Agent Findings (from graph_state if available) ---
     if graph_state:
@@ -326,50 +404,80 @@ def generate_detailed_report_segment_html(
 def _deduplicate_detailed_figure_blocks(html: str) -> str:
     """Keep the first occurrence of each keyed detailed-report figure block."""
     seen_figure_keys: set[str] = set()
-    figure_block_re = re.compile(
-        r'<div class="figure-item" data-figure-key="([^"]+)">.*?</div>',
-        re.DOTALL,
-    )
-
-    def _dedupe_figure(match: re.Match) -> str:
+    starts = re.compile(r'<div class="figure-item" data-figure-key="([^"]+)">')
+    div_tags = re.compile(r"<div\b[^>]*>|</div>", re.I)
+    parts, cursor = [], 0
+    for match in starts.finditer(html):
+        if match.start() < cursor:
+            continue
+        depth, end = 1, None
+        for tag in div_tags.finditer(html, match.end()):
+            depth += -1 if tag.group().lower() == "</div>" else 1
+            if depth == 0:
+                end = tag.end()
+                break
+        if end is None:
+            continue
         key = html_module.unescape(match.group(1))
-        if key in seen_figure_keys:
-            return ""
-        seen_figure_keys.add(key)
-        return match.group(0)
+        # Frozen bytes identify the embedded image even when old chapters used
+        # filenames and galleries used stems. Same-name revisions remain distinct.
+        source = re.search(r'<img\b[^>]*\bsrc="([^"]+)"', html[match.end():end])
+        if source:
+            key = "render:" + hashlib.sha256(source.group(1).encode()).hexdigest()
+        parts.append(html[cursor:match.start()])
+        if key not in seen_figure_keys:
+            parts.append(html[match.start():end])
+            seen_figure_keys.add(key)
+        cursor = end
+    parts.append(html[cursor:])
+    return "".join(parts)
 
-    return figure_block_re.sub(_dedupe_figure, html)
-
-def generate_combined_detailed_report_html(state: "AnalysisState") -> str:
-    """Generate combined HTML from all detailed report segments.
-
-    Returns:
-        Path to the saved HTML file
-    """
-    from backend.config import get_session_reports
-    reports_dir = Path(get_session_reports(state.id))
-    reports_dir.mkdir(parents=True, exist_ok=True)
-
+def render_detailed_report_document(state, *, segment=None, supplements=()) -> str:
+    """Wrap retained HTML in a standalone document without regenerating findings."""
+    segments = [segment, *supplements] if segment is not None else state.detailed_report_segments
+    title = (
+        f"Round {segment.round_number} Analysis Report"
+        if segment is not None else "Detailed Analysis Report"
+    )
     segments_html = "\n<hr class='segment-divider'>\n".join(
         content
-        for seg in state.detailed_report_segments
-        if (content := _with_historical_evidence_observations(state, seg))
+        for seg in segments
+        if (content := (seg.content_html if segment is not None
+                        else _with_historical_evidence_observations(state, seg)))
     )
     # A figure can be visible at several workflow gates. Keep its first segment
     # occurrence so the combined report does not repeat the same image gallery.
     segments_html = _deduplicate_detailed_figure_blocks(segments_html)
+    # Stored chapter HTML is immutable; later provenance notices are appended
+    # independently so downloading a frozen chapter still discloses data changes.
+    from ..quality import render_artifact_drift_notice_html
+    segment_ids = {item.id for item in segments}
+    referenced_ids = {
+        a.artifact_id for r in state.round_results
+        if r.report_segment_id in segment_ids and r.report_chapter
+        for a in r.report_chapter.artifacts
+    }
+    updates = []
+    for artifact in [*state.publication_figures, *state.publication_tables]:
+        if artifact.id not in referenced_ids:
+            continue
+        notice = render_artifact_drift_notice_html(artifact)
+        if notice and notice not in segments_html:
+            updates.append(f'<h4>{html_module.escape(artifact.name)}</h4>' + notice)
+    if updates:
+        segments_html += '<section><h3>Updated Artifact Disclosures</h3>' + "".join(updates) + '</section>'
 
     toc_items = "".join(
         f'<li><a href="#{seg.phase}">{html_module.escape(seg.title)}'
         f' (Round {seg.round_number})</a></li>'
-        for seg in state.detailed_report_segments
+        for seg in segments
     )
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Detailed Analysis Report - {html_module.escape(state.name)}</title>
+<title>{title} - {html_module.escape(state.name)}</title>
 <style>
 body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 2rem; background: #f8fafc; color: #1e293b; }}
 .report-header {{ background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2rem; border-radius: 1rem; margin-bottom: 2rem; }}
@@ -402,7 +510,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 </head>
 <body>
 <div class="report-header">
-  <h1>Detailed Analysis Report</h1>
+  <h1>{title}</h1>
   <p>{html_module.escape(state.name)} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
 </div>
 <div class="toc">
@@ -413,10 +521,20 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 </body>
 </html>"""
 
+    return embed_report_math(html)
+
+
+def generate_combined_detailed_report_html(state: "AnalysisState") -> str:
+    """Generate and save the combined HTML from retained report segments."""
+    from backend.config import get_session_reports
+    reports_dir = Path(get_session_reports(state.id))
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    html = render_detailed_report_document(state)
+
     output_path = reports_dir / "detailed_report.html"
     tmp_path = output_path.with_suffix(".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(embed_report_math(html))
+        f.write(html)
     os.replace(str(tmp_path), str(output_path))
 
     state.detailed_report_html_path = str(output_path)

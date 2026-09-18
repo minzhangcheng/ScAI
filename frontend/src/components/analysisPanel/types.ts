@@ -20,6 +20,7 @@ export interface ExplorationReportData extends Partial<ExplorationReport> {
 }
 
 export interface RoundSummaryContent {
+  report_segment_id?: string | null
   round?: number
   max_rounds?: number
   summary?: string

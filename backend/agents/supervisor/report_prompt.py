@@ -3,12 +3,37 @@ from __future__ import annotations
 
 from ...constants import NO_OUTPUT_TOKEN_CAP
 from ...services.report.quality import build_quality_disclosures
+from ...services.report.round_chapters import (
+    merge_reusable_sections, reusable_sections, reuse_context, saved_figure_captions,
+    reserved_artifact_names, report_artifact_names,
+)
 
 
 def bind_facade(facade) -> None:
     globals().update(
         {name: value for name, value in vars(facade).items() if not name.startswith("__")}
     )
+
+def _budget_saved_context(self, sections, base_prompt, language):
+    """Bound read-only excerpts while preserving the persisted report chapters."""
+    from ...utils.context_budget import CHARS_PER_TOKEN, ContextBudget
+    try:
+        window = self._resolve_context_window()
+    except (AttributeError, ValueError, TypeError):
+        window = 32_768  # Bounded best effort if runtime settings are unavailable.
+    prompt_chars = int(ContextBudget(window).prompt_ceiling * CHARS_PER_TOKEN)
+    base_chars = len(base_prompt) + len(self._get_report_system_prompt(language))
+    limit = max(0, min(prompt_chars // 2, prompt_chars - base_chars - 512))
+    full = reuse_context(sections)
+    context = reuse_context(sections, max_chars=limit)
+    observation = {
+        "original_chars": len(full), "sent_chars": len(context), "budget_chars": limit,
+        "truncated": len(context) < len(full), "chapter_count": len(sections),
+    }
+    if observation["truncated"]:
+        logger.warning("[%s] Saved chapter context excerpted: %s", self.session_id, observation)
+    return context, observation
+
 
 def _build_figure_allocation_text(
     outline: Sequence["OutlineSection"],
@@ -109,7 +134,7 @@ def _build_report_prompt(
     )
     figure_lines = []
     for name in figure_map:
-        metadata = figure_metadata_by_stem.get(Path(name).stem, {})
+        metadata = figure_metadata_by_stem.get(name, figure_metadata_by_stem.get(Path(name).stem, {}))
         figure_type = metadata.get("type") or self._categorize_figure(name)
         line = f"- {name} (type: {figure_type})"
         if name in attribution:
@@ -649,14 +674,52 @@ async def prepare_report_generation(
         figure_paths=figure_map,
     )
 
+    # Resolve registered bytes once for both saved references and live metadata.
+    # Exact names distinguish independent renders sharing a stem.
+    selected_ids = {
+        a.artifact_id for r in analysis_state.round_results if r.report_chapter
+        for a in r.report_chapter.artifacts
+    }
+    names_by_stem = {}
+    for name in figure_map:
+        names_by_stem.setdefault(Path(name).stem, []).append(name)
+    colliding_stems = {stem for stem, names in names_by_stem.items() if len(names) > 1}
+    selected_ids.update(
+        r.id for r in analysis_state.publication_figures
+        if artifact_stems([r]) & colliding_stems
+    )
+    artifact_names = report_artifact_names(
+        analysis_state, figure_map, table_list, artifact_ids=selected_ids,
+    )
+    figure_records_by_name = {
+        artifact_names[record.id]: record
+        for record in eligible_artifacts(analysis_state.publication_figures, state=analysis_state)
+        if record.id in artifact_names
+    }
+    for name, record in figure_records_by_name.items():
+        metadata = publication_figure_metadata([record], report_only=True, state=analysis_state)
+        figure_metadata_by_stem[name] = next(iter(metadata.values()), {})
+    saved_sections = reusable_sections(analysis_state, outline, figure_map, table_list, names=artifact_names)
+    saved_ids = {section["id"] for section in saved_sections}
+    writing_outline = [section for section in outline if section.id not in saved_ids]
+    reserved = reserved_artifact_names(saved_sections)
+    reserved_names = reserved["FIGURE"] | reserved["TABLE"]
+    writing_figures = {name: path for name, path in figure_map.items() if name not in reserved["FIGURE"]}
+    writing_tables = [table for table in table_list if table["filename"] not in reserved["TABLE"]]
+
     await _progress(15, "Generating report content...")
 
     # Generate report sections using strong model
     report_prompt = self._build_report_prompt(
-        narrative, stats, analysis_state, figure_map, language,
-        table_list=table_list, outline=outline, attribution=attribution,
+        narrative, stats, analysis_state, writing_figures, language,
+        table_list=writing_tables, outline=writing_outline, attribution=attribution,
         figure_metadata_by_stem=figure_metadata_by_stem,
+        figure_outline=writing_outline,
     )
+    saved_context, saved_context_budget = _budget_saved_context(
+        self, saved_sections, report_prompt, language,
+    )
+    report_prompt += saved_context
 
     used_fallback = False
     try:
@@ -705,6 +768,13 @@ async def prepare_report_generation(
         "figure_metadata_by_stem": figure_metadata_by_stem, "table_list": table_list,
         "outline": outline, "attribution": attribution, "report_content": report_content,
         "used_fallback": used_fallback, "client": client,
+        "saved_sections": saved_sections, "saved_context": saved_context,
+        "saved_context_budget": saved_context_budget,
+        "figure_records_by_name": figure_records_by_name,
+        "reserved_names": reserved_names, "writing_figures": writing_figures,
+        "writing_tables": writing_tables,
+        "writing_outline": writing_outline,
+        "saved_figure_captions": saved_figure_captions(analysis_state, figure_map, table_list, names=artifact_names),
     }
 
 async def _request_unwritten_sections(
@@ -752,9 +822,9 @@ async def _request_unwritten_sections(
             ctx.get("narrative", ""),
             ctx.get("stats", {}),
             analysis_state,
-            ctx["figure_map"],
+            ctx.get("writing_figures", ctx["figure_map"]),
             language,
-            table_list=ctx.get("table_list"),
+            table_list=ctx.get("writing_tables", ctx.get("table_list")),
             outline=list(pending),
             attribution=ctx["attribution"],
             figure_metadata_by_stem=ctx["figure_metadata_by_stem"],
@@ -762,8 +832,13 @@ async def _request_unwritten_sections(
             # allocation only the pending sections leaves every figure of an
             # already-written chapter unclaimed, and the prompt then offers it to
             # this pass as a free candidate — inside the block it calls BINDING.
-            figure_outline=ctx["outline"],
+            figure_outline=ctx.get("writing_outline", ctx["outline"]),
         )
+        saved_context, observation = _budget_saved_context(
+            self, ctx.get("saved_sections", []), continuation, language,
+        )
+        ctx.setdefault("saved_context_budget_retries", []).append(observation)
+        continuation += saved_context
         client.set_context(self.session_id, "report_generator")
         response = await self._budgeted_text_call(
             client.chat,
@@ -857,6 +932,12 @@ async def parse_and_place_report(
 
     # Parse the LLM output into sections
     sections = self._parse_report_sections(report_content, language, outline=outline)
+    saved_sections = ctx.get("saved_sections", [])
+    if saved_sections:
+        sections = merge_reusable_sections(
+            sections, saved_sections, figure_names=figure_map,
+            table_names=[t["filename"] for t in ctx.get("table_list", [])],
+        )
 
     # For a normal report this is populated by the placement pass below. A
     # degraded fallback keeps its fixed three-section body, but that must not
@@ -875,6 +956,12 @@ async def parse_and_place_report(
     # sections; forcing it through an outline it was never written against
     # would only scramble it. Its figures fall through to the supplementary
     # section, which is the honest presentation for a failed report.
+    if used_fallback and saved_sections:
+        saved_ids = {s["id"] for s in saved_sections}
+        ordered_saved = sorted(saved_sections, key=lambda s: next(
+            i for i, item in enumerate(outline) if item.id == s["id"]
+        ))
+        sections = [s for s in sections if s.get("id") not in saved_ids] + ordered_saved
     if not used_fallback:
         # The alignment below keeps a section the model skipped only when it
         # owns a figure, so a body that stopped early silently loses whole
@@ -888,7 +975,7 @@ async def parse_and_place_report(
                 if str(section.get("content") or "").strip()
             }
         ]
-        if pending:
+        if pending and not used_fallback:
             logger.warning(
                 f"[{self.session_id}] Report body is missing {len(pending)} "
                 f"planned section(s): "
@@ -898,6 +985,11 @@ async def parse_and_place_report(
             sections = await _request_unwritten_sections(
                 self, ctx, analysis_state, sections, pending, report_model,
             )
+            if saved_sections:
+                sections = merge_reusable_sections(
+                    sections, saved_sections, figure_names=figure_map,
+                    table_names=[t["filename"] for t in ctx.get("table_list", [])],
+                )
 
         # Reading order follows the outline, not the order the model emitted.
         # Sections owning figures are materialised even when skipped, so their
@@ -934,16 +1026,19 @@ async def parse_and_place_report(
         figure_order = {
             name: float(index) for index, name in enumerate(figure_map)
         }
+        protected_figures = reserved_artifact_names(saved_sections)["FIGURE"]
         placement = enforce_figure_placement(
             sections, outline, attribution, figure_map.keys(),
             figure_order=figure_order,
+            protected_sections={s["id"] for s in saved_sections},
             figure_captions={
                 name: (
-                    figure_metadata_by_stem.get(Path(name).stem, {}).get("description")
-                    or figure_metadata_by_stem.get(Path(name).stem, {}).get("interpretation")
+                    figure_metadata_by_stem.get(name, figure_metadata_by_stem.get(Path(name).stem, {})).get("description")
+                    or figure_metadata_by_stem.get(name, figure_metadata_by_stem.get(Path(name).stem, {})).get("interpretation")
                     or ""
                 )
                 for name in figure_map
+                if name not in protected_figures
             },
         )
         if placement.unplaced:

@@ -64,6 +64,7 @@ from .reports_parts.html_views import (  # noqa: F401
     get_annotation_report_html,
     get_integration_report_html,
     get_detailed_report_html,
+    get_round_report_html,
     get_detailed_report,
     generate_detailed_report,
     _generate_report_task,

@@ -13,6 +13,7 @@ def serialize_round_results(round_results: List[RoundResult]) -> List[Dict[str, 
         {
             "round": r.round_number,
             "summary": r.pi_summary,
+            "report_segment_id": r.report_segment_id,
             "phase": r.phase,
             "pathology_findings": r.pathology_findings,
             "pathology_coverage": [

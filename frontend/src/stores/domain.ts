@@ -184,6 +184,7 @@ export interface BiochemistryIndicator {
 }
 
 export interface RoundResult {
+  reportSegmentId?: string
   round: number
   summary: string
   phase: 'exploration' | 'innovation' | 'integration' | ''

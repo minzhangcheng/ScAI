@@ -1,6 +1,7 @@
 """HTML assembly for the detailed-report generator facade."""
 from __future__ import annotations
 
+from backend.services.report.section_badges import section_badge
 from pathlib import Path
 from typing import Any, Dict, Optional
 from backend.models.schemas import AnalysisState
@@ -35,9 +36,7 @@ async def generate_html_report(
     # Prepare table of contents
     toc_items = []
     for section in report.get("sections", []):
-        analysis_type = section.get("analysis_type", "general")
-        type_class = "general" if analysis_type == "general" else "specific"
-        type_label = ("General") if analysis_type == "general" else ("Specific")
+        type_class, type_label = section_badge(section)
 
         toc_items.append(
             f'<li><a href="#{bindings.html_module.escape(section["id"])}">{bindings.html_module.escape(section["title"])}</a>'
@@ -68,9 +67,7 @@ def _render_primary_sections(
     # Generate sections HTML
     sections_html = []
     for section in report.get("sections", []):
-        analysis_type = section.get("analysis_type", "general")
-        type_class = "general" if analysis_type == "general" else "specific"
-        type_label = ("General") if analysis_type == "general" else ("Specific")
+        type_class, type_label = section_badge(section)
 
         # Convert markdown in content to HTML
         content_html = bindings.markdown_to_html(section.get("content", ""))

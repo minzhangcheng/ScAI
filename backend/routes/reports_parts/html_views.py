@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import BackgroundTasks, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from backend.config import get_session_dir, PI_AGENT_NAME
 from backend.models.schemas import AnalysisState
@@ -141,6 +141,38 @@ async def get_integration_report_html(
     validate_path_within(Path(html_path), session_dir)
 
     return FileResponse(html_path, media_type="text/html", filename="integration_report.html")
+
+@router.get("/{session_id}/round-report/{segment_id}/html")
+async def get_round_report_html(
+    session_id: str, segment_id: str, request: Request,
+    branch_id: Optional[str] = None,
+):
+    """Download one settled round, identified by its saved segment, not its number."""
+    from backend.services.report.variants_parts.detailed import render_detailed_report_document
+
+    validate_session_id(session_id)
+    state = await require_session_ownership(
+        session_id=session_id, user_id=getattr(request.state, "user_id", ""),
+    )
+    lineage = resolve_report_target_lineage(
+        branch_id if branch_id is not None else state.restore_branch_id
+    )
+    result = next((r for r in state.round_results
+                   if r.report_segment_id == segment_id and r.lineage_id == lineage), None)
+    segment = next((s for s in state.detailed_report_segments if s.id == segment_id), None)
+    if result is None or segment is None or not segment.content_html:
+        raise HTTPException(status_code=404, detail="Round report not available for this branch")
+    by_id = {item.id: item for item in state.detailed_report_segments}
+    supplements = [by_id[sid] for sid in dict.fromkeys(result.report_supplement_ids)
+                   if sid in by_id and sid != segment.id]
+    return HTMLResponse(
+        render_detailed_report_document(state, segment=segment, supplements=supplements),
+        headers={
+            "Content-Disposition": f'attachment; filename="round_{result.round_number}_report.html"',
+            "Cache-Control": "no-store",
+        },
+    )
+
 
 @router.get("/{session_id}/detailed-report/html")
 async def get_detailed_report_html(session_id: str, request: Request, branch_id: Optional[str] = None):
