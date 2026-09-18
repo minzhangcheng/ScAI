@@ -410,6 +410,7 @@ async def persist_round_result(self, ctx):
         branch_label=analysis_state.restore_branch_label,
         restored_from_snapshot_id=restored_from,
     )
+    ctx["round_result"] = round_result
     if restored_from is not None:
         consume_restore_provenance(analysis_state)
     from ..direction_coverage import active_batch_ready_for_integration

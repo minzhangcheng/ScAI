@@ -216,6 +216,7 @@ export interface PathologyCoverage {
 }
 
 export interface RawRoundResult {
+  report_segment_id?: string | null
   round?: number
   pi_summary?: string
   summary?: string
@@ -513,6 +514,7 @@ export type LucideIconComponent = React.ComponentType<{ className?: string }>
 // ============================================================
 
 export interface RoundSummary {
+  reportSegmentId?: string
   round: number
   maxRounds?: number
   summary: string

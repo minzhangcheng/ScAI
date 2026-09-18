@@ -410,20 +410,18 @@ def _deduplicate_detailed_figure_blocks(html: str) -> str:
 
     return figure_block_re.sub(_dedupe_figure, html)
 
-def generate_combined_detailed_report_html(state: "AnalysisState") -> str:
-    """Generate combined HTML from all detailed report segments.
-
-    Returns:
-        Path to the saved HTML file
-    """
-    from backend.config import get_session_reports
-    reports_dir = Path(get_session_reports(state.id))
-    reports_dir.mkdir(parents=True, exist_ok=True)
-
+def render_detailed_report_document(state, *, segment=None) -> str:
+    """Wrap retained HTML in a standalone document without regenerating findings."""
+    segments = [segment] if segment is not None else state.detailed_report_segments
+    title = (
+        f"Round {segment.round_number} Analysis Report"
+        if segment is not None else "Detailed Analysis Report"
+    )
     segments_html = "\n<hr class='segment-divider'>\n".join(
         content
-        for seg in state.detailed_report_segments
-        if (content := _with_historical_evidence_observations(state, seg))
+        for seg in segments
+        if (content := (seg.content_html if segment is not None
+                        else _with_historical_evidence_observations(state, seg)))
     )
     # A figure can be visible at several workflow gates. Keep its first segment
     # occurrence so the combined report does not repeat the same image gallery.
@@ -432,14 +430,14 @@ def generate_combined_detailed_report_html(state: "AnalysisState") -> str:
     toc_items = "".join(
         f'<li><a href="#{seg.phase}">{html_module.escape(seg.title)}'
         f' (Round {seg.round_number})</a></li>'
-        for seg in state.detailed_report_segments
+        for seg in segments
     )
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Detailed Analysis Report - {html_module.escape(state.name)}</title>
+<title>{title} - {html_module.escape(state.name)}</title>
 <style>
 body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 2rem; background: #f8fafc; color: #1e293b; }}
 .report-header {{ background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2rem; border-radius: 1rem; margin-bottom: 2rem; }}
@@ -472,7 +470,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 </head>
 <body>
 <div class="report-header">
-  <h1>Detailed Analysis Report</h1>
+  <h1>{title}</h1>
   <p>{html_module.escape(state.name)} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
 </div>
 <div class="toc">
@@ -483,10 +481,20 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 </body>
 </html>"""
 
+    return embed_report_math(html)
+
+
+def generate_combined_detailed_report_html(state: "AnalysisState") -> str:
+    """Generate and save the combined HTML from retained report segments."""
+    from backend.config import get_session_reports
+    reports_dir = Path(get_session_reports(state.id))
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    html = render_detailed_report_document(state)
+
     output_path = reports_dir / "detailed_report.html"
     tmp_path = output_path.with_suffix(".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(embed_report_math(html))
+        f.write(html)
     os.replace(str(tmp_path), str(output_path))
 
     state.detailed_report_html_path = str(output_path)

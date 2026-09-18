@@ -335,6 +335,8 @@ export const zh = {
 
     // Round Feedback Dialog
     roundComplete: '第 {round} 轮分析完成',
+    downloadRoundReport: '下载本轮分析报告（HTML）',
+    roundReportDownloadHint: '包含本轮发现、图片、图注与结论，可下载后离线详细评估。',
     roundSummaryTitle: '本轮总结',
     keyFindings: '主要发现',
     additionalDataSuggested: '建议补充的数据',

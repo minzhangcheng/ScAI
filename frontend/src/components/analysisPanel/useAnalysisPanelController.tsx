@@ -80,6 +80,7 @@ function buildRoundSummaries(messages: Message[], currentSession: Session | null
       round,
       maxRounds: content.max_rounds,
       summary: content.summary || '',
+      reportSegmentId: content.report_segment_id || undefined,
       findings: content.findings || [],
       dataRequests: {
         pathology: content.data_requests?.pathology || [],
@@ -103,6 +104,7 @@ function buildRoundSummaries(messages: Message[], currentSession: Session | null
     if (existing) {
       summaries.set(identity, {
         ...existing,
+        reportSegmentId: result.reportSegmentId || existing.reportSegmentId,
         summary: isUnavailableRoundText(existing.summary) && result.summary
           ? result.summary
           : existing.summary,
@@ -116,6 +118,7 @@ function buildRoundSummaries(messages: Message[], currentSession: Session | null
     summaries.set(identity, {
       round: result.round,
       summary: result.summary || '',
+      reportSegmentId: result.reportSegmentId,
       findings: [
         ...(result.pathologyFindings || []),
         ...(result.bioinformaticsFindings || []),

@@ -54,6 +54,7 @@ export function transformRoundResults(raw: (RawRoundResult | null)[] | undefined
     return {
       round,
       summary: r.pi_summary || r.summary || '',
+      ...(r.report_segment_id ? { reportSegmentId: r.report_segment_id } : {}),
       phase,
       pathologyFindings: Array.isArray(r.pathology_findings) ? r.pathology_findings : [],
       pathologyCoverage: Array.isArray(r.pathology_coverage) ? r.pathology_coverage : [],

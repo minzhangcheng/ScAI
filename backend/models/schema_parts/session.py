@@ -195,6 +195,7 @@ class AgentRoundCache(BaseModel):
 
 class DetailedReportSegment(BaseModel):
     """One segment of the incrementally-built detailed report at each HITL checkpoint"""
+    result_identity_key: str = ""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     phase: str  # "pre_annotation" | "exploration_complete" | "supplementary_annotation_N" | "supplementary_direction_N"
     title: str  # Human-readable, e.g. "Pre-Annotation Analysis Summary"

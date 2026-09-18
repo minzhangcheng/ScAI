@@ -1,5 +1,5 @@
 import {
-  AlertTriangle, BookOpen, CheckCircle2, ChevronDown, Clock, Code2, FlaskConical,
+  AlertTriangle, BookOpen, CheckCircle2, ChevronDown, Clock, Code2, Download, FlaskConical,
   Loader2, Microscope, Pause, Play, Send, Square, Upload, Users, X,
 } from 'lucide-react'
 
@@ -213,6 +213,7 @@ function RoundFeedbackComposer({ controller }: RoundFeedbackViewProps) {
 
 export function RoundFeedbackView({ controller }: RoundFeedbackViewProps) {
   const {
+    reportUrl, downloadingReport, reportDownloadError, handleDownloadReport,
     bioinformaticsFindings, biochemistryFindings, handleSkip, hasCountdown, hasDataRequests,
     isManualMode, isSupplementaryRunning, language, literatureFindings, onRequestSupplementary,
     onStopImmediate, onStopSummarize, pathologyFindings, roundNumber, roundSummary, sending,
@@ -299,6 +300,26 @@ export function RoundFeedbackView({ controller }: RoundFeedbackViewProps) {
 
         {/* Content area — top 2/3 scrollable */}
         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4" style={{ minHeight: 0 }}>
+
+          {reportUrl && (
+            <div>
+              <button
+                type="button"
+                onClick={handleDownloadReport}
+                disabled={downloadingReport}
+                className="flex items-center gap-2 text-sm text-blue-600 hover:underline disabled:opacity-50"
+              >
+                {downloadingReport
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <Download className="w-4 h-4" />}
+                {t('downloadRoundReport')}
+              </button>
+              <p className="mt-1 text-xs text-slate-500">{t('roundReportDownloadHint')}</p>
+              {reportDownloadError && (
+                <p role="alert" className="mt-2 text-sm text-red-600">{reportDownloadError}</p>
+              )}
+            </div>
+          )}
 
           {/* PI Summary */}
           {roundSummary.summary && (

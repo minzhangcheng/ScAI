@@ -69,6 +69,7 @@ class RoundResult(BaseModel):
     literature_findings: List[str] = Field(default_factory=list)
     pi_summary: str = ""
     report_chapter: Optional[RoundReportChapter] = None
+    report_segment_id: Optional[str] = None
     conflicts: List[Dict[str, Any]] = Field(default_factory=list)
     next_steps: List[str] = Field(default_factory=list)
     new_findings: bool = True

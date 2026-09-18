@@ -335,6 +335,8 @@ export const en = {
 
     // Round Feedback Dialog
     roundComplete: 'Round {round} Complete',
+    downloadRoundReport: 'Download this round’s report (HTML)',
+    roundReportDownloadHint: 'Includes findings, figures, captions and conclusions for offline review.',
     roundSummaryTitle: 'Round Summary',
     keyFindings: 'Key Findings',
     additionalDataSuggested: 'Suggested Additional Data',

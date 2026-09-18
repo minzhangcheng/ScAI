@@ -694,12 +694,15 @@ async def _build_and_save_detailed_segment(
         round_result=round_result,
     )
     segment = DetailedReportSegment(
+        result_identity_key=getattr(round_result, "result_identity_key", ""),
         phase=phase,
         title=title,
         content_html=content_html,
         round_number=state.current_round,
     )
     state.detailed_report_segments.append(segment)
+    if round_result is not None:
+        round_result.report_segment_id = segment.id
 
     try:
         generate_combined_detailed_report_html(state)

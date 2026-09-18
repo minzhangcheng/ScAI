@@ -472,9 +472,16 @@ def _should_build_innovation_segment(analysis_state, round_result) -> bool:
     if round_result.phase != "innovation":
         return False
     phase = f"innovation_round_{analysis_state.current_round}"
-    return not any(
-        s.phase == phase for s in analysis_state.detailed_report_segments
-    )
+    for segment in analysis_state.detailed_report_segments:
+        if segment.phase != phase:
+            continue
+        if segment.result_identity_key:
+            if segment.result_identity_key != round_result.result_identity_key:
+                continue
+            # Reconnect/retry must retain the existing round's download handle.
+            round_result.report_segment_id = segment.id
+        return False
+    return True
 
 
 def _direction_result_is_coverage_eligible(result: RoundResult) -> bool:
@@ -637,6 +644,7 @@ def build_round_summary_payload(
         "round": round_result.round_number,
         "max_rounds": effective_max_rounds,
         "summary": round_result.pi_summary,
+        "report_segment_id": round_result.report_segment_id,
         "pathology_findings": round_result.pathology_findings,
         "pathology_coverage": [
             item.model_dump(mode="json")
