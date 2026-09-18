@@ -114,9 +114,9 @@ class SynthesisMixin:
         prompt = f"""
 Extract key findings from the following literature review (in list form):
 
-{report[:self._FINDINGS_EXTRACT_MAX_CHARS]}
-
 Please list 3-5 most important findings, one per line.
+
+{report[:self._FINDINGS_EXTRACT_MAX_CHARS]}
 """
 
         response = await self.chat_without_history(prompt, temperature=0.3)

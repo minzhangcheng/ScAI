@@ -1487,12 +1487,7 @@ from adjacent or background work. If no retrieved paper is directly relevant,
 state that plainly and do not cite adjacent papers as support for the target claim.
 """
 
-        prompt = f"""Based on the following PubMed articles, write a comprehensive literature review
-on the topic: {topic}
-
-Articles ({len(articles)} total):
-{articles_text}
-{evaluation_context}
+        prompt = f"""Based on the following PubMed articles, write a comprehensive literature review.
 
 Please include:
 1. Overview of the research field and key findings
@@ -1502,7 +1497,13 @@ Please include:
 5. Cite specific PMIDs that support each point (format: PMID: XXXXX)
 6. Gaps in current knowledge and future directions
 
-Write a well-structured review with clear sections."""
+Write a well-structured review with clear sections.
+
+Topic: {topic}
+
+Articles ({len(articles)} total):
+{articles_text}
+{evaluation_context}"""
 
         response, _ = await self._chat_with_fallback(prompt, temperature=0.4)
         return response

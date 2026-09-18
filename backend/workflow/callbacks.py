@@ -205,23 +205,27 @@ class CallbacksMixin:
 
         # Build plan context if an approved plan exists
         plan_context = ""
+        plan_progress = ""
         analysis_state = getattr(self, '_current_analysis_state', None)
         if analysis_state and analysis_state.current_plan and analysis_state.current_plan.status == "approved":
             plan = analysis_state.current_plan
             steps_summary = "\n".join(
-                f"  [{s.status}] Step {s.id}: {s.title}"
+                f"  Step {s.id}: {s.title}"
                 for s in plan.steps
             )
+            plan_progress = "\n\n## Current Plan Progress\n" + "\n".join(
+                f"  [{s.status}] Step {s.id}" for s in plan.steps
+            )
             plan_context = f"""
-
-## Current Analysis Plan (for reference)
-{steps_summary}
 
 If the question reveals that the current plan cannot be executed as-is, you should:
 1. First, determine if this is a MINOR adjustment (method switch, parameter change, skip step)
    or MAJOR revision (hypothesis change, new analysis branch, core objective removed)
 2. For MINOR: Provide direct actionable guidance
 3. For MAJOR: State clearly that a plan revision is needed and explain why
+
+## Current Analysis Plan (for reference)
+{steps_summary}
 """
         # Build stage context so PI knows the agent's current constraints
         stage_context = ""
@@ -244,15 +248,8 @@ If the question reveals that the current plan cannot be executed as-is, you shou
                     "The agent is now executing the approved Stage 2 analysis plan."
                 )
 
-        # Use PI agent to answer the biological question
+        # Keep reusable instructions and plan text ahead of per-call state.
         prompt = f"""The bioinformatics analyst is asking for your guidance on a biological decision:
-
-QUESTION: {question}
-
-CONTEXT FROM ANALYSIS:
-{context}
-{plan_context}
-{stage_context}
 
 Please provide clear guidance on:
 1. Your recommended decision/direction
@@ -262,7 +259,15 @@ Please provide clear guidance on:
 
 Be specific and actionable in your response.
 
-IMPORTANT: Respond in English only. Do not use any other language."""
+IMPORTANT: Respond in English only. Do not use any other language.
+{stage_context}
+{plan_context}
+{plan_progress}
+
+CONTEXT FROM ANALYSIS:
+{context}
+
+QUESTION: {question}"""
 
         try:
             response = await self.pi_agent.chat_without_history(prompt, temperature=self._settings_provider.get_temperature('pi'))

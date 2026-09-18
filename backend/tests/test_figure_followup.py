@@ -208,3 +208,41 @@ async def test_pi_consultation_is_durable_for_later_figure_review():
     assert record.planning_stage == "stage2"
     restored = AnalysisState.model_validate(state.model_dump(mode="json"))
     assert restored.pi_decision_records[0].response == record.response
+
+
+@pytest.mark.asyncio
+async def test_pi_consultation_keeps_plan_prefix_stable_as_progress_changes():
+    state = AnalysisState(id="pi-cache", user_id="user")
+    state.current_plan = AnalysisPlan(
+        id="plan-current", phase="innovation", status="approved",
+        steps=[PlanStep(
+            id=1, title="Summarize results", method="Summarize measured effects",
+            status="pending",
+        )],
+    )
+    host = CallbacksMixin.__new__(CallbacksMixin)
+    host.session_id = state.id
+    host._current_analysis_state = state
+    host._current_graph_state = {"planning_stage": "stage2"}
+    host._send_message = AsyncMock()
+    host._settings_provider = SimpleNamespace(get_temperature=lambda _agent: 0.1)
+    host.pi_agent = SimpleNamespace(chat_without_history=AsyncMock(return_value="Proceed."))
+
+    await host._pi_callback("First question?", "First evidence")
+    state.current_plan.steps[0].status = "completed"
+    await host._pi_callback("Second question?", "Updated evidence")
+    first, second = [call.args[0] for call in host.pi_agent.chat_without_history.await_args_list]
+    prefix, first_tail = first.split("## Current Plan Progress", 1)
+    second_prefix, second_tail = second.split("## Current Plan Progress", 1)
+
+    assert prefix == second_prefix
+    assert "Please provide clear guidance" in prefix
+    assert "CURRENT STAGE: Stage 2" in prefix
+    assert "Step 1: Summarize results" in prefix
+    assert "For MAJOR: State clearly that a plan revision is needed" in prefix
+    assert "[pending] Step 1" in first_tail
+    assert "[completed] Step 1" in second_tail
+    assert "First evidence" in first_tail and "QUESTION: First question?" in first_tail
+    assert "Updated evidence" in second_tail and "QUESTION: Second question?" in second_tail
+    assert "First evidence" not in second and "First question?" not in second
+    assert [r.question for r in state.pi_decision_records] == ["First question?", "Second question?"]

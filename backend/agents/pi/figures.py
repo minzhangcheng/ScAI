@@ -418,29 +418,11 @@ they are present, regardless of revision count.
         plan_requirement_block = self._figure_plan_requirement_text(state, figure)
         pi_decision_block = self._figure_pi_decision_text(state, figure)
 
+        # Keep review rules and project context ahead of per-figure changes.
         prompt = f"""## Figure Review for Publication Quality
 
 You are reviewing a figure for publication in a high-impact scientific journal.
 
-**Research Context:**
-Project: {state.name}
-Objective: {state.initial_instruction[:500] if state.initial_instruction else 'Biomedical research'}
-
-**Experimental Design (ACTUAL uploaded groups):**
-{state.build_experimental_design_summary()}
-Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatment_groups else 'No groups defined'}
-
-**CRITICAL CONSTRAINT:** The experiment contains ONLY the groups listed above. Do NOT suggest adding, referencing, or comparing groups that are not in the experimental design. If the figure shows groups not listed above, flag this as a critical data accuracy issue.
-
-**Figure Information:**
-- Name: {figure.name}
-- Type: {figure.figure_type}
-- Description: {figure.description}
-- Revision count: {figure.revision_count}
-{self._build_revision_history_text(figure)}
-{plan_requirement_block}
-{pi_decision_block}
-{layout_block}
 **Review Criteria:**
 1. **Scientific Accuracy**: Does the figure accurately represent the data?
 2. **Clarity**: Is the figure easy to understand? Are labels clear and readable?
@@ -477,6 +459,26 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
 - For UMAP/clustering plots: check color distinctness, label clarity, legend placement.
 - For heatmaps: check color scale, row/column labels, clustering dendrograms if applicable.
 - For violin/dotplots: check group comparisons, statistical annotations if needed.
+
+**Research Context:**
+Project: {state.name}
+Objective: {state.initial_instruction[:500] if state.initial_instruction else 'Biomedical research'}
+
+**Experimental Design (ACTUAL uploaded groups):**
+{state.build_experimental_design_summary()}
+Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatment_groups else 'No groups defined'}
+
+**CRITICAL CONSTRAINT:** The experiment contains ONLY the groups listed above. Do NOT suggest adding, referencing, or comparing groups that are not in the experimental design. If the figure shows groups not listed above, flag this as a critical data accuracy issue.
+
+**Figure Information:**
+- Name: {figure.name}
+- Type: {figure.figure_type}
+- Description: {figure.description}
+- Revision count: {figure.revision_count}
+{self._build_revision_history_text(figure)}
+{plan_requirement_block}
+{pi_decision_block}
+{layout_block}
 """
 
         # Apply progressive leniency for multiple revisions

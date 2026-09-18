@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.59.1 · **Last updated**: 2026-09-18
+**Version**: 0.59.2 · **Last updated**: 2026-09-18
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,12 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.59.x — (2026-09-18 onward)**
 
+- `0.59.2` — Optimizes prompt-cache prefix reuse across PI, Pathology, and
+  Literature agents. Stable instructions, response contracts, and reusable
+  context now precede per-request questions, progress, images, and retrieved
+  evidence; batch-specific indices and scientific context remain explicit at
+  the dynamic tail. Regression coverage verifies that changing request data
+  does not change the reusable prompt prefix.
 - `0.59.1` — Merges the report optimization work. PI synthesis now saves each
   round's chapter with finding-to-artifact references, reading order, captions,
   conclusions, and limitations. Final reports reuse those chapters and write

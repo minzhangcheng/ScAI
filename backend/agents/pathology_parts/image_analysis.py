@@ -110,9 +110,6 @@ async def _analyze_tile_batches(
         # production, the former "Tile N findings..." example was echoed
         # verbatim by the model and silently accepted as evidence.
         batch_prompt = f"""
-You are analyzing {len(batch_tiles)} regions (tiles {start_idx + 1} to {end_idx}) from a {image_info.data_type} stained tissue section.
-Total tiles in this section: {len(tiles_to_analyze)}
-
 For EACH tile in order, report only features that are directly visible in that
 tile and interpretable for the stated stain. Use observation-first language:
 describe the visible morphology or stain pattern, its distribution/localization,
@@ -120,15 +117,22 @@ and its approximate extent when defensible. Do not force every tile through a
 fixed disease checklist, infer an etiology, or reuse a generic category label
 such as "Cell morphology changes" as the finding itself.
 
-Return one JSON object with a "tile_findings" array containing EXACTLY {len(batch_tiles)} objects in image order.
+Return one JSON object with a "tile_findings" array containing one object per tile in image order.
 Each object must contain:
-- "tile_index": the zero-based integer index for that tile, beginning at {start_idx}
+- "tile_index": the zero-based integer index for that tile
 - "findings": a concrete, non-empty observation from that tile
 
 Never copy field descriptions, use ellipses, or return placeholders such as "Tile N findings".
 Do not repeat an identical abnormal sentence for different tiles; describe the
 tile-specific evidence. Identical explicit normal findings are allowed.
 If no abnormality is visible in a tile, use the explicit finding "No abnormality detected."
+
+Stain: {image_info.data_type}
+Total tiles in this section: {len(tiles_to_analyze)}
+
+## Current Batch
+You are analyzing {len(batch_tiles)} regions (tiles {start_idx + 1} to {end_idx}).
+Return EXACTLY {len(batch_tiles)} objects, with tile_index beginning at {start_idx}.
 """
 
         # Dynamic timeout: 30s per image on top of the default floor
@@ -279,10 +283,6 @@ async def analyze_image(
 
         # Analyze overview first
         overview_prompt = f"""
-This is an overview of a tissue section stained with {image_info.data_type}.
-
-Analysis instruction: {instruction}
-
 Please first describe the overall features of the section:
 1. What is the overall tissue architecture, and does it depart from the expected architecture
    for this tissue and stain? Say what you are comparing against
@@ -308,6 +308,10 @@ Please reply in JSON format:
     "severity_basis": "what the scale measures and what each level means, or why none applies",
     "areas_of_interest": ["Area 1 requiring detailed observation", ...]
 }}
+
+This is an overview of a tissue section stained with {image_info.data_type}.
+
+Analysis instruction: {instruction}
 """
 
         overview_result = await agent._call_llm_with_hitl(
@@ -381,15 +385,6 @@ Please reply in JSON format:
         combined_prompt = f"""
 Based on the following regional analysis results, please summarize the pathological findings for the entire section:
 
-## Overview Analysis
-{json.dumps(overview_data, ensure_ascii=False, indent=2)}
-
-## Regional Analysis
-{json.dumps(tile_findings, ensure_ascii=False, indent=2)}
-
-## Regional Coverage
-{valid_tiles}/{expected_tiles} tiles passed validation. Do not infer findings for omitted tiles.
-
 Please summarize:
 1. Main pathological findings (list format)
 2. Severity, graded only against a scale you can name and defend for THIS tissue, stain and
@@ -410,6 +405,15 @@ Reply in JSON format:
     "further_analysis": ["direction 1", ...],
     "suggested_staining": ["staining type 1", ...]
 }}
+
+## Overview Analysis
+{json.dumps(overview_data, ensure_ascii=False, indent=2)}
+
+## Regional Analysis
+{json.dumps(tile_findings, ensure_ascii=False, indent=2)}
+
+## Regional Coverage
+{valid_tiles}/{expected_tiles} tiles passed validation. Do not infer findings for omitted tiles.
 """
 
         combined_result = await agent._call_llm_with_hitl(

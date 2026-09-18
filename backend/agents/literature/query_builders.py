@@ -354,16 +354,6 @@ class QueryBuildersMixin:
 
         prompt = f"""Convert the following research topic into an optimized PubMed search query.
 
-Authoritative research question:
-{topic}
-
-Context for terminology and disambiguation only:
-Study species: {ctx.get("species") or "Not specified."}
-Experimental background:
-{ctx["initial_instruction"][:500] if ctx["initial_instruction"] else "Not available."}
-
-{extra_block}
-
 This context is not part of the authoritative question. Use it to understand terminology,
 but do not automatically convert it into PubMed filters.
 
@@ -385,7 +375,17 @@ Rules for PubMed query:
    scope — a genuinely novel topic with no directly relevant literature is a finding,
    and widening the query until something matches only replaces it with a different topic
 
-Return ONLY the PubMed query string, nothing else."""
+Return ONLY the PubMed query string, nothing else.
+
+Authoritative research question:
+{topic}
+
+Context for terminology and disambiguation only:
+Study species: {ctx.get("species") or "Not specified."}
+Experimental background:
+{ctx["initial_instruction"][:500] if ctx["initial_instruction"] else "Not available."}
+
+{extra_block}"""
 
         response, _ = await self._chat_with_fallback(prompt, temperature=0.2)
         # Clean up the response - remove quotes, markdown, etc.
@@ -406,6 +406,13 @@ Return ONLY the PubMed query string, nothing else."""
         ctx = self._build_research_context(topic, state, current_round_findings)
         prompt = f"""Revise a PubMed query that completed successfully but returned zero results.
 
+Return one concept-preserving PubMed query. Keep every concept explicitly required by the
+authoritative question. You may correct MeSH wording, add synonyms or gene aliases as OR
+alternatives, and remove species, tissue, model, treatment, or other constraints that came
+only from context. Do not replace the target mechanism or broaden to a different topic.
+
+Return ONLY the revised PubMed query string, nothing else.
+
 Authoritative research question:
 {topic}
 
@@ -415,14 +422,7 @@ Executed query:
 Context for terminology and disambiguation only:
 Study species: {ctx.get("species") or "Not specified."}
 Experimental background: {ctx["initial_instruction"][:500] or "Not available."}
-Current findings: {ctx["current_round_findings"][:300] or "Not available."}
-
-Return one concept-preserving PubMed query. Keep every concept explicitly required by the
-authoritative question. You may correct MeSH wording, add synonyms or gene aliases as OR
-alternatives, and remove species, tissue, model, treatment, or other constraints that came
-only from context. Do not replace the target mechanism or broaden to a different topic.
-
-Return ONLY the revised PubMed query string, nothing else."""
+Current findings: {ctx["current_round_findings"][:300] or "Not available."}"""
         response, _ = await self._chat_with_fallback(prompt, temperature=0.2)
         revised = response.strip().strip('"').strip("'").strip("`")
         revised = re.sub(r'^```\w*\n?', '', revised)

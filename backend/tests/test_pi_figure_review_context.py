@@ -87,3 +87,28 @@ async def test_figure_review_receives_the_linked_plan_deliverable():
     assert "Use the responder-versus-control contrast and label CXCL10" in prompt
     assert "Use an unrelated panel" not in prompt
     assert "merely attractive plot of the wrong result" in prompt
+
+
+    # A new render and later PI decision must not invalidate the review rules
+    # or the reusable project background at the beginning of the request.
+    figure.name = "de_result_revised"
+    figure.description = "Updated labels"
+    figure.revision_count = 2
+    state.pi_decision_records[0].response = "Label the revised contrast clearly."
+    await agent.review_figure(state, figure, "revised-base64")
+    revised_prompt = vision.await_args.kwargs["text_prompt"]
+    prefix, first_tail = prompt.split("**Figure Information:**", 1)
+    revised_prefix, revised_tail = revised_prompt.split("**Figure Information:**", 1)
+    assert prefix == revised_prefix
+    assert "**Review Criteria:**" in prefix
+    assert "**Respond in JSON format:**" in prefix
+    assert "**Critical review instructions:**" in prefix
+    assert "Project: Project" in prefix
+    assert prefix.index("**Respond in JSON format:**") < prefix.index("**Research Context:**")
+    assert "Name: de_result\n" in first_tail
+    assert "Name: de_result_revised\n" in revised_tail
+    assert "Updated labels" in revised_tail
+    assert "Label the revised contrast clearly." in revised_tail
+    assert "REVISION LENIENCY POLICY" in revised_tail
+    assert "REVISION LENIENCY POLICY" not in prompt
+    assert vision.await_args.kwargs["images"] == ["revised-base64"]
