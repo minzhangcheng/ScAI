@@ -410,9 +410,9 @@ def _deduplicate_detailed_figure_blocks(html: str) -> str:
 
     return figure_block_re.sub(_dedupe_figure, html)
 
-def render_detailed_report_document(state, *, segment=None) -> str:
+def render_detailed_report_document(state, *, segment=None, supplements=()) -> str:
     """Wrap retained HTML in a standalone document without regenerating findings."""
-    segments = [segment] if segment is not None else state.detailed_report_segments
+    segments = [segment, *supplements] if segment is not None else state.detailed_report_segments
     title = (
         f"Round {segment.round_number} Analysis Report"
         if segment is not None else "Detailed Analysis Report"

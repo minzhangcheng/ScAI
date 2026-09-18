@@ -1,6 +1,7 @@
 """Assemble and reuse round chapters; scientific ordering belongs to the PI."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -11,6 +12,16 @@ from backend.models.schema_parts.round_report import (
     RoundReportArtifact, RoundReportBlock, RoundReportChapter,
 )
 from .artifacts import archival_path_matches_record, artifact_stems, eligible_artifacts
+from .report_outline import report_result_identity
+
+
+def round_chapter_digest(result):
+    """Identify the exact saved chapter version independently of its round ID."""
+    chapter = getattr(result, "report_chapter", None)
+    if chapter is None:
+        return ""
+    payload = json.dumps(chapter.model_dump(mode="json"), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def round_artifact_catalog(state):
@@ -176,14 +187,27 @@ def saved_figure_captions(state, figure_map, tables):
 def reusable_sections(state, outline, figure_map, tables):
     """Project saved chapters into the final outline without another LLM call."""
     names = report_artifact_names(state, figure_map, tables)
-    rounds = {r.round_number: r for r in state.round_results}
+    rounds = {report_result_identity(r): r for r in state.round_results}
     sections = []
     for section in outline:
         # The final integration remains a global synthesis. Intermediate
         # integrations reuse the already retained PI report at their own position.
         if section.kind not in {"exploration", "direction", "integration_gate"}:
             continue
-        owned = [rounds[n] for n in section.rounds if n in rounds]
+        keys = section.result_keys
+        if not keys:
+            # Compatibility for callers supplying an older outline: phase must
+            # still match, and an ambiguous same-phase round is not guessed.
+            phase = {"exploration": "exploration", "direction": "innovation",
+                     "integration_gate": "integration"}[section.kind]
+            candidates = [r for r in rounds.values()
+                          if r.phase == phase and r.round_number in section.rounds]
+            if len(candidates) != len(section.rounds):
+                continue
+            keys = tuple(report_result_identity(r) for r in candidates)
+        if any(key not in rounds for key in keys):
+            continue
+        owned = [rounds[key] for key in keys]
         if not owned or not all(getattr(r, "report_chapter", None) for r in owned):
             continue
         sections.append({

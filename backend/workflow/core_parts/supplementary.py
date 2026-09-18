@@ -533,12 +533,22 @@ async def _run_supplementary_analysis(
 
     # Generate new detailed report segment
     seg_index = sum(1 for s in state.detailed_report_segments if "supplementary" in s.phase)
-    await self._build_and_save_detailed_segment(
+    segment = await self._build_and_save_detailed_segment(
         state,
         f"supplementary_{context}_{seg_index}",
         f"Supplementary Analysis: {request_text[:60]}",
         graph_state=self._current_graph_state,
     )
+    report_round = next((
+        result for result in reversed(state.round_results)
+        if result.round_number == state.current_round
+        and result.lineage_id == (state.restore_branch_id or "main")
+        and (context != "round" or result.phase != "integration")
+    ), None)
+    if report_round is not None and report_round.report_segment_id:
+        # Supplementary segments keep their own content and order. Associate
+        # them explicitly rather than collecting every segment with this number.
+        report_round.report_supplement_ids.append(segment.id)
 
     await self._send_message(
         "status",

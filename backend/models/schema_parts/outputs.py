@@ -70,6 +70,7 @@ class RoundResult(BaseModel):
     pi_summary: str = ""
     report_chapter: Optional[RoundReportChapter] = None
     report_segment_id: Optional[str] = None
+    report_supplement_ids: List[str] = Field(default_factory=list)
     conflicts: List[Dict[str, Any]] = Field(default_factory=list)
     next_steps: List[str] = Field(default_factory=list)
     new_findings: bool = True

@@ -162,8 +162,11 @@ async def get_round_report_html(
     segment = next((s for s in state.detailed_report_segments if s.id == segment_id), None)
     if result is None or segment is None or not segment.content_html:
         raise HTTPException(status_code=404, detail="Round report not available for this branch")
+    by_id = {item.id: item for item in state.detailed_report_segments}
+    supplements = [by_id[sid] for sid in dict.fromkeys(result.report_supplement_ids)
+                   if sid in by_id and sid != segment.id]
     return HTMLResponse(
-        render_detailed_report_document(state, segment=segment),
+        render_detailed_report_document(state, segment=segment, supplements=supplements),
         headers={
             "Content-Disposition": f'attachment; filename="round_{result.round_number}_report.html"',
             "Cache-Control": "no-store",

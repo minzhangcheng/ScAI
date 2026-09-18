@@ -417,6 +417,9 @@ def _upsert_round_result(
     if target_index is None:
         normalized.append(result)
     else:
+        result.report_supplement_ids = list(dict.fromkeys(
+            normalized[target_index].report_supplement_ids + result.report_supplement_ids
+        ))
         normalized[target_index] = result
     results[:] = normalized
     return result
@@ -467,20 +470,27 @@ def _should_build_innovation_segment(analysis_state, round_result) -> bool:
     flipped to INNOVATION at the end of the exploration round and would
     otherwise spawn a spurious 'innovation_round_1' segment for round 1.
 
-    Deduplicates by phase to stay idempotent across node retries.
+    Reuse an identical chapter on retry; revisions must refresh its report.
     """
     if round_result.phase != "innovation":
         return False
     phase = f"innovation_round_{analysis_state.current_round}"
-    for segment in analysis_state.detailed_report_segments:
+    from ...services.report.round_chapters import round_chapter_digest
+    from ...services.report.report_outline import report_result_identity
+
+    digest = round_chapter_digest(round_result)
+    for segment in reversed(analysis_state.detailed_report_segments):
         if segment.phase != phase:
             continue
         if segment.result_identity_key:
-            if segment.result_identity_key != round_result.result_identity_key:
+            if segment.result_identity_key != report_result_identity(round_result):
                 continue
-            # Reconnect/retry must retain the existing round's download handle.
+            if segment.chapter_sha256 != digest:
+                return True
             round_result.report_segment_id = segment.id
-        return False
+            return False
+        if not digest:
+            return False  # Preserve the legacy no-chapter retry behavior.
     return True
 
 

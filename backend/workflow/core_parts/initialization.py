@@ -688,19 +688,33 @@ async def _build_and_save_detailed_segment(
         generate_combined_detailed_report_html,
     )
 
+    from ...services.report.round_chapters import round_chapter_digest
+    from ...services.report.report_outline import report_result_identity
+
     content_html = generate_detailed_report_segment_html(
         state, phase, title,
         graph_state=dict(graph_state) if graph_state else None,
         round_result=round_result,
     )
     segment = DetailedReportSegment(
-        result_identity_key=getattr(round_result, "result_identity_key", ""),
+        result_identity_key=report_result_identity(round_result) if round_result is not None else "",
+        chapter_sha256=round_chapter_digest(round_result),
         phase=phase,
         title=title,
         content_html=content_html,
         round_number=state.current_round,
     )
-    state.detailed_report_segments.append(segment)
+    previous_index = next((
+        index for index, previous in enumerate(state.detailed_report_segments)
+        if segment.result_identity_key and previous.phase == phase
+        and previous.result_identity_key == segment.result_identity_key
+    ), None)
+    if previous_index is None:
+        state.detailed_report_segments.append(segment)
+    else:
+        # Refresh content in place so already-delivered download links stay valid.
+        segment.id = state.detailed_report_segments[previous_index].id
+        state.detailed_report_segments[previous_index] = segment
     if round_result is not None:
         round_result.report_segment_id = segment.id
 

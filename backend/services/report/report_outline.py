@@ -70,6 +70,7 @@ class OutlineSection:
     analysis_type: str = "general"
     guidance: str = ""
     figure_policy: str = FIGURE_POLICY_PREFER
+    result_keys: Tuple[str, ...] = ()
 
     @property
     def owns_figures(self) -> bool:
@@ -87,6 +88,20 @@ class OutlineSection:
     @property
     def is_brief(self) -> bool:
         return self.kind == "integration_gate"
+
+
+def report_result_identity(result: Any) -> str:
+    """Use the workflow identity, including for records written before it existed."""
+    from backend.workflow.direction_coverage import build_result_identity_key, normalize_direction_key
+
+    return getattr(result, "result_identity_key", "") or build_result_identity_key(
+        getattr(result, "lineage_id", "") or "main",
+        getattr(result, "phase", "") or "exploration",
+        int(result.round_number),
+        getattr(result, "direction_key", "") or normalize_direction_key(
+            getattr(result, "direction", "") or ""
+        ),
+    )
 
 
 def _phase_of(rr: Any) -> str:
@@ -197,6 +212,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
         sections.append(OutlineSection(
             "exploration_findings", "exploration", "Phase 1 Exploration Findings",
             exploration_rounds, analysis_type="specific",
+            result_keys=tuple(report_result_identity(rr) for rr in rounds if _phase_of(rr) == "exploration"),
             guidance=(
                 "What the unbiased first pass found: composition, cell states and quality "
                 "characteristics of the data, plus the research directions it motivated"
@@ -220,6 +236,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
             sections.append(OutlineSection(
                 f"direction_{direction_index}", "direction",
                 f"Innovation Round {rn}", (rn,), analysis_type="specific",
+                result_keys=(report_result_identity(rr),),
                 guidance=(
                     f"Innovation round {rn} — research direction: {short}. State the "
                     f"hypothesis, the targeted analyses run against it, the findings and "
@@ -234,6 +251,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
                     f"integration_gate_{gate_index}", "integration_gate",
                     f"Integration Cycle {gate_index}", (rn,),
                     figure_policy=FIGURE_POLICY_TEXT_ONLY,
+                    result_keys=(report_result_identity(rr),),
                     guidance=(
                         f"Integration cycle {gate_index} (round {rn}) — a hinge between "
                         f"directions, not a findings chapter. Answer exactly two questions: "
@@ -249,6 +267,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
                     "integrated_findings", "integration_final",
                     "Integrated Findings Across All Phases", (rn,), analysis_type="specific",
                     figure_policy=FIGURE_POLICY_TEXT_ONLY,
+                    result_keys=(report_result_identity(rr),),
                     guidance=(
                         "Closing cross-direction synthesis: how the directions converge, "
                         "which mechanisms they jointly support, where they remain in "
