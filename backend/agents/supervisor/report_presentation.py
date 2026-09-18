@@ -43,8 +43,8 @@ async def build_report_figures(self, ctx, analysis_state):
     }
     for fig_name, fig_path in figure_map.items():
         stem = Path(fig_name).stem
-        record = records_by_stem.get(stem) or records_by_stem.get(fig_path.stem)
-        metadata = figure_metadata_by_stem.get(stem, {})
+        record = ctx.get("figure_records_by_name", {}).get(fig_name) or records_by_stem.get(stem) or records_by_stem.get(fig_path.stem)
+        metadata = figure_metadata_by_stem.get(fig_name, figure_metadata_by_stem.get(stem, {}))
         legacy_record = legacy_by_stem.get(stem) or legacy_by_stem.get(fig_path.stem)
         if record is not None:
             metadata = {
@@ -190,6 +190,8 @@ async def assemble_and_persist_report(self, ctx, analysis_state):
         "figures": report_figures,
         "round_chapter_captions": ctx.get("saved_figure_captions", {}),
         "round_chapter_artifacts": sorted(ctx.get("reserved_names", set())),
+        "saved_context_budget": ctx.get("saved_context_budget", {}),
+        "saved_context_budget_retries": ctx.get("saved_context_budget_retries", []),
         "tables": table_list,
         "graphic_abstract_path": ga_path,  # Path for zip download
         "generated_at": datetime.now().isoformat(),

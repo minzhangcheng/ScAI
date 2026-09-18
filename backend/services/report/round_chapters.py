@@ -277,10 +277,10 @@ def reusable_sections(state, outline, figure_map, tables, *, names=None):
     return sections
 
 
-def reuse_context(sections):
+def reuse_context(sections, *, max_chars=None):
     if not sections:
         return ""
-    return (
+    context = (
         "\n\n## Saved PI Round Chapters (read-only context)\n"
         "These chapters are already written and will be inserted verbatim. "
         "Do not emit, paraphrase, or reorder them or their artifacts. Write only "
@@ -289,8 +289,37 @@ def reuse_context(sections):
         + "\n\n".join(f"## [{s['id']}] {s['title']}\n{s['content']}" for s in sections)
     )
 
+    if max_chars is None or len(context) <= max_chars:
+        return context
+    max_chars = max(0, max_chars)
+    header = (
+        "\n\n## Saved PI Round Chapters — Budgeted Excerpts\n"
+        "Only excerpts are provided for global synthesis; missing text is not missing evidence. "
+        "Do not invent omitted findings or claim a complete cross-round assessment. "
+        "Complete saved chapters will be inserted verbatim; do not rewrite them.\n"
+    )
+    if len(header) > max_chars:
+        return "[Saved chapter context omitted for budget; full chapters remain in the report.]"[:max_chars]
+    # Equal space per chapter, preserving both its opening question and closing
+    # conclusions. This is technical truncation, not a ranking of findings.
+    per_section = max(0, (max_chars - len(header)) // len(sections))
+    parts = [header]
+    for section in sections:
+        text = f"\n## [{section['id']}] {section['title']}\n{section['content']}"
+        if len(text) > per_section:
+            marker = "\n[... chapter excerpt omitted for context budget ...]\n"
+            if per_section <= len(marker):
+                text = text[:per_section]
+            else:
+                keep = per_section - len(marker)
+                head = (keep + 1) // 2
+                tail = keep // 2
+                text = text[:head] + marker + (text[-tail:] if tail else "")
+        parts.append(text)
+    return "".join(parts)
 
-def reserved_artifact_names(saved, figure_names=(), table_names=()):
+
+def reserved_artifact_names(saved):
     """Protect saved references by kind, including references with missing bytes."""
     reserved = {"FIGURE": set(), "TABLE": set()}
     for section in saved:
@@ -298,23 +327,27 @@ def reserved_artifact_names(saved, figure_names=(), table_names=()):
             reserved[ref["kind"].upper()].add(ref["filename"])
         for kind, name in re.findall(r'\[(FIGURE|TABLE):\s*([^\]]+)\]', section["content"]):
             reserved[kind].add(name.strip())
-    for kind, candidates in (("FIGURE", figure_names), ("TABLE", table_names)):
-        stems = {Path(name).stem for name in reserved[kind]}
-        reserved[kind].update(name for name in candidates if Path(name).stem in stems)
     return reserved
 
 
-def merge_reusable_sections(generated, saved):
+def merge_reusable_sections(generated, saved, *, figure_names=(), table_names=()):
     """Keep model output from replacing a saved chapter or claiming its assets."""
     saved_ids = {s["id"] for s in saved}
     reserved = reserved_artifact_names(saved)
     reserved_stems = {kind: {Path(name).stem for name in names}
                       for kind, names in reserved.items()}
+    known = {"FIGURE": set(figure_names), "TABLE": set(table_names)}
+    def is_reserved(kind, name):
+        # A real exact filename wins over extension fallback. An unknown alias
+        # must still not steal a saved figure through the renderer fallback.
+        return (name in reserved[kind] or (name not in known[kind]
+                and Path(name).stem in reserved_stems[kind]))
+
     merged = [s for s in generated if s.get("id") not in saved_ids]
     for section in merged:
         section["content"] = re.sub(
             r'\[(FIGURE|TABLE):\s*([^\]]+)\]\s*(?:\[\1_CAPTION:\s*[^\]]*\])?',
-            lambda m: "" if Path(m.group(2).strip()).stem in reserved_stems[m.group(1).upper()] else m.group(0),
+            lambda m: "" if is_reserved(m.group(1).upper(), m.group(2).strip()) else m.group(0),
             section.get("content", ""), flags=re.I,
         )
     return merged + saved

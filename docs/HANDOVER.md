@@ -299,6 +299,11 @@ recorded data-drift notices are disclosed separately. Invalid inline media marku
 is removed from PI prose with an assembly note, without discarding the chapter.
 Degraded final reports retain the fallback summary and saved chapters without
 materializing empty sections from the planned outline.
+Saved references reserve exact render names; distinct registered renders sharing a
+stem remain available to other chapters, with byte-bound metadata. Unknown
+extension aliases cannot steal saved references. Global writing receives bounded
+chapter excerpts when necessary, while published chapters remain complete. The
+report JSON records initial and continuation `saved_context_budget` observations.
 
 Two detailed-report generators must remain aligned: `backend/agents/supervisor_agent.py` is the live generation path, while `backend/services/report/generator.py` is the fallback. Shared report services provide planning, sections, figures, rendering, scoring, variants, and regeneration. Exploration and integrated reports use the workflow/report variants alongside the detailed HTML report.
 
