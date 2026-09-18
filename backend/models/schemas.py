@@ -959,6 +959,7 @@ class AnalysisState(BaseModel):
 
         return [
             {"round": r["round_number"], "pi_summary": r["pi_summary"],
+             "report_segment_id": r.get("report_segment_id"),
              "phase": r.get("phase", "exploration"),
              "pathology_findings": r["pathology_findings"],
              "pathology_coverage": r.get("pathology_coverage", []),

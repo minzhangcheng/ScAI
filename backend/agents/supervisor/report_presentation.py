@@ -626,7 +626,7 @@ def render_html_sections(self, ctx):
         # Fallback: embed figures referenced by filename in text but without markers
         remaining_fig_parts = []
         for fig_name in figure_b64_cache:
-            if fig_name in placed_figures:
+            if fig_name in placed_figures or sec.get("saved_round_chapter"):
                 continue
             if fig_name in ctx["report"].get("round_chapter_captions", {}):
                 continue
@@ -639,7 +639,7 @@ def render_html_sections(self, ctx):
         # Fallback: embed tables referenced by filename in text but without markers
         remaining_tbl_parts = []
         for tbl_filename in table_lookup:
-            if tbl_filename in placed_tables:
+            if tbl_filename in placed_tables or sec.get("saved_round_chapter"):
                 continue
             if tbl_filename in ctx["report"].get("round_chapter_artifacts", []):
                 continue

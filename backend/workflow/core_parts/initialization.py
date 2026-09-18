@@ -688,7 +688,7 @@ async def _build_and_save_detailed_segment(
         generate_combined_detailed_report_html,
     )
 
-    from ...services.report.round_chapters import round_chapter_digest
+    from ...services.report.round_chapters import round_chapter_digest, round_segment_index
     from ...services.report.report_outline import report_result_identity
 
     content_html = generate_detailed_report_segment_html(
@@ -704,11 +704,7 @@ async def _build_and_save_detailed_segment(
         content_html=content_html,
         round_number=state.current_round,
     )
-    previous_index = next((
-        index for index, previous in enumerate(state.detailed_report_segments)
-        if segment.result_identity_key and previous.phase == phase
-        and previous.result_identity_key == segment.result_identity_key
-    ), None)
+    previous_index = round_segment_index(state, phase, round_result)
     if previous_index is None:
         state.detailed_report_segments.append(segment)
     else:

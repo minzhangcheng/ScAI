@@ -24,15 +24,47 @@ def round_chapter_digest(result):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def round_segment_index(state, phase, result):
+    """Find a prior segment, adopting legacy ownership only when unambiguous."""
+    if result is None:
+        return None
+    key = report_result_identity(result)
+    for index, segment in enumerate(state.detailed_report_segments):
+        if segment.phase == phase and segment.result_identity_key == key:
+            return index
+    candidates = [(index, segment) for index, segment in enumerate(state.detailed_report_segments)
+                  if not segment.result_identity_key and segment.phase == phase
+                  and segment.round_number == result.round_number]
+    if len(candidates) != 1:
+        return None
+    index, segment = candidates[0]
+    owners = {report_result_identity(r) for r in state.round_results
+              if r.round_number == result.round_number and r.phase == result.phase}
+    if owners - {key}:
+        return None
+    # A cloned report may still be owned by an ancestor. Missing legacy lineage
+    # cannot be reconstructed from a matching round number alone.
+    if result.inherited_from_lineage_id:
+        return None
+    if result.report_segment_id == segment.id:
+        return index
+    if result.lineage_id == "main" and not state.restore_branch_id:
+        return index
+    return None
+
+
 def round_artifact_catalog(state):
     """Offer registered artifacts of this round, retaining their exact identity."""
     catalog = []
+    visible_rounds = {state.current_round}
+    if state.current_round == 1 and state.analysis_phase == "exploration":
+        visible_rounds.add(0)
     for kind, records, path_field in (
         ("figure", state.publication_figures, "png_path"),
         ("table", state.publication_tables, "csv_path"),
     ):
         for record in eligible_artifacts(records, state=state):
-            if record.round_number != state.current_round:
+            if record.round_number not in visible_rounds:
                 continue
             catalog.append(RoundReportArtifact(
                 artifact_id=record.id,
@@ -215,6 +247,11 @@ def reusable_sections(state, outline, figure_map, tables):
             "title": owned[0].report_chapter.title,
             "content": "\n\n".join(chapter_markdown(r.report_chapter, names) for r in owned),
             "analysis_type": section.analysis_type,
+            "saved_round_chapter": True,
+            "artifact_references": [
+                a.model_dump(exclude={"caption"})
+                for r in owned for a in r.report_chapter.artifacts
+            ],
             "figures": [], "tables": [],
         })
     return sections
@@ -233,15 +270,31 @@ def reuse_context(sections):
     )
 
 
-def merge_reusable_sections(generated, saved, reserved_names):
+def reserved_artifact_names(saved, figure_names=(), table_names=()):
+    """Protect saved references by kind, including references with missing bytes."""
+    reserved = {"FIGURE": set(), "TABLE": set()}
+    for section in saved:
+        for ref in section.get("artifact_references", []):
+            reserved[ref["kind"].upper()].add(ref["filename"])
+        for kind, name in re.findall(r'\[(FIGURE|TABLE):\s*([^\]]+)\]', section["content"]):
+            reserved[kind].add(name.strip())
+    for kind, candidates in (("FIGURE", figure_names), ("TABLE", table_names)):
+        stems = {Path(name).stem for name in reserved[kind]}
+        reserved[kind].update(name for name in candidates if Path(name).stem in stems)
+    return reserved
+
+
+def merge_reusable_sections(generated, saved):
     """Keep model output from replacing a saved chapter or claiming its assets."""
     saved_ids = {s["id"] for s in saved}
-    reserved_stems = {Path(name).stem for name in reserved_names}
+    reserved = reserved_artifact_names(saved)
+    reserved_stems = {kind: {Path(name).stem for name in names}
+                      for kind, names in reserved.items()}
     merged = [s for s in generated if s.get("id") not in saved_ids]
     for section in merged:
         section["content"] = re.sub(
             r'\[(FIGURE|TABLE):\s*([^\]]+)\]\s*(?:\[\1_CAPTION:\s*[^\]]*\])?',
-            lambda m: "" if Path(m.group(2).strip()).stem in reserved_stems else m.group(0),
+            lambda m: "" if Path(m.group(2).strip()).stem in reserved_stems[m.group(1)] else m.group(0),
             section.get("content", ""),
         )
     return merged + saved

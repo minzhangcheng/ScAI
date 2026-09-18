@@ -417,6 +417,7 @@ def _upsert_round_result(
     if target_index is None:
         normalized.append(result)
     else:
+        result.report_segment_id = result.report_segment_id or normalized[target_index].report_segment_id
         result.report_supplement_ids = list(dict.fromkeys(
             normalized[target_index].report_supplement_ids + result.report_supplement_ids
         ))

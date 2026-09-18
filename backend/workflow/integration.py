@@ -214,6 +214,17 @@ class IntegrationMixin:
                 f"boundary ({_capture_outcome.disclosure})."
             ]
 
+        try:
+            await self._build_and_save_detailed_segment(
+                analysis_state,
+                f"integration_cycle_{analysis_state.integration_cycle}",
+                f"Integration Cycle {analysis_state.integration_cycle} — Cross-Direction Analysis",
+                graph_state=state,
+                round_result=integration_result,
+            )
+        except Exception as e:
+            logger.warning(f"[{session_id}] Integration detailed segment failed: {e}")
+
         # Send round_summary so the frontend shows this integration round
         effective_max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
         no_wait = analysis_state.round_wait_seconds == 0
@@ -228,17 +239,6 @@ class IntegrationMixin:
             wait_policy=wait_policy,
         )
         await self._send_message("round_summary", round_summary, AgentType.PI)
-
-        try:
-            await self._build_and_save_detailed_segment(
-                analysis_state,
-                f"integration_cycle_{analysis_state.integration_cycle}",
-                f"Integration Cycle {analysis_state.integration_cycle} — Cross-Direction Analysis",
-                graph_state=state,
-                round_result=integration_result,
-            )
-        except Exception as e:
-            logger.warning(f"[{session_id}] Integration detailed segment failed: {e}")
 
         try:
             from ..services.report import generate_integration_report_html

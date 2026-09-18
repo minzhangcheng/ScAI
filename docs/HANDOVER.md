@@ -287,6 +287,13 @@ that rank, while the API, CLI and prune use the derived `deletion_order`.
 
 ## 10. Reports and Operations
 
+New analyses save PI-authored round chapters, including single-pass exploration.
+Their final reports reuse those chapters under the round-based outline and add
+global methods and synthesis sections. Older single-pass sessions without saved
+chapters retain the type-organised outline described in historical release notes.
+Round downloads preserve their link across chapter revisions and include explicitly
+associated supplementary segments; session reloads retain the download identifier.
+
 Two detailed-report generators must remain aligned: `backend/agents/supervisor_agent.py` is the live generation path, while `backend/services/report/generator.py` is the fallback. Shared report services provide planning, sections, figures, rendering, scoring, variants, and regeneration. Exploration and integrated reports use the workflow/report variants alongside the detailed HTML report.
 
 Publication figures pass two reviewers of different standing before a report can carry them. The vision reviewers *judge*: PI `review_figure` (`agents/pi/figures.py`) is the blocking one, while `SupervisorAgent` evaluates any step that produced a figure and is advisory only — its verdict appends a `[Supervisor]` message and cannot reject anything, because `force_skip` derives from `code_error` alone and a figure that rendered has none. The linter *measures*: `services/figure_layout.py` supplies source injected into the publication-figure wrapper, which draws the figure inside the kernel before `savefig`, asks the renderer for every text artist's window extent, and prints one `__SCAI_LAYOUT_LINT__` line. It runs in the kernel because only the kernel holds a live `Figure`; the backend ever sees JPEG bytes. Every violation carries its own `severity`: `text_over_text` and `text_over_foreign_axes` can block or advise according to what collided, `tick_label_collision` blocks, and `tiny_text` advises. There is deliberately no out-of-canvas check because every report save uses `bbox_inches='tight'`. Consumers must read `severity`, never infer it from `kind`. A blocking violation is not overridable by either reviewer while revision budget remains, and `is_report_eligible` rejects it regardless of `review_status`. An absent verdict means unverified, not clean — `lint_ran()` distinguishes them.

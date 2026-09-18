@@ -105,6 +105,7 @@ def enforce_figure_placement(
     known_figures: Iterable[str],
     figure_order: Optional[Dict[str, float]] = None,
     figure_captions: Optional[Dict[str, str]] = None,
+    protected_sections: Iterable[str] = (),
 ) -> FigurePlacementReport:
     """Rewrite ``sections`` in place so every figure sits in its round's section.
 
@@ -118,6 +119,8 @@ def enforce_figure_placement(
         figure_captions: Optional authoritative caption by exact filename.
             Registered publication metadata should be supplied here so a model
             cannot relabel a bar plot as a UMAP from filename guesswork.
+        protected_sections: Saved chapters whose bound markers retain their order;
+            unbound figures remain supplementary instead of being appended there.
 
     Returns:
         A :class:`FigurePlacementReport` describing the corrections applied.
@@ -125,6 +128,7 @@ def enforce_figure_placement(
     report = FigurePlacementReport()
     known = {name for name in known_figures if name}
     authoritative_captions = figure_captions or {}
+    protected_sections = set(protected_sections)
     if not sections:
         report.unplaced = sorted(known)
         return report
@@ -191,9 +195,14 @@ def enforce_figure_placement(
             if fig in placed:
                 report.duplicates_removed.append((fig, sid))
                 return ""
+            if sid in protected_sections:
+                placed.add(fig)
+                return match.group(0)
             authoritative_caption = authoritative_captions.get(fig) or ""
             caption = authoritative_caption or caption
             target = _target_for(fig)
+            if target in protected_sections:
+                return ""  # An unbound candidate must not be added to a saved chapter.
             if target is None or target == sid:
                 # Correctly placed, or unattributable — leave it where the model
                 # put it. An unattributable figure has no better home to move to.
@@ -214,7 +223,7 @@ def enforce_figure_placement(
         target = _target_for(fig)
         if target is None:
             target = fallback_id
-        if target is None:
+        if target is None or target in protected_sections:
             report.unplaced.append(fig)
             continue
         pending.setdefault(target, []).append(

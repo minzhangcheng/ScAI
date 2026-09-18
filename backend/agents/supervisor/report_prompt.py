@@ -5,6 +5,7 @@ from ...constants import NO_OUTPUT_TOKEN_CAP
 from ...services.report.quality import build_quality_disclosures
 from ...services.report.round_chapters import (
     merge_reusable_sections, reusable_sections, reuse_context, saved_figure_captions,
+    reserved_artifact_names,
 )
 
 
@@ -656,13 +657,12 @@ async def prepare_report_generation(
     saved_ids = {section["id"] for section in saved_sections}
     writing_outline = [section for section in outline if section.id not in saved_ids]
     saved_context = reuse_context(saved_sections)
-    reserved_names = {
-        match.group(1).strip()
-        for section in saved_sections
-        for match in re.finditer(r'\[(?:FIGURE|TABLE):\s*([^\]]+)\]', section["content"])
-    }
-    writing_figures = {name: path for name, path in figure_map.items() if name not in reserved_names}
-    writing_tables = [table for table in table_list if table["filename"] not in reserved_names]
+    reserved = reserved_artifact_names(
+        saved_sections, figure_map, [table["filename"] for table in table_list],
+    )
+    reserved_names = reserved["FIGURE"] | reserved["TABLE"]
+    writing_figures = {name: path for name, path in figure_map.items() if name not in reserved["FIGURE"]}
+    writing_tables = [table for table in table_list if table["filename"] not in reserved["TABLE"]]
 
     await _progress(15, "Generating report content...")
 
@@ -880,7 +880,7 @@ async def parse_and_place_report(
     sections = self._parse_report_sections(report_content, language, outline=outline)
     saved_sections = ctx.get("saved_sections", [])
     if saved_sections:
-        sections = merge_reusable_sections(sections, saved_sections, ctx.get("reserved_names", set()))
+        sections = merge_reusable_sections(sections, saved_sections)
 
     # For a normal report this is populated by the placement pass below. A
     # degraded fallback keeps its fixed three-section body, but that must not
@@ -924,7 +924,7 @@ async def parse_and_place_report(
             )
             if saved_sections:
                 sections = merge_reusable_sections(
-                    sections, saved_sections, ctx.get("reserved_names", set()),
+                    sections, saved_sections,
                 )
 
         # Reading order follows the outline, not the order the model emitted.
@@ -962,16 +962,19 @@ async def parse_and_place_report(
         figure_order = {
             name: float(index) for index, name in enumerate(figure_map)
         }
+        protected_figures = reserved_artifact_names(saved_sections, figure_map)["FIGURE"]
         placement = enforce_figure_placement(
             sections, outline, attribution, figure_map.keys(),
             figure_order=figure_order,
+            protected_sections={s["id"] for s in saved_sections},
             figure_captions={
                 name: (
                     figure_metadata_by_stem.get(Path(name).stem, {}).get("description")
                     or figure_metadata_by_stem.get(Path(name).stem, {}).get("interpretation")
                     or ""
                 )
-                for name in figure_map if name not in ctx.get("reserved_names", set())
+                for name in figure_map
+                if name not in protected_figures
             },
         )
         if placement.unplaced:

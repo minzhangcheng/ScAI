@@ -233,13 +233,19 @@ INNOVATION PHASE — focused synthesis:
                 reanalysis_agents=reanalysis_next,
             )
 
-        # If we have a response but couldn't parse JSON, use it as summary
+        # The raw response remains in the recorded LLM exchange. Do not turn
+        # malformed JSON or unexpected prose into a report-ready conclusion.
         if response and response.strip():
+            summary = (
+                f"Round {state.current_round} PI synthesis could not be parsed. "
+                "No synthesized conclusion is available; retained agent findings "
+                "and artifact captions remain available for review."
+            )
             return RoundResult(
                 round_number=state.current_round,
-                pi_summary=response,
+                pi_summary=summary,
                 report_chapter=assemble_round_chapter(
-                    None, catalog, response, state.current_round,
+                    None, catalog, summary, state.current_round,
                 ),
                 new_findings=True,
                 reanalysis_agents=[]

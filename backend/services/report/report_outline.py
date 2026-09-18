@@ -180,9 +180,9 @@ def _legacy_outline(state: Any) -> List[OutlineSection]:
 def build_report_outline(state: Any) -> List[OutlineSection]:
     """Derive the report outline from the rounds that actually ran.
 
-    Returns sections in presentation order. When no innovation round is present
-    the legacy type-organised outline is returned unchanged, so single-pass
-    analyses keep the report shape they have always had.
+    Saved PI chapters use the round-based outline, including single-pass runs.
+    Older single-pass sessions without saved chapters keep their type-organised
+    outline. Global sections provide methodology and cross-round context.
     """
     rounds = _sorted_rounds(state)
     innovation = [rr for rr in rounds if _phase_of(rr) == "innovation"]
@@ -222,6 +222,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
     # Innovation and integration rounds, in round order. An integration round is
     # a gate when innovation work follows it, and the closing chapter otherwise.
     last_innovation_round = int(innovation[-1].round_number) if innovation else 0
+    last_integration = next((rr for rr in reversed(rounds) if _phase_of(rr) == "integration"), None)
     direction_index = 0
     gate_index = 0
     final_integration_seen = False
@@ -245,7 +246,7 @@ def build_report_outline(state: Any) -> List[OutlineSection]:
                 ),
             ))
         elif phase == "integration":
-            if rn < last_innovation_round:
+            if rn < last_innovation_round or rr is not last_integration:
                 gate_index += 1
                 sections.append(OutlineSection(
                     f"integration_gate_{gate_index}", "integration_gate",
