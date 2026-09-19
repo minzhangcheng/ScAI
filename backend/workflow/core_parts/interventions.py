@@ -14,7 +14,7 @@ def bind_facade(facade) -> None:
 # reached after the LLM client already exhausted its own retries, so this is a
 # second-order budget: enough for a transient upstream to clear, small enough
 # that an automated run cannot spend hours re-running an expensive node.
-UNATTENDED_GATE_MAX_AUTO_RETRIES = 3
+UNATTENDED_GATE_MAX_AUTO_RETRIES = 2
 
 
 async def _unattended_gate_backoff(event, attempt: int) -> None:
@@ -105,12 +105,18 @@ async def _drive_hitl_gate(
     Callers parameterize only what differs; behavior is otherwise identical
     across LLM-failure, disabled-agent, and marker-db gates.
 
-    ``wait_seconds=None`` inherits the session's ``round_wait_seconds``, the
-    same setting every other HITL gate honours.  A caller that supplies its
-    own budget owns its unattended path and should pass ``auto_retry=False``.
+    Exceptional gates never inherit routine decision countdowns. After at
+    most two automatic retries, only an explicit user action can resolve them.
+    ``wait_seconds`` and ``require_explicit_resolution`` remain accepted for
+    compatibility; neither can enable an automatic skip.
     """
+    # The first two failure dialogs auto-retry; the third stays open. This is
+    # a gate-local policy, independent of the routine round decision timeout.
     effective_wait = (
-        analysis_state.round_wait_seconds if wait_seconds is None else wait_seconds
+        0
+        if auto_retry
+        and self._unattended_gate_retries.get(node_name, 0) < UNATTENDED_GATE_MAX_AUTO_RETRIES
+        else -1
     )
     async with self._llm_failure_lock:
         gen = self._next_generation(node_name)
@@ -132,22 +138,15 @@ async def _drive_hitl_gate(
         await self._send_state_sync(analysis_state, enter_change)
 
     try:
-        # Gates inherit the session's round_wait_seconds unless the caller
-        # explicitly owns a different wait contract.
-        signaled = await wait_with_skip_time(
-            event, effective_wait, self.session_id, node_name,
-        )
         action = self._llm_failure_actions.pop(node_name, None)
-        if action is None and not signaled and auto_retry and effective_wait >= 0:
-            # Nobody answered and nobody will. Falling straight through to skip
-            # abandons the node on the first blip; blocking strands the run.
+        if action is None and effective_wait == 0:
             action = await _consume_unattended_gate_retry(self, node_name, event)
             late = self._llm_failure_actions.pop(node_name, None)
             if late is not None:
                 # An answer landed during the backoff and the caller was told it
                 # was accepted, so it outranks the retry chosen on a timeout.
                 action = late
-        if action is None and require_explicit_resolution:
+        if action is None:
             logger.warning(
                 f"[{self.session_id}] {node_name}: unattended gate requires "
                 "explicit resolution after automatic retries"
@@ -159,7 +158,9 @@ async def _drive_hitl_gate(
                     event.clear()
                 await wait_with_skip_time(event, -1, self.session_id, node_name)
                 action = self._llm_failure_actions.pop(node_name, None)
-        if action != LlmFailureAction.RETRY.value:
+        if action != LlmFailureAction.RETRY.value or event.is_set():
+            # A user action starts a fresh recovery episode, including Retry
+            # after changing credentials. Automatic retries keep their budget.
             self._unattended_gate_retries.pop(node_name, None)
         analysis_state.wait_input_reason = None
         setattr(analysis_state, info_attr, None)

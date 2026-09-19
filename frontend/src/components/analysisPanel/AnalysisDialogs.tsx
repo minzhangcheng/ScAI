@@ -194,7 +194,7 @@ export function AnalysisDialogs({ controller }: AnalysisDialogsProps) {
             ? t('speciesInputPlaceholder')
             : t('speciesGeneValidationPlaceholder')}
           language={language}
-          countdownSeconds={roundWaitSeconds}
+          countdownSeconds={-1}
           resetKey={speciesInputInfo.source}
           onSubmit={handleSpeciesInput}
           onClose={() => clearSpeciesInputState()}

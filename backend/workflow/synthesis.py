@@ -1,6 +1,6 @@
 """Synthesis workflow facade retaining graph-facing mixin methods."""
 import sys
-from .helpers import WorkflowTerminatedError, WorkflowSupersededError
+from .helpers import WorkflowTerminatedError, WorkflowSupersededError, reset_unattended_gate_budget
 from .synthesis_parts import phases as synthesis_phases
 from .synthesis_parts import support as _support
 globals().update(
@@ -153,13 +153,13 @@ class SynthesisMixin:
 
     async def _exploration_llm_step(self, analysis_state, call, *args, **kwargs):
         """Retry only the failed report step, retaining completed upstream work."""
+        reset_unattended_gate_budget(self, "pi_synthesis")
         while True:
             try:
                 return await call(*args, **kwargs)
             except UpstreamExhaustedError as error:
                 action = await self._wait_for_llm_intervention(
                     error, "pi_synthesis", analysis_state,
-                    auto_retry=False, require_explicit_resolution=True,
                 )
                 if action == LlmFailureAction.RETRY:
                     continue

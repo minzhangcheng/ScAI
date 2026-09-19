@@ -77,12 +77,15 @@ async def test_gene_validation_uses_gene_mismatch_reason(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gene_validation_cleanup_on_cancel(monkeypatch):
+@pytest.mark.parametrize("round_wait", [0, 30, -1])
+async def test_gene_validation_cleanup_on_cancel(monkeypatch, round_wait):
     state = AnalysisState(user_id="u", species="Homo sapiens")
     state.status = TaskStatus.RUNNING
+    state.round_wait_seconds = round_wait
     inst = _build_callbacks_mixin(state)
 
-    async def _raise(*a, **k):
+    async def _raise(event, wait_seconds, *a, **k):
+        assert wait_seconds == -1
         raise asyncio.CancelledError()
     monkeypatch.setattr("backend.workflow.callbacks.wait_with_skip_time", _raise)
 

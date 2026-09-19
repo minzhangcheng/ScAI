@@ -276,6 +276,7 @@ class FinalReportMixin:
 
         # === LLM call with retry + user intervention ===
         report: Optional[Dict[str, Any]] = None
+        reset_unattended_gate_budget(self, "generate_detailed_report")
         while True:
             try:
                 llm_client = self._settings_provider.get_llm_client('pi')
@@ -328,18 +329,12 @@ class FinalReportMixin:
                 break  # success
 
             except UpstreamExhaustedError as e:
-                # Persist the recovery decision together with the WAITING_INPUT
-                # gate. If the process exits while nobody is present, a resumed
-                # workflow will bypass the same exhausted upstream.
-                analysis_state.detailed_report_fallback_pending = True
+                # A fallback requires an explicit Skip; an unresolved failure
+                # must not authorize fallback after a process restart.
                 action = await self._wait_for_llm_intervention(
                     e,
                     "generate_detailed_report",
                     analysis_state,
-                    # On an unattended timeout, use the deterministic fallback
-                    # instead of re-running the same exhausted report request.
-                    # Manual sessions remain parked until an explicit action.
-                    auto_retry=False,
                 )
                 if action == LlmFailureAction.RETRY:
                     analysis_state.detailed_report_fallback_pending = False
@@ -360,10 +355,11 @@ class FinalReportMixin:
                         "User terminated workflow during detailed report generation"
                     )
                 force_fallback = True
+                analysis_state.detailed_report_fallback_pending = True
                 self._set_status(analysis_state, TaskStatus.GENERATING_REPORT)
                 await self._send_message(
                     "status",
-                    "Detailed report LLM generation was skipped or timed out; "
+                    "Detailed report LLM generation was skipped by the user; "
                     "building a deterministic fallback report.",
                     AgentType.PI,
                 )

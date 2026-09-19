@@ -116,38 +116,43 @@ def _upstream_error():
 
 
 @pytest.mark.asyncio
-async def test_unattended_report_gate_times_out_into_persisted_fallback(
-    monkeypatch, tmp_path
-):
+async def test_report_gate_waits_after_two_retries_until_user_skips(monkeypatch, tmp_path):
+    from backend.tests.test_llm_failure_workflow import _no_backoff, _park_probe
+
     _patch_report_paths(monkeypatch, tmp_path)
+    slept = _no_backoff(monkeypatch)
+    parked = _park_probe(monkeypatch)
     supervisor = MagicMock()
     supervisor.generate_detailed_report = AsyncMock(
-        side_effect=[_upstream_error(), _report("partial")]
+        side_effect=[_upstream_error(), _upstream_error(), _upstream_error(), _report("partial")]
     )
     harness = _Harness(supervisor)
     _bind_real_intervention(harness)
     state = _state(round_wait_seconds=0)
-
-    result = await harness._generate_detailed_report(state)
-
-    calls = supervisor.generate_detailed_report.await_args_list
-    assert [call.kwargs["force_fallback"] for call in calls] == [False, True]
-    assert result["analysis_state"].status == TaskStatus.COMPLETED
-    assert result["analysis_state"].detailed_report_fallback_pending is False
-    assert any(
-        saved.status == TaskStatus.WAITING_INPUT
-        and saved.wait_input_reason == "llm_failure"
-        and saved.detailed_report_fallback_pending
-        for saved in harness.persisted
-    )
-    assert any(
-        saved.status == TaskStatus.GENERATING_REPORT
-        and saved.wait_input_reason is None
-        and saved.detailed_report_fallback_pending
-        for saved in harness.persisted
-    )
-    assert harness.persisted[-1].status == TaskStatus.COMPLETED
-    assert harness.persisted[-1].detailed_report_fallback_pending is False
+    task = asyncio.create_task(harness._generate_detailed_report(state))
+    try:
+        await asyncio.wait_for(parked.wait(), 2)
+        assert not task.done()
+        assert slept == [0, 1]
+        assert supervisor.generate_detailed_report.await_count == 3
+        assert state["analysis_state"].status == TaskStatus.WAITING_INPUT
+        assert state["analysis_state"].detailed_report_fallback_pending is False
+        assert harness.persisted[-1].llm_failure_info["wait_seconds"] == -1
+        harness._llm_failure_actions["generate_detailed_report"] = "skip"
+        harness._llm_failure_events["generate_detailed_report"].set()
+        result = await asyncio.wait_for(task, 2)
+        calls = supervisor.generate_detailed_report.await_args_list
+        assert [call.kwargs["force_fallback"] for call in calls] == [False, False, False, True]
+        assert result["analysis_state"].status == TaskStatus.COMPLETED
+        assert result["analysis_state"].detailed_report_fallback_pending is False
+        assert any(
+            saved.status == TaskStatus.GENERATING_REPORT
+            and saved.detailed_report_fallback_pending
+            for saved in harness.persisted
+        )
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -174,9 +179,6 @@ async def test_report_retry_disarms_fallback_and_retries_upstream(
         ANY,
         "generate_detailed_report",
         ANY,
-        # This gate's unattended answer is the deterministic fallback, not a
-        # bounded re-run of the same exhausted upstream.
-        auto_retry=False,
     )
 
 

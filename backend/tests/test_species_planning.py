@@ -71,14 +71,17 @@ async def test_high_confidence_sends_species_resolved_state_sync(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_species_state_restored_on_cancellation(monkeypatch):
+@pytest.mark.parametrize("round_wait", [0, 30, -1])
+async def test_species_state_restored_on_cancellation(monkeypatch, round_wait):
     """If wait_with_skip_time raises CancelledError, species_input_info / wait_input_reason
     must still be reset (try/finally guarantee)."""
     inst = _build_mixin({"confidence": "low", "suggestions": ["Mus musculus"]})
     state = AnalysisState(user_id="u", current_round=1)
     state.status = TaskStatus.RUNNING
+    state.round_wait_seconds = round_wait
 
-    async def _raise(*a, **k):
+    async def _raise(event, wait_seconds, *a, **k):
+        assert wait_seconds == -1
         raise asyncio.CancelledError()
     wstate = {"analysis_state": state}
     with patch_facade("backend.workflow.planning", "wait_with_skip_time", _raise):

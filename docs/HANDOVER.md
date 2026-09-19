@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.59.2 · **Last updated**: 2026-09-18
+**Version**: 0.59.3 · **Last updated**: 2026-09-19
 
 ## 1. Runtime Architecture
 
@@ -345,23 +345,18 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 
 `scai_client` provides a `Client` and job-oriented batch API for submitting analysis configurations, waiting for completion, and downloading exports. Its package version follows the ScAI application release. See the [Python client README](../clients/python/README.md) for the authoritative API and examples.
 
-**`analysis.round_wait_seconds` also governs unattended recovery.** Every HITL
-gate reads this one setting, including the LLM-failure gate that a recoverable
-upstream failure parks on — not just the between-round checkpoints its name
-suggests. `0` returns immediately and the gate auto-retries (up to three times);
-a positive value waits that many seconds plus a 60-second delivery buffer before
-doing the same; `-1` means manual and blocks **indefinitely** waiting for a
-human. What happens once the retries are spent depends on the node: most skip,
-but `bioinformatics_analysis` requires explicit resolution and parks with its
-round, stage and approved plan intact rather than abandoning them, so an
-unattended run can still stop there. An unattended run configured with `-1`
-therefore stops for good on the first transient LLM failure, and the failure
-rate is not negligible — a stream that ends without a terminal response was
-observed roughly 0.3% of calls. Submit `0` for headless work. The client
-README's example configuration shows `-1`, which suits an attended session and
-is the wrong value to copy for a batch run; the `new_session*.json` files in use
-all set `0`. `DEFAULT_ROUND_WAIT_SECONDS` is 300, so omitting the field costs
-six minutes per occurrence rather than blocking.
+**`analysis.round_wait_seconds` governs routine decision gates.** It applies to
+analysis-plan review, cell annotation, research-direction selection, and the
+post-round summary. Exceptional error dialogs use a separate bounded recovery
+policy so a zero routine wait cannot silently discard a failed analysis: the
+first two error dialogs automatically retry the failed operation, and the third
+remains in the foreground indefinitely until the user chooses Retry, changes the
+agent configuration, skips, or terminates. This fallback also covers provider
+errors the platform cannot classify, while preserving the original error details
+for the user. Exception recovery never overwrites the session-level
+`round_wait_seconds`; later routine decision gates continue to use the user's
+configured value. `DEFAULT_ROUND_WAIT_SECONDS` remains 300 for omitted routine
+gate settings.
 
 ## 13. Version History (condensed)
 
@@ -369,6 +364,11 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.59.x — (2026-09-18 onward)**
 
+- `0.59.3` — Exceptional provider and agent failures now auto-retry twice
+  and keep the third error dialog open for explicit user handling,
+  independently of the routine round-wait setting. The routine setting remains
+  scoped to plan review, annotation, direction selection, and post-round
+  feedback; exception recovery never overwrites it.
 - `0.59.2` — Optimizes prompt-cache prefix reuse across PI, Pathology, and
   Literature agents. Stable instructions, response contracts, and reusable
   context now precede per-request questions, progress, images, and retrieved

@@ -635,7 +635,7 @@ Approve if quality_score >= 7."""
 
             signaled = await wait_with_skip_time(
                 self._species_event,
-                analysis_state.round_wait_seconds,
+                -1,
                 self.session_id,
                 "gene_species_mismatch",
             )

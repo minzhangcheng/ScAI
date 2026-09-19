@@ -37,7 +37,7 @@ async def _signal_action_once(mock_self, node_name, action, timeout=5.0):
     mock_self._llm_failure_events[node_name].set()
 
 
-# ── Unattended gates: honour round_wait_seconds instead of blocking ───
+# ── Exceptional gates: bounded retries, then explicit user resolution ───
 
 
 def _gate_self():
@@ -121,53 +121,72 @@ def _exhausted(cause=None):
 
 
 @pytest.mark.asyncio
-async def test_unattended_llm_gate_auto_retries_then_skips(monkeypatch):
-    """Nobody answers the dialog. The gate must hand back a bounded number of
-    retries and then skip — never park the run on an unanswerable dialog."""
+@pytest.mark.parametrize("round_wait", [0, 30, -1])
+@pytest.mark.parametrize("gate_kind", ["llm", "marker_db"])
+async def test_exception_gate_retries_twice_then_waits(monkeypatch, round_wait, gate_kind):
     slept = _no_backoff(monkeypatch)
+    parked = _park_probe(monkeypatch)
     wf = _gate_self()
-    state = AnalysisState(user_id="u")
-    state.round_wait_seconds = 0  # unattended
+    state = AnalysisState(user_id="u", round_wait_seconds=round_wait)
+    wf._set_status = lambda state, status: setattr(state, "status", status)
+    dialog_waits = []
 
-    actions = [
-        await wf._wait_for_llm_intervention(_exhausted(), "bioinformatics", state)
-        for _ in range(5)
-    ]
+    async def record_sync(state, change_type):
+        if change_type == StateSyncChangeType.LLM_FAILURE.value:
+            dialog_waits.append(state.llm_failure_info["wait_seconds"])
 
-    assert actions == [
-        LlmFailureAction.RETRY,
-        LlmFailureAction.RETRY,
-        LlmFailureAction.RETRY,
-        LlmFailureAction.SKIP,
-        # Budget cleared on skip, so a later independent failure is not starved.
-        LlmFailureAction.RETRY,
-    ]
-    assert slept == [0, 1, 2, 0]
+    wf._send_state_sync = AsyncMock(side_effect=record_sync)
+
+    async def enter():
+        if gate_kind == "marker_db":
+            from backend.workflow.core_parts.interventions import _wait_for_marker_db_intervention
+            return await _wait_for_marker_db_intervention(wf, "planning_dialogue", state)
+        return await wf._wait_for_llm_intervention(_exhausted(), "planning_dialogue", state)
+
+    assert await enter() == LlmFailureAction.RETRY
+    assert await enter() == LlmFailureAction.RETRY
+    task = asyncio.create_task(enter())
+    try:
+        await asyncio.wait_for(parked.wait(), 2)
+        assert not task.done()
+        assert slept == [0, 1]
+        assert state.status == TaskStatus.WAITING_INPUT
+        assert state.llm_failure_info["wait_seconds"] == -1
+        assert state.llm_failure_info["generation"] == 3
+        assert dialog_waits == [0, 0, -1]
+        assert wf._send_state_sync.await_args.args[1] == StateSyncChangeType.LLM_FAILURE.value
+        assert wf.signal_llm_failure_action("planning_dialogue", "retry", 3)
+        assert await asyncio.wait_for(task, 2) == LlmFailureAction.RETRY
+        assert state.llm_failure_info is None
+        assert wf._unattended_gate_retries == {}
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_unattended_llm_gate_does_not_retry_a_non_recoverable_failure(
-    monkeypatch,
-):
-    """The client breaks out of its own retry loop on auth errors. Re-running
-    the node cannot fix a bad key, and unattended nobody will replace it."""
+async def test_non_recoverable_failure_waits_without_retrying(monkeypatch):
     from backend.utils.llm_client import AuthenticationError
 
     slept = _no_backoff(monkeypatch)
+    parked = _park_probe(monkeypatch)
     wf = _gate_self()
-    state = AnalysisState(user_id="u")
-    state.round_wait_seconds = 0
-
+    state = AnalysisState(user_id="u", round_wait_seconds=0)
     auth = AuthenticationError.__new__(AuthenticationError)
     Exception.__init__(auth, "Error code: 401 - Missing Authentication header")
-
-    action = await wf._wait_for_llm_intervention(
+    task = asyncio.create_task(wf._wait_for_llm_intervention(
         _exhausted(cause=auth), "pi_planning", state
-    )
-
-    assert action == LlmFailureAction.SKIP
-    assert slept == []
-    assert wf._unattended_gate_retries == {}
+    ))
+    try:
+        await asyncio.wait_for(parked.wait(), 2)
+        assert not task.done()
+        assert slept == []
+        assert state.llm_failure_info["wait_seconds"] == -1
+        assert wf.signal_llm_failure_action("pi_planning", "retry", 1)
+        assert await asyncio.wait_for(task, 2) == LlmFailureAction.RETRY
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -206,55 +225,31 @@ async def test_answer_during_the_backoff_outranks_the_auto_retry(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_manual_wait_still_blocks_for_the_user(monkeypatch):
-    """round_wait_seconds=-1 is the attended mode: the gate must wait for a
-    real answer and must not spend the unattended budget."""
-    _no_backoff(monkeypatch)
-    wf = _gate_self()
-    state = AnalysisState(user_id="u")
-    state.round_wait_seconds = -1
-
-    gate = asyncio.create_task(
-        wf._wait_for_llm_intervention(_exhausted(), "bioinformatics", state)
-    )
-    await _signal_action_once(wf, "bioinformatics", LlmFailureAction.TERMINATE.value)
-
-    assert await gate == LlmFailureAction.TERMINATE
-    assert wf._unattended_gate_retries == {}
-
-
-@pytest.mark.asyncio
-async def test_explicit_wait_seconds_overrides_round_wait(monkeypatch):
-    """A caller that supplies its own budget owns the unattended path; the
-    session-wide round wait must not override it."""
-    _no_backoff(monkeypatch)
-    wf = _gate_self()
-    state = AnalysisState(user_id="u")
-    state.round_wait_seconds = -1  # would otherwise block forever
-
-    action = await wf._wait_for_llm_intervention(
-        _exhausted(), "generate_detailed_report", state,
-        wait_seconds=0, auto_retry=False,
-    )
-
-    assert action == LlmFailureAction.SKIP
-
-
-@pytest.mark.asyncio
-async def test_unattended_disabled_agent_gate_skips_without_retrying(monkeypatch):
-    """A disabled agent has an empty model. Retrying re-runs the node against
-    the same empty configuration, so unattended it must skip immediately."""
+@pytest.mark.parametrize("gate_kind", ["llm", "disabled_agent"])
+async def test_non_retrying_gate_ignores_zero_wait(monkeypatch, gate_kind):
     slept = _no_backoff(monkeypatch)
+    parked = _park_probe(monkeypatch)
     wf = _gate_self()
-    state = AnalysisState(user_id="u")
-    state.round_wait_seconds = 0
-
-    action = await wf._wait_for_disabled_agent_intervention(
-        "pathology", "pathology_analysis", state
-    )
-
-    assert action == LlmFailureAction.SKIP
-    assert slept == []
+    state = AnalysisState(user_id="u", round_wait_seconds=0)
+    if gate_kind == "llm":
+        call = wf._wait_for_llm_intervention(
+            _exhausted(), "generate_detailed_report", state,
+            wait_seconds=0, auto_retry=False,
+        )
+        node = "generate_detailed_report"
+    else:
+        call = wf._wait_for_disabled_agent_intervention("pi", "pi_planning", state)
+        node = "pi_planning"
+    task = asyncio.create_task(call)
+    try:
+        await asyncio.wait_for(parked.wait(), 2)
+        assert not task.done()
+        assert slept == []
+        assert wf.signal_llm_failure_action(node, "terminate", 1)
+        assert await asyncio.wait_for(task, 2) == LlmFailureAction.TERMINATE
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -281,10 +276,11 @@ async def test_node_entry_resets_the_unattended_retry_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_bioinformatics_unattended_exhaustion_retains_gate_and_retry_context(
-    monkeypatch,
+@pytest.mark.parametrize("node_name", ["bioinformatics_analysis", "planning_dialogue"])
+async def test_unattended_exhaustion_retains_gate_and_retry_context(
+    monkeypatch, node_name,
 ):
-    """Core Bioinformatics failures remain actionable after auto-retries."""
+    """Planning and execution failures retain the same plan until user Retry."""
     from backend.workflow import with_retry
 
     _no_backoff(monkeypatch)
@@ -314,35 +310,34 @@ async def test_bioinformatics_unattended_exhaustion_retains_gate_and_retry_conte
     }
     calls = 0
 
-    @with_retry("bioinformatics_analysis")
+    @with_retry(node_name)
     async def node(self, state):
         nonlocal calls
         calls += 1
-        if calls <= 4:
+        if calls <= 3:
             raise _exhausted()
         return {**state, "bioinformatics_result": {"status": "completed"}}
 
     task = asyncio.create_task(node(wf, workflow_state))
-    while wf._generation_for("bioinformatics_analysis") < 4:
-        await asyncio.sleep(0)
+    await asyncio.wait_for(parked.wait(), timeout=2.5)
 
     assert not task.done()
     assert analysis_state.status == TaskStatus.WAITING_INPUT
     assert analysis_state.wait_input_reason == "llm_failure"
-    assert analysis_state.llm_failure_info["node_name"] == "bioinformatics_analysis"
-    assert analysis_state.llm_failure_info["generation"] == 4
+    assert analysis_state.llm_failure_info["node_name"] == node_name
+    assert analysis_state.llm_failure_info["generation"] == 3
     assert analysis_state.current_round == 1
     assert analysis_state.current_plan is plan
-    assert wf._llm_failure_events["bioinformatics_analysis"]
+    assert wf._llm_failure_events[node_name]
 
     # The terminal branch parks in the indefinite wait rather than skipping.
     await asyncio.wait_for(parked.wait(), timeout=2.5)
     assert wf.signal_llm_failure_action(
-        "bioinformatics_analysis", LlmFailureAction.RETRY.value, 4
+        node_name, LlmFailureAction.RETRY.value, 3
     ) is True
     result = await asyncio.wait_for(task, timeout=2.0)
 
-    assert calls == 5
+    assert calls == 4
     assert result["bioinformatics_result"]["status"] == "completed"
     assert analysis_state.current_round == 1
     assert analysis_state.current_plan is plan

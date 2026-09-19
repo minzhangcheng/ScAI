@@ -324,10 +324,9 @@ export function useAnalysisPanelController() {
     setShowPlanReviewDialog, wsConnect: store.wsConnect,
     maxExplorationRound: MAX_EXPLORATION_ROUND, addMessage: store.addMessage,
   })
-  const llmWaitSeconds = llmFailureInfo?.waitSeconds ?? roundWaitSeconds
+  const llmWaitSeconds = llmFailureInfo?.waitSeconds ?? -1
   const { timeRemaining } = useCountdownTimer({
     countdownSeconds: llmWaitSeconds > 0 ? llmWaitSeconds : 0,
-    onExpire: interventionActions.handleLlmSkip,
     resetKey: llmFailureInfo?.generation != null ? String(llmFailureInfo.generation) : undefined,
   })
   const isCurrentIntegrationGate = store.currentSession?.status === 'waiting_input'

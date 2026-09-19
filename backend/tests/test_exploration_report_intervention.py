@@ -51,7 +51,7 @@ async def test_report_intervention_holds_boundary_and_retries_only_failed_step(
     async def intervention(error, node, analysis_state, **kwargs):
         assert node == "pi_synthesis"
         assert analysis_state is state
-        assert kwargs == {"auto_retry": False, "require_explicit_resolution": True}
+        assert kwargs == {}
         entered.set()
         await release.wait()
         return action
@@ -134,7 +134,7 @@ async def test_real_literature_triage_failure_reaches_report_intervention(monkey
         await wf._generate_evidence_gated_exploration_report({}, state, SimpleNamespace())
     assert chat.await_count == 1
     wf._wait_for_llm_intervention.assert_awaited_once_with(
-        error, "pi_synthesis", state, auto_retry=False, require_explicit_resolution=True,
+        error, "pi_synthesis", state,
     )
     wf.pi_agent.score_directions_with_evidence.assert_not_awaited()
 
