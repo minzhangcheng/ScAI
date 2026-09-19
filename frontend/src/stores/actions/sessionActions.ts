@@ -99,6 +99,7 @@ export function createCurrentSessionActions(set: SetState): Pick<AppState, Curre
                     bulkInputProfiles: [],
                     methodDecisions: [],
                     integratedReport: undefined,
+                    integratedReportPublication: undefined,
                     graphicAbstract: undefined,
                     explorationReportUrl: undefined,
                     integrationReportUrl: undefined,

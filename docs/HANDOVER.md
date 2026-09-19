@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.59.4 · **Last updated**: 2026-09-19
+**Version**: 0.59.5 · **Last updated**: 2026-09-19
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,20 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.59.x — (2026-09-18 onward)**
 
+- `0.59.5` — Integrated Report publication now freezes the selected figure
+  catalogue, render identities, PI reservations, and report body as one
+  persisted version. Retries reuse the pending catalogue, while reloads and
+  older WebSocket messages cannot pair a new catalogue with an older report.
+  Numbered figures resolve only to the frozen render and PDF digests; missing
+  or mismatched bytes are reported unavailable instead of being replaced by a
+  newer same-name figure. The report prompt and publication sanitizer exclude
+  experimental Methods, internal declarations, and figure inventories, retain
+  structured PI limitations, and repair only Markdown figure citations without
+  rewriting scientific conclusions. Result-page links expand a collapsed
+  gallery before scrolling to the referenced card. Focused backend and frontend
+  regression coverage exercises publication persistence, frozen provenance,
+  reference repair, reload ordering, digest serving, and collapsed-gallery
+  navigation.
 - `0.59.4` — PI round synthesis now requires the report chapter inside the
   primary JSON response and can recover one separately fenced chapter when a
   provider returns the chapter as a second JSON object. Recovery validates the

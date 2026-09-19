@@ -2,6 +2,7 @@ import {
   BookOpen, ChevronDown, ChevronRight, Code2, Download, FileText, FlaskConical,
   GitMerge, Microscope,
 } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
 
 import { resultIdentityKey } from '../../utils/roundKey'
 import { reportBranchQuery, withReportBranch } from '../../utils/reportBranch'
@@ -261,6 +262,16 @@ export function ResultsView({ controller }: ResultsViewProps) {
     graphicAbstract, integratedReport, language, loadReport, loading,
     orderedFigures, publicationFigures, publicationTables, t, toggleRound,
   } = controller
+  const [targetReportNumber, setTargetReportNumber] = useState<number | null>(null)
+  const [targetRequestId, setTargetRequestId] = useState(0)
+  const requestFigureReference = useCallback((number: number) => {
+    setTargetReportNumber(number)
+    setTargetRequestId(requestId => requestId + 1)
+  }, [])
+  useEffect(() => {
+    setTargetReportNumber(null)
+    setTargetRequestId(0)
+  }, [currentSession?.id, currentSession?.restoreBranchId])
   if (!currentSession) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center">
@@ -399,10 +410,18 @@ export function ResultsView({ controller }: ResultsViewProps) {
           )}
 
           {integratedReport && (
-            <IntegratedReport report={integratedReport} />
+            <IntegratedReport
+              report={integratedReport}
+              onFigureReference={requestFigureReference}
+            />
           )}
 
-          <FigureGallery figures={orderedFigures} curatedCount={curatedCount} />
+          <FigureGallery
+            figures={orderedFigures}
+            curatedCount={curatedCount}
+            targetReportNumber={targetReportNumber}
+            targetRequestId={targetRequestId}
+          />
 
           {publicationFigures.length > 0 && (
             <DownloadButtons

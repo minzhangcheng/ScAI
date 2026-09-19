@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { ChevronDown, ChevronRight, Download, FileImage, X } from 'lucide-react'
 
 import { FigureCard, getStatusColor, getStatusIcon, getStatusLabel } from './FigureCard'
@@ -9,12 +10,23 @@ const API_BASE = '/api'
 export function FigureGallery(props: FigureGalleryProps) {
   const controller = useFigureGallery(props)
   const { figures } = props
-  if (figures.length === 0) return null
   const {
     branchQuery, collapsed, currentSession, downloadJPG, downloadPDF, hiddenCount, language,
     selectedFigure, setCollapsed, setSelectedFigure, setShowAll, showAll, t, visibleFigures,
   } = controller
   const selectedBase64 = normalizeImageBase64(selectedFigure?.pngBase64)
+  useEffect(() => {
+    if (props.targetReportNumber == null || collapsed) return
+    if (!visibleFigures.some(
+      figure => figure.reportNumber === props.targetReportNumber,
+    )) return
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(`figure-${props.targetReportNumber}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [collapsed, props.targetReportNumber, props.targetRequestId, visibleFigures])
+  if (figures.length === 0) return null
   return (
     <div className="mt-6">
       <button
@@ -114,7 +126,9 @@ export function FigureGallery(props: FigureGalleryProps) {
                 />
               ) : currentSession?.id ? (
                 <img
-                  src={`${API_BASE}/session/${currentSession.id}/figure/${selectedFigure.id}/png${branchQuery}`}
+                  src={selectedFigure.reportNumber && selectedFigure.reportGenerationId
+                    ? `${API_BASE}/session/${currentSession.id}/integrated-report/${selectedFigure.reportGenerationId}/figure/${selectedFigure.reportNumber}${branchQuery}`
+                    : `${API_BASE}/session/${currentSession.id}/figure/${selectedFigure.id}/png${branchQuery}`}
                   alt={selectedFigure.name}
                   className="max-w-full h-auto mx-auto"
                   onError={(e) => {
@@ -128,8 +142,13 @@ export function FigureGallery(props: FigureGalleryProps) {
               ) : null}
               {/* Placeholder shown on API load error */}
               {!selectedBase64 && (
-                <div className="items-center justify-center h-64 text-slate-400" style={{ display: 'none' }}>
+                <div className="flex-col items-center justify-center gap-2 h-64 text-slate-400" style={{ display: 'none' }}>
                   <FileImage className="w-16 h-16" />
+                  <span className="text-sm">
+                    {language === 'zh'
+                      ? '该报告版本中的图片暂不可用'
+                      : 'Image unavailable for this report version'}
+                  </span>
                 </div>
               )}
             </div>

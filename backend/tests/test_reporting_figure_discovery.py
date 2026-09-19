@@ -72,6 +72,62 @@ class _CaptureReporter(reporting_mod.ReportingMixin):
 
 
 @pytest.mark.asyncio
+async def test_numbered_catalogue_freezes_the_pdf_digest(monkeypatch, tmp_path):
+    image_path = tmp_path / "bound.jpg"
+    write_valid_image(image_path, min_bytes=2200)
+    figure = _pub_fig("bound", png_path=str(image_path))
+    reporter = _CaptureReporter(
+        "test-session", [], publication_figures=[figure], pi_return=["bound"],
+    )
+    setattr_facade(
+        monkeypatch, "backend.workflow.reporting", "resolve_state_figure_candidates",
+        lambda *args, **kwargs: [],
+    )
+    refs, _, _ = await reporter._prepare_brief_figures(reporter.analysis_state)
+
+    assert len(refs) == 1
+    assert refs[0].figure_id == figure.id
+    assert refs[0].pdf_sha256 == figure.pdf_sha256
+
+
+@pytest.mark.asyncio
+async def test_numbered_catalogue_scopes_and_accumulates_pi_notes(
+    monkeypatch, tmp_path,
+):
+    image_path = tmp_path / "bound.jpg"
+    write_valid_image(image_path, min_bytes=2200)
+    figure = _pub_fig("bound", png_path=str(image_path))
+    reporter = _CaptureReporter(
+        "test-session", [], publication_figures=[figure], pi_return=["bound"],
+    )
+    reporter.analysis_state.figure_revision_tasks = [
+        types.SimpleNamespace(
+            selected_figure_id=figure.id, current_figure_id="",
+            lineage_id="main", pi_report_note="First reservation.",
+        ),
+        types.SimpleNamespace(
+            selected_figure_id=figure.id, current_figure_id="",
+            lineage_id="main", pi_report_note="Second reservation.",
+        ),
+        types.SimpleNamespace(
+            selected_figure_id=figure.id, current_figure_id="",
+            lineage_id="other", pi_report_note="Other branch reservation.",
+        ),
+    ]
+    setattr_facade(
+        monkeypatch, "backend.workflow.reporting", "resolve_state_figure_candidates",
+        lambda *args, **kwargs: [],
+    )
+
+    refs, limitations, _ = await reporter._prepare_brief_figures(
+        reporter.analysis_state,
+    )
+
+    assert refs[0].pi_report_note == "First reservation.; Second reservation."
+    assert limitations == []
+
+
+@pytest.mark.asyncio
 async def test_registry_v1_graphic_abstract_excludes_disk_only_figure(
     monkeypatch, tmp_path,
 ):
@@ -170,17 +226,17 @@ async def test_real_pi_llm_failure_does_not_dump_all(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_blank_on_disk_render_is_not_offered_for_download(monkeypatch, tmp_path):
-    """The gallery is status-blind on purpose; it is not preview-blind.
+async def test_report_catalogue_excludes_blank_and_unqualified_renders(monkeypatch, tmp_path):
+    """The numbered report catalogue requires both integrity and eligibility.
 
     A figure whose every revision attempt errored exits at revision_requested,
     and the wrapper saves in a ``finally``, so a revision that rendered nothing
     has already overwritten the good file -- with no snapshot to roll back to
     while a blocking defect is outstanding. The record still holds the earlier
     render's base64, so the entry previewed one image and downloaded another.
-    Gallery selection still validates the render bytes. The corrupt attempt is
-    withheld, while a valid revision-requested render remains visible with its
-    review badge.
+    The corrupt attempt is withheld by integrity checks. A valid but
+    revision-requested render remains available to the ordinary gallery, but it
+    must not acquire an Integrated Report number.
     """
     blank = tmp_path / "abandoned.jpg"
     blank.write_bytes(b"\xff\xd8" + b"\x00" * 700)      # under the blank floor
@@ -215,7 +271,7 @@ async def test_a_blank_on_disk_render_is_not_offered_for_download(monkeypatch, t
     await reporter._assemble_brief_figures(reporter.analysis_state, {"summary": "s"})
 
     names = {f["name"] for f in reporter.sent["integrated_report"]["figures"]}
-    assert names == {"revised"}
+    assert names == set()
     assert "abandoned" not in {c["name"] for c in reporter.captured_selection_input}
 
 

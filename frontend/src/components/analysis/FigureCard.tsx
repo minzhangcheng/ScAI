@@ -82,6 +82,7 @@ export function FigureCard({
   return (
           <div
             key={figure.id}
+            id={figure.reportNumber ? `figure-${figure.reportNumber}` : undefined}
             className="bg-white dark:bg-surface-900 border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden hover:shadow-md transition-shadow"
           >
             {/* Image Preview */}
@@ -98,7 +99,9 @@ export function FigureCard({
               ) : currentSessionId ? (
                 <img
                   key={`api-${figure.id}-${figure.reviewStatus}-${figure.revisionCount}`}
-                  src={`${API_BASE}/session/${currentSessionId}/figure/${figure.id}/png${branchQuery}`}
+                  src={figure.reportNumber && figure.reportGenerationId
+                    ? `${API_BASE}/session/${currentSessionId}/integrated-report/${figure.reportGenerationId}/figure/${figure.reportNumber}${branchQuery}`
+                    : `${API_BASE}/session/${currentSessionId}/figure/${figure.id}/png${branchQuery}`}
                   alt={figure.name}
                   className="w-full h-full object-contain"
                   onError={(e) => {
@@ -112,8 +115,13 @@ export function FigureCard({
               ) : null}
               {/* Placeholder shown on API load error */}
               {!pngBase64 && (
-                <div className="w-full h-full items-center justify-center text-slate-400" style={{ display: 'none' }}>
+                <div className="w-full h-full flex-col items-center justify-center gap-2 px-3 text-center text-slate-400" style={{ display: 'none' }}>
                   <FileImage className="w-12 h-12" />
+                  <span className="text-xs">
+                    {language === 'zh'
+                      ? '该报告版本中的图片暂不可用'
+                      : 'Image unavailable for this report version'}
+                  </span>
                 </div>
               )}
 
@@ -131,6 +139,11 @@ export function FigureCard({
               </div>
 
               {/* Revision Count */}
+              {figure.reportNumber && (
+                <div className="absolute bottom-2 left-2 px-2 py-1 bg-violet-700/90 text-white rounded-full text-xs font-medium">
+                  Figure {figure.reportNumber}
+                </div>
+              )}
               {figure.revisionCount > 0 && (
                 <div className="absolute top-2 left-2 px-2 py-1 bg-slate-800/70 text-white rounded-full text-xs">
                   v{figure.revisionCount + 1}
@@ -146,6 +159,11 @@ export function FigureCard({
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2" title={figure.description}>
                 {figure.description}
               </p>
+              {figure.piReportNote && (
+                <p className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                  {figure.piReportNote}
+                </p>
+              )}
               <div className="flex flex-wrap items-center gap-1 mt-2">
                 <span className="text-xs text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded">
                   {figure.figureType}

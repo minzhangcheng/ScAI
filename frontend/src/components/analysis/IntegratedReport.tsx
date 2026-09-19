@@ -21,9 +21,10 @@ const API_BASE = '/api'
 
 interface IntegratedReportProps {
   report: string
+  onFigureReference?: (number: number) => void
 }
 
-export function IntegratedReport({ report }: IntegratedReportProps) {
+export function IntegratedReport({ report, onFigureReference }: IntegratedReportProps) {
   const { currentSession, language } = useAppStore()
   const { t } = useTranslation(language)
   const [expanded, setExpanded] = useState(true)
@@ -134,6 +135,11 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
                         e.preventDefault()
                         // Could scroll to figure in gallery
                         const figureId = href.replace('#figure-', '')
+                        const figureNumber = Number.parseInt(figureId, 10)
+                        if (Number.isFinite(figureNumber) && onFigureReference) {
+                          onFigureReference(figureNumber)
+                          return
+                        }
                         const el = document.getElementById(`figure-${figureId}`)
                         if (el) {
                           el.scrollIntoView({ behavior: 'smooth' })

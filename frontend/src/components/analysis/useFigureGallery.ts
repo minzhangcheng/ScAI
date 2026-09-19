@@ -16,6 +16,8 @@ export interface FigureGalleryProps {
   figures: PublicationFigure[]
   /** How many leading entries the PI curated for the brief report, if any. */
   curatedCount?: number
+  targetReportNumber?: number | null
+  targetRequestId?: number
 }
 
 interface OwnedGalleryView {
@@ -25,7 +27,9 @@ interface OwnedGalleryView {
   collapsed: boolean
 }
 
-export function useFigureGallery({ figures, curatedCount }: FigureGalleryProps) {
+export function useFigureGallery({
+  figures, curatedCount, targetReportNumber, targetRequestId,
+}: FigureGalleryProps) {
   const { currentSession, language } = useAppStore()
   const { t } = useTranslation(language)
   const ownerKey = chatOwnerKey(
@@ -92,6 +96,16 @@ export function useFigureGallery({ figures, curatedCount }: FigureGalleryProps) 
   const selectedFigure = visibleView.selectedFigure
   const visibleFigures = showAll ? figures : figures.slice(0, previewCount)
   const hiddenCount = figures.length - visibleFigures.length
+
+  useEffect(() => {
+    if (targetReportNumber == null) return
+    const targetIndex = figures.findIndex(
+      figure => figure.reportNumber === targetReportNumber,
+    )
+    if (targetIndex < 0) return
+    setCollapsed(false)
+    if (targetIndex >= previewCount) setShowAll(true)
+  }, [figures, previewCount, setCollapsed, setShowAll, targetReportNumber, targetRequestId])
   const branchQuery = reportBranchQuery(currentSession?.restoreBranchId)
   const ownsRenderedOwner = () => {
     const active = useAppStore.getState().currentSession
@@ -106,7 +120,9 @@ export function useFigureGallery({ figures, curatedCount }: FigureGalleryProps) 
     if (!currentSession || !ownsRenderedOwner()) return
     try {
       await fetchAndDownload(
-        `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/pdf${branchQuery}`,
+        figure.reportNumber && figure.reportGenerationId
+          ? `${API_BASE}/session/${currentSession.id}/integrated-report/${figure.reportGenerationId}/figure/${figure.reportNumber}${branchQuery ? `${branchQuery}&` : '?'}kind=pdf`
+          : `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/pdf${branchQuery}`,
         `${figure.name}.pdf`
       )
     } catch (e) {
@@ -118,7 +134,9 @@ export function useFigureGallery({ figures, curatedCount }: FigureGalleryProps) 
     if (!currentSession || !ownsRenderedOwner()) return
     try {
       await fetchAndDownload(
-        `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/png${branchQuery}`,
+        figure.reportNumber && figure.reportGenerationId
+          ? `${API_BASE}/session/${currentSession.id}/integrated-report/${figure.reportGenerationId}/figure/${figure.reportNumber}${branchQuery}`
+          : `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/png${branchQuery}`,
         `${figure.name}.jpg`
       )
     } catch (e) {

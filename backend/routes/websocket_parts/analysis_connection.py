@@ -226,7 +226,9 @@ async def _run_owned_analysis_connection(
     # State callback to save after each round
     # (_sess_lock acquired above for create-or-observe gate; reuse same handle)
 
-    async def _write_state_if_current(state: AnalysisState, *, set_paused=False, set_failed=False) -> bool:
+    async def _write_state_if_current(
+        state: AnalysisState, *, set_paused=False, set_failed=False, force=False,
+    ) -> bool:
         """Write state to cache and disk only if this workflow is still current.
 
         Returns True if state was written, False if workflow was superseded.
@@ -245,11 +247,14 @@ async def _run_owned_analysis_connection(
             # (see message_callback and _preserve_realtime_stream).
             bindings._preserve_realtime_stream(_sessions.get(session_id), state)
             await bindings._update_session_cache(session_id, state)
-            await bindings._async_save_session(session_id, state)
+            if force:
+                await bindings._async_save_session(session_id, state, force=True)
+            else:
+                await bindings._async_save_session(session_id, state)
             return True
 
-    async def state_callback(state: AnalysisState):
-        return await _write_state_if_current(state)
+    async def state_callback(state: AnalysisState, *, force: bool = False):
+        return await _write_state_if_current(state, force=force)
 
     # Import workflow here to avoid circular imports
     from backend.workflow import SingleCellAnalysisWorkflow

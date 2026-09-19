@@ -12,9 +12,16 @@ from fastapi import HTTPException
 import backend.config as backend_config
 import backend.routes.reports_parts.publication as publication_routes
 from backend.services.report import artifacts
-from backend.models.schemas import AnalysisState, FigureReviewStatus, PublicationFigure
+from backend.models.schemas import (
+    AnalysisState,
+    FigureReviewStatus,
+    IntegratedReportFigureRef,
+    IntegratedReportPublication,
+    PublicationFigure,
+)
 from backend.routes.reports import get_publication_figures
 from backend.routes.reports_parts.publication import (
+    download_integrated_report_figure,
     download_publication_figure_pdf,
     download_publication_figure_png,
 )
@@ -328,6 +335,77 @@ def _configure_download_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(backend_config, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(backend_config, "REPORTS_DIR", tmp_path)
     return workspace
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["image", "pdf"])
+async def test_integrated_report_download_requires_frozen_render_identity(
+    tmp_path, monkeypatch, kind,
+):
+    workspace = _configure_download_paths(monkeypatch, tmp_path)
+    path = workspace / "figures" / "bound.png"
+    path.parent.mkdir()
+    payload = write_valid_image(path, min_bytes=2200)
+    digest = hashlib.sha256(payload).hexdigest()
+    pdf_path = path.with_suffix(".pdf")
+    pdf_payload = valid_pdf_bytes()
+    pdf_path.write_bytes(pdf_payload)
+    pdf_digest = hashlib.sha256(pdf_payload).hexdigest()
+    expected_payload = pdf_payload if kind == "pdf" else payload
+    figure = PublicationFigure(
+        name="bound",
+        description="Frozen report image",
+        figure_type="other",
+        png_path=str(path),
+        pdf_path=str(pdf_path),
+        render_sha256=digest,
+        pdf_sha256=pdf_digest,
+        review_status=FigureReviewStatus.APPROVED,
+    )
+    state = _download_state(figure)
+    state.artifact_registry_version = 1
+    state.integrated_report_state.published = IntegratedReportPublication(
+        generation_id="report-generation",
+        publication_revision=1,
+        markdown="# Report",
+        figure_refs=[IntegratedReportFigureRef(
+            number=1,
+            figure_id=figure.id,
+            name=figure.name,
+            render_sha256=digest,
+            pdf_sha256=pdf_digest,
+        )],
+        catalog_fingerprint="f" * 64,
+    )
+
+    response = await download_integrated_report_figure(
+        "session-download", "report-generation", 1, state=state, kind=kind,
+    )
+    assert response.body == expected_payload
+    assert response.media_type == ("application/pdf" if kind == "pdf" else "image/png")
+
+    # Report identity is independent from mutable current-gallery eligibility.
+    figure.is_current = False
+    figure.invalidated_at = datetime.now()
+    response = await download_integrated_report_figure(
+        "session-download", "report-generation", 1, state=state, kind=kind,
+    )
+    assert response.body == expected_payload
+
+    digest_field = "pdf_sha256" if kind == "pdf" else "render_sha256"
+    ref = state.integrated_report_state.published.figure_refs[0]
+    setattr(ref, digest_field, "0" * 64)
+    with pytest.raises(HTTPException) as exc:
+        await download_integrated_report_figure(
+            "session-download", "report-generation", 1, state=state, kind=kind,
+        )
+    assert exc.value.status_code == 410
+    setattr(ref, digest_field, None)
+    with pytest.raises(HTTPException) as exc:
+        await download_integrated_report_figure(
+            "session-download", "report-generation", 1, state=state, kind=kind,
+        )
+    assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio

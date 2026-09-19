@@ -5,6 +5,7 @@ import { useTranslation } from '../../i18n/translations'
 import {
   useAppStore,
   type GraphicAbstract as GraphicAbstractType,
+  type IntegratedReportPublication,
   type PublicationFigure,
   type PublicationTable,
   type Session,
@@ -24,6 +25,8 @@ interface IntegratedReportContent {
   report?: string
   figures?: Record<string, unknown>[]
   tables?: PublicationTable[]
+  generation_id?: string
+  publication_revision?: number
 }
 
 interface OwnedResultsState {
@@ -32,6 +35,9 @@ interface OwnedResultsState {
   publicationFigures: PublicationFigure[]
   publicationTables: PublicationTable[]
   integratedReport: string | null
+  integratedReportPublication: IntegratedReportPublication | null
+  integratedReportRevision: number
+  integratedReportGenerationId: string | null
   graphicAbstract: GraphicAbstractType | null
   curatedKeys: Set<string>
   expandedRounds: Set<string>
@@ -40,11 +46,66 @@ interface OwnedResultsState {
   reportRequestGeneration: number
 }
 
-// Identity for gallery de-duplication. Names are unique per session (the agent
-// upserts publication figures by name), while ids are regenerated for
-// workspace-only figures every time the brief gallery is assembled — keying on
-// the id alone duplicates them when a report is regenerated.
-const figureKey = (f: PublicationFigure) => f.name || f.id
+// Registered revisions may deliberately share a display name. Report binding
+// therefore follows the immutable artifact id; the name is only a fallback for
+// old workspace messages that predate stable ids.
+const figureKey = (f: PublicationFigure) => f.id || `workspace:${f.name}`
+
+const withoutReportBinding = (figure: PublicationFigure): PublicationFigure => {
+  const {
+    reportNumber: _reportNumber,
+    reportGenerationId: _reportGenerationId,
+    piReportNote: _piReportNote,
+    ...unbound
+  } = figure
+  return unbound
+}
+
+export function reportBoundFigures(
+  session: Session | null,
+): { figures: PublicationFigure[]; curatedKeys: Set<string> } {
+  const inventory = (session?.publicationFigures ?? []).map(withoutReportBinding)
+  const publication = session?.integratedReportPublication
+  if (!publication) return { figures: inventory, curatedKeys: new Set() }
+  const inventoryById = new Map(inventory.map(figure => [figure.id, figure]))
+  const curated = publication.figureRefs.map(ref => {
+    const existing = inventoryById.get(ref.figureId)
+    return {
+      ...(existing || {
+        id: ref.figureId,
+        name: ref.name,
+        description: ref.description,
+        figureType: ref.figureType,
+        pngPath: '',
+        pdfPath: '',
+        reviewStatus: ref.reviewStatus,
+        revisionCount: ref.revisionCount,
+        createdAt: publication.publishedAt,
+      }),
+      id: ref.figureId,
+      name: ref.name,
+      description: ref.description,
+      figureType: ref.figureType,
+      reviewStatus: ref.reviewStatus,
+      reviewUnavailable: ref.reviewUnavailable,
+      revisionCount: ref.revisionCount,
+      round: ref.roundNumber,
+      diagnostic: ref.diagnostic,
+      isPublication: ref.isPublication,
+      reportNumber: ref.number,
+      reportGenerationId: publication.generationId,
+      piReportNote: ref.piReportNote,
+      // Numbered report cards must load through the generation-bound endpoint;
+      // an inventory preview is not proof that the frozen bytes still exist.
+      pngBase64: undefined,
+    } satisfies PublicationFigure
+  })
+  const curatedIds = new Set(curated.map(figure => figure.id))
+  return {
+    figures: [...curated, ...inventory.filter(figure => !curatedIds.has(figure.id))],
+    curatedKeys: new Set(curated.map(figure => figure.id)),
+  }
+}
 
 // Review and integrated-report messages may carry a compact figure payload.
 // Keep provenance already loaded from the authoritative session inventory when
@@ -66,7 +127,9 @@ export const mergeFigureMetadata = (
     // revision count means the old base64 is stale even when the display name
     // is unchanged; let the id-based PNG endpoint load the new bytes instead.
     pngBase64: incomingBase64
-      ?? (renderIdentityChanged ? undefined : existingBase64),
+      ?? (renderIdentityChanged || incoming.reportGenerationId
+        ? undefined
+        : existingBase64),
     planStepId: incoming.planStepId ?? existing?.planStepId,
     planId: incoming.planId ?? existing?.planId,
     reviewUnavailable: incoming.reviewUnavailable ?? existing?.reviewUnavailable,
@@ -96,21 +159,65 @@ const transformFigure = (f: any): PublicationFigure => ({
   planId: f.plan_id ?? f.planId ?? undefined,
   purpose: f.purpose ?? undefined,
   isPublication: f.is_publication ?? f.isPublication ?? true,
+  reportNumber: f.report_number ?? f.reportNumber ?? undefined,
+  reportGenerationId: f.report_generation_id ?? f.reportGenerationId ?? undefined,
+  piReportNote: f.pi_report_note ?? f.piReportNote ?? undefined,
 })
+
+export function mergeIntegratedReportFigures(
+  existingFigures: PublicationFigure[],
+  rawFigures: Record<string, unknown>[],
+  legacyNameFallback = false,
+): { figures: PublicationFigure[]; curatedKeys: Set<string> } {
+  const unboundFigures = existingFigures.map(withoutReportBinding)
+  const curated = rawFigures.map(transformFigure).map(figure => {
+    if (!legacyNameFallback || figure.id) return figure
+    const existing = unboundFigures.find(candidate => (
+      candidate.name === figure.name
+      && (figure.isPublication !== false || candidate.isPublication === false)
+    ))
+    return existing ? { ...figure, id: existing.id } : figure
+  })
+  const merged = new Map<string, PublicationFigure>()
+  // Legacy workspace scans generated new ids on each report. Keep that name
+  // fallback separate from registered artifact identity.
+  const mergeKey = (figure: PublicationFigure) => (
+    legacyNameFallback && figure.isPublication === false
+      ? `workspace:${figure.name}`
+      : figureKey(figure)
+  )
+  for (const fig of curated) {
+    const existing = unboundFigures.find(
+      candidate => mergeKey(candidate) === mergeKey(fig),
+    )
+    merged.set(mergeKey(fig), mergeFigureMetadata(fig, existing))
+  }
+  for (const fig of unboundFigures) {
+    if (!merged.has(mergeKey(fig))) merged.set(mergeKey(fig), fig)
+  }
+  return {
+    figures: [...merged.values()],
+    curatedKeys: new Set(curated.map(figureKey)),
+  }
+}
 
 /** Every accumulated artifact value, reset unconditionally per owner. */
 function makeOwnedState(
   ownerKey: string | null,
   session: Session | null,
 ): OwnedResultsState {
+  const bound = reportBoundFigures(session)
   return {
     ownerKey,
     report: null,
-    publicationFigures: session?.publicationFigures ?? [],
+    publicationFigures: bound.figures,
     publicationTables: session?.publicationTables ?? [],
     integratedReport: session?.integratedReport ?? null,
+    integratedReportPublication: session?.integratedReportPublication ?? null,
+    integratedReportRevision: session?.integratedReportPublication?.publicationRevision ?? 0,
+    integratedReportGenerationId: session?.integratedReportPublication?.generationId ?? null,
     graphicAbstract: session?.graphicAbstract ?? null,
-    curatedKeys: new Set<string>(),
+    curatedKeys: bound.curatedKeys,
     expandedRounds: new Set<string>(),
     loading: false,
     error: null,
@@ -129,6 +236,9 @@ function mergeOwnerArtifacts(
     publicationFigures: base.publicationFigures,
     publicationTables: base.publicationTables,
     integratedReport: base.integratedReport,
+    integratedReportPublication: base.integratedReportPublication,
+    integratedReportRevision: base.integratedReportRevision,
+    integratedReportGenerationId: base.integratedReportGenerationId,
     graphicAbstract: base.graphicAbstract,
   }
 
@@ -145,6 +255,10 @@ function mergeOwnerArtifacts(
         const existing = next.publicationFigures.find(
           (f: PublicationFigure) => figureKey(f) === incomingKey
         )
+        // A publication freezes the card's render and review metadata. Ordinary
+        // review history must not replace that binding, even if its report event
+        // was never delivered. New artifact ids remain independent gallery cards.
+        if (existing?.reportNumber != null && existing.reportGenerationId) continue
         next = {
           ...next,
           publicationFigures: existing
@@ -157,6 +271,25 @@ function mergeOwnerArtifacts(
     }
     if (msg.type === 'integrated_report') {
       const content = msg.content as IntegratedReportContent
+      const currentRevision = next.integratedReportRevision
+      const incomingRevision = content.publication_revision ?? 0
+      const incomingGeneration = content.generation_id || null
+      // A capped/replayed legacy event cannot replace an authoritative bundle.
+      if (currentRevision > 0 && incomingRevision < currentRevision) continue
+      if (
+        currentRevision > 0
+        && incomingRevision === currentRevision
+        && next.integratedReportGenerationId
+        && incomingGeneration
+        && incomingGeneration !== next.integratedReportGenerationId
+      ) continue
+      if (incomingRevision > 0) {
+        next = {
+          ...next,
+          integratedReportRevision: incomingRevision,
+          integratedReportGenerationId: incomingGeneration,
+        }
+      }
       if (
         content?.report
         && content.report !== STRIPPED_FIGURE_PLACEHOLDER
@@ -164,30 +297,33 @@ function mergeOwnerArtifacts(
       ) {
         next = { ...next, integratedReport: content.report }
       }
-      if (Array.isArray(content?.figures) && content.figures.length > 0) {
+      if (Array.isArray(content?.figures)) {
+        // The versioned report event is the authority for its frozen catalogue.
+        // It may legitimately reference an older render that is absent from the
+        // mutable current inventory. Clear every prior report number before
+        // applying the new catalogue so removed figures do not retain old labels.
+        const isVersionedPublication = incomingRevision > 0 && !!incomingGeneration
         const inventoryFigures = session?.publicationFigures || []
-        const inventoryIds = new Set(inventoryFigures.map(fig => fig.id))
-        const inventoryNames = new Set(inventoryFigures.map(fig => fig.name))
-        const curated = content.figures
-          .map(transformFigure)
-          .filter(fig => (
-            fig.isPublication === false
-            || (fig.id ? inventoryIds.has(fig.id) : inventoryNames.has(fig.name))
-          ))
-        const merged = new Map<string, PublicationFigure>()
-        for (const fig of curated) {
-          const existing = next.publicationFigures.find(
-            f => figureKey(f) === figureKey(fig)
-          )
-          merged.set(figureKey(fig), mergeFigureMetadata(fig, existing))
-        }
-        for (const fig of next.publicationFigures) {
-          if (!merged.has(figureKey(fig))) merged.set(figureKey(fig), fig)
-        }
+        const inventoryIds = new Set(inventoryFigures.map(figure => figure.id))
+        const inventoryNames = new Set(inventoryFigures.map(figure => figure.name))
+        const reportFigures = isVersionedPublication
+          ? content.figures
+          : content.figures.filter((raw) => {
+              const figure = transformFigure(raw)
+              return figure.isPublication === false
+                || (figure.id
+                  ? inventoryIds.has(figure.id)
+                  : inventoryNames.has(figure.name))
+            })
+        const merged = mergeIntegratedReportFigures(
+          next.publicationFigures,
+          reportFigures,
+          !isVersionedPublication,
+        )
         next = {
           ...next,
-          publicationFigures: [...merged.values()],
-          curatedKeys: new Set(curated.map(figureKey)),
+          publicationFigures: merged.figures,
+          curatedKeys: merged.curatedKeys,
         }
       }
       if (content?.tables) {
@@ -252,6 +388,8 @@ export function useResultsController() {
     && currentSession.publicationFigures === previousSessionRef.current.publicationFigures
     && currentSession.publicationTables === previousSessionRef.current.publicationTables
     && currentSession.integratedReport === previousSessionRef.current.integratedReport
+    && currentSession.integratedReportPublication
+      === previousSessionRef.current.integratedReportPublication
     && currentSession.graphicAbstract === previousSessionRef.current.graphicAbstract
   )
   const authoritativeSession = carriedOldArtifacts ? null : currentSession
@@ -270,12 +408,16 @@ export function useResultsController() {
   useEffect(() => {
     setOwnedState(previous => {
       const base = previous.ownerKey === ownerKey
-        ? {
+            ? {
             ...previous,
-            publicationFigures: authoritativeSession?.publicationFigures ?? [],
+            publicationFigures: reportBoundFigures(authoritativeSession).figures,
             publicationTables: authoritativeSession?.publicationTables ?? [],
             integratedReport: authoritativeSession?.integratedReport ?? null,
+            integratedReportPublication: authoritativeSession?.integratedReportPublication ?? null,
+            integratedReportRevision: authoritativeSession?.integratedReportPublication?.publicationRevision ?? 0,
+            integratedReportGenerationId: authoritativeSession?.integratedReportPublication?.generationId ?? null,
             graphicAbstract: authoritativeSession?.graphicAbstract ?? null,
+            curatedKeys: reportBoundFigures(authoritativeSession).curatedKeys,
           }
         : makeOwnedState(ownerKey, authoritativeSession)
       // Message-derived figures are merged only after the authoritative
@@ -350,7 +492,8 @@ export function useResultsController() {
   }, [ownerKey])
 
   const {
-    curatedKeys, error, expandedRounds, graphicAbstract, integratedReport, loading,
+    curatedKeys, error, expandedRounds, graphicAbstract, integratedReport,
+    integratedReportPublication, loading,
     publicationFigures, publicationTables, report,
   } = visibleState
 
@@ -370,6 +513,7 @@ export function useResultsController() {
   return {
     currentSession, curatedCount, downloadReport, error, expandedRounds,
     graphicAbstract, integratedReport, language, loadReport, loading,
+    integratedReportPublication,
     orderedFigures, publicationFigures, publicationTables, report, t,
     toggleRound,
   }

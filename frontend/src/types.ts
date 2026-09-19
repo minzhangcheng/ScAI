@@ -96,6 +96,10 @@ export interface SessionLoadResponse {
   method_decisions?: RawMethodDecision[]
   graphic_abstract?: RawGraphicAbstract
   integrated_report?: string | null
+  integrated_report_state?: {
+    published?: RawIntegratedReportPublication | null
+    pending?: Record<string, unknown> | null
+  } | null
   exploration_report_url?: string
   integration_report_url?: string
   annotation_report_url?: string
@@ -245,6 +249,35 @@ export interface RawRoundResult {
   direction_key?: string
   result_identity_key?: string
   wait_policy?: 'manual' | 'countdown' | 'no_wait'
+}
+
+export interface RawIntegratedReportFigureRef {
+  number: number
+  figure_id: string
+  name: string
+  description?: string
+  figure_type?: string
+  render_sha256?: string | null
+  pdf_sha256?: string | null
+  logical_figure_id?: string | null
+  review_status?: string
+  review_unavailable?: boolean
+  revision_count?: number
+  round_number?: number | null
+  diagnostic?: boolean
+  is_publication?: boolean
+  pi_report_note?: string | null
+}
+
+export interface RawIntegratedReportPublication {
+  generation_id: string
+  publication_revision: number
+  lineage_id?: string
+  markdown: string
+  figure_refs?: RawIntegratedReportFigureRef[]
+  reporting_limitations?: string[]
+  catalog_fingerprint: string
+  published_at: string
 }
 
 export interface RawPublicationFigure {

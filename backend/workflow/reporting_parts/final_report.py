@@ -14,6 +14,7 @@ else:
 
 from ...models.schemas import (
     AnalysisState, AgentType, TaskStatus, GraphicAbstract,
+    IntegratedReportPublication, PendingIntegratedReportGeneration,
 )
 from ...utils.llm_client import UpstreamExhaustedError
 from ...constants import LlmFailureAction
@@ -25,6 +26,11 @@ from ...services.report.artifacts import artifact_stems, eligible_artifacts
 from ..direction_coverage import current_lineage_id, direction_coverage_status
 from ...services.report.paths import resolve_report_output_dir
 from ...services.report.lineage import build_lineage_report_state
+from ...services.report.integrated_report import (
+    integrated_report_catalog_fingerprint,
+    integrated_report_source_fingerprint,
+    sanitize_integrated_report,
+)
 
 from .shared import (  # noqa: F401
     logging,
@@ -171,10 +177,65 @@ class FinalReportMixin:
         await self._send_message("status", "Generating integrated report with figures...", AgentType.PI)
 
         integrated_report = None
-        reset_unattended_gate_budget(self, "generate_final_report")
-        while True:
+        pending = analysis_state.integrated_report_state.pending
+        report_lineage_id = current_lineage_id(analysis_state)
+        source_fingerprint = integrated_report_source_fingerprint(
+            analysis_state, report_lineage_id,
+        )
+        if (
+            pending is None
+            or pending.lineage_id != report_lineage_id
+            or pending.source_fingerprint != source_fingerprint
+        ):
+            previous_pending = pending
             try:
-                integrated_report = await self.pi_agent.generate_integrated_report(analysis_state)
+                (
+                    figure_refs,
+                    reporting_limitations,
+                    _selected_gallery_figures,
+                ) = await self._prepare_brief_figures(analysis_state)
+                previous_publication = analysis_state.integrated_report_state.published
+                pending = PendingIntegratedReportGeneration(
+                    base_publication_revision=(
+                        previous_publication.publication_revision
+                        if previous_publication else 0
+                    ),
+                    lineage_id=report_lineage_id,
+                    figure_refs=figure_refs,
+                    reporting_limitations=reporting_limitations,
+                    catalog_fingerprint=integrated_report_catalog_fingerprint(
+                        figure_refs
+                    ),
+                    source_fingerprint=integrated_report_source_fingerprint(
+                        analysis_state, report_lineage_id,
+                    ),
+                )
+                analysis_state.integrated_report_state.pending = pending
+                await self._send_state_sync(
+                    analysis_state,
+                    "integrated_report_catalog_prepared",
+                    raise_on_save_error=True,
+                )
+            except Exception as e:
+                analysis_state.integrated_report_state.pending = previous_pending
+                logger.exception(
+                    f"[{self.session_id}] Failed to freeze integrated report figures"
+                )
+                await self._send_message(
+                    "error",
+                    f"Integrated report catalogue preparation failed: {str(e)}",
+                    AgentType.PI,
+                )
+                pending = None
+
+        reset_unattended_gate_budget(self, "generate_final_report")
+        while pending is not None:
+            try:
+                integrated_report = await self.pi_agent.generate_integrated_report(
+                    analysis_state,
+                    pending.figure_refs,
+                    pending.reporting_limitations,
+                )
                 break
             except UpstreamExhaustedError as e:
                 action = await self._wait_for_llm_intervention(
@@ -198,10 +259,40 @@ class FinalReportMixin:
                 break
 
         if integrated_report is not None:
+            previous_report_state = analysis_state.integrated_report_state.model_copy(
+                deep=True
+            )
+            previous_legacy_report = analysis_state.integrated_report
             try:
-                analysis_state.integrated_report = integrated_report
-                await self._assemble_brief_figures(analysis_state, integrated_report)
+                assert pending is not None
+                markdown = sanitize_integrated_report(
+                    integrated_report,
+                    pending.figure_refs,
+                    pending.reporting_limitations,
+                )
+                publication = IntegratedReportPublication(
+                    generation_id=pending.generation_id,
+                    publication_revision=pending.base_publication_revision + 1,
+                    lineage_id=pending.lineage_id,
+                    markdown=markdown,
+                    figure_refs=pending.figure_refs,
+                    reporting_limitations=pending.reporting_limitations,
+                    catalog_fingerprint=pending.catalog_fingerprint,
+                )
+                analysis_state.integrated_report_state.published = publication
+                analysis_state.integrated_report_state.pending = None
+                analysis_state.integrated_report = markdown
+                # Persistence is the publication boundary. A websocket event is
+                # emitted only after the body and mapping have committed together.
+                await self._send_state_sync(
+                    analysis_state,
+                    "integrated_report_published",
+                    raise_on_save_error=True,
+                )
+                await self._emit_integrated_report(analysis_state)
             except Exception as e:
+                analysis_state.integrated_report_state = previous_report_state
+                analysis_state.integrated_report = previous_legacy_report
                 logger.exception(f"[{self.session_id}] Failed to assemble integrated report figures")
                 await self._send_message(
                     "error",

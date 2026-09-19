@@ -8,10 +8,11 @@ Extracted from backend/main.py to decouple report generation and serving route h
 import logging
 import os
 import asyncio
+import hashlib
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from datetime import datetime
 from fastapi import Depends, HTTPException, Request
@@ -329,6 +330,7 @@ def _prepare_publication_download_sync(
     target_lineage: str,
     *,
     kind: str,
+    require_gallery_eligibility: bool = True,
 ) -> tuple[bytes, Path, str]:
     """Resolve and verify one immutable response body off the event loop."""
     from backend.config import REPORTS_DIR as _REPORTS_DIR, SESSION_DIR as _SESSION_DIR
@@ -354,11 +356,25 @@ def _prepare_publication_download_sync(
             for root in allowed_roots
         )
 
-    figure = gallery_artifact_by_id(
-        state.publication_figures,
-        figure_id,
-        lineage_id=target_lineage,
-    )
+    if require_gallery_eligibility:
+        figure = gallery_artifact_by_id(
+            state.publication_figures,
+            figure_id,
+            lineage_id=target_lineage,
+        )
+    else:
+        # A report publication binds immutable bytes, not mutable gallery
+        # eligibility. Resolve its exact historical record and verify the
+        # frozen digest below even if the record is no longer a gallery head.
+        figure = next(
+            (
+                item for item in state.publication_figures
+                if str(getattr(item, "id", "")) == str(figure_id)
+                and str(getattr(item, "lineage_id", None) or "main")
+                == str(target_lineage or "main")
+            ),
+            None,
+        )
     registered_id = any(
         str(getattr(item, "id", "")) == str(figure_id)
         for item in state.publication_figures
@@ -428,6 +444,7 @@ def _prepare_generation_bound_download_sync(
     workspace: Path,
     target_lineage: str,
     kind: str,
+    require_gallery_eligibility: bool,
 ) -> tuple[bytes, Path, str]:
     # Validate the generation on both sides of the expensive immutable-byte
     # read.  The lifecycle flock is held only for each check, not for image
@@ -441,6 +458,7 @@ def _prepare_generation_bound_download_sync(
         workspace,
         target_lineage,
         kind=kind,
+        require_gallery_eligibility=require_gallery_eligibility,
     )
     _with_generation_file_barrier(session_id, generation, lambda: None)
     return result
@@ -454,6 +472,7 @@ async def _prepare_generation_bound_download(
     target_lineage: str,
     *,
     kind: str,
+    require_gallery_eligibility: bool = True,
 ) -> tuple[bytes, Path, str]:
     generation = int(getattr(state, "lifecycle_generation", 0) or 0)
     try:
@@ -466,6 +485,7 @@ async def _prepare_generation_bound_download(
             workspace,
             target_lineage,
             kind,
+            require_gallery_eligibility,
         )
     except SessionGoneError as exc:
         raise HTTPException(status_code=404, detail="Session no longer exists") from exc
@@ -673,6 +693,16 @@ async def get_integrated_report(session_id: str, request: Request):
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
+    publication = state.integrated_report_state.published
+    if publication is not None:
+        return {
+            "success": True,
+            "report": publication.markdown,
+            "publication": publication.model_dump(mode="json"),
+            "figures_count": len(publication.figure_refs),
+            "tables_count": len(state.publication_tables),
+        }
+
     if state.integrated_report:
         return {
             "success": True,
@@ -686,6 +716,84 @@ async def get_integrated_report(session_id: str, request: Request):
         "error": "Integrated report not generated yet",
         "report": None
     }
+
+
+@router.get(
+    "/{session_id}/integrated-report/{generation_id}/figure/{number}"
+)
+async def download_integrated_report_figure(
+    session_id: str,
+    generation_id: str,
+    number: int,
+    state: AnalysisState = Depends(require_session_ownership),
+    branch_id: Optional[str] = None,
+    kind: Literal["image", "pdf"] = "image",
+):
+    """Serve only the exact render frozen into one report publication."""
+    publication = state.integrated_report_state.published
+    if publication is None or publication.generation_id != generation_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Integrated report publication not found",
+        )
+    ref = next(
+        (item for item in publication.figure_refs if item.number == number),
+        None,
+    )
+    if ref is None:
+        raise HTTPException(status_code=404, detail="Report figure not found")
+    expected_digest = ref.pdf_sha256 if kind == "pdf" else ref.render_sha256
+    if not expected_digest:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Report figure has no verified {kind} binding",
+        )
+
+    workspace = get_session_workspace(session_id)
+    await _ensure_frozen_artifact_inventory(session_id, state, workspace)
+    target_lineage = resolve_report_target_lineage(
+        branch_id
+        if branch_id is not None
+        else getattr(state, "restore_branch_id", None)
+    )
+    if publication.lineage_id != target_lineage:
+        raise HTTPException(status_code=404, detail="Report figure not found")
+    try:
+        payload, image_path, figure_name = await _prepare_generation_bound_download(
+            session_id,
+            state,
+            ref.figure_id,
+            workspace,
+            target_lineage,
+            kind=kind,
+            require_gallery_eligibility=False,
+        )
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=410,
+            detail="Frozen report figure is unavailable",
+        ) from exc
+    if hashlib.sha256(payload).hexdigest() != expected_digest:
+        raise HTTPException(
+            status_code=410,
+            detail="Frozen report figure failed render identity validation",
+        )
+
+    extension = image_path.suffix.lower()
+    media_type = (
+        "application/pdf" if kind == "pdf"
+        else "image/jpeg" if extension in (".jpg", ".jpeg") else "image/png"
+    )
+    download_extension = (
+        ".pdf" if kind == "pdf"
+        else extension if extension in (".jpg", ".jpeg") else ".png"
+    )
+    return _immutable_download_response(
+        payload,
+        image_path,
+        media_type=media_type,
+        filename=f"Figure-{number}-{figure_name}{download_extension}",
+    )
 
 @router.get("/{session_id}/code")
 async def get_code_history(session_id: str, request: Request):

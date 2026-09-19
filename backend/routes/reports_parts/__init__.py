@@ -49,6 +49,7 @@ from .publication import (  # noqa: F401
     get_publication_tables,
     download_publication_figure_pdf,
     download_publication_figure_png,
+    download_integrated_report_figure,
     get_integrated_report,
     get_code_history,
     get_report,

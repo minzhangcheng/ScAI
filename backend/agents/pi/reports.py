@@ -2,7 +2,7 @@
 
 Moved verbatim out of backend/agents/pi_agent.py; composed into PIAgent.
 """
-from typing import List, Optional
+from typing import List, Optional, Sequence
 import asyncio
 import logging
 
@@ -13,7 +13,12 @@ from ..prompt_blocks import build_integration_block
 
 # Configure logger
 logger = logging.getLogger(__name__)
-from ...models.schemas import AnalysisState, RoundResult, ExplorationReport
+from ...models.schemas import (
+    AnalysisState,
+    ExplorationReport,
+    IntegratedReportFigureRef,
+    RoundResult,
+)
 
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
@@ -52,7 +57,9 @@ class ReportsMixin:
 
     async def generate_integrated_report(
         self,
-        state: AnalysisState
+        state: AnalysisState,
+        figure_refs: Optional[Sequence[IntegratedReportFigureRef]] = None,
+        reporting_limitations: Optional[Sequence[str]] = None,
     ) -> str:
         """
         Generate an integrated report with embedded figure and table references.
@@ -71,40 +78,76 @@ class ReportsMixin:
         # rendering would withhold; otherwise it can cite a panel readers cannot
         # actually see.
         figures_info = []
-        renderable_figures = [
-            fig for fig in eligible_artifacts(
-                state.publication_figures, state=state
-            )
-            if archival_render_available(fig)
-        ]
-        for i, fig in enumerate(renderable_figures):
-            raw_status = getattr(fig.review_status, "value", fig.review_status)
+        if figure_refs is None:
+            # Compatibility for direct callers. The workflow freezes and passes
+            # refs before invoking this method; this branch must not invent a
+            # separate report catalogue.
+            renderable_figures = [
+                fig for fig in eligible_artifacts(
+                    state.publication_figures, state=state
+                )
+                if archival_render_available(fig)
+            ]
+            figure_refs = [
+                IntegratedReportFigureRef(
+                    number=index,
+                    figure_id=fig.id,
+                    name=fig.name,
+                    description=fig.description,
+                    figure_type=fig.figure_type,
+                    render_sha256=fig.render_sha256,
+                    pdf_sha256=fig.pdf_sha256,
+                    logical_figure_id=getattr(fig, "logical_figure_id", None),
+                    review_status=str(
+                        getattr(fig.review_status, "value", fig.review_status)
+                    ),
+                    review_unavailable=bool(
+                        getattr(fig, "review_unavailable", False)
+                    ),
+                    revision_count=int(getattr(fig, "revision_count", 0) or 0),
+                    round_number=getattr(fig, "round_number", None),
+                    diagnostic=bool(getattr(fig, "diagnostic", False)),
+                    pi_report_note=(
+                        getattr(fig, "pi_degraded_acceptance_reason", None)
+                        or None
+                    ),
+                )
+                for index, fig in enumerate(renderable_figures, start=1)
+            ]
+
+        for ref in figure_refs:
             status = (
                 "Review Unavailable"
-                if getattr(fig, "review_unavailable", False)
-                else str(raw_status or "reportable").replace("_", " ").title()
+                if ref.review_unavailable
+                else str(ref.review_status or "reportable").replace("_", " ").title()
             )
-            degraded_reason = str(
-                getattr(fig, "pi_degraded_acceptance_reason", None) or ""
-            ).strip()
             figures_info.append(
-                f"Figure {i+1}: {fig.name} (declared type: {fig.figure_type}) - "
-                f"{fig.description} [{status}]"
-                + (
-                    f" PI reservation: {degraded_reason}"
-                    if degraded_reason else ""
-                )
+                f"Figure {ref.number}: {ref.name} "
+                f"(declared type: {ref.figure_type}) - {ref.description} [{status}]"
+                + (f" PI reservation: {ref.pi_report_note}" if ref.pi_report_note else "")
             )
 
-        figure_disposition_notes = []
-        for task in getattr(state, "figure_revision_tasks", None) or []:
-            note = str(getattr(task, "pi_report_note", None) or "").strip()
-            if not note:
-                continue
-            figure_disposition_notes.append(
-                f"- {task.plan_requirement_key or task.logical_figure_id}: "
-                f"{task.pi_disposition or task.status} — {note[:1000]}"
-            )
+        if reporting_limitations is None:
+            # Compatibility for direct callers. The workflow passes limitations
+            # frozen with the pending catalogue instead of rereading live tasks.
+            target_lineage = str(getattr(state, "restore_branch_id", None) or "main")
+            figure_disposition_notes = [
+                note
+                for task in (getattr(state, "figure_revision_tasks", None) or [])
+                if (
+                    getattr(task, "lineage_id", None) is None
+                    or str(getattr(task, "lineage_id", None) or "main")
+                    == target_lineage
+                )
+                if (note := str(
+                    getattr(task, "pi_report_note", None) or ""
+                ).strip())
+            ]
+        else:
+            figure_disposition_notes = [
+                str(note).strip() for note in reporting_limitations
+                if str(note).strip()
+            ]
 
         # Collect tables
         tables_info = []
@@ -152,14 +195,14 @@ class ReportsMixin:
 **Available Figures:**
 {chr(10).join(figures_info) if figures_info else "No figures generated"}
 
-**PI Figure Dispositions and Reservations:**
-{chr(10).join(figure_disposition_notes) if figure_disposition_notes else "None"}
-
 The declared figure type and description above are authoritative. Do not infer
 a different plot type from a filename, and keep every caption consistent with
 the supplied metadata (for example, never describe a declared barplot as a UMAP).
-Disclose the PI figure notes where they affect interpretation or explain an omitted
-planned visual. Do not imply that an omitted or reserved figure passed ordinary review.
+Disclose each supplied PI reservation where it affects interpretation.
+Do not imply that an omitted or reserved figure passed ordinary review.
+
+**Reader-facing PI limitations (preserve their meaning; do not create a metadata section):**
+{chr(10).join(f'- {note}' for note in figure_disposition_notes) if figure_disposition_notes else "None"}
 
 **Available Tables:**
 {chr(10).join(tables_info) if tables_info else "No tables generated"}
@@ -182,7 +225,8 @@ Generate a comprehensive research report in Markdown format suitable for publica
 3. **Introduction**: Background and research objectives (2-3 paragraphs)
 4. **Results**:
    - Organize by major findings
-   - Reference figures using format: (Figure X) or "As shown in Figure X, ..."
+   - Reference only figures in the supplied catalogue
+   - Use exact Markdown links: [Figure X](#figure-X)
    - Reference tables using format: (Table X)
    - Include key statistics and observations
 5. **Discussion**:
@@ -190,13 +234,16 @@ Generate a comprehensive research report in Markdown format suitable for publica
    - Compare with literature
    - Discuss implications
 6. **Conclusions**: Key takeaways (1 paragraph)
-7. **Methods Summary**: Brief overview of analysis methods
 
 **Important:**
 - Use academic writing style
 - Include figure/table references naturally in the text
 - Write in English
 - Focus on biological/clinical significance, not just technical details
+- Do not create a Methods, Methods Summary, Materials and Methods, Experimental
+  Procedures, Declarations, Metadata, figure inventory, or figure-type list section
+- Do not invent sample preparation, laboratory protocols, sequencing procedures,
+  assays, instruments, reagents, or other experimental methods
 """
 
         # Try up to 2 times if response is empty

@@ -14,6 +14,7 @@ else:
 
 from ...models.schemas import (
     AnalysisState, AgentType, TaskStatus, GraphicAbstract,
+    IntegratedReportFigureRef,
 )
 from ...utils.llm_client import UpstreamExhaustedError
 from ...constants import LlmFailureAction
@@ -28,7 +29,6 @@ from ...services.report.artifacts import (
     artifact_stems,
     eligible_artifacts,
     excluded_artifact_stems,
-    gallery_artifacts,
     has_blocking_layout_defects,
     image_file_sha256,
     pdf_file_sha256,
@@ -39,6 +39,7 @@ from ...services.report.figure_attribution import attribute_figures_to_rounds  #
 from ..direction_coverage import current_lineage_id, direction_coverage_status
 from ...services.report.paths import resolve_report_output_dir
 from ...services.report.lineage import build_lineage_report_state
+from ...services.report.integrated_report import integrated_report_catalog_fingerprint
 
 from .shared import (  # noqa: F401
     logging,
@@ -64,7 +65,6 @@ from .shared import (  # noqa: F401
     artifact_stems,
     eligible_artifacts,
     excluded_artifact_stems,
-    gallery_artifacts,
     has_blocking_layout_defects,
     attribute_figures_to_rounds,
     current_lineage_id,
@@ -150,23 +150,23 @@ def _round_coverage_floor(candidates, selected_names) -> set:
 class GraphicAbstractMixin:
     """Graphic abstract: brief figure gallery, image and text variants, reviewer selection."""
 
-    async def _assemble_brief_figures(
-        self, analysis_state, integrated_report
-    ) -> None:
-        """Discover, curate, and emit the brief Results figure gallery."""
+    async def _prepare_brief_figures(
+        self, analysis_state,
+    ) -> tuple[List[IntegratedReportFigureRef], List[str], List[Dict[str, Any]]]:
+        """Select and freeze the numbered Integrated Report catalogue."""
         DISCOVERY_CAP = 200
-        # Browsing and archival surfaces share the same publication predicate
-        # and published-head resolver. Pending, failed, rejected, superseded,
-        # invalidated, layout-blocked, or otherwise unreportable attempts stay
-        # in audit state but cannot become current gallery entries merely because
-        # their bytes still exist.
+        # The report catalogue uses the existing report-eligibility and
+        # published-head contract. Browsable pending/rejected revisions remain
+        # visible in the ordinary gallery but cannot acquire report numbers.
         #
         # The one thing that breadth must not carry with it is an entry whose
         # file is no longer the figure it advertises: see ``render_is_intact``.
         # Dropping it here also feeds ``excluded_artifact_stems`` below, so the
         # same blank file is not re-offered by workspace discovery.
         publication_figures = [
-            fig for fig in gallery_artifacts(analysis_state.publication_figures)
+            fig for fig in eligible_artifacts(
+                analysis_state.publication_figures, state=analysis_state,
+            )
             if render_is_intact(fig)
             and (getattr(fig, "lineage_id", None) or "main")
             == current_lineage_id(analysis_state)
@@ -238,22 +238,37 @@ class GraphicAbstractMixin:
                     "diagnostic": bool(getattr(fig, "diagnostic", False)),
                 })
 
-        selected_names = set(
+        selected_names = list(
             await self.pi_agent.select_brief_figures(analysis_state, all_figs_for_ai)
         )
         # Defensive filter: drop any selected name that is not a real candidate,
         # so a bogus non-empty selection cannot suppress the publication fallback
         # below and silently empty the Results gallery.
         known_names = pub_figure_names | {f["name"] for f in all_workspace_figs}
-        selected_names = {n for n in selected_names if n in known_names}
+        selected_names = list(dict.fromkeys(
+            n for n in selected_names if n in known_names
+        ))
         # Fallback: if selection is empty, show all publication figures.
         if not selected_names:
-            selected_names = pub_figure_names
-        selected_names |= _round_coverage_floor(all_figs_for_ai, selected_names)
+            selected_names = [
+                fig.name for fig in publication_figures
+            ]
+        coverage_names = _round_coverage_floor(all_figs_for_ai, set(selected_names))
+        selected_names.extend(
+            candidate["name"] for candidate in all_figs_for_ai
+            if candidate["name"] in coverage_names
+            and candidate["name"] not in selected_names
+        )
 
         figures_data: List[Dict[str, Any]] = []
-        for fig in publication_figures:
-            if fig.name in selected_names:
+        publication_by_name = {fig.name: fig for fig in publication_figures}
+        workspace_by_name = {
+            fig["name"]: fig for fig in all_workspace_figs
+            if fig["name"] not in pub_figure_names
+        }
+        for selected_name in selected_names:
+            fig = publication_by_name.get(selected_name)
+            if fig is not None:
                 figures_data.append({
                     "id": fig.id,
                     "name": fig.name,
@@ -288,19 +303,16 @@ class GraphicAbstractMixin:
                     "is_publication": True,
                 })
 
-        for wf in all_workspace_figs:
-            if wf["name"] in selected_names and wf["name"] not in pub_figure_names:
+                continue
+            wf = workspace_by_name.get(selected_name)
+            if wf is not None:
                 try:
                     b64 = compress_image_to_base64(wf["path"], max_width=800)
                 except Exception:
                     logger.warning("Failed to compress image", exc_info=True)
                     b64 = None
                 figures_data.append({
-                    "id": str(
-                        wf.get("id")
-                        or wf.get("legacy_artifact_id")
-                        or uuid.uuid4()
-                    ),
+                    "id": str(wf.get("id") or wf.get("legacy_artifact_id") or ""),
                     "name": wf["name"],
                     "description": "",
                     "figure_type": wf["type"],
@@ -327,11 +339,115 @@ class GraphicAbstractMixin:
                     "is_publication": False,
                 })
 
+        task_notes_by_figure_id: Dict[str, List[str]] = {}
+        reporting_limitations: List[str] = []
+        selected_ids = {str(item.get("id") or "") for item in figures_data}
+        report_lineage_id = current_lineage_id(analysis_state)
+        for task in getattr(analysis_state, "figure_revision_tasks", None) or []:
+            task_lineage_id = getattr(task, "lineage_id", None)
+            if (
+                task_lineage_id is not None
+                and str(task_lineage_id or "main") != report_lineage_id
+            ):
+                continue
+            note = str(getattr(task, "pi_report_note", None) or "").strip()
+            if not note:
+                continue
+            candidate_ids = [
+                str(getattr(task, "selected_figure_id", None) or ""),
+                str(getattr(task, "current_figure_id", None) or ""),
+            ]
+            attached_id = next((item for item in candidate_ids if item in selected_ids), None)
+            if attached_id:
+                notes = task_notes_by_figure_id.setdefault(attached_id, [])
+                if note not in notes:
+                    notes.append(note)
+            else:
+                label = (
+                    getattr(task, "plan_requirement_key", None)
+                    or getattr(task, "logical_figure_id", None)
+                    or "Planned visual"
+                )
+                disposition = (
+                    getattr(task, "pi_disposition", None)
+                    or getattr(task, "status", None)
+                    or "not selected"
+                )
+                reporting_limitations.append(f"{label}: {disposition} — {note}")
+
+        def combined_pi_note(figure_id: str, figure_name: str) -> Optional[str]:
+            notes = [
+                *task_notes_by_figure_id.get(figure_id, []),
+                str(getattr(
+                    publication_by_name.get(figure_name),
+                    "pi_degraded_acceptance_reason", "",
+                ) or "").strip(),
+            ]
+            combined = "; ".join(note for note in dict.fromkeys(notes) if note)
+            return combined or None
+
+        refs: List[IntegratedReportFigureRef] = []
+        for item in figures_data:
+            figure_id = str(item.get("id") or "").strip()
+            render_sha256 = str(item.get("render_sha256") or "").strip()
+            # A numbered new reference must have a stable identity and verified
+            # render digest. Unbound compatibility candidates remain available
+            # to the ordinary gallery but cannot be cited as a frozen figure.
+            if not figure_id or not render_sha256:
+                continue
+            refs.append(IntegratedReportFigureRef(
+                number=len(refs) + 1,
+                figure_id=figure_id,
+                name=str(item.get("name") or ""),
+                description=str(item.get("description") or ""),
+                figure_type=str(item.get("figure_type") or "other"),
+                render_sha256=render_sha256,
+                pdf_sha256=item.get("pdf_sha256"),
+                logical_figure_id=item.get("logical_figure_id"),
+                review_status=str(item.get("review_status") or "pending"),
+                review_unavailable=bool(item.get("review_unavailable", False)),
+                revision_count=int(item.get("revision_count") or 0),
+                round_number=item.get("round"),
+                diagnostic=bool(item.get("diagnostic", False)),
+                is_publication=bool(item.get("is_publication", True)),
+                pi_report_note=combined_pi_note(
+                    figure_id, str(item.get("name") or ""),
+                ),
+            ))
+
         logger.info(
             f"[{self.session_id}] Brief figures: {len(figures_data)} selected "
             f"({len(pub_figure_names)} pub + {len(all_workspace_figs)} workspace scanned)"
         )
 
+        return refs, reporting_limitations, figures_data
+
+    async def _emit_integrated_report(self, analysis_state) -> None:
+        """Emit the already-persisted publication as one versioned message."""
+        publication = analysis_state.integrated_report_state.published
+        if publication is None:
+            return
+        figures_data = [
+            {
+                "id": ref.figure_id,
+                "name": ref.name,
+                "description": ref.description,
+                "figure_type": ref.figure_type,
+                "render_sha256": ref.render_sha256,
+                "pdf_sha256": ref.pdf_sha256,
+                "review_status": ref.review_status,
+                "review_unavailable": ref.review_unavailable,
+                "revision_count": ref.revision_count,
+                "logical_figure_id": ref.logical_figure_id,
+                "round": ref.round_number,
+                "diagnostic": ref.diagnostic,
+                "is_publication": ref.is_publication,
+                "report_number": ref.number,
+                "pi_report_note": ref.pi_report_note,
+                "report_generation_id": publication.generation_id,
+            }
+            for ref in publication.figure_refs
+        ]
         tables_data = [
             {
                 "id": tbl.id,
@@ -346,9 +462,12 @@ class GraphicAbstractMixin:
         await self._send_message(
             "integrated_report",
             {
-                "report": integrated_report,
+                "report": publication.markdown,
                 "figures": figures_data,
                 "tables": tables_data,
+                "generation_id": publication.generation_id,
+                "publication_revision": publication.publication_revision,
+                "catalog_fingerprint": publication.catalog_fingerprint,
                 "total_figures": len(figures_data),
                 "approved_figures": sum(
                     1 for f in figures_data if f.get("review_status") == "approved"
@@ -360,6 +479,62 @@ class GraphicAbstractMixin:
             f"[{self.session_id}] Integrated report generated with "
             f"{len(figures_data)} brief figures"
         )
+
+    async def _assemble_brief_figures(
+        self, analysis_state, integrated_report
+    ) -> None:
+        """Compatibility wrapper for direct callers of the former one-step API."""
+        refs, limitations, figures_data = await self._prepare_brief_figures(
+            analysis_state
+        )
+        if not hasattr(analysis_state, "integrated_report_state"):
+            tables_data = [
+                {
+                    "id": tbl.id,
+                    "name": tbl.name,
+                    "description": tbl.description,
+                    "csv_path": tbl.csv_path,
+                    "review_status": tbl.review_status.value,
+                }
+                for tbl in analysis_state.publication_tables
+            ]
+            await self._send_message(
+                "integrated_report",
+                {
+                    "report": integrated_report,
+                    "figures": figures_data,
+                    "tables": tables_data,
+                    "total_figures": len(figures_data),
+                    "approved_figures": sum(
+                        1 for item in figures_data
+                        if item.get("review_status") == "approved"
+                    ),
+                },
+                AgentType.PI,
+            )
+            return
+        from ...models.schemas import IntegratedReportPublication
+        from ...services.report.integrated_report import sanitize_integrated_report
+
+        previous = analysis_state.integrated_report_state.published
+        revision = (previous.publication_revision if previous else 0) + 1
+        generation_id = str(uuid.uuid4())
+        fingerprint = integrated_report_catalog_fingerprint(refs)
+        analysis_state.integrated_report_state.published = IntegratedReportPublication(
+            generation_id=generation_id,
+            publication_revision=revision,
+            lineage_id=current_lineage_id(analysis_state),
+            markdown=sanitize_integrated_report(
+                str(integrated_report), refs, limitations,
+            ),
+            figure_refs=refs,
+            reporting_limitations=limitations,
+            catalog_fingerprint=fingerprint,
+        )
+        analysis_state.integrated_report = (
+            analysis_state.integrated_report_state.published.markdown
+        )
+        await self._emit_integrated_report(analysis_state)
 
     async def _generate_graphic_abstract(self, state: WorkflowState) -> WorkflowState:
         """Dispatcher: try image mode first when Painter is available; on failure (or when

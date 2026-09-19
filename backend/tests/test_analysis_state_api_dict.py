@@ -83,6 +83,7 @@ class TestAnalysisStateApiDictRoundTrip:
             "figure_revision_tasks",
             "bulk_input_profiles", "method_decisions",
             "integrated_report",
+            "integrated_report_state",
             "species", "species_resolved", "species_genes_validated",
             "species_input_info",
             "runtime_restore_status",

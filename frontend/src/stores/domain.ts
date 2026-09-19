@@ -82,6 +82,39 @@ export interface PublicationFigure {
   purpose?: string
   /** True for a registered publication artifact; false for workspace-only context. */
   isPublication?: boolean
+  /** Stable number and publication identity assigned by Integrated Report. */
+  reportNumber?: number
+  reportGenerationId?: string
+  piReportNote?: string
+}
+
+export interface IntegratedReportFigureRef {
+  number: number
+  figureId: string
+  name: string
+  description: string
+  figureType: string
+  renderSha256?: string
+  pdfSha256?: string
+  logicalFigureId?: string
+  reviewStatus: FigureReviewStatus
+  reviewUnavailable: boolean
+  revisionCount: number
+  roundNumber?: number
+  diagnostic: boolean
+  isPublication: boolean
+  piReportNote?: string
+}
+
+export interface IntegratedReportPublication {
+  generationId: string
+  publicationRevision: number
+  lineageId: string
+  markdown: string
+  figureRefs: IntegratedReportFigureRef[]
+  reportingLimitations: string[]
+  catalogFingerprint: string
+  publishedAt: string
 }
 
 export interface PublicationTable {
@@ -234,6 +267,7 @@ export interface Session {
   methodDecisions?: MethodDecision[]
   graphicAbstract?: GraphicAbstract
   integratedReport?: string
+  integratedReportPublication?: IntegratedReportPublication
   explorationReportUrl?: string
   integrationReportUrl?: string
   multiDirectionCorrelation?: string

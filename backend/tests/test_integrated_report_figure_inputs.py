@@ -57,6 +57,26 @@ class _Harness(ReportsMixin):
 
 
 @pytest.mark.asyncio
+async def test_integrated_report_uses_frozen_limitations_when_supplied():
+    state = AnalysisState(
+        id="session", user_id="test-user", initial_instruction="Analyze data.",
+    )
+    state.figure_revision_tasks = [FigureRevisionTask(
+        logical_figure_id="live-task",
+        reason="attempts_exhausted",
+        pi_report_note="Live task note must not replace the frozen catalogue.",
+    )]
+    harness = _Harness()
+
+    await harness.generate_integrated_report(
+        state, figure_refs=[], reporting_limitations=["Frozen omission note."],
+    )
+
+    assert "Frozen omission note." in harness.prompt
+    assert "Live task note must not replace" not in harness.prompt
+
+
+@pytest.mark.asyncio
 async def test_integrated_report_uses_only_renderable_report_eligible_figure_metadata(tmp_path):
     state = AnalysisState(
         id="session",

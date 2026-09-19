@@ -21,6 +21,7 @@ import type {
   AgentTemperatures,
   AgentType,
   AgentVisionSettings,
+  IntegratedReportPublication,
 } from '../stores/appStore'
 import { resultIdentityKey } from './roundKey'
 import { normalizeImageBase64 } from './image'
@@ -93,6 +94,38 @@ export function transformRoundResults(raw: (RawRoundResult | null)[] | undefined
       ...(r.integration_report_summary ? { integrationReportSummary: r.integration_report_summary } : {}),
     }
   }).filter((r): r is RoundResult => r !== null)
+}
+
+function transformIntegratedReportPublication(
+  raw: NonNullable<SessionLoadResponse['integrated_report_state']>['published'],
+): IntegratedReportPublication | undefined {
+  if (!raw) return undefined
+  return {
+    generationId: raw.generation_id,
+    publicationRevision: raw.publication_revision,
+    lineageId: raw.lineage_id || 'main',
+    markdown: raw.markdown,
+    figureRefs: (raw.figure_refs || []).map(ref => ({
+      number: ref.number,
+      figureId: ref.figure_id,
+      name: ref.name,
+      description: ref.description || '',
+      figureType: ref.figure_type || 'other',
+      ...(ref.render_sha256 ? { renderSha256: ref.render_sha256 } : {}),
+      ...(ref.pdf_sha256 ? { pdfSha256: ref.pdf_sha256 } : {}),
+      ...(ref.logical_figure_id ? { logicalFigureId: ref.logical_figure_id } : {}),
+      reviewStatus: (ref.review_status || 'pending') as FigureReviewStatus,
+      reviewUnavailable: ref.review_unavailable ?? false,
+      revisionCount: ref.revision_count ?? 0,
+      ...(ref.round_number != null ? { roundNumber: ref.round_number } : {}),
+      diagnostic: ref.diagnostic ?? false,
+      isPublication: ref.is_publication ?? true,
+      ...(ref.pi_report_note ? { piReportNote: ref.pi_report_note } : {}),
+    })),
+    reportingLimitations: raw.reporting_limitations || [],
+    catalogFingerprint: raw.catalog_fingerprint,
+    publishedAt: raw.published_at,
+  }
 }
 
 function transformTreatmentGroups(raw: RawTreatmentGroup[] | undefined) {
@@ -321,7 +354,16 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
       createdAt: decision.created_at,
     })) : undefined),
     ...opt('graphicAbstract', data.graphic_abstract != null ? transformGraphicAbstract(data.graphic_abstract) : undefined),
-    ...opt('integratedReport', data.integrated_report ?? undefined),
+    ...opt(
+      'integratedReportPublication',
+      transformIntegratedReportPublication(data.integrated_report_state?.published),
+    ),
+    ...opt(
+      'integratedReport',
+      data.integrated_report_state?.published?.markdown
+        ?? data.integrated_report
+        ?? undefined,
+    ),
     ...opt('explorationReportUrl', data.exploration_report_url),
     ...opt('integrationReportUrl', data.integration_report_url),
     ...opt('restoreBranchId', data.restore_branch_id ?? undefined),

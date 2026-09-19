@@ -113,6 +113,8 @@ from .schema_parts.outputs import (  # noqa: F401
     PublicationFigure,
     LegacyArtifactRecord,
     PublicationTable, FigureRevisionTask, PIDecisionRecord,
+    IntegratedReportFigureRef, PendingIntegratedReportGeneration,
+    IntegratedReportPublication, IntegratedReportState,
     GraphicAbstract,
     APIRequest,
     APIResponse,
@@ -361,6 +363,11 @@ class AnalysisState(BaseModel):
     invalidated_artifact_stems: List[str] = Field(default_factory=list)
     graphic_abstract: Optional[GraphicAbstract] = None
     integrated_report: Optional[str] = None  # Integrated report with figure/table references
+    # Versioned authority for new reports. ``integrated_report`` remains a
+    # compatibility mirror for clients and sessions predating this contract.
+    integrated_report_state: IntegratedReportState = Field(
+        default_factory=IntegratedReportState
+    )
 
     # Score definitions (methodology tracking for report transparency)
     score_definitions: List[ScoreDefinition] = Field(default_factory=list)
@@ -519,6 +526,7 @@ class AnalysisState(BaseModel):
         "figure_revision_tasks": "figure_revision_tasks",
         "graphic_abstract": "graphic_abstract",
         "integrated_report": "integrated_report",
+        "integrated_report_state": "integrated_report_state",
         "species": "species",
         "species_resolved": "species_resolved",
         "species_genes_validated": "species_genes_validated",

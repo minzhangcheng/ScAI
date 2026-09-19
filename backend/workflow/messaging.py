@@ -31,7 +31,13 @@ class MessagingMixin:
             except Exception as e:
                 logger.exception("[Workflow] Failed to send message")
 
-    async def _send_state_sync(self, analysis_state: AnalysisState, change_type: str):
+    async def _send_state_sync(
+        self,
+        analysis_state: AnalysisState,
+        change_type: str,
+        *,
+        raise_on_save_error: bool = False,
+    ):
         """Send unified state synchronization message after state changes"""
         # Increment version for synchronization
         from backend.constants import StateSyncChangeType
@@ -42,9 +48,18 @@ class MessagingMixin:
         # Save state via callback first
         if self.state_callback:
             try:
-                await self.state_callback(analysis_state)
+                if raise_on_save_error:
+                    saved = await self.state_callback(analysis_state, force=True)
+                else:
+                    saved = await self.state_callback(analysis_state)
+                if raise_on_save_error and saved is not True:
+                    raise RuntimeError("State callback did not acknowledge persistence")
             except Exception as e:
                 logger.exception(f"[{self.session_id}] State callback failed")
+                if raise_on_save_error:
+                    raise
+        elif raise_on_save_error:
+            raise RuntimeError("No state callback is available for persistence")
 
         # Then send sync message to frontend
         if self.message_callback:
@@ -67,6 +82,21 @@ class MessagingMixin:
                     "snapshot_transaction": analysis_state.snapshot_transaction,
                     "runtime_persistence": dict(
                         analysis_state.runtime_persistence or {}
+                    ),
+                    "integrated_report_generation_id": (
+                        analysis_state.integrated_report_state.published.generation_id
+                        if analysis_state.integrated_report_state.published
+                        else None
+                    ),
+                    "integrated_report_publication_revision": (
+                        analysis_state.integrated_report_state.published.publication_revision
+                        if analysis_state.integrated_report_state.published
+                        else 0
+                    ),
+                    "pending_integrated_report_generation_id": (
+                        analysis_state.integrated_report_state.pending.generation_id
+                        if analysis_state.integrated_report_state.pending
+                        else None
                     ),
                 }
             )

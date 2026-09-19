@@ -293,6 +293,63 @@ class PublicationTable(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
+class IntegratedReportFigureRef(BaseModel):
+    """One numbered render frozen into an Integrated Report publication."""
+
+    number: int = Field(ge=1)
+    figure_id: str
+    name: str
+    description: str = ""
+    figure_type: str = "other"
+    # Required for newly generated reports. Optional only so sessions written
+    # before this contract can still be loaded without claiming an exact bind.
+    render_sha256: Optional[str] = None
+    pdf_sha256: Optional[str] = None
+    logical_figure_id: Optional[str] = None
+    review_status: str = "pending"
+    review_unavailable: bool = False
+    revision_count: int = 0
+    round_number: Optional[int] = None
+    diagnostic: bool = False
+    is_publication: bool = True
+    pi_report_note: Optional[str] = None
+
+
+class PendingIntegratedReportGeneration(BaseModel):
+    """Durable figure catalogue reused by report-generation retries/resume."""
+
+    generation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    base_publication_revision: int = 0
+    lineage_id: str = "main"
+    figure_refs: List[IntegratedReportFigureRef] = Field(default_factory=list)
+    reporting_limitations: List[str] = Field(default_factory=list)
+    catalog_fingerprint: str
+    # Identifies the analysis/artifact inputs from which this catalogue was
+    # selected. A retry may reuse the catalogue only while those inputs match.
+    source_fingerprint: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class IntegratedReportPublication(BaseModel):
+    """Atomically published narrative and its immutable numbered catalogue."""
+
+    generation_id: str
+    publication_revision: int = Field(ge=1)
+    lineage_id: str = "main"
+    markdown: str
+    figure_refs: List[IntegratedReportFigureRef] = Field(default_factory=list)
+    reporting_limitations: List[str] = Field(default_factory=list)
+    catalog_fingerprint: str
+    published_at: datetime = Field(default_factory=datetime.now)
+
+
+class IntegratedReportState(BaseModel):
+    """Published report plus an independently durable in-progress catalogue."""
+
+    published: Optional[IntegratedReportPublication] = None
+    pending: Optional[PendingIntegratedReportGeneration] = None
+
+
 class FigureRevisionTask(BaseModel):
     """Durable work item for a figure that did not clear PI review."""
 

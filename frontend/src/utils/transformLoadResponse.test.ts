@@ -77,6 +77,38 @@ describe('transformLoadResponse', () => {
     expect(result.sessionUpdates.restoreBranchId).toBe('branch/A')
   })
 
+  it('loads the versioned integrated report body and frozen figure catalogue', () => {
+    const result = transformLoadResponse({
+      ...MINIMAL_RESPONSE,
+      integrated_report: 'legacy body',
+      integrated_report_state: {
+        published: {
+          generation_id: 'generation-2',
+          publication_revision: 2,
+          lineage_id: 'main',
+          markdown: '# Versioned body',
+          catalog_fingerprint: 'f'.repeat(64),
+          published_at: '2026-09-19T00:00:00Z',
+          figure_refs: [{
+            number: 1,
+            figure_id: 'figure-1',
+            name: 'Frozen panel',
+            render_sha256: 'a'.repeat(64),
+            pdf_sha256: 'b'.repeat(64),
+            review_status: 'approved',
+          }],
+        },
+      },
+    })
+
+    expect(result.sessionUpdates.integratedReport).toBe('# Versioned body')
+    expect(result.sessionUpdates.integratedReportPublication).toMatchObject({
+      generationId: 'generation-2',
+      publicationRevision: 2,
+      figureRefs: [{ number: 1, figureId: 'figure-1', pdfSha256: 'b'.repeat(64) }],
+    })
+  })
+
   it('does not include keys for missing fields', () => {
     const { round_results: _rr, data_files: _df, publication_figures: _pf, publication_tables: _pt, graphic_abstract: _ga, final_summary: _fs, integrated_report: _ir, ...rest } = MINIMAL_RESPONSE
     const result = transformLoadResponse(rest)
