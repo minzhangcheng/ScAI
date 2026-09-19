@@ -21,6 +21,7 @@ from backend.services.report.round_chapters import (
 from backend.services.report.report_outline import build_report_outline
 from backend.services.report.variants_parts.detailed import generate_detailed_report_segment_html
 from backend.tests.figure_image_helpers import write_valid_image
+from backend.utils.formatting import safe_parse_json
 
 
 def _state(tmp_path):
@@ -69,6 +70,73 @@ async def test_pi_synthesis_composes_and_persists_chapter_in_one_call(tmp_path):
     loaded = AnalysisState.model_validate_json(state.model_dump_json())
     assert loaded.round_results[0].report_chapter == chapter
     assert loaded.round_results[0].report_chapter.blocks[0].artifact_ids == ["baseline"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", [
+    "separate", "embedded", "ambiguous", "malformed", "nested", "bad_references",
+    "with_malformed_draft", "with_empty_draft",
+])
+async def test_pi_synthesis_receives_separate_chapter_without_merging_json(tmp_path, case):
+    state = _state(tmp_path)
+    chapter = _chapter(state)
+    raw = chapter.model_dump()
+    summary = {"summary": "Retained summary.", "should_stop": False}
+    extras = [raw]
+    if case == "embedded":
+        summary["report_chapter"] = raw
+        extras = [{**raw, "title": "Must not replace the embedded chapter"}]
+    elif case == "ambiguous":
+        extras.append({**raw, "title": "Another possible chapter"})
+    elif case == "malformed":
+        extras = [{"title": "Invalid chapter", "blocks": "not a block list"}]
+    elif case == "with_malformed_draft":
+        extras.insert(0, {"title": "Invalid draft", "blocks": "not a block list"})
+    elif case == "with_empty_draft":
+        extras.append({"title": "Empty draft", "blocks": []})
+    elif case == "nested":
+        extras = [{"metadata": raw}]
+    elif case == "bad_references":
+        raw["blocks"][0]["artifact_ids"] = ["unknown", "baseline", "baseline"]
+        raw["blocks"][1]["artifact_ids"] = []
+    # An independent chapter must never overwrite synthesis decisions.
+    for extra in extras:
+        extra["should_stop"] = True
+    response = "\n\n".join(
+        "```json\n" + json.dumps(value) + "\n```" for value in [summary, *extras]
+    )
+    pi = SynthesisMixin()
+    pi.refresh_runtime_config_if_needed = lambda: None
+    pi.reset_history = lambda: None
+    pi._safe_parse_json = safe_parse_json
+    pi._extract_next_steps = lambda data: []
+    pi.chat = AsyncMock(return_value=response)
+
+    result = await pi.synthesize_round(state)
+
+    pi.chat.assert_awaited_once()
+    assert result.pi_summary == "Retained summary."
+    assert result.should_stop is False
+    state.round_results = [result]
+    loaded = AnalysisState.model_validate_json(state.model_dump_json())
+    saved = loaded.round_results[0].report_chapter
+    assert {a.artifact_id for a in saved.artifacts} == {"baseline", "late_result"}
+    if case in {"ambiguous", "malformed", "nested"}:
+        assert saved.source == "fallback"
+        assert saved.blocks[0].text == "Retained summary."
+    elif case == "bad_references":
+        assert saved.source == "pi"
+        assert saved.blocks[0].artifact_ids == ["baseline"]
+        assert saved.blocks[-1].artifact_ids == ["late_result"]
+    else:
+        assert saved == chapter
+        sections = reusable_sections(
+            loaded, build_report_outline(loaded),
+            {Path(f.png_path).name: Path(f.png_path) for f in loaded.publication_figures}, [],
+        )
+        content = sections[0]["content"]
+        assert content.index("[FIGURE: baseline.jpg]") < content.index("[FIGURE: late_result.jpg]")
+        assert "Additional Recorded Evidence" not in content
 
 
 def test_bad_references_and_missing_chapter_preserve_evidence(tmp_path):

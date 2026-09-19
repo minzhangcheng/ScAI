@@ -78,7 +78,9 @@ def round_artifact_catalog(state):
 def chapter_prompt(catalog):
     return """
 ## Reusable Round Report Chapter
-Alongside the synthesis JSON, return a `report_chapter` object:
+Return exactly one JSON object for the synthesis. Inside that same object,
+include a `report_chapter` field with this value (never a separate JSON object
+or code block):
 {"title": "Scientific chapter title", "blocks": [
   {"text": "Report-ready Markdown explaining a finding and its limitations",
    "artifact_ids": ["exact catalog ID, in reading order"]}

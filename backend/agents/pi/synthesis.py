@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional
 import asyncio
 import json
 import logging
+import re
 
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...services.report.round_chapters import (
@@ -39,6 +40,33 @@ from .shared import (  # noqa: F401
     _format_database_priors_block,
     _build_default_bio_tasks,
 )
+
+
+def _synthesis_report_chapter(data, response, catalog, round_number):
+    """Recover an unambiguous separately fenced chapter without merging JSON."""
+    raw = data.get("report_chapter")
+    if raw is None:
+        candidates = []
+        for match in re.finditer(
+            r"^```(?:json)?[ \t]*\r?\n(.*?)^```[ \t]*$",
+            response, re.MULTILINE | re.DOTALL | re.IGNORECASE,
+        ):
+            try:
+                candidate = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                continue
+            if (isinstance(candidate, dict) and "summary" not in candidate
+                    and "title" in candidate and "blocks" in candidate):
+                chapter = assemble_round_chapter(
+                    candidate, catalog, data.get("summary", ""), round_number,
+                )
+                if chapter.source == "pi":
+                    candidates.append(chapter)
+        if len(candidates) == 1:
+            return candidates[0]
+    # The existing assembler validates structure, resolves catalog IDs, and
+    # preserves unreferenced evidence. Invalid or ambiguous chapters fall back.
+    return assemble_round_chapter(raw, catalog, data.get("summary", ""), round_number)
 
 
 class SynthesisMixin:
@@ -220,9 +248,8 @@ INNOVATION PHASE — focused synthesis:
                 biochemistry_findings=data.get("biochemistry_findings", []),
                 literature_findings=data.get("literature_findings", []),
                 pi_summary=data.get("summary", ""),
-                report_chapter=assemble_round_chapter(
-                    data.get("report_chapter"), catalog,
-                    data.get("summary", ""), state.current_round,
+                report_chapter=_synthesis_report_chapter(
+                    data, response, catalog, state.current_round,
                 ),
                 conflicts=data.get("conflicts", []),
                 next_steps=self._extract_next_steps(data),

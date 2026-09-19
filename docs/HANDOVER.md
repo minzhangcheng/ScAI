@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.59.3 · **Last updated**: 2026-09-19
+**Version**: 0.59.4 · **Last updated**: 2026-09-19
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,13 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.59.x — (2026-09-18 onward)**
 
+- `0.59.4` — PI round synthesis now requires the report chapter inside the
+  primary JSON response and can recover one separately fenced chapter when a
+  provider returns the chapter as a second JSON object. Recovery validates the
+  chapter before selecting it, rejects ambiguous candidates, preserves exact
+  artifact references and reading order, and keeps malformed responses on the
+  existing evidence-preserving fallback path. Focused report regression coverage
+  passes 39/39.
 - `0.59.3` — Exceptional provider and agent failures now auto-retry twice
   and keep the third error dialog open for explicit user handling,
   independently of the routine round-wait setting. The routine setting remains
