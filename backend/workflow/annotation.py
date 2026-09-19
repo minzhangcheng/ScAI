@@ -54,10 +54,11 @@ class AnnotationMixin:
     async def _annotate_clusters_callback(
         self, cluster_markers: Dict, tissue: str, organism: str,
         analysis_log: Optional[List] = None, database_priors: Optional[Dict] = None,
+        annotation_source: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         annotation_callback.bind_facade(sys.modules[__name__])
         return await annotation_callback.annotate_clusters_callback(
-            self, cluster_markers, tissue, organism, analysis_log, database_priors
+            self, cluster_markers, tissue, organism, analysis_log, database_priors, annotation_source
         )
 
     def _validation_enabled(self) -> bool:

@@ -25,22 +25,27 @@ export function downloadBlob(blob: Blob, filename: string): void {
 
 /**
  * Fetch a URL with auth, convert the response to a Blob, and trigger a download.
+ * Uses the supplied filename unless response filenames are explicitly requested.
  * Throws on non-OK responses.
  */
 export async function fetchAndDownload(
   url: string,
   filename: string,
-  options?: RequestInit
+  options?: RequestInit & { preferResponseFilename?: boolean }
 ): Promise<void> {
+  const { preferResponseFilename = false, ...requestOptions } = options ?? {}
   const mergedHeaders = {
     ...authHeaders(),
-    ...(options?.headers as Record<string, string> || {}),
+    ...(requestOptions.headers as Record<string, string> || {}),
   }
-  const response = await fetch(url, { ...options, headers: mergedHeaders })
+  const response = await fetch(url, { ...requestOptions, headers: mergedHeaders })
   if (!response.ok) {
     const errorText = (await response.text().catch(() => 'Unknown error')).slice(0, 1000)
     throw new FetchError(response.status, `Download failed (${response.status}): ${errorText}`)
   }
   const blob = await response.blob()
-  downloadBlob(blob, filename)
+  const disposition = preferResponseFilename ? response.headers.get('Content-Disposition') : null
+  const match = disposition?.match(/(?:^|;)\s*filename\s*=\s*(?:"([^"]+)"|([^;]+))/i)
+  const responseFilename = (match?.[1] ?? match?.[2])?.trim()
+  downloadBlob(blob, responseFilename || filename)
 }

@@ -624,6 +624,8 @@ async def ensure_stage1_baseline_figures(
     rendered: Dict[str, str] = {}
     for spec in specs:
         output_name = _safe_baseline_output_name(state, spec.name)
+        prior_ids = {figure.id for figure in getattr(state, "publication_figures", [])}
+        lineage = getattr(state, "restore_branch_id", None) or "main"
         try:
             result = await agent._handle_generate_publication_figure(
                 code=spec.code,
@@ -640,5 +642,10 @@ async def ensure_stage1_baseline_figures(
                 "[Bioinformatics] Stage 1 baseline %s failed: %r", output_name, err
             )
             continue
+        for figure in getattr(state, "publication_figures", []):
+            # Each render attempt receives a fresh ID; tag only this call's records.
+            if (figure.id not in prior_ids and figure.name == output_name
+                    and (figure.lineage_id or "main") == lineage):
+                figure.report_role = "foundation_annotation"
         rendered[output_name] = str(result or "")
     return rendered

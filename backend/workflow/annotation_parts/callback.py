@@ -265,7 +265,7 @@ async def match_annotations(
 
 async def review_and_confirm_annotations(
     self, ctx, cluster_markers, tissue, organism, analysis_log=None,
-    database_priors=None,
+    database_priors=None, annotation_source=None,
 ):
     state = ctx["state"]
     result = ctx["result"]
@@ -351,14 +351,16 @@ async def review_and_confirm_annotations(
         try:
             analysis_summary = self._build_annotation_context_report(state, self._current_graph_state)
 
-            from ...services.report import generate_annotation_context_report_html
-            try:
-                html_path = generate_annotation_context_report_html(state, self._current_graph_state, cluster_anns)
-                state.annotation_report_html_path = html_path
-                report_html_url = f"/api/session/{self.session_id}/annotation-report/html"
-            except Exception as e:
-                logger.warning(f"[{self.session_id}] Annotation context report generation failed: {e}")
-                report_html_url = None
+            from ...services.report.stage_reviews import build_stage_review
+            from ...agents.bioinformatics.annotation_preview import render_candidate_annotation_preview
+            preview = await render_candidate_annotation_preview(
+                getattr(self.bioinformatics_agent, "sandbox", None), annotation_source, cluster_anns,
+            )
+            report_html_url = await build_stage_review(
+                state, self.pi_agent, "stage1", summary=analysis_summary,
+                annotations=cluster_anns, graph_state=self._current_graph_state, validation=validation_meta,
+                annotation_preview=preview,
+            )
 
             await self._build_and_save_detailed_segment(
                 state, "pre_annotation",
@@ -466,12 +468,14 @@ async def review_and_confirm_annotations(
                     proportion_meta = {"group_labels": [], "proportions": {}, "column_used": None, "dimension": "group"}
                 self._apply_group_proportions(cluster_anns, proportion_meta)
 
-                try:
-                    html_path = generate_annotation_context_report_html(state, self._current_graph_state, cluster_anns)
-                    state.annotation_report_html_path = html_path
-                    report_html_url = f"/api/session/{self.session_id}/annotation-report/html"
-                except Exception as e:
-                    logger.warning(f"[{self.session_id}] Report re-generation failed: {e}")
+                preview = await render_candidate_annotation_preview(
+                    getattr(self.bioinformatics_agent, "sandbox", None), annotation_source, cluster_anns,
+                )
+                report_html_url = await build_stage_review(
+                    state, self.pi_agent, "stage1", summary=analysis_summary,
+                    annotations=cluster_anns, graph_state=self._current_graph_state, validation=validation_meta,
+                    annotation_preview=preview,
+                )
 
                 detailed_report_url = f"/api/session/{self.session_id}/detailed-report/html" if state.detailed_report_html_path else None
 
@@ -520,7 +524,7 @@ async def review_and_confirm_annotations(
 
 async def annotate_clusters_callback(
     self, cluster_markers, tissue, organism, analysis_log=None,
-    database_priors=None,
+    database_priors=None, annotation_source=None,
 ):
     ctx = await begin_annotation(
         self, cluster_markers, tissue, organism, analysis_log, database_priors
@@ -531,5 +535,5 @@ async def annotate_clusters_callback(
         self, ctx, cluster_markers, tissue, organism, database_priors
     )
     return await review_and_confirm_annotations(
-        self, ctx, cluster_markers, tissue, organism, analysis_log, database_priors
+        self, ctx, cluster_markers, tissue, organism, analysis_log, database_priors, annotation_source
     )

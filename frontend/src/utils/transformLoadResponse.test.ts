@@ -606,3 +606,11 @@ describe('round report download identity', () => {
     expect(round.reportSegmentId).toBe('saved-round')
   })
 })
+
+
+describe('stage review report reload URLs', () => {
+  it('clears a stale exploration download when the latest stage report failed', () => {
+    const result = transformLoadResponse({ ...MINIMAL_RESPONSE, exploration_report_url: null })
+    expect(result.sessionUpdates).toHaveProperty('explorationReportUrl', '')
+  })
+})

@@ -100,7 +100,7 @@ export interface SessionLoadResponse {
     published?: RawIntegratedReportPublication | null
     pending?: Record<string, unknown> | null
   } | null
-  exploration_report_url?: string
+  exploration_report_url?: string | null
   integration_report_url?: string
   annotation_report_url?: string
   detailed_report_url?: string

@@ -336,6 +336,7 @@ async def handle_annotate_clusters(context, tool_call) -> ToolAction:
                 cluster_markers, tissue, organism,
                 analysis_log=analysis_log,
                 database_priors=database_priors,
+                annotation_source={"adata_var": adata_var, "cluster_key": cluster_key},
             )
         finally:
             self.pending_tool_checkpoint = None

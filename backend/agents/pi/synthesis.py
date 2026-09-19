@@ -215,7 +215,7 @@ INNOVATION PHASE — focused synthesis:
 
         # Compose the reusable chapter in this same PI synthesis call.
         catalog = round_artifact_catalog(state)
-        prompt += chapter_prompt(catalog)
+        prompt += chapter_prompt(catalog, state=state)
 
         # Try up to 2 times if response is empty
         max_retries = 2

@@ -113,12 +113,12 @@ export function GraphicAbstract({ branchId, graphicAbstract, sessionId }: Graphi
         <div className="p-4 border-t border-slate-200 dark:border-slate-700">
           <div className="flex items-start justify-between gap-4">
             <div className="flex-1">
-              <p className="text-sm text-slate-600 dark:text-slate-300">
-                <span className="font-medium text-slate-700 dark:text-slate-200">
+              <details className="text-sm text-slate-600 dark:text-slate-300">
+                <summary className="cursor-pointer font-medium text-slate-700 dark:text-slate-200">
                   {t('graphicAbstractPrompt')}
-                </span>
-                {graphicAbstract.prompt}
-              </p>
+                </summary>
+                <p className="mt-2 whitespace-pre-wrap break-words">{graphicAbstract.prompt}</p>
+              </details>
               <p className="text-xs text-slate-400 mt-1">
                 {t('generatedAt')}
                 {new Date(graphicAbstract.createdAt).toLocaleString()}

@@ -11,9 +11,12 @@ from backend.agents.pi.synthesis import SynthesisMixin
 from backend.agents.supervisor import report_content, report_presentation, report_prompt
 from backend.agents.supervisor_agent import SupervisorAgent
 from backend.models.schemas import (
-    AnalysisState, FigureReviewStatus, PublicationFigure, PublicationTable, RoundResult,
+    AcceptedFoundationInventory, AcceptedFoundationStep,
+    AnalysisPlan, AnalysisState, CodeExecution, FigureRevisionTask, FigureReviewStatus,
+    PlanStep, PublicationFigure, PublicationTable, RoundResult,
 )
 from backend.services.report.round_chapters import (
+    _chapter_analysis_context,
     assemble_round_chapter, chapter_markdown, report_artifact_names,
     reusable_sections, round_artifact_catalog,
     saved_figure_captions,
@@ -70,6 +73,136 @@ async def test_pi_synthesis_composes_and_persists_chapter_in_one_call(tmp_path):
     loaded = AnalysisState.model_validate_json(state.model_dump_json())
     assert loaded.round_results[0].report_chapter == chapter
     assert loaded.round_results[0].report_chapter.blocks[0].artifact_ids == ["baseline"]
+
+
+@pytest.mark.asyncio
+async def test_synthesis_places_late_figure_with_its_analysis_step(tmp_path):
+    state = _state(tmp_path)
+    state.current_plan = AnalysisPlan(id="plan", phase="exploration", round_number=1, steps=[
+        PlanStep(id=20, title="Initial measurement", method="Recorded method", status="completed"),
+        PlanStep(id=10, title="Downstream comparison", method="Comparison", depends_on=[20]),
+    ])
+    supplement, baseline = state.publication_figures
+    for figure in (supplement, baseline):
+        figure.plan_id = "plan"
+        figure.plan_step_id = 20
+        figure.source_execution_id = "measurement"
+    supplement.producer_run_kind = "figure_followup"
+    supplement.figure_followup_task_id = "followup"
+    supplement.revision_of_id = "old-render"
+    state.figure_revision_tasks = [FigureRevisionTask(
+        id="followup", logical_figure_id="late_result", reason="visual_revision",
+        plan_id="plan", plan_step_id=20,
+        pi_instruction="Clarify the diagnostic view of the retained measurement.",
+    )]
+    state.code_history = [CodeExecution(
+        id="measurement", code="recorded_measurement()", round_number=1,
+        plan_id="plan", plan_step_ids=[20], execution_status="succeeded",
+    )]
+    baseline.plan_id = "earlier-plan"
+    baseline.source_execution_id = "earlier-measurement"
+    state.code_history.append(CodeExecution(
+        id="earlier-measurement", code="earlier_measurement()", round_number=1,
+        plan_id="earlier-plan", plan_step_ids=[20], execution_status="succeeded",
+    ))
+    earlier = AnalysisPlan(id="earlier-plan", phase="exploration", round_number=1, steps=[
+        PlanStep(id=20, title="Earlier measurement", method="Earlier method"),
+    ])
+    state.plan_dialogue_history = [{"round": 7, "plan": earlier.model_dump(mode="json")}]
+    state.publication_figures.append(baseline.model_copy(update={"id": "other-round", "round_number": 2}))
+
+    async def respond(prompt, **kwargs):
+        context = json.loads(prompt.split(
+            "(plans are intentions; execution links are not scientific acceptance):\n", 1
+        )[1])
+        assert [step["id"] for step in context["current_plan"]["steps"]] == [20, 10]
+        assert context["current_plan"]["steps"][1]["depends_on"] == [20]
+        assert context["historical_plans"][0]["id"] == "earlier-plan"
+        assert context["historical_plans"][0]["steps"][0]["id"] == 20
+        assert context["historical_plans"][0]["steps"][0]["method"] == "Earlier method"
+        assert context["current_plan"]["steps"][0]["method"] == "Recorded method"
+        assert context["missing_plan_ids"] == []
+        artifacts = {item["id"]: item for item in context["artifacts"]}
+        assert set(artifacts) == {"late_result", "baseline"}
+        assert artifacts["late_result"]["plan_step_id"] == 20
+        assert artifacts["baseline"]["plan_id"] == "earlier-plan"
+        assert artifacts["late_result"]["producer_run_kind"] == "figure_followup"
+        assert artifacts["late_result"]["revision_of_id"] == "old-render"
+        assert artifacts["late_result"]["followup_task"]["pi_instruction"].startswith("Clarify")
+        assert context["source_executions"][0]["id"] == "measurement"
+        assert context["source_executions"][1]["plan_id"] == "earlier-plan"
+        return json.dumps({"summary": "Summary.", "report_chapter": {
+            "title": "Analysis steps", "blocks": [
+                {"text": "### Initial measurement\nThe diagnostic qualifies this result.",
+                 "artifact_ids": ["baseline", "late_result"]},
+                {"text": "### Downstream comparison\nThe next planned step remains unperformed.",
+                 "artifact_ids": []},
+            ],
+        }})
+
+    pi = SynthesisMixin()
+    pi.refresh_runtime_config_if_needed = lambda: None
+    pi.reset_history = lambda: None
+    pi._safe_parse_json = safe_parse_json
+    pi._extract_next_steps = lambda data: []
+    pi.chat = AsyncMock(side_effect=respond)
+    result = await pi.synthesize_round(state)
+    pi.chat.assert_awaited_once()
+    state.round_results = [result]
+    loaded = AnalysisState.model_validate_json(state.model_dump_json())
+    sections = reusable_sections(
+        loaded, build_report_outline(loaded),
+        {Path(f.png_path).name: Path(f.png_path) for f in (supplement, baseline)}, [],
+    )
+    content = sections[0]["content"]
+    assert content.index("[FIGURE: baseline.jpg]") < content.index("[FIGURE: late_result.jpg]")
+    assert content.index("[FIGURE: late_result.jpg]") < content.index("### Downstream comparison")
+    assert "The diagnostic qualifies this result." in content
+    assert "Additional Recorded Evidence" not in content
+
+
+@pytest.mark.parametrize("source", ["foundation", "missing", "malformed", "other_round"])
+def test_historical_plan_context_discloses_partial_or_missing_history(tmp_path, source):
+    state = _state(tmp_path)
+    state.current_plan = AnalysisPlan(id="current", phase="exploration", round_number=1, steps=[
+        PlanStep(id=1, title="Current step", method="Current method"),
+    ])
+    state.publication_figures[0].plan_id = "earlier"
+    state.publication_figures[0].plan_step_id = 1
+    state.publication_figures[1].plan_id = "current"
+    if source == "foundation":
+        state.accepted_foundation_inventories = [AcceptedFoundationInventory(
+            inventory_id="foundation", plan_id="earlier", round_number=1,
+            planning_stage="stage1", steps=[AcceptedFoundationStep(
+                plan_step_id=1, title="Earlier step", method="Earlier method",
+                evidence_execution_ids=["original-execution"],
+            )],
+        )]
+    elif source == "malformed":
+        state.plan_dialogue_history = [{"plan": {"id": "earlier", "steps": "invalid"}}]
+    elif source == "other_round":
+        state.plan_dialogue_history = [{"plan": AnalysisPlan(
+            id="earlier", phase="innovation", round_number=2,
+            steps=[PlanStep(id=1, title="Wrong round", method="Wrong method")],
+        ).model_dump(mode="json")}]
+    # A stale snapshot of the current plan must not override its live steps.
+    state.plan_dialogue_history.append({"plan": state.current_plan.model_copy(update={
+        "steps": [PlanStep(id=1, title="Stale step", method="Stale method")],
+    }).model_dump(mode="json")})
+    loaded = AnalysisState.model_validate_json(state.model_dump_json())
+    context = _chapter_analysis_context(loaded, round_artifact_catalog(loaded))
+    assert context["current_plan"]["steps"][0]["method"] == "Current method"
+    if source == "foundation":
+        earlier = context["historical_plans"][0]
+        assert earlier["id"] == "earlier"
+        assert earlier["steps"][0]["method"] == "Earlier method"
+        assert earlier["steps"][0]["evidence_execution_ids"] == ["original-execution"]
+        assert "depends_on" not in earlier["steps"][0]
+        assert "dependency graph are unavailable" in earlier["context_limitations"]
+        assert context["missing_plan_ids"] == []
+    else:
+        assert context["historical_plans"] == []
+        assert context["missing_plan_ids"] == ["earlier"]
 
 
 @pytest.mark.asyncio

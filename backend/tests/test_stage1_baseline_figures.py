@@ -246,6 +246,7 @@ def test_existing_platform_baseline_keeps_the_stable_name():
 
     assert list(rendered) == [ANNOTATION_UMAP_NAME]
     assert agent.figure_calls[0]["figure_name"] == ANNOTATION_UMAP_NAME
+    assert state.publication_figures[0].report_role is None
 
 
 @pytest.mark.parametrize("agent", [
@@ -354,3 +355,30 @@ def test_all_real_panels_render_and_pass_the_blocking_layout_gate():
             f"{spec.name} must pass the deterministic layout gate: {violations}"
         )
     plt.close("all")
+
+
+def test_platform_role_only_tags_new_attempt_in_active_lineage():
+    from types import SimpleNamespace
+    prior = PublicationFigure(
+        name=ANNOTATION_UMAP_NAME, description="Earlier baseline", figure_type="umap",
+        png_path="earlier.jpg", pdf_path="", lineage_id="fork", purpose="baseline",
+    )
+    ancestor = prior.model_copy(update={"id": "ancestor", "lineage_id": "main", "purpose": "result"})
+    state = SimpleNamespace(publication_figures=[prior, ancestor], restore_branch_id="fork")
+    agent = _Agent(_Sandbox(_Result(output=_probe_line(
+        batch_key=None, batch_levels=[], cluster_key=None, cluster_levels=[],
+        marker_group_key=None, marker_group_levels=[], marker_genes=[],
+    ))))
+
+    async def render(**kwargs):
+        state.publication_figures.append(PublicationFigure(
+            name=kwargs["figure_name"], description="New baseline", figure_type="umap",
+            png_path="new.jpg", pdf_path="", lineage_id="fork", purpose="baseline",
+        ))
+        return "rendered"
+
+    agent._handle_generate_publication_figure = render
+    asyncio.run(ensure_stage1_baseline_figures(agent, state))
+    assert prior.report_role is None
+    assert ancestor.report_role is None
+    assert state.publication_figures[-1].report_role == "foundation_annotation"

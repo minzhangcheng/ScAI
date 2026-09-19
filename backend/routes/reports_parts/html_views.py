@@ -56,6 +56,29 @@ _REPORT_RESOURCE_CLEANUP_TIMEOUT_SECONDS = 10.0
 from .core import _create_report_archive, _enforce_archive_retention, _load_report_json, _next_archive_version, _report_cache_key_for_lineage, _report_generation_pending, _sanitize_nan, _try_begin_generation, clear_generation_pending, router
 
 
+@router.get("/{session_id}/stage-review-report/{report_id}/html")
+async def get_stage_review_report_html(
+    session_id: str, report_id: str, request: Request, branch_id: Optional[str] = None,
+):
+    """Download the frozen review version owned by this session and branch."""
+    validate_session_id(session_id)
+    state = await require_session_ownership(
+        session_id=session_id, user_id=getattr(request.state, "user_id", ""),
+    )
+    lineage = resolve_report_target_lineage(
+        branch_id if branch_id is not None else state.restore_branch_id,
+    )
+    report = next((item for item in state.stage_review_reports
+                   if item.id == report_id and item.session_id == session_id
+                   and item.lineage_id == lineage), None)
+    if report is None or report.status == "failed" or not report.html:
+        raise HTTPException(status_code=404, detail="Stage review report not found")
+    return HTMLResponse(report.html, headers={
+        "Content-Disposition": f'attachment; filename="{report.stage}_review_v{report.revision}.html"',
+        "Cache-Control": "no-store",
+    })
+
+
 @router.get("/{session_id}/exploration-report/html")
 async def get_exploration_report_html(
     session_id: str,

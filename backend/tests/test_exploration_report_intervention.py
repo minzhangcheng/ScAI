@@ -23,7 +23,7 @@ async def test_report_intervention_holds_boundary_and_retries_only_failed_step(
     state = AnalysisState(user_id="u", name="s", initial_instruction="x", round_wait_seconds=0)
     state.current_round = 1
     graph = {"analysis_state": state, "bioinformatics_result": {"status": "completed"}}
-    rr = SimpleNamespace(round_number=1, pi_summary="summary", exploration_report=None)
+    rr = SimpleNamespace(round_number=1, pi_summary="summary", exploration_report=None, report_chapter=None)
     ctx = {"state": graph, "analysis_state": state, "round_result": rr,
            "bioinformatics_result": graph["bioinformatics_result"]}
     raw = [{"direction_id": "dir_001", "direction": "A"}]
@@ -62,7 +62,6 @@ async def test_report_intervention_holds_boundary_and_retries_only_failed_step(
     persist, finalize = AsyncMock(), AsyncMock(return_value=graph)
     monkeypatch.setattr(phases, "persist_round_result", persist)
     monkeypatch.setattr(phases, "finalize_synthesis", finalize)
-    monkeypatch.setattr("backend.services.report.generate_exploration_report_html", Mock(return_value="report.html"))
     task = asyncio.create_task(phases.run_pi_synthesis(wf, graph))
     try:
         await asyncio.wait_for(entered.wait(), 2)
@@ -96,7 +95,9 @@ async def test_report_intervention_holds_boundary_and_retries_only_failed_step(
             from backend.services.round_snapshots.restore import (
                 _strip_unavailable_report_urls,
             )
-            assert produced["html_url"] == "/api/session/s/exploration-report/html"
+            assert produced["html_url"] == (
+                f"/api/session/{state.id}/stage-review-report/{state.stage_review_reports[-1].id}/html"
+            )
             assert _strip_unavailable_report_urls(produced)["html_url"] is None
         else:
             assert state.exploration_report is None

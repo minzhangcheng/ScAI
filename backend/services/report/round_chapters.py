@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from backend.models.schema_parts.session import AnalysisPlan
 from backend.models.schema_parts.round_report import (
     RoundReportArtifact, RoundReportBlock, RoundReportChapter,
 )
@@ -75,7 +76,92 @@ def round_artifact_catalog(state):
     return catalog
 
 
-def chapter_prompt(catalog):
+def _chapter_plan_context(plan):
+    return plan.model_dump(mode="json", include={
+        "id": True, "round_number": True, "stage": True, "overview": True,
+        "steps": {"__all__": {
+            "id", "title", "method", "input", "expected_output",
+            "rationale", "depends_on", "status",
+        }},
+    })
+
+
+def _chapter_analysis_context(state, catalog):
+    """Project recorded step and follow-up links without assigning narrative order."""
+    artifact_ids = {item.artifact_id for item in catalog}
+    records = [record for record in [*state.publication_figures, *state.publication_tables]
+               if record.id in artifact_ids]
+    tasks = {task.id: task for task in state.figure_revision_tasks}
+    artifacts = []
+    for record in records:
+        item = record.model_dump(mode="json", include={
+            "id", "plan_id", "plan_step_id", "plan_step_ids", "purpose", "report_role",
+            "source_execution_id", "producer_run_kind", "source_execution_run_kind",
+            "logical_figure_id", "revision_of_id", "supersedes_id",
+            "figure_followup_task_id", "round_number",
+        })
+        task = tasks.get(getattr(record, "figure_followup_task_id", None))
+        if task is not None:
+            item["followup_task"] = task.model_dump(mode="json", include={
+                "id", "plan_id", "plan_step_id", "reason", "pi_instruction",
+                "pi_rationale", "pi_report_note", "status",
+            })
+        artifacts.append(item)
+    execution_ids = {record.source_execution_id for record in records
+                     if record.source_execution_id}
+    executions = [execution.model_dump(mode="json", include={
+        "id", "plan_id", "plan_step_ids", "plan_binding_status",
+        "execution_purpose", "execution_status", "round_number",
+    }) for execution in state.code_history if execution.id in execution_ids]
+    plan = state.current_plan
+    plan_context = None
+    if plan is not None and plan.round_number in (0, state.current_round):
+        plan_context = _chapter_plan_context(plan)
+    missing_plan_ids = {record.plan_id for record in records if record.plan_id}
+    if plan_context:
+        missing_plan_ids.discard(plan_context["id"])
+    historical_plans = []
+    # The dialogue counter is not an analysis round. Match the stored plan ID
+    # and the plan's own round, never step numbers or the dialogue counter.
+    for entry in reversed(state.plan_dialogue_history):
+        raw = entry.get("plan")
+        if not isinstance(raw, dict) or raw.get("id") not in missing_plan_ids:
+            continue
+        try:
+            historical = AnalysisPlan.model_validate(raw)
+        except ValidationError:
+            continue
+        if historical.round_number not in (0, state.current_round):
+            continue
+        historical_plans.append({
+            **_chapter_plan_context(historical), "context_source": "plan_dialogue_history",
+        })
+        missing_plan_ids.remove(historical.id)
+    # Accepted foundations survive later planning dialogues. They retain only
+    # completed steps, not the full plan or its dependency graph.
+    for inventory in reversed(state.accepted_foundation_inventories):
+        if (inventory.plan_id not in missing_plan_ids
+                or inventory.round_number != state.current_round):
+            continue
+        historical_plans.append({
+            "id": inventory.plan_id, "round_number": inventory.round_number,
+            "stage": inventory.planning_stage,
+            "context_source": "accepted_foundation_inventory",
+            "inventory_id": inventory.inventory_id,
+            "context_limitations": "Only retained completed steps are available; the full "
+                                    "plan, inputs, and dependency graph are unavailable.",
+            "steps": [{"id": step.plan_step_id, **step.model_dump(
+                mode="json", exclude={"plan_step_id"},
+            )} for step in inventory.steps],
+        })
+        missing_plan_ids.remove(inventory.plan_id)
+    return {"current_plan": plan_context, "artifacts": artifacts,
+            "historical_plans": historical_plans,
+            "missing_plan_ids": sorted(missing_plan_ids),
+            "source_executions": executions}
+
+
+def chapter_prompt(catalog, *, state=None):
     return """
 ## Reusable Round Report Chapter
 Return exactly one JSON object for the synthesis. Inside that same object,
@@ -85,21 +171,54 @@ or code block):
   {"text": "Report-ready Markdown explaining a finding and its limitations",
    "artifact_ids": ["exact catalog ID, in reading order"]}
 ], "conclusions": "This round's conclusions and remaining uncertainty"}.
-Begin with this round's research question. Organize blocks by the reasoning a
-reader needs, and place each supporting artifact immediately after the block
-that explains it. Decide the order from the evidence and research question;
+Begin with this round's research question, inputs, and sample design. Organize
+headed blocks in the logical order of the analysis actually performed, respecting
+step dependencies: describe each step's recorded method, relevant parameters,
+result, and limitations, then place its supporting artifacts immediately after
+that explanation. Follow this study's actual workflow, not a fixed assay template.
+Planned steps and expected outputs are not proof of execution. Use execution
+records and reported findings to distinguish performed, partial, and unperformed
+work; disclose missing methods or parameters instead of inventing them. Refer to
+retained execution records for reproducibility without dumping code or tool logs.
+Plan step IDs are local to their plan_id; never equate steps across different plans.
+Match each artifact to current_plan or historical_plans by exact plan_id. Historical
+contexts may be partial; respect their context_limitations. For missing_plan_ids,
+state that step details are unavailable rather than borrowing another plan's steps.
+
+Late-generated figures belong at the analysis step they support, not at the end:
+- Insert supplementary validation and diagnostic plots beside the original result.
+- Keep full-dataset confirmed annotation UMAP and annotation validation in the
+  QC/annotation foundation section, including artifacts marked foundation_annotation,
+  even when rendered during Stage 2. A later downstream subset analysis belongs
+  with its own result; do not move every UMAP into the foundation section.
+- Use explicit revision/supersession links to explain corrections; do not infer
+  replacement from similar filenames or hide offered evidence as a duplicate.
+- Place genuinely new analysis after its prerequisite steps and explain what it adds.
+- Write the associated prose together with the figures: state what the supplement
+  validates, qualifies, or changes, preserving unrelated findings and uncertainty.
+  A figure-only follow-up is a visualization of retained results, not a new analysis.
+For unbound artifacts, reason from captions and available evidence, disclose uncertain
+placement, and retain them with an explanation; never fabricate a step association.
+Do not create a trailing supplement merely because an artifact was generated later.
+Scientific interpretation and placement remain your responsibility;
 catalog order, filenames, creation times, and plot types are NOT reading order.
 Use each offered artifact once. Explain auxiliary/diagnostic evidence where it
 belongs. Do not invent IDs, numbers, observations, or missing analyses. Use plain
 prose when no artifact supports a finding. Refer to artifacts only through
 artifact_ids, never handwritten FIGURE/TABLE markers or image links. Existing
-captions will be retained verbatim. Do not repeat generic methods or execution
-logs. This chapter is saved at round completion and reused without rewriting in
+captions will be retained verbatim. Avoid generic textbook methods; include the
+recorded study-specific choices needed to understand the results.
+This chapter is saved at round completion and reused without rewriting in
 the final report. Later integration may explicitly qualify earlier conclusions.
 The host validates references only; you own scientific interpretation and order.
 
 Artifact catalog (not ordered for presentation):
-""" + json.dumps([item.model_dump() for item in catalog], ensure_ascii=False)
+""" + json.dumps([item.model_dump() for item in catalog], ensure_ascii=False) + (
+        "\n\nRecorded analysis and supplementary-figure context "
+        "(plans are intentions; execution links are not scientific acceptance):\n"
+        + json.dumps(_chapter_analysis_context(state, catalog), ensure_ascii=False)
+        if state is not None else ""
+    )
 
 
 def assemble_round_chapter(raw, catalog, summary, round_number):

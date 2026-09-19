@@ -1,5 +1,5 @@
 import {
-  AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Clock, Edit3, FileDown, X,
+  AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Clock, Edit3, X,
 } from 'lucide-react'
 
 import type { Language } from '../../i18n/translations'
@@ -8,6 +8,7 @@ import type {
   AnnotationDialogController,
   ClusterAnnotation,
 } from './useAnnotationDialogController'
+import { StageReviewReportDownload } from '../report/StageReviewReportDownload'
 
 interface AnnotationDialogViewProps {
   controller: AnnotationDialogController
@@ -65,14 +66,15 @@ function renderProportions(annotation: ClusterAnnotation, labels: string[]) {
 
 export function AnnotationDialogView({ controller }: AnnotationDialogViewProps) {
   const {
-    allLowConfidenceConfirmed, annotations, countdown, detailedReportUrl, editingCluster,
+    allLowConfidenceConfirmed, annotations, countdown, editingCluster,
     editValue, expandedClusters, handleConfirmAll, handleConfirmCluster, handleEdit,
     handleSaveEdit, hasLowConfidence, initialAnnotations, isSupplementaryRunning, language,
     lowConfidenceClusters, onClose, onRequestSupplementary, organism, proportionDimension,
     proportionGroupLabels, reclusteringRecommendations, reportHtmlUrl, setEditValue,
     setShowSupplementaryInput, showSupplementaryInput, submitting, tissue, tissueSummary,
     toggleExpanded, validationResult, validationSummary, validationTextSummary,
-  } = controller; return (
+  } = controller
+  return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
       <div className="bg-white dark:bg-surface-900 rounded-2xl shadow-modal max-w-[95vw] w-[1120px] mx-4 max-h-[85vh] flex flex-col animate-scale-in">
         <div className="flex items-center justify-between px-6 py-4 border-b">
@@ -86,17 +88,7 @@ export function AnnotationDialogView({ controller }: AnnotationDialogViewProps) 
                 {tissueSummary && ` | ${tissueSummary.substring(0, 100)}`}
               </p>
             </div>
-            {reportHtmlUrl && (
-              <a
-                href={reportHtmlUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-2 px-4 py-2 bg-accent-50 text-accent-700 hover:bg-accent-100 rounded-lg text-sm font-medium transition-colors border border-accent-200"
-              >
-                <FileDown className="w-4 h-4" />
-                {language === 'zh' ? '查看分析报告' : 'View Analysis Report'}
-              </a>
-            )}
+            <StageReviewReportDownload url={reportHtmlUrl} language={language} stage={1} />
           </div>
           <button
             onClick={onClose}
@@ -308,17 +300,6 @@ export function AnnotationDialogView({ controller }: AnnotationDialogViewProps) 
                   {annotations.filter(a => a.user_confirmed).length} / {annotations.length}{' '}
                   {language === 'zh' ? '已确认' : 'confirmed'}
                 </div>
-                {detailedReportUrl && (
-                  <a
-                    href={detailedReportUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-accent-600 hover:text-accent-800 flex items-center gap-1"
-                  >
-                    <FileDown className="w-3.5 h-3.5" />
-                    {language === 'zh' ? '查看详细报告' : 'View Detailed Report'}
-                  </a>
-                )}
               </div>
               <div className="flex items-center gap-3">
                 <button

@@ -131,6 +131,7 @@ class RoundResult(BaseModel):
 
 class PublicationFigure(BaseModel):
     """Publication-quality figure with PNG thumbnail and PDF high-res"""
+    report_role: Optional[Literal["foundation_annotation"]] = None
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     description: str

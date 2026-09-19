@@ -1,9 +1,10 @@
 import {
-  AlertTriangle, Brain, CheckSquare, ChevronDown, ChevronUp, Clock, Dna, ExternalLink,
+  AlertTriangle, Brain, CheckSquare, ChevronDown, ChevronUp, Clock, Dna,
   Plus, Send, Square, Trash2, TrendingUp, X,
 } from 'lucide-react'
 
 import DirectionEvidence from '../analysis/DirectionEvidence'
+import { StageReviewReportDownload } from '../report/StageReviewReportDownload'
 import { SupplementaryAnalysisModal } from '../SupplementaryAnalysisModal'
 import type { ExplorationReportController } from './useExplorationReportController'
 
@@ -202,7 +203,7 @@ function DirectionCandidates({ controller }: ExplorationReportViewProps) {
 
 export function ExplorationReportView({ controller }: ExplorationReportViewProps) {
   const {
-    addCustomDirection, canSubmit, customDirections, detailedReportUrl, explorationReportUrl,
+    addCustomDirection, canSubmit, customDirections, explorationReportUrl,
     formatTime, handlePiDecide, handleSubmit, hasCountdown, isSupplementaryRunning, isZh,
     language, onClose, onRequestSupplementary, removeCustomDirection, report, roundSummary,
     setShowFullReport, setShowSupplementaryInput, showFullReport, showSupplementaryInput,
@@ -223,17 +224,7 @@ export function ExplorationReportView({ controller }: ExplorationReportViewProps
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {explorationReportUrl && (
-              <a
-                href={explorationReportUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-accent-700 bg-accent-100 hover:bg-accent-200 rounded-lg transition-colors"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                {isZh ? '查看详细报告' : 'View Detailed Report'}
-              </a>
-            )}
+            <StageReviewReportDownload url={explorationReportUrl} language={language} stage={2} />
             <button onClick={onClose} className="p-2 hover:bg-white/60 rounded-lg">
               <X className="w-5 h-5 text-slate-400" />
             </button>
@@ -379,17 +370,6 @@ export function ExplorationReportView({ controller }: ExplorationReportViewProps
                 {isZh ? '让 PI 决定' : 'Let PI Decide'}
               </div>
             </button>
-            {detailedReportUrl && (
-              <a
-                href={detailedReportUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm text-accent-600 hover:text-accent-800 flex items-center gap-1"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                {isZh ? '查看详细报告' : 'View Detailed Report'}
-              </a>
-            )}
           </div>
           <div className="flex items-center gap-3">
             <button

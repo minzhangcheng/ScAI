@@ -106,7 +106,7 @@ _REPORT_URL_FIELDS = frozenset({
 _LOCAL_REPORT_URL = re.compile(
     r"^/api/session/[^/?#\s]+/"
     r"(?:report|exploration-report|annotation-report|integration-report|"
-    r"detailed-report)(?:/|$|[?#])"
+    r"detailed-report|stage-review-report)(?:/|$|[?#])"
 )
 
 

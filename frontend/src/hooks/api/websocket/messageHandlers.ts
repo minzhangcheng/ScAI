@@ -197,6 +197,12 @@ function handleStateSync(data: any, context: MessageHandlerContext): void {
   return  // Don't add state_sync to message stream
 }
 
+function handleExplorationReport(data: any): void {
+  useAppStore.getState().updateSession({
+    explorationReportUrl: data.content?.html_url ?? '',
+  })
+}
+
 export function handleWebSocketMessage(
   event: MessageEvent,
   context: MessageHandlerContext,
@@ -401,6 +407,10 @@ export function handleWebSocketMessage(
       })
       store.setShowExplorationFailedDialog(true)
       return  // Don't add to MessageStream — the dialog is the UX
+    }
+
+    if (data.type === 'exploration_report') {
+      handleExplorationReport(data)
     }
 
     const message: Message = {

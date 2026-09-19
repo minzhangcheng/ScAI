@@ -35,6 +35,7 @@ DATA_TYPE_BULK_RNASEQ = "bulk RNA-seq"
 # Module-level lock for async-safe state version increments
 _version_lock = asyncio.Lock()
 
+from .schema_parts.round_report import StageReviewReport
 from .schema_parts.snapshot_failure import sanitize_snapshot_failure
 
 
@@ -224,6 +225,7 @@ class AnalysisState(BaseModel):
     # Path to annotation context report HTML file
 
     # Incremental detailed report segments (built at each HITL point)
+    stage_review_reports: List[StageReviewReport] = Field(default_factory=list)
     detailed_report_segments: List[DetailedReportSegment] = Field(default_factory=list)
     detailed_report_html_path: Optional[str] = None
 
@@ -872,14 +874,9 @@ class AnalysisState(BaseModel):
             else:
                 result[api_key] = val
 
-        result["exploration_report_url"] = (
-            f"/api/session/{self.id}/exploration-report/html"
-            if getattr(self, 'exploration_report_html_path', None) else None
-        )
-        result["annotation_report_url"] = (
-            f"/api/session/{self.id}/annotation-report/html"
-            if getattr(self, 'annotation_report_html_path', None) else None
-        )
+        from backend.services.report.stage_reviews import latest_stage_review_url
+        result["exploration_report_url"] = latest_stage_review_url(self, "stage2")
+        result["annotation_report_url"] = latest_stage_review_url(self, "stage1")
         result["integration_report_url"] = (
             f"/api/session/{self.id}/integration-report/html"
             if getattr(self, 'integration_report_html_path', None) else None

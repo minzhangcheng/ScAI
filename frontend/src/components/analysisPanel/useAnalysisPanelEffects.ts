@@ -44,6 +44,7 @@ interface AnalysisPanelEffectsOptions {
 export function useAnalysisPanelEffects(options: AnalysisPanelEffectsOptions) {
   // A mounted panel must not compete with useWebSocket's owner-transition
   // effect, including when the panel itself first mounts for an active owner.
+  const lastExplorationUrlRef = useRef<string | undefined>(undefined)
   const previousOwnerRef = useRef<string | null>(null)
   useEffect(() => {
     const owner = chatOwnerKey(
@@ -167,21 +168,27 @@ export function useAnalysisPanelEffects(options: AnalysisPanelEffectsOptions) {
       }
     }
     if (explorationMessage
-      && explorationMessage.id !== options.lastExplorationMsgRef.current
+      && (explorationMessage.id !== options.lastExplorationMsgRef.current
+        || options.currentSession?.explorationReportUrl !== lastExplorationUrlRef.current)
       && options.currentSession?.status === 'waiting_input') {
       if ((options.currentSession.currentRound ?? 0) > 1) {
         options.lastExplorationMsgRef.current = explorationMessage.id
         return
       }
       options.lastExplorationMsgRef.current = explorationMessage.id
-      options.setExplorationReportData(explorationMessage.content as ExplorationReportData)
+      lastExplorationUrlRef.current = options.currentSession.explorationReportUrl
+      options.setExplorationReportData({
+        ...(explorationMessage.content as ExplorationReportData),
+        ...(options.currentSession.explorationReportUrl !== undefined
+          ? { html_url: options.currentSession.explorationReportUrl } : {}),
+      })
       options.setIsSupplementaryRunning(false)
       if (!options.showExplorationDialog) {
         options.setShowExplorationDialog(true)
         options.setShowFeedbackDialog(false)
       }
     }
-  }, [options.messages, options.currentSession?.status, options.currentSession?.currentRound])
+  }, [options.messages, options.currentSession?.status, options.currentSession?.currentRound, options.currentSession?.explorationReportUrl])
 
   useEffect(() => {
     if (!options.isCurrentIntegrationGate) {

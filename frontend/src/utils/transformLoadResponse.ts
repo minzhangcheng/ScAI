@@ -364,7 +364,8 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
         ?? data.integrated_report
         ?? undefined,
     ),
-    ...opt('explorationReportUrl', data.exploration_report_url),
+    ...(data.exploration_report_url !== undefined
+      ? { explorationReportUrl: data.exploration_report_url ?? '' } : {}),
     ...opt('integrationReportUrl', data.integration_report_url),
     ...opt('restoreBranchId', data.restore_branch_id ?? undefined),
     ...opt(

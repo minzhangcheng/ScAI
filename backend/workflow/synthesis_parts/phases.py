@@ -272,18 +272,11 @@ async def build_exploration_result(self, ctx):
             analysis_state.exploration_report = exploration_report
             round_result.exploration_report = exploration_report
 
-            # Generate exploration report HTML
-            try:
-                from ...services.report import generate_exploration_report_html
-                html_path = generate_exploration_report_html(
-                    analysis_state, exploration_report, round_result
-                )
-                analysis_state.exploration_report_html_path = html_path
-                logger.info(f"[{self.session_id}] Exploration report HTML saved to: {html_path}")
-            except Exception as html_err:
-                logger.error(f"[{self.session_id}] Exploration report HTML generation failed: {html_err}")
-
-            html_url = f"/api/session/{self.session_id}/exploration-report/html" if analysis_state.exploration_report_html_path else None
+            from ...services.report.stage_reviews import build_stage_review
+            html_url = await build_stage_review(
+                analysis_state, self.pi_agent, "stage2", graph_state=state,
+                round_result=round_result,
+            )
 
             # Generate detailed report segment for exploration completion
             await self._build_and_save_detailed_segment(
@@ -903,12 +896,11 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
                         )
                         analysis_state.exploration_report = exploration_report
 
-                        from ...services.report import generate_exploration_report_html
-                        html_path = generate_exploration_report_html(
-                            analysis_state, exploration_report, last_round
+                        from ...services.report.stage_reviews import build_stage_review
+                        html_url = await build_stage_review(
+                            analysis_state, self.pi_agent, "stage2",
+                            graph_state=self._current_graph_state or state, round_result=last_round,
                         )
-                        analysis_state.exploration_report_html_path = html_path
-                        html_url = f"/api/session/{self.session_id}/exploration-report/html"
                         detailed_report_url = f"/api/session/{self.session_id}/detailed-report/html" if analysis_state.detailed_report_html_path else None
 
                         await self._send_message("exploration_report", {
@@ -919,6 +911,15 @@ async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
                             "detailed_report_url": detailed_report_url,
                         }, AgentType.PI)
                 except Exception as e:
+                    from ...services.report.stage_reviews import record_stage_review_failure
+                    record_stage_review_failure(analysis_state, "stage2")
+                    if analysis_state.exploration_report:
+                        await self._send_message("exploration_report", {
+                            "report_a": analysis_state.exploration_report.model_dump(mode="json"),
+                            "round": analysis_state.current_round,
+                            "summary": "Review regeneration failed; previous direction suggestions are retained.",
+                            "html_url": None, "detailed_report_url": None,
+                        }, AgentType.PI)
                     logger.error(f"[{self.session_id}] Exploration report regeneration failed: {e}")
                     await self._send_message("error", f"Report regeneration failed: {e}", AgentType.PI)
 

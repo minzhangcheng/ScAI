@@ -37,6 +37,42 @@ from .shared import (  # noqa: F401
 class ReportsMixin:
     """Exploration report, integrated report, and research briefs."""
 
+    async def generate_stage_review_chapter(self, state, stage, catalog, context):
+        """Use round-report structure while letting the PI select decision-time scope."""
+        import json
+        from ...services.report.round_chapters import chapter_prompt
+
+        self.refresh_runtime_config_if_needed()
+        scope = (
+            "Stage 1: describe performed QC, preprocessing, clustering and candidate "
+            "annotation evidence. Labels are pending user confirmation. Include existing "
+            "candidate-label UMAPs and marker evidence; disclose any missing visualization. "
+            "Do not describe candidate labels as accepted or invent an annotation plot."
+            if stage == "stage1" else
+            "Stage 2: describe the performed unbiased exploration and evidence for research "
+            "directions, after a brief statement of the confirmed annotation basis. Do not "
+            "repeat the Stage 1 QC/annotation gallery. Full-dataset confirmed annotation UMAP "
+            "and foundation_annotation artifacts belong to the foundation section of the final "
+            "report even if created late. Include newly available confirmed-label views here "
+            "when they are needed for direction review and were absent from the Stage 1 "
+            "review; that does not change their foundation placement in the final report. New downstream "
+            "subset UMAPs belong with their downstream analysis. Explain uncertainties."
+        )
+        prompt = chapter_prompt(catalog, state=state) + """
+
+## Decision-time review override
+Generate an independent stage review, not the complete round chapter described above.
+Return one JSON object with `stage_artifact_ids` (exact IDs selected for this stage)
+and `report_chapter` using the block structure above. Use every SELECTED artifact once;
+the full catalog is available evidence, not a requirement to include all artifacts.
+Choose stage scope by scientific role and recorded analysis, not creation time or filename.
+Keep methods, parameters, findings, adjacent figures, uncertainty, and conclusions in
+actual analysis order, just as in a per-round report. Integrate supplementary evidence
+beside its owning result. This review does not replace the full final-report chapter.
+""" + scope + "\nRecorded review context:\n" + json.dumps(context, ensure_ascii=False, default=str)
+        response = await self.chat_without_history(prompt)
+        return self._safe_parse_json(response)
+
     async def generate_exploration_report(
         self,
         state: AnalysisState,

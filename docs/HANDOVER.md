@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.59.5 · **Last updated**: 2026-09-19
+**Version**: 0.59.6 · **Last updated**: 2026-09-19
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,17 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.59.x — (2026-09-18 onward)**
 
+- `0.59.6` — Round 1 now produces independent Stage 1 and Stage 2 review
+  reports at the cell-annotation and research-direction decisions. Each review
+  is frozen with its own version, authenticated download URL, and branch-aware
+  persistence; supplementary analysis creates a new review version instead of
+  replacing the earlier export. Stage 1 includes candidate annotation evidence
+  and a read-only candidate-label UMAP preview when retained coordinates are
+  available. Final Round 1 chapters remain independent of these decision-time
+  slices, so confirmed annotation UMAPs stay in the QC/annotation foundation
+  section even when rendered during Stage 2. Legacy report links remain
+  available only when no new stage review exists, and report downloads preserve
+  the server-provided versioned filename. Focused backend regressions passed.
 - `0.59.5` — Integrated Report publication now freezes the selected figure
   catalogue, render identities, PI reservations, and report body as one
   persisted version. Retries reuse the pending catalogue, while reloads and

@@ -52,6 +52,7 @@ _EXCLUDED_FIELDS = {
     "detailed_report_html_path",
     "exploration_report_html_path",
     "annotation_report_html_path",
+    "stage_review_reports",  # Frozen HTML is served only through owned report routes.
     "integration_report_html_path",
     "last_restored_snapshot_id",
     "restore_provenance_snapshot_id",
