@@ -350,11 +350,25 @@ CANDIDATE_PROMPT_FIELDS: Sequence[str] = (
     "report_recommendation",
 )
 
-# The novelty record's verdict and its caveats. The per-article dumps and the
-# full query strings are the bulk of the record and none of them change a
-# scoring decision, so they are not sent.
+# The new policy's execution facts, PI assessment, source-linked observations,
+# and limitations lead the prompt. Legacy count/novelty fields remain for old
+# records and are descriptive when policy_version is set.
 EVIDENCE_PROMPT_FIELDS: Sequence[str] = (
     "direction_id",
+    "policy_version",
+    "plan_status",
+    "assessment_status",
+    "assessment_uncertainty",
+    "assessment_limitations",
+    "pi_reviews",
+    "article_inventory",
+    "extractions",
+    "task_executions",
+    "unexecuted_task_ids",
+    "tasks",
+    "source_passage",
+    "cited_article_ids",
+    # Legacy summary fields are retained below for historical evidence.
     "novelty_status",
     "prior_art_level",
     "support_level",
@@ -374,6 +388,18 @@ EVIDENCE_PROMPT_FIELDS: Sequence[str] = (
     "fallback_tier",
     "timed_out",
 )
+
+_DISCLOSED_EVIDENCE_LIST_FIELDS: Sequence[str] = (
+    "article_inventory",
+    "extractions",
+    "task_executions",
+)
+
+_EVIDENCE_LIST_IDENTITY_FIELDS = {
+    "article_inventory": "pmid",
+    "extractions": "pmid",
+    "task_executions": "task_id",
+}
 
 
 def _shorten(value: Any, budget: int) -> Any:
@@ -438,11 +464,43 @@ def budgeted_prompt_block(
         kept: Dict[str, Any] = {}
         omitted = 0
         used = 2
+        disclosed_counts: Dict[str, Any] = {}
         for field in fields:
             value = item.get(field)
             if value is None or value == "" or value == [] or value == {}:
+                if item.get("policy_version") and field in _DISCLOSED_EVIDENCE_LIST_FIELDS:
+                    disclosed_counts[f"{field}_source_count"] = 0
+                    disclosed_counts[f"{field}_retained_count"] = 0
+                    disclosed_counts[f"{field}_omitted_count"] = 0
+                    disclosed_counts[f"{field}_detail_truncated_count"] = 0
+                    disclosed_counts[f"{field}_detail_truncated"] = False
                 continue
             piece = _shorten(value, max(0, share - used - len(field) - 6))
+            if item.get("policy_version") and field in _DISCLOSED_EVIDENCE_LIST_FIELDS:
+                source_count = len(value) if isinstance(value, list) else 0
+                identity_field = _EVIDENCE_LIST_IDENTITY_FIELDS[field]
+                retained_items: List[Dict[str, Any]] = []
+                detail_truncated_count = 0
+                if isinstance(value, list) and isinstance(piece, list):
+                    for index, projected in enumerate(piece):
+                        if not isinstance(projected, dict) or not projected.get(identity_field):
+                            continue
+                        retained_items.append(projected)
+                        if index >= len(value) or projected != value[index]:
+                            detail_truncated_count += 1
+                    piece = retained_items
+                retained_count = len(retained_items)
+                disclosed_counts[f"{field}_source_count"] = source_count
+                disclosed_counts[f"{field}_retained_count"] = retained_count
+                disclosed_counts[f"{field}_omitted_count"] = max(
+                    0, source_count - retained_count
+                )
+                disclosed_counts[f"{field}_detail_truncated_count"] = (
+                    detail_truncated_count
+                )
+                disclosed_counts[f"{field}_detail_truncated"] = bool(
+                    detail_truncated_count
+                )
             if piece is None or piece == "" or piece == [] or piece == {}:
                 omitted += 1
                 continue
@@ -453,6 +511,7 @@ def budgeted_prompt_block(
                 kept[field] = item.get(field)
         if omitted:
             kept["fields_omitted_for_prompt_budget"] = omitted
+        kept.update(disclosed_counts)
         rendered.append(kept)
     return json.dumps(rendered, ensure_ascii=False, indent=1)
 

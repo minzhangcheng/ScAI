@@ -12,7 +12,125 @@ from ...utils.formatting import as_list
 from ...utils.llm_client import UpstreamExhaustedError
 
 logger = logging.getLogger(__name__)
-from ...models.schemas import AnalysisState, DirectionSearchQuery
+from ...models.schemas import (
+    AnalysisState,
+    DirectionSearchQuery,
+    DirectionSearchTask,
+    DirectionSearchTerm,
+)
+
+
+SUPPORTED_DIRECTION_SEARCH_FIELDS = frozenset(
+    {"all", "tiab", "title", "author", "mesh", "majr", "pt", "sh", "subh", "nm"}
+)
+_DIRECTION_TERM_CONTROL_RE = re.compile(
+    r"(?:\bAND\b|\bOR\b|\bNOT\b|[()\[\]{}\"])", re.IGNORECASE
+)
+
+
+class DirectionSearchCompilationError(ValueError):
+    """Technical validation failure for a PI-authored direction-search task."""
+
+
+def _direction_term(value: Any) -> DirectionSearchTerm:
+    try:
+        term = value if isinstance(value, DirectionSearchTerm) else DirectionSearchTerm.model_validate(value)
+    except Exception as exc:
+        raise DirectionSearchCompilationError(f"invalid direction search term: {exc}") from exc
+    text = term.text.strip()
+    if not text:
+        raise DirectionSearchCompilationError("direction search term is empty")
+    if len(text) > 240:
+        raise DirectionSearchCompilationError("direction search term exceeds 240 characters")
+    if _DIRECTION_TERM_CONTROL_RE.search(text):
+        raise DirectionSearchCompilationError(
+            f"direction search term contains Boolean/control syntax: {text!r}"
+        )
+    if term.field not in SUPPORTED_DIRECTION_SEARCH_FIELDS:
+        raise DirectionSearchCompilationError(f"unsupported PubMed field tag: {term.field!r}")
+    return term
+
+
+def _compile_direction_term(term: DirectionSearchTerm) -> str:
+    return f'"{term.text.strip()}"[{term.field}]'
+
+
+def compile_direction_search_task(
+    task: DirectionSearchTask | Dict[str, Any],
+    *,
+    candidate_ids: Optional[set[str] | List[str]] = None,
+) -> str:
+    """Compile one PI-approved task without adding scientific concepts."""
+    try:
+        task = task if isinstance(task, DirectionSearchTask) else DirectionSearchTask.model_validate(task)
+    except Exception as exc:
+        raise DirectionSearchCompilationError(f"invalid direction search task: {exc}") from exc
+    if candidate_ids is not None and task.direction_id not in set(candidate_ids):
+        raise DirectionSearchCompilationError(
+            f"task {task.task_id!r} references unknown candidate {task.direction_id!r}"
+        )
+    if not task.task_id.strip() or not task.direction_id.strip():
+        raise DirectionSearchCompilationError("task and direction identifiers must be non-empty")
+    if not task.concept_groups:
+        raise DirectionSearchCompilationError(f"task {task.task_id!r} has no concept groups")
+
+    group_ids: set[str] = set()
+    clauses: list[str] = []
+    for group in task.concept_groups:
+        if group.group_id in group_ids:
+            raise DirectionSearchCompilationError(f"duplicate concept group id: {group.group_id!r}")
+        group_ids.add(group.group_id)
+        terms = [_compile_direction_term(_direction_term(term)) for term in group.terms]
+        if not terms:
+            raise DirectionSearchCompilationError(f"concept group {group.group_id!r} is empty")
+        clauses.append(terms[0] if len(terms) == 1 else "(" + " OR ".join(terms) + ")")
+
+    if task.scope is not None:
+        missing = set(task.scope.required_group_ids) - group_ids
+        if missing:
+            raise DirectionSearchCompilationError(
+                f"task {task.task_id!r} scope references unknown groups: {sorted(missing)}"
+            )
+
+    exclusion_ids: set[str] = set()
+    for exclusion in task.exclusions:
+        if exclusion.exclusion_id in exclusion_ids:
+            raise DirectionSearchCompilationError(
+                f"duplicate exclusion group id: {exclusion.exclusion_id!r}"
+            )
+        exclusion_ids.add(exclusion.exclusion_id)
+        terms = [_compile_direction_term(_direction_term(term)) for term in exclusion.terms]
+        if not terms:
+            raise DirectionSearchCompilationError(f"exclusion group {exclusion.exclusion_id!r} is empty")
+        clauses.append("NOT " + (terms[0] if len(terms) == 1 else "(" + " OR ".join(terms) + ")"))
+
+    return " AND ".join(clauses)
+
+
+def compile_direction_search_plan(
+    tasks: List[DirectionSearchTask | Dict[str, Any]],
+    *,
+    candidate_ids: Optional[set[str] | List[str]] = None,
+) -> Dict[str, str]:
+    """Validate/compile a bounded batch and return task_id -> exact query."""
+    if len(tasks) > 256:
+        raise DirectionSearchCompilationError("a direction search batch may contain at most 256 tasks")
+    seen: set[str] = set()
+    compiled: Dict[str, str] = {}
+    for raw_task in tasks:
+        try:
+            task = raw_task if isinstance(raw_task, DirectionSearchTask) else DirectionSearchTask.model_validate(raw_task)
+        except Exception as exc:
+            raise DirectionSearchCompilationError(f"invalid direction search task: {exc}") from exc
+        if task.task_id in seen:
+            raise DirectionSearchCompilationError(f"duplicate task id: {task.task_id!r}")
+        seen.add(task.task_id)
+        compiled[task.task_id] = compile_direction_search_task(task, candidate_ids=candidate_ids)
+    return compiled
+
+
+compile_pi_direction_search_task = compile_direction_search_task
+compile_pi_direction_search_plan = compile_direction_search_plan
 
 from .shared import (  # noqa: F401
     # Lives in shared.py because build_focused_query needs it too and shared is

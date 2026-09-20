@@ -154,13 +154,20 @@ async def test_focused_articles_prioritized_for_synthesis_when_main_pool_large()
 
 @pytest.mark.asyncio
 async def test_no_articles_returns_nonblocking_empty_result_without_fallback():
-    lit = _Lit([{"sufficient": True}], first_articles=0)
+    lit = _Lit([{
+        "search_exhausted": True,
+        "evidence_strength": "unassessed",
+        "reasoning": "The executed query returned zero results.",
+        "refined_query": "",
+    }], first_articles=0)
     res = await lit._multi_round_pubmed("t", state=None, pubmed_max_results=50,
         initial_query="q1", evaluate_fn=lit._eval_fn, organism="mouse", tissue="liver")
     assert "No PubMed articles were found" in res["report"]
     assert res["search_meta"]["stop_reason"] == "no_pubmed_results"
     assert res["search_meta"]["fallback"] == "none"
     assert res["search_meta"]["search_exhausted"] is True
+    assert lit._eval_i == 1
+    assert "PI review" in res["report"]
     assert res.get("report_id") is None
     assert lit.quick_calls == 0
     assert lit.focused_called == []

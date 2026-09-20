@@ -117,6 +117,40 @@ def _render_integration_evidence_section(candidates, literature_evidence):
         analogous = html_module.escape(str(evidence.get("analogous_evidence_count", "N/A")))
         contradictory = html_module.escape(str(evidence.get("contradictory_evidence_count", "N/A")))
         summary = html_module.escape(str(evidence.get("summary") or ""))
+        detail = ""
+        if evidence.get("policy_version"):
+            assessment = str(evidence.get("assessment_status") or "unassessed")
+            limitations = "; ".join(str(item) for item in (evidence.get("assessment_limitations") or evidence.get("limitations") or [])[:3])
+            source_id_values = list(dict.fromkeys(
+                str(item.get("pmid"))
+                for collection in (
+                    evidence.get("article_inventory") or [],
+                    evidence.get("extractions") or [],
+                )
+                for item in collection
+                if isinstance(item, dict) and item.get("pmid")
+            ))[:5]
+            source_ids = ", ".join(source_id_values)
+            task_statuses = ", ".join(
+                f"{item.get('task_id') or 'task'}={item.get('status') or 'unknown'}"
+                for item in (evidence.get("task_executions") or [])
+                if isinstance(item, dict)
+            )
+            uncertainty = "; ".join(
+                str(item) for item in (evidence.get("assessment_uncertainty") or [])
+            )
+            detail = " | ".join(item for item in (
+                f"PI assessment: {assessment}",
+                f"Source PMIDs: {source_ids}" if source_ids else "",
+                f"Task status: {task_statuses}" if task_statuses else "",
+                f"PI uncertainty: {uncertainty}" if uncertainty else "",
+                f"Limitations: {limitations}" if limitations else "",
+            ) if item)
+        summary_cell = (
+            f"{summary}<br>{html_module.escape(detail)}"
+            if evidence.get("policy_version")
+            else summary
+        )
         strength = _render_evidence_strength(candidate.get("evidence_strength"))
         rows += f"""
             <tr>
@@ -127,7 +161,7 @@ def _render_integration_evidence_section(candidates, literature_evidence):
                 <td>{analogous}</td>
                 <td>{contradictory}</td>
                 <td>{html_module.escape(strength)}</td>
-                <td>{summary}</td>
+                <td>{summary_cell}</td>
             </tr>"""
 
     if not rows:

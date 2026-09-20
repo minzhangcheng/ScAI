@@ -116,9 +116,17 @@ class CallbacksMixin:
         result = await self.literature_agent.process(
             state,
             topic,
-            use_deep_research=True
+            use_deep_research=True,
+            pi_plan_fn=self.pi_agent.plan_literature_search,
+            pi_review_fn=self.pi_agent.review_literature_search,
+            research_context=(
+                f"Project question: {state.initial_instruction}\n"
+                f"Current round: {state.current_round}"
+            ),
         )
-        return result.get("report", "")
+        report = str(result.get("report") or "")
+        note = str(result.get("note") or result.get("source_provenance") or "")
+        return f"{report}\n\nSource note: {note}".strip() if note else report
 
     async def _runtime_persistence_commit_callback(
         self, event: Dict[str, Any]

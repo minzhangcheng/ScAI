@@ -17,6 +17,13 @@ from backend.models.schemas import (
     DirectionLiteratureEvidence,
     ResearchDirectionCandidate,
     DirectionSelectionDecision,
+    DirectionLiteratureInProgress,
+    DirectionSearchTask,
+    DirectionSearchExecution,
+    DirectionArticleInventory,
+    DirectionLiteratureExtraction,
+    DirectionPIReview,
+    AnalysisState,
     SpeciesTissueQualification,
 )
 
@@ -383,6 +390,80 @@ def test_direction_literature_evidence_enhanced_fields_round_trip():
     assert dumped["similar_published_directions"] == [{"pmid": "123", "title": "Related mechanism"}]
     assert dumped["knowledge_gap_summary"] == "No direct prior work in matched liver DKO context."
     assert dumped["fallback_tier"] == "tier3_broad"
+
+
+def test_pi_directed_evidence_and_checkpoint_round_trip_through_analysis_state():
+    task = DirectionSearchTask(
+        task_id="task-1",
+        direction_id="dir_001",
+        evidence_question="Does the proposed link have prior evidence?",
+        concept_groups=[{
+            "group_id": "mechanism",
+            "terms": [{"text": "NFE2L2", "field": "tiab"}],
+        }],
+    )
+    review = DirectionPIReview(
+        direction_id="dir_001",
+        action="finish",
+        assessment_status="uncertain",
+        uncertainty=["bounded retrieval"],
+        cited_article_ids=["123"],
+    )
+    checkpoint = DirectionLiteratureInProgress(
+        gate_id="exploration:1:0:dir_001:question:direction_search_v1",
+        candidate_ids=["dir_001"],
+        tasks=[task],
+        task_executions=[DirectionSearchExecution(
+            task_id="task-1",
+            direction_id="dir_001",
+            compiled_query='"NFE2L2"[tiab]',
+            status="completed",
+            returned_count=1,
+            retrieved_pmids=["123"],
+        )],
+        article_inventory=[DirectionArticleInventory(
+            pmid="123",
+            title="Study",
+            abstract="Retained raw abstract.",
+            task_ids=["task-1"],
+        )],
+        extractions=[DirectionLiteratureExtraction(
+            pmid="123",
+            task_ids=["task-1"],
+            finding="Linked observation",
+            source_passage="Retained raw abstract.",
+        )],
+        pi_reviews=[review],
+        limitations_by_candidate={"dir_001": ["bounded retrieval"]},
+        candidate_deadline_epoch={"dir_001": 123.0},
+    )
+    evidence = DirectionLiteratureEvidence(
+        direction_id="dir_001",
+        direction="Stress response",
+        policy_version="direction_search_v1",
+        tasks=[task],
+        task_executions=checkpoint.task_executions,
+        article_inventory=checkpoint.article_inventory,
+        extractions=checkpoint.extractions,
+        pi_reviews=[review],
+        assessment_status="uncertain",
+        assessment_uncertainty=["bounded retrieval"],
+    )
+    state = AnalysisState(
+        user_id="u",
+        direction_literature_in_progress={checkpoint.gate_id: checkpoint},
+        integration_gate_literature_evidence=[evidence.model_dump(mode="json")],
+    )
+
+    loaded = AnalysisState.model_validate_json(state.model_dump_json())
+    loaded_checkpoint = DirectionLiteratureInProgress.model_validate(
+        loaded.direction_literature_in_progress[checkpoint.gate_id]
+    )
+
+    assert loaded_checkpoint.article_inventory[0].abstract == "Retained raw abstract."
+    assert loaded_checkpoint.pi_reviews[0].assessment_status == "uncertain"
+    assert loaded_checkpoint.limitations_by_candidate["dir_001"] == ["bounded retrieval"]
+    assert loaded.integration_gate_literature_evidence[0]["policy_version"] == "direction_search_v1"
 
 
 class TestDirectionSelectionDecision:

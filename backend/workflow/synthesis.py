@@ -209,18 +209,31 @@ class SynthesisMixin:
 
         try:
             direction_evidence = await self._exploration_llm_step(
-                analysis_state, self.literature_agent.evaluate_direction_novelty_candidates,
-                raw_candidates, state=analysis_state,
+                analysis_state,
+                self.literature_agent.evaluate_direction_literature_search,
+                raw_candidates,
+                state=analysis_state,
+                pi_plan_fn=self.pi_agent.plan_direction_literature_search,
+                pi_review_fn=self.pi_agent.review_direction_literature_search,
+                intervention_fn=self._wait_for_llm_intervention,
+                phase="exploration",
             )
         except (ExplorationReportSkipped, WorkflowTerminatedError, WorkflowSupersededError):
             raise
         except Exception as lit_err:
             logger.exception(f"[{self.session_id}] Direction literature evidence gate failed")
-            direction_evidence = build_fallback_direction_evidence(
-                raw_candidates,
-                status="failed",
-                reason=f"Direction-level literature verification failed: {lit_err}",
-                limitations=["Literature verification failed; PI scoring must be conservative."],
+            checkpoint_projection = getattr(
+                self.literature_agent, "direction_evidence_from_checkpoint", None
+            )
+            direction_evidence = (
+                checkpoint_projection(raw_candidates, analysis_state, phase="exploration")
+                if callable(checkpoint_projection)
+                else build_fallback_direction_evidence(
+                    raw_candidates,
+                    status="failed",
+                    reason=f"Direction-level literature verification failed: {lit_err}",
+                    limitations=["Literature verification failed; PI scoring must be conservative."],
+                )
             )
         report = await self._exploration_llm_step(
             analysis_state, self.pi_agent.score_directions_with_evidence,

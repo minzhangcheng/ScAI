@@ -91,6 +91,16 @@ from .schema_parts.session import (  # noqa: F401
     PlanStep,
     AnalysisPlan,
     SpeciesTissueQualification,
+    DirectionSearchTerm,
+    DirectionConceptGroup,
+    DirectionExclusionGroup,
+    DirectionSearchScope,
+    DirectionSearchTask,
+    DirectionSearchExecution,
+    DirectionArticleInventory,
+    DirectionLiteratureExtraction,
+    DirectionPIReview,
+    DirectionLiteratureInProgress,
     DirectionSearchQuery,
     PubMedArticle,
     PubMedEvidenceItem,
@@ -428,6 +438,12 @@ class AnalysisState(BaseModel):
         "max_search_rounds": 20,             # Max iterative search rounds
     })
     literature_search_cache: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    # In-progress PI-directed direction search checkpoints.  The key is a
+    # stable gate identity (phase/round/candidate batch/policy).  This is
+    # intentionally additive and empty for old sessions.
+    direction_literature_in_progress: Dict[str, "DirectionLiteratureInProgress"] = Field(
+        default_factory=dict
+    )
     environment_api_notes: Dict[str, str] = Field(default_factory=dict)
     
     # Chat messages (PI Agent free-form chat, separate from workflow)

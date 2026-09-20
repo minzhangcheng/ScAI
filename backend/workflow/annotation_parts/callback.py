@@ -1,6 +1,12 @@
 """Annotation literature, PI matching, and HITL callback phases."""
 from __future__ import annotations
 
+import asyncio
+import time
+
+from ...utils.llm_client import UpstreamExhaustedError
+from ...agents.literature.research import literature_technical_failure
+
 #: What the model reads when a restored session resumes into this tool call.
 #: The call it made has no result yet -- the user is looking at the dialog --
 #: so the checkpoint pairs it with this, and a resumed executor sees an
@@ -116,15 +122,21 @@ async def begin_annotation(
     pi_search_guided = False
     pi_query = None
     pi_evaluate = None
+    search_deadline = time.monotonic() + float(
+        getattr(self.literature_agent, "search_wall_clock_seconds", 600) or 600
+    )
 
     # Step 0a: PI generates search query (only for pubmed_llm mode)
     if lit_mode == "pubmed_llm":
         try:
-            pi_query = await self.pi_agent.generate_annotation_search_query(
-                cluster_markers=cluster_markers,
-                organism=organism,
-                tissue=tissue,
-                state=state,
+            pi_query = await asyncio.wait_for(
+                self.pi_agent.generate_annotation_search_query(
+                    cluster_markers=cluster_markers,
+                    organism=organism,
+                    tissue=tissue,
+                    state=state,
+                ),
+                timeout=max(0.001, search_deadline - time.monotonic()),
             )
             logger.info(f"[{self.session_id}] PI generated annotation query: {pi_query[:100]}")
 
@@ -144,6 +156,8 @@ async def begin_annotation(
                 f"PI-guided literature search for {n_clusters} clusters in {organism} {tissue}...",
                 AgentType.PI
             )
+        except UpstreamExhaustedError:
+            raise
         except Exception as e:
             logger.warning(f"[{self.session_id}] PI query generation failed, falling back to Literature Agent: {e}")
     else:
@@ -178,6 +192,7 @@ async def begin_annotation(
                 pi_initial_query=pi_query,
                 pi_evaluate_fn=pi_evaluate,
                 skip_matching=True,
+                search_deadline=search_deadline,
             )
         elif lit_mode == "pubmed_llm":
             result = await self.literature_agent.annotate_clusters(
@@ -194,7 +209,11 @@ async def begin_annotation(
                 state=state,
                 skip_matching=True,
                 pi_research_brief=annotation_brief,
+                pi_plan_fn=self.pi_agent.plan_literature_search,
+                pi_review_fn=self.pi_agent.review_literature_search,
             )
+    except UpstreamExhaustedError:
+        raise
     except Exception as e:
         error_msg = f"Cluster annotation failed: {str(e)}"
         logger.error(f"[{self.session_id}] {error_msg}")
@@ -231,9 +250,14 @@ async def match_annotations(
                 focused_evidence=result.get("focused_evidence", {}),
                 database_priors=database_priors or {},
             )
-            result["status"] = "completed"
+            result["status"] = (
+                "partial" if literature_technical_failure(result) else "completed"
+            )
+            result["matching_status"] = "completed"
             result["annotations"] = matching_result.get("annotations", {})
             result["tissue_summary"] = matching_result.get("tissue_summary", "")
+        except UpstreamExhaustedError:
+            raise
         except Exception as e:
             logger.warning(
                 f"[{self.session_id}] PI matching failed, falling back to Literature Agent: {e}"
@@ -245,7 +269,11 @@ async def match_annotations(
                     tissue=tissue,
                     state=state,
                     pi_research_brief=annotation_brief,
+                    pi_plan_fn=self.pi_agent.plan_literature_search,
+                    pi_review_fn=self.pi_agent.review_literature_search,
                 )
+            except UpstreamExhaustedError:
+                raise
             except Exception as e2:
                 logger.error(f"[{self.session_id}] Literature fallback also failed: {e2}")
                 result = self._build_fallback_annotations(cluster_markers, e2)
@@ -261,6 +289,7 @@ async def match_annotations(
         AgentType.LITERATURE
     )
 
+    ctx["result"] = result
     ctx["annotations"] = annotations
 
 async def review_and_confirm_annotations(
@@ -299,6 +328,8 @@ async def review_and_confirm_annotations(
                 if cid in annotations and isinstance(review, dict):
                     annotations[cid].update(review)
             result["annotations"] = annotations
+        except UpstreamExhaustedError:
+            raise
         except Exception as e:
             logger.warning(f"[{self.session_id}] PI annotation review failed: {e}")
 
@@ -441,6 +472,8 @@ async def review_and_confirm_annotations(
                         if cid in annotations and isinstance(review, dict):
                             annotations[cid].update(review)
                     result["annotations"] = annotations
+                except UpstreamExhaustedError:
+                    raise
                 except Exception as e:
                     logger.warning(f"[{self.session_id}] PI re-review after supplementary failed: {e}")
 

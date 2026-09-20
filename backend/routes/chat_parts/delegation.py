@@ -353,10 +353,21 @@ async def _execute_chat_agent_inner(
             max_search_rounds=lit_config.get("max_search_rounds", 20),
             proxy_url=config.api.proxy_url if config.api else None,
         )
+        from backend.agents.pi_agent import PIAgent
+        literature_pi_agent = PIAgent(settings_provider=provider)
 
         async def lit_callback(topic: str) -> str:
-            result = await literature_agent.process(state, topic, use_deep_research=True)
-            return result.get("report", "")
+            result = await literature_agent.process(
+                state,
+                topic,
+                use_deep_research=True,
+                pi_plan_fn=literature_pi_agent.plan_literature_search,
+                pi_review_fn=literature_pi_agent.review_literature_search,
+                research_context=f"Project question: {state.initial_instruction}",
+            )
+            report = str(result.get("report") or "")
+            note = str(result.get("note") or result.get("source_provenance") or "")
+            return f"{report}\n\nSource note: {note}".strip() if note else report
 
         async def pi_callback(question: str, context: str) -> str:
             await _send_agent_msg("pi_question", f"Question: {question}\nContext: {context}", AgentType.BIOINFORMATICS)

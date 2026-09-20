@@ -144,6 +144,88 @@ def test_every_novelty_record_survives_the_evidence_budget():
         assert record["direction_id"] in block
 
 
+def test_new_policy_evidence_discloses_list_truncation_counts():
+    record = {
+        "direction_id": "NEW-01",
+        "policy_version": "direction_search_v1",
+        "article_inventory": [
+            {"pmid": str(i), "title": "title" * 80} for i in range(100)
+        ],
+        "extractions": [
+            {"pmid": str(i), "source_passage": "passage" * 80} for i in range(100)
+        ],
+        "task_executions": [
+            {"task_id": f"task-{i}", "status": "completed", "compiled_query": "q" * 400}
+            for i in range(100)
+        ],
+    }
+
+    parsed = json.loads(
+        budgeted_prompt_block([record], EVIDENCE_PROMPT_FIELDS, 350)
+    )[0]
+
+    assert parsed["direction_id"] == "NEW-01"
+    for field in ("article_inventory", "extractions", "task_executions"):
+        assert parsed[f"{field}_source_count"] == 100
+        assert parsed[f"{field}_retained_count"] < 100
+        assert parsed[f"{field}_omitted_count"] == (
+            100 - parsed[f"{field}_retained_count"]
+        )
+        identity = "task_id" if field == "task_executions" else "pmid"
+        assert all(item.get(identity) for item in parsed.get(field, []))
+        assert parsed[f"{field}_retained_count"] == len(parsed.get(field, []))
+
+
+@pytest.mark.parametrize(
+    ("field", "items"),
+    [
+        (
+            "article_inventory",
+            [{"pmid": str(i), "title": "title" * 80} for i in range(8)],
+        ),
+        (
+            "extractions",
+            [{"pmid": str(i), "source_passage": "passage" * 80} for i in range(8)],
+        ),
+        (
+            "task_executions",
+            [
+                {
+                    "task_id": f"task-{i}",
+                    "status": "completed",
+                    "compiled_query": "query" * 80,
+                }
+                for i in range(8)
+            ],
+        ),
+    ],
+)
+def test_new_policy_evidence_discloses_retained_detail_truncation(field, items):
+    record = {
+        "direction_id": "NEW-01",
+        "policy_version": "direction_search_v1",
+        field: items,
+    }
+
+    parsed = json.loads(
+        budgeted_prompt_block([record], EVIDENCE_PROMPT_FIELDS, 350)
+    )[0]
+
+    identity = "task_id" if field == "task_executions" else "pmid"
+    retained = parsed[field]
+    originals_by_identity = {item[identity]: item for item in items}
+    changed_details = sum(
+        item != originals_by_identity[item[identity]] for item in retained
+    )
+    assert retained
+    assert all(item.get(identity) for item in retained)
+    assert parsed[f"{field}_source_count"] == 8
+    assert parsed[f"{field}_retained_count"] == len(retained)
+    assert changed_details > 0
+    assert parsed[f"{field}_detail_truncated_count"] == changed_details
+    assert parsed[f"{field}_detail_truncated"] is True
+
+
 # --- the prompts themselves ---------------------------------------------------
 
 

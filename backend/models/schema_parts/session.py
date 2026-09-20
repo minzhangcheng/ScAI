@@ -350,6 +350,202 @@ SpeciesTissueQualification = Literal[
     "cross_species_only",
 ]
 
+# ---------------------------------------------------------------------------
+# PI-directed direction-literature search records
+#
+# These records are deliberately additive.  They describe the technical
+# search contract and the evidence handed back to the PI; they do not encode a
+# scientific acceptance rule.  The old DirectionSearchQuery and
+# DirectionLiteratureEvidence fields below remain in place for historical
+# sessions and legacy readers.
+
+DirectionSearchField = Literal[
+    "all", "tiab", "title", "author", "mesh", "majr", "pt", "sh", "subh", "nm"
+]
+
+
+class DirectionSearchTerm(BaseModel):
+    """One PI-authored literal PubMed term and its field tag."""
+
+    text: str = Field(min_length=1, max_length=240)
+    field: DirectionSearchField = "tiab"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_field_tag_alias(cls, value):
+        if isinstance(value, dict) and "field" not in value and "field_tag" in value:
+            value = dict(value)
+            value["field"] = value.pop("field_tag")
+        return value
+
+    @field_validator("text")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        value = str(value).strip()
+        if not value:
+            raise ValueError("direction search terms must not be empty")
+        return value
+
+    @property
+    def field_tag(self) -> str:
+        return self.field
+
+
+class DirectionConceptGroup(BaseModel):
+    """Ordered OR alternatives; groups are joined by AND by the compiler."""
+
+    group_id: str = Field(min_length=1, max_length=120)
+    terms: List[DirectionSearchTerm] = Field(min_length=1, max_length=24)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_group_alias(cls, value):
+        if isinstance(value, dict) and "terms" not in value and "alternatives" in value:
+            value = dict(value)
+            value["terms"] = value.pop("alternatives")
+        return value
+
+
+class DirectionExclusionGroup(BaseModel):
+    """PI-authored exclusions, including the reason shown to the PI later."""
+
+    exclusion_id: str = Field(min_length=1, max_length=120)
+    terms: List[DirectionSearchTerm] = Field(min_length=1, max_length=24)
+    rationale: str = Field(default="", max_length=1000)
+
+
+class DirectionSearchScope(BaseModel):
+    """References required concept groups without inventing scope anchors."""
+
+    required_group_ids: List[str] = Field(default_factory=list, max_length=24)
+    required_constraints: Dict[str, str] = Field(default_factory=dict, max_length=12)
+    unrestricted_dimensions: List[str] = Field(default_factory=list, max_length=12)
+    rationale: str = Field(default="", max_length=2000)
+
+
+class DirectionSearchTask(BaseModel):
+    """A self-contained evidence question approved by the PI."""
+
+    task_id: str = Field(min_length=1, max_length=160)
+    direction_id: str = Field(min_length=1, max_length=160)
+    evidence_question: str = Field(min_length=1, max_length=2000)
+    purpose: str = Field(default="", max_length=1000)
+    concept_groups: List[DirectionConceptGroup] = Field(default_factory=list, max_length=12)
+    exclusions: List[DirectionExclusionGroup] = Field(default_factory=list, max_length=8)
+    scope: Optional[DirectionSearchScope] = None
+    mechanism_link: str = Field(default="", max_length=1000)
+    can_establish: List[str] = Field(default_factory=list, max_length=12)
+    cannot_establish: List[str] = Field(default_factory=list, max_length=12)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_task_aliases(cls, value):
+        if isinstance(value, dict):
+            value = dict(value)
+            if "concept_groups" not in value and "groups" in value:
+                value["concept_groups"] = value.pop("groups")
+            if "mechanism_link" not in value and "hypothesis_link" in value:
+                value["mechanism_link"] = value.pop("hypothesis_link")
+        return value
+
+
+class DirectionSearchExecution(BaseModel):
+    """Technical facts for one compiled task execution."""
+
+    task_id: str
+    direction_id: str
+    compiled_query: str = ""
+    status: Literal[
+        "planned", "running", "completed", "zero_result", "failed",
+        "timeout", "unexecuted", "partial",
+    ] = "planned"
+    returned_count: int = Field(default=0, ge=0)
+    total_hit_count: Optional[int] = Field(default=None, ge=0)
+    duplicate_count: int = Field(default=0, ge=0)
+    retrieved_pmids: List[str] = Field(default_factory=list, max_length=20)
+    error: Optional[str] = None
+    elapsed_seconds: Optional[float] = Field(default=None, ge=0)
+    budget_limitation: str = ""
+    batch: Literal["initial", "followup"] = "initial"
+
+
+class DirectionArticleInventory(BaseModel):
+    """Raw article metadata retained independently of Literature's label."""
+
+    pmid: str = Field(min_length=1, max_length=32)
+    title: str = ""
+    url: str = ""
+    source: Literal["new_search", "session_cache"] = "new_search"
+    task_ids: List[str] = Field(default_factory=list, max_length=64)
+    query_links: List[str] = Field(default_factory=list, max_length=64)
+    abstract: str = ""
+    raw_source_cache_ref: Optional[str] = None
+    authors: List[str] = Field(default_factory=list, max_length=64)
+    journal: str = ""
+    year: Optional[str] = None
+
+
+class DirectionLiteratureExtraction(BaseModel):
+    """Literature's bounded, source-linked observation for PI review."""
+
+    pmid: str = Field(min_length=1, max_length=32)
+    task_ids: List[str] = Field(default_factory=list, max_length=64)
+    study_context: Dict[str, str] = Field(default_factory=dict, max_length=12)
+    finding: str = Field(default="", max_length=2000)
+    source_passage: str = Field(default="", max_length=1200)
+    addressed_link: str = Field(default="", max_length=1000)
+    applicability_limits: List[str] = Field(default_factory=list, max_length=12)
+    provisional_classification: Literal[
+        "direct", "linked", "background", "conflicting", "irrelevant", "uncertain", "unknown"
+    ] = "unknown"
+    extraction_status: Literal["completed", "failed", "unavailable"] = "completed"
+    limitation: Optional[str] = None
+
+
+class DirectionPIReview(BaseModel):
+    """PI feedback and final scientific assessment for one candidate."""
+
+    direction_id: str = Field(min_length=1, max_length=160)
+    action: Literal["finish", "search_more"] = "finish"
+    requested_detail_pmids: List[str] = Field(default_factory=list, max_length=20)
+    follow_up_tasks: List[DirectionSearchTask] = Field(default_factory=list, max_length=4)
+    rationale: str = Field(default="", max_length=4000)
+    uncertainty: List[str] = Field(default_factory=list, max_length=20)
+    cited_article_ids: List[str] = Field(default_factory=list, max_length=40)
+    final_scientific_classifications: Dict[str, str] = Field(default_factory=dict, max_length=16)
+    assessment_status: Literal["assessed", "uncertain", "unavailable", "unassessed"] = "unassessed"
+
+
+class DirectionLiteratureInProgress(BaseModel):
+    """Crash/retry checkpoint for one stable direction-search gate identity."""
+
+    gate_id: str = Field(min_length=1, max_length=300)
+    policy_version: str = "direction_search_v1"
+    plan_id: str = ""
+    plan_hash: str = ""
+    plan_status: Literal["planned", "partial", "completed", "failed", "unavailable", "unknown"] = "unknown"
+    planning_errors: Dict[str, str] = Field(default_factory=dict)
+    compile_errors: Dict[str, str] = Field(default_factory=dict)
+    limitations_by_candidate: Dict[str, List[str]] = Field(default_factory=dict)
+    phase: str = "exploration"
+    round_number: int = 0
+    integration_cycle: Optional[int] = None
+    candidate_ids: List[str] = Field(default_factory=list, max_length=256)
+    tasks: List[DirectionSearchTask] = Field(default_factory=list, max_length=256)
+    task_executions: List[DirectionSearchExecution] = Field(default_factory=list, max_length=256)
+    article_inventory: List[DirectionArticleInventory] = Field(default_factory=list, max_length=2048)
+    extractions: List[DirectionLiteratureExtraction] = Field(default_factory=list, max_length=2048)
+    pi_reviews: List[DirectionPIReview] = Field(default_factory=list, max_length=32)
+    unexecuted_task_ids: List[str] = Field(default_factory=list, max_length=256)
+    spent_seconds: float = Field(default=0.0, ge=0)
+    followup_used_by_candidate: Dict[str, bool] = Field(default_factory=dict)
+    task_batches: Dict[str, Literal["initial", "followup", "forbidden"]] = Field(default_factory=dict)
+    provided_detail_pmids_by_candidate: Dict[str, List[str]] = Field(default_factory=dict)
+    # Wall-clock deadlines survive an in-process retry and remain meaningful
+    # after a session is reloaded; monotonic values are derived at execution.
+    candidate_deadline_epoch: Dict[str, float] = Field(default_factory=dict)
+    status: Literal["in_progress", "partial", "completed", "unavailable"] = "in_progress"
+
 class DirectionSearchQuery(BaseModel):
     category: Literal[
         "direct_prior_work",
@@ -364,6 +560,7 @@ class DirectionSearchQuery(BaseModel):
         "prior_art",
         "tier3_support",
         "tier3_challenge",
+        "pi_directed",
         # Session-cached articles, triaged once per candidate rather than once
         # per query. Always degraded, so it never counts toward axis coverage.
         "session_cache",
@@ -437,6 +634,21 @@ class DirectionLiteratureEvidence(BaseModel):
     knowledge_gap_summary: str = ""
     fallback_tier: str = ""
     scheduler_limitation: str = ""
+    # Additive PI-directed search contract.  Empty/default values preserve
+    # loading of evidence written before this policy existed.
+    policy_version: str = ""
+    plan_id: str = ""
+    plan_hash: str = ""
+    plan_status: Literal["planned", "partial", "completed", "failed", "unavailable", "unknown"] = "unknown"
+    tasks: List[DirectionSearchTask] = Field(default_factory=list)
+    task_executions: List[DirectionSearchExecution] = Field(default_factory=list)
+    article_inventory: List[DirectionArticleInventory] = Field(default_factory=list)
+    extractions: List[DirectionLiteratureExtraction] = Field(default_factory=list)
+    pi_reviews: List[DirectionPIReview] = Field(default_factory=list)
+    assessment_status: Literal["assessed", "uncertain", "unavailable", "unassessed"] = "unassessed"
+    assessment_uncertainty: List[str] = Field(default_factory=list)
+    assessment_limitations: List[str] = Field(default_factory=list)
+    unexecuted_task_ids: List[str] = Field(default_factory=list)
 
 class ResearchDirectionCandidate(BaseModel):
     direction_id: str

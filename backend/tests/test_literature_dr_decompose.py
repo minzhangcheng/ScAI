@@ -6,6 +6,7 @@ import pytest
 from backend.workflow.agents import AgentNodesMixin
 from backend.workflow.helpers import cache_store
 from backend.models.schemas import AnalysisState, AgentType
+from backend.agents.literature.pubmed import PUBMED_QUERY_POLICY_VERSION
 
 
 class _Host(AgentNodesMixin):
@@ -71,6 +72,25 @@ class _PIAgent:
     async def generate_round_research_brief(self, **kwargs):
         self.brief_calls.append(kwargs)
         return self._brief
+
+    async def plan_literature_search(self, **_kwargs):
+        return {
+            "primary_query": "planned query",
+            "alternative_queries": ["alternative query"],
+            "rationale": "test plan",
+        }
+
+    async def review_literature_search(self, **_kwargs):
+        return {
+            "search_exhausted": True,
+            "evidence_strength": "sparse",
+            "reasoning": "test review",
+            "refined_query": "",
+            "missing_aspects": [],
+        }
+
+    async def review_deep_research_coverage(self, **_kwargs):
+        return []
 
 
 def _state():
@@ -222,6 +242,9 @@ async def test_pubmed_uses_deferred_round_topics_without_species_or_history_in_t
     assert lit.calls[0]["topic"] == (
         "Metallothionein induction during hepatic copper deficiency"
     )
+    assert lit.calls[0]["kwargs"]["pi_plan_fn"] == pi.plan_literature_search
+    assert lit.calls[0]["kwargs"]["pi_review_fn"] == pi.review_literature_search
+    assert "Project question: obj" in lit.calls[0]["kwargs"]["research_context"]
 
 
 @pytest.mark.asyncio
@@ -307,7 +330,74 @@ async def test_stale_pubmed_node_cache_is_reexecuted_for_current_query_policy():
 
     assert lit.process.await_count == 1
     assert result["literature_result"]["findings"] == ["new finding"]
-    assert result["literature_result"]["query_policy_version"] == 2
+    assert result["literature_result"]["query_policy_version"] == PUBMED_QUERY_POLICY_VERSION
 
     await host._literature_research(result)
     assert lit.process.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [
+    {"source_processing_error": "RuntimeError: synthesis failed"},
+    {"source_failure": {"mode": "pubmed_llm", "reason": "ValueError: invalid XML"}},
+])
+async def test_technical_partial_is_visible_and_not_stored_in_node_cache(failure):
+    lit = _LitAgent()
+    lit.is_deep_research_available = False
+    lit.literature_mode = "pubmed_llm"
+    lit.process = AsyncMock(return_value={
+        "status": "partial",
+        "findings": ["retained source inventory"],
+        "report": "retained report",
+        "search_mode": "pubmed_llm",
+        **failure,
+        "source_provenance": "pubmed_retrieved_partial",
+        "search_meta": {
+            "stop_reason": "search_exhausted",
+            "evaluation_failed": False,
+        },
+    })
+    pi = _PIAgent({"decompose": False, "tasks": []})
+    host = _Host(lit, pi)
+    analysis_state = _state()
+    graph_state = {
+        "analysis_state": analysis_state,
+        "pi_instructions": {"literature_topics": ["topic"], "overview": ""},
+    }
+
+    first = await host._literature_research(graph_state)
+    second = await host._literature_research(graph_state)
+
+    assert first["literature_result"]["status"] == "partial"
+    for key, value in failure.items():
+        assert first["literature_result"]["technical_failures"][0][key] == value
+    assert second["literature_result"]["status"] == "partial"
+    assert lit.process.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode, expected_calls", [
+    ("quick_search (fallback from pubmed_llm)", 1),
+    ("quick_search", 0),
+])
+async def test_legacy_fallback_cache_is_invalidated_without_rejecting_explicit_knowledge(
+    mode, expected_calls,
+):
+    lit = _LitAgent()
+    lit.is_deep_research_available = False
+    lit.literature_mode = "pubmed_llm"
+    lit.process = AsyncMock(return_value={"findings": ["new evidence"]})
+    host = _Host(lit, _PIAgent({"decompose": False, "tasks": []}))
+    state = _state()
+    cache_store(state, AgentType.LITERATURE, {
+        "findings": ["model memory"], "search_modes": [mode],
+        "source_provenance": ["knowledge_only"],
+        "query_policy_version": PUBMED_QUERY_POLICY_VERSION,
+    })
+
+    await host._literature_research({
+        "analysis_state": state,
+        "pi_instructions": {"literature_topics": ["topic"], "overview": ""},
+    })
+
+    assert lit.process.await_count == expected_calls

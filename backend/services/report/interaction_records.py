@@ -137,6 +137,34 @@ def _evidence_panel(ev: Dict[str, Any]) -> str:
             blocks.append(f"<div><b>{label}</b>{html}</div>")
     if ev.get("summary"):
         blocks.append(f"<div><b>Summary:</b> {_esc(str(ev['summary']))}</div>")
+    if ev.get("policy_version"):
+        executions = ev.get("task_executions") or []
+        execution_text = ", ".join(
+            f"{item.get('task_id', '?')}: {item.get('status', 'unknown')} ({item.get('returned_count', 0)} returned)"
+            for item in executions if isinstance(item, dict)
+        ) or "No task execution completed."
+        blocks.append(
+            f"<div><b>PI-directed search:</b> {_esc(str(ev.get('assessment_status') or 'unassessed'))}; "
+            f"{_esc(execution_text)}</div>"
+        )
+        extractions = ev.get("extractions") or []
+        source_rows = []
+        for item in extractions[:5]:
+            if not isinstance(item, dict):
+                continue
+            source_rows.append(
+                f"<li>PMID {_esc(str(item.get('pmid') or ''))}: {_esc(str(item.get('finding') or ''))}"
+                f" <span class='muted'>{_esc(str(item.get('source_passage') or ''))}</span></li>"
+            )
+        if source_rows:
+            blocks.append(f"<div><b>Source-linked observations:</b><ul>{''.join(source_rows)}</ul></div>")
+        limits = ev.get("assessment_limitations") or ev.get("limitations") or []
+        if limits:
+            blocks.append(
+                "<div><b>Limitations:</b><ul>" + "".join(
+                    f"<li>{_esc(str(item))}</li>" for item in limits
+                ) + "</ul></div>"
+            )
     if not blocks:
         return ""
     return ("<details><summary class='muted'>Literature evidence</summary>"

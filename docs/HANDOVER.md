@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.59.6 · **Last updated**: 2026-09-19
+**Version**: 0.59.7 · **Last updated**: 2026-09-20
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,18 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.59.x — (2026-09-18 onward)**
 
+- `0.59.7` — Literature retrieval now separates a valid zero-result search from
+  technical failures across PubMed, ordinary rounds, supplementary research,
+  integration evidence, and cluster annotation. PubMed response-shape and XML
+  validation preserves malformed or incomplete responses as technical failures,
+  while genuine empty searches remain zero-result evidence. Failed retrievals
+  retain source provenance and PI-visible limitations, are excluded from success
+  caches, and do not turn completed supplementary execution into a false success.
+  PI-directed exploration search now validates bounded query tasks, preserves
+  raw article inventory and completed PI reviews across checkpoint recovery,
+  enforces the one-follow-up ceiling, and reserves time for PI assessment.
+  Focused backend verification passed 156/156 tests; no image build, registry
+  push, deployment, or historical-session mutation was performed.
 - `0.59.6` — Round 1 now produces independent Stage 1 and Stage 2 review
   reports at the cell-annotation and research-direction decisions. Each review
   is frozen with its own version, authenticated download URL, and branch-aware

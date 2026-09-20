@@ -21,6 +21,8 @@ from .shared import (  # noqa: F401
     status_from_judge,
     build_focused_query,
 )
+from .pubmed import PUBMED_QUERY_POLICY_VERSION
+from .research import literature_provenance_disclosure, literature_technical_failure
 
 
 class MarkersMixin:
@@ -36,6 +38,9 @@ class MarkersMixin:
         pi_evaluate_fn: Optional[Callable] = None,
         skip_matching: bool = False,
         pi_research_brief: Optional[str] = None,
+        pi_plan_fn: Optional[Callable] = None,
+        pi_review_fn: Optional[Callable] = None,
+        search_deadline: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Two-phase cluster annotation: one literature search + LLM matching.
@@ -70,10 +75,19 @@ class MarkersMixin:
             all_genes_for_key.update(genes[:10])
         import hashlib
         genes_hash = hashlib.md5(",".join(sorted(all_genes_for_key)).encode()).hexdigest()[:16]
-        cache_key = f"{organism}:{tissue}:{genes_hash}"
+        query_hash = hashlib.sha256(
+            str(pi_initial_query or pi_research_brief or "").encode("utf-8")
+        ).hexdigest()[:16]
+        cache_key = (
+            f"v{PUBMED_QUERY_POLICY_VERSION}:{organism}:{tissue}:"
+            f"{genes_hash}:{query_hash}"
+        )
         if cache_key in self._annotation_cache:
-            logger.info(f"[Literature] annotate_clusters cache HIT: {cache_key}")
-            return self._annotation_cache[cache_key]
+            cached = self._annotation_cache[cache_key]
+            if not literature_technical_failure(cached):
+                logger.info(f"[Literature] annotate_clusters cache HIT: {cache_key}")
+                return cached
+            del self._annotation_cache[cache_key]
 
         n_clusters = len(cluster_markers)
 
@@ -125,16 +139,48 @@ class MarkersMixin:
                 organism=organism, tissue=tissue,
                 seed_queries=atlas_seeds,
                 cluster_markers=cluster_markers,
+                deadline_override=search_deadline,
             )
         else:
             # Default: Literature Agent handles everything (original behavior)
             # Also used for deep_research/gemini modes where PI query guidance doesn't apply
+            research_kwargs: Dict[str, Any] = {}
+            if pi_plan_fn and pi_review_fn:
+                research_kwargs.update({
+                    "pi_plan_fn": pi_plan_fn,
+                    "pi_review_fn": pi_review_fn,
+                    "research_context": pi_research_brief or "",
+                })
             research_result = await self._do_research(
-                topic, state, pubmed_max_results=50, research_brief=pi_research_brief
+                topic,
+                state,
+                pubmed_max_results=50,
+                research_brief=pi_research_brief,
+                **research_kwargs,
             )
 
         literature_report = research_result.get("report", "")
         references = research_result.get("references", [])
+        technical_failure = literature_technical_failure(research_result)
+        research_metadata = {
+            "research_status": (
+                "partial" if technical_failure else research_result.get("status", "completed")
+            ),
+            **{
+                key: research_result[key]
+                for key in (
+                    "source_failure", "source_processing_error", "source_provenance",
+                    "search_meta", "search_mode", "retained_source_report_ids",
+                )
+                if key in research_result
+            },
+        }
+        disclosure = literature_provenance_disclosure(research_metadata)
+        literature_report = "\n\n".join(
+            part for part in (disclosure, literature_report) if part
+        )
+        triage = dict(research_result.get("triage") or {})
+        triage["research_provenance"] = research_metadata
 
         # ---- Phase 2: LLM matching ----
         # When skip_matching is True, PI Agent handles matching externally
@@ -142,6 +188,8 @@ class MarkersMixin:
             logger.info(f"[Literature] annotate_clusters Phase 2 skipped (PI Agent will handle matching)")
             result = {
                 "status": "literature_only",
+                "matching_status": "pending",
+                **research_metadata,
                 "annotations": {},
                 "tissue_summary": "",
                 "literature_report": literature_report,
@@ -150,7 +198,7 @@ class MarkersMixin:
                 "organism": organism,
                 "tissue": tissue,
                 "focused_evidence": research_result.get("focused_evidence", {}),
-                "triage": research_result.get("triage", {}),
+                "triage": triage,
             }
             # Do NOT cache partial results — cache will be populated after PI matching
             return result
@@ -241,15 +289,21 @@ Return a JSON object with this EXACT structure:
         )
 
         result = {
-            "status": "completed",
+            "status": "partial" if technical_failure else "completed",
+            "matching_status": "completed" if parsed and "annotations" in parsed else "error",
+            **research_metadata,
             "annotations": annotations,
             "tissue_summary": tissue_summary,
             "literature_report": literature_report,
             "references": references,
             "n_clusters": n_clusters,
             "organism": organism,
-            "tissue": tissue
+            "tissue": tissue,
+            "triage": triage,
+            "focused_evidence": research_result.get("focused_evidence", {}),
         }
+        if technical_failure or result["matching_status"] == "error":
+            return result
         # Evict oldest entries if cache exceeds limit
         if len(self._annotation_cache) >= self._ANNOTATION_CACHE_MAX:
             oldest_key = next(iter(self._annotation_cache))

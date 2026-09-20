@@ -249,7 +249,14 @@ class ClientsMixin:
         )
 
         references = self._select_references(response, report_text)
-        return await self._finalize_result(topic, report_text, references, state, 1)
+        return await self._finalize_result(
+            topic,
+            report_text,
+            references,
+            state,
+            1,
+            partial_source_provenance="deep_research_retrieved_partial",
+        )
 
     def _make_deep_research_client(self) -> OpenAICompatibleClient:
         client = OpenAICompatibleClient(
@@ -302,7 +309,14 @@ class ClientsMixin:
             for s in sources
         ]
 
-        return await self._finalize_result(topic, report_text, references, state, 1)
+        return await self._finalize_result(
+            topic,
+            report_text,
+            references,
+            state,
+            1,
+            partial_source_provenance="gemini_deep_research_retrieved_partial",
+        )
 
     def _sync_literature_config_from_provider(self) -> None:
         if self._runtime_clients_closing:

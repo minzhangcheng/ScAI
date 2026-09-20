@@ -43,3 +43,10 @@ def test_two_consecutive_requests_preserved():
     assert len(wf._supplementary_queue) == 2
     assert wf._supplementary_queue[0] == ("first", "annotation")
     assert wf._supplementary_queue[1] == ("second", "direction")
+
+
+def test_supplementary_literature_uses_configured_retrieval_and_pi_callbacks():
+    src = inspect.getsource(supplementary._run_supplementary_analysis)
+    assert "use_deep_research=True" in src
+    assert "pi_plan_fn=self.pi_agent.plan_literature_search" in src
+    assert "pi_review_fn=self.pi_agent.review_literature_search" in src

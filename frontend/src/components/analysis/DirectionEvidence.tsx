@@ -35,15 +35,20 @@ export default function DirectionEvidence({
     (evidence.analogous_evidence_count || 0) +
     (evidence.contradictory_evidence_count || 0) +
     (evidence.methodological_precedent_count || 0)
-  const timedOutWithoutEvidence = Boolean(evidence.timed_out) && totalEvidence === 0
-  const partialWithEvidence = evidence.status === 'partial' && totalEvidence > 0
+  const retainedArticleCount = (evidence.article_inventory || []).length
+  const retainedExtractionCount = (evidence.extractions || []).length
+  const hasRetainedSources = retainedArticleCount > 0 || retainedExtractionCount > 0
+  const timedOutWithoutEvidence = Boolean(evidence.timed_out) && totalEvidence === 0 && !hasRetainedSources
+  const partialWithEvidence = evidence.status === 'partial' && (totalEvidence > 0 || hasRetainedSources)
 
   return (
     <>
       <div className="px-4 pb-1 pl-12 flex flex-wrap gap-1.5">
         {evidence.status === 'completed' && (
           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300">
-            {isZh ? '证据已验证' : 'Evidence verified'}
+            {evidence.policy_version
+              ? (isZh ? '检索流程已完成' : 'Search workflow completed')
+              : (isZh ? '证据已验证' : 'Evidence verified')}
           </span>
         )}
         {partialWithEvidence && (
@@ -123,6 +128,33 @@ export default function DirectionEvidence({
             </div>
           )}
           {evidence.summary && <div>{evidence.summary}</div>}
+          {evidence.policy_version && (
+            <div className="grid grid-cols-2 gap-2 text-slate-500 dark:text-slate-400">
+              <div>{isZh ? 'PI检索评估' : 'PI assessment'}: {evidence.assessment_status || 'unassessed'}</div>
+              <div>{isZh ? '保留文章' : 'Retained articles'}: {retainedArticleCount}</div>
+            </div>
+          )}
+          {(evidence.task_executions || []).length > 0 && (
+            <div className="border-t border-slate-200 dark:border-slate-700 pt-2">
+              <div className="font-medium">{isZh ? '检索执行状态' : 'Task execution'}</div>
+              {(evidence.task_executions || []).map((task, ti) => (
+                <div key={ti} className="text-slate-400">
+                  {task.task_id || '?'}: {task.status || 'unknown'} ({task.returned_count || 0} returned)
+                </div>
+              ))}
+            </div>
+          )}
+          {(evidence.extractions || []).slice(0, 5).map((item, ei) => (
+            <div key={`extraction-${ei}`} className="border-t border-slate-200 dark:border-slate-700 pt-2">
+              PMID: {item.pmid || '?'} — {item.finding || ''}
+              {item.source_passage ? <span className="block text-slate-400">{item.source_passage}</span> : null}
+            </div>
+          ))}
+          {(evidence.assessment_uncertainty || []).length > 0 && (
+            <div className="text-slate-500 dark:text-slate-400">
+              {isZh ? 'PI不确定性' : 'PI uncertainty'}: {(evidence.assessment_uncertainty || []).join('; ')}
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-2 text-slate-500 dark:text-slate-400">
             {evidence.support_level && <div>{isZh ? '支持强度' : 'Support level'}: {evidence.support_level}</div>}
             {evidence.contradiction_level && <div>{isZh ? '反证强度' : 'Contradiction level'}: {evidence.contradiction_level}</div>}

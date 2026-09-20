@@ -23,17 +23,21 @@ class _Harness(IntegrationMixin):
         pi.analyze_direction_correlations = _analyze
         pi.generate_integration_direction_candidates = _gen
         pi.score_integration_directions_with_evidence = _score
+        pi.plan_direction_literature_search = lambda *args, **kwargs: None
+        pi.review_direction_literature_search = lambda *args, **kwargs: None
         self.pi_agent = pi
 
         lit = types.SimpleNamespace()
         async def _open(state, report): return "NEW LIT"
-        async def _novelty(cands, state=None): return [{"direction_id": c.get("direction_id", "")} for c in cands]
+        async def _novelty(cands, state=None, **kwargs): return [{"direction_id": c.get("direction_id", "")} for c in cands]
         lit.integration_literature_search = _open
-        lit.evaluate_direction_novelty_candidates = _novelty
+        lit.evaluate_direction_literature_search = _novelty
         self.literature_agent = lit
 
     async def _send_message(self, t, c, agent=None): self.sent.append((t, c))
     async def _send_state_sync(self, state, change_type): self.sent.append(("state_sync", change_type))
+    async def _wait_for_llm_intervention(self, error, node, state):
+        raise error
     async def _build_and_save_detailed_segment(self, state, phase, title, graph_state=None, round_result=None):
         self.segments.append(phase)
     def _set_status(self, state, status): state.status = status

@@ -51,6 +51,32 @@ async def test_contamination_runs_both_queries_and_takes_higher():
 
 
 @pytest.mark.asyncio
+async def test_multitier_choice_retains_raw_articles_from_every_executed_tier():
+    fake = _FakeLit()
+    calls = {"n": 0}
+
+    async def search(_query, max_results=10):
+        calls["n"] += 1
+        return [{"pmid": str(calls["n"]), "title": f"tier-{calls['n']}", "abstract": "a"}]
+
+    fake._pubmed_search = search
+    statuses = iter(["strong", "exhausted"])
+
+    async def judge(_item, _tissue, _articles, _bucket):
+        return {"status": next(statuses), "judge": {}}
+
+    fake._judge_focused_relevance = judge
+    out = await fake._focused_rare_search(
+        [{"cluster_id": "8", "candidate_celltype": None, "top_markers": ["GeneA"]}],
+        "species A", "organ A", bucket="suspected_contamination",
+    )
+
+    assert out["8"]["status"] == "strong"
+    assert [article["pmid"] for article in out["8"]["articles"]] == ["1"]
+    assert {article["pmid"] for article in out["8"]["retained_articles"]} == {"1", "2"}
+
+
+@pytest.mark.asyncio
 async def test_pubmed_failure_returns_exhausted_not_raise():
     fake = _FakeLit()
 
@@ -84,7 +110,8 @@ async def test_judge_failure_returns_exhausted_not_raise():
     out = await fake._focused_rare_search(items, "mouse", "liver", bucket="rare_unresolved")
 
     assert out["19"]["status"] == "exhausted"
-    assert out["19"]["articles"] == []
+    assert out["19"]["articles"][0]["pmid"] == "1"
+    assert out["19"]["retained_articles"][0]["pmid"] == "1"
 
 
 @pytest.mark.asyncio

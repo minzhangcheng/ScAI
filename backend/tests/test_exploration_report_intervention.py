@@ -41,9 +41,11 @@ async def test_report_intervention_holds_boundary_and_retries_only_failed_step(
     wf.pi_agent = SimpleNamespace(
         generate_raw_direction_candidates=calls["raw"],
         score_directions_with_evidence=calls["score"],
+        plan_direction_literature_search=AsyncMock(),
+        review_direction_literature_search=AsyncMock(),
         _sanitize_direction_dependency_graph=Mock(),
     )
-    wf.literature_agent = SimpleNamespace(evaluate_direction_novelty_candidates=calls["literature"])
+    wf.literature_agent = SimpleNamespace(evaluate_direction_literature_search=calls["literature"])
     wf._send_message = AsyncMock()
     wf._build_and_save_detailed_segment = AsyncMock()
     entered, release = asyncio.Event(), asyncio.Event()
@@ -118,7 +120,7 @@ async def test_real_literature_triage_failure_reaches_report_intervention(monkey
     agent = _make_agent()
     article = {"pmid": "1", "title": "Gene1", "abstract": "Gene1 evidence"}
     monkeypatch.setattr(agent, "_extract_session_cached_pubmed_articles", lambda state: [article] if cached else [])
-    monkeypatch.setattr(agent, "_pubmed_search", AsyncMock(return_value=[] if cached else [article]))
+    monkeypatch.setattr(agent, "_pubmed_search", AsyncMock(return_value=[article]))
     error = UpstreamExhaustedError("stream incomplete", agent_name="literature")
     chat = AsyncMock(side_effect=error)
     monkeypatch.setattr(agent, "chat_without_history", chat)
@@ -128,6 +130,14 @@ async def test_real_literature_triage_failure_reaches_report_intervention(monkey
     wf.pi_agent = SimpleNamespace(
         generate_raw_direction_candidates=AsyncMock(return_value=_candidates(1)),
         score_directions_with_evidence=AsyncMock(),
+        plan_direction_literature_search=AsyncMock(return_value={
+            "tasks": [{
+                "task_id": "task-1", "direction_id": "NEW-01",
+                "evidence_question": "q",
+                "concept_groups": [{"group_id": "g1", "terms": [{"text": "Gene1"}]}],
+            }]
+        }),
+        review_direction_literature_search=AsyncMock(return_value={"reviews": []}),
     )
     wf.literature_agent = agent
     wf._wait_for_llm_intervention = AsyncMock(return_value=LlmFailureAction.TERMINATE)

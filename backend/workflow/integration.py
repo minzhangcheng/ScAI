@@ -4,6 +4,7 @@ Orchestrates PI (cumulative integration + candidate generation + scoring) and
 Literature (open search + novelty gate). Does NOT run bioinformatics/pathology/
 biochemistry agents. See docs/superpowers/specs/2026-07-03-integration-round-loop-design.md.
 """
+import asyncio
 import logging
 from typing import List
 
@@ -11,8 +12,11 @@ from ..models.schemas import AnalysisPhase, TaskStatus, RoundResult, AgentType
 from ..utils.direction_payload import merge_unpursued_candidates
 from ..models.schema_parts.round_report import RoundReportBlock, RoundReportChapter
 from .helpers import build_integration_gate_payload
+from ..utils.direction_evidence import build_fallback_direction_evidence
 from .retry import with_retry
 from .state import WorkflowState
+from ..utils.llm_client import UpstreamExhaustedError
+from .helpers import WorkflowSupersededError, WorkflowTerminatedError
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +72,13 @@ class IntegrationMixin:
 
         try:
             new_literature = await self.literature_agent.integration_literature_search(
-                analysis_state, integration_report
+                analysis_state,
+                integration_report,
+                pi_plan_fn=self.pi_agent.plan_literature_search,
+                pi_review_fn=self.pi_agent.review_literature_search,
             )
+        except (UpstreamExhaustedError, WorkflowSupersededError, WorkflowTerminatedError, asyncio.CancelledError):
+            raise
         except Exception as e:
             logger.warning(f"[{session_id}] Integration literature search failed (non-critical): {e}")
             new_literature = ""
@@ -110,12 +119,31 @@ class IntegrationMixin:
         literature_evidence = []
         if raw_candidates:
             try:
-                literature_evidence = await self.literature_agent.evaluate_direction_novelty_candidates(
-                    raw_candidates, state=analysis_state
+                literature_evidence = await self.literature_agent.evaluate_direction_literature_search(
+                    raw_candidates,
+                    state=analysis_state,
+                    pi_plan_fn=self.pi_agent.plan_direction_literature_search,
+                    pi_review_fn=self.pi_agent.review_direction_literature_search,
+                    intervention_fn=self._wait_for_llm_intervention,
+                    phase="integration",
                 )
+            except (UpstreamExhaustedError, WorkflowSupersededError, WorkflowTerminatedError, asyncio.CancelledError):
+                raise
             except Exception as e:
                 logger.warning(f"[{session_id}] Integration novelty gate failed: {e}")
-                literature_evidence = []
+                checkpoint_projection = getattr(
+                    self.literature_agent, "direction_evidence_from_checkpoint", None
+                )
+                literature_evidence = (
+                    checkpoint_projection(raw_candidates, analysis_state, phase="integration")
+                    if callable(checkpoint_projection)
+                    else build_fallback_direction_evidence(
+                        raw_candidates,
+                        status="failed",
+                        reason=f"Direction-level literature verification failed technically: {e}",
+                        limitations=["PI-directed literature assessment was unavailable; candidates were retained."],
+                    )
+                )
             scored_candidates = await self.pi_agent.score_integration_directions_with_evidence(
                 analysis_state, raw_candidates, literature_evidence
             )

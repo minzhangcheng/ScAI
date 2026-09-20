@@ -11,7 +11,7 @@ PLANNING = source_for_path("backend/workflow/planning.py")
 def test_all_exploration_report_paths_use_evidence_gate():
     assert SYNTHESIS.count("generate_exploration_report(") == 0
     assert SYNTHESIS.count("generate_raw_direction_candidates") >= 1
-    assert SYNTHESIS.count("evaluate_direction_novelty_candidates") >= 1
+    assert SYNTHESIS.count("evaluate_direction_literature_search") >= 1
     assert SYNTHESIS.count("score_directions_with_evidence") >= 2
 
 

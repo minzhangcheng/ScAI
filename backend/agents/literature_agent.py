@@ -199,6 +199,9 @@ class LiteratureAgent(
         use_deep_research = kwargs.get("use_deep_research", True)
         current_round_findings = kwargs.get("current_round_findings", None)
         research_brief = kwargs.get("research_brief")
+        pi_plan_fn = kwargs.get("pi_plan_fn")
+        pi_review_fn = kwargs.get("pi_review_fn")
+        research_context = kwargs.get("research_context", "")
 
         logger.info(
             f"[Literature] Processing topic: {topic[:100]}... "
@@ -206,9 +209,21 @@ class LiteratureAgent(
         )
 
         if use_deep_research:
-            return await self._do_research(topic, state, current_round_findings=current_round_findings, mode_override=mode_override, research_brief=research_brief)
+            return await self._do_research(
+                topic,
+                state,
+                current_round_findings=current_round_findings,
+                mode_override=mode_override,
+                research_brief=research_brief,
+                pi_plan_fn=pi_plan_fn,
+                pi_review_fn=pi_review_fn,
+                research_context=research_context,
+            )
         else:
-            return await self._quick_search(topic, state)
+            result = await self._quick_search(topic, state)
+            result["search_mode"] = "quick_search (explicit knowledge-only mode)"
+            result["source_provenance"] = "knowledge_only"
+            return result
 
     # ===================================================================
     # Core routing with fallback chain
@@ -290,8 +305,6 @@ class LiteratureAgent(
     # ===================================================================
     # Direction novelty literature triage (Task 2)
     # ===================================================================
-
-
 
 
 

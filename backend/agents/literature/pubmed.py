@@ -21,7 +21,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-PUBMED_QUERY_POLICY_VERSION = 2
+PUBMED_QUERY_POLICY_VERSION = 3
 
 # NCBI E-utilities request policy.
 #
@@ -92,6 +92,8 @@ def _search_cache_key(
     tissue: str,
     pi_guided: bool,
     query_policy_version: int = PUBMED_QUERY_POLICY_VERSION,
+    research_context: str = "",
+    planned_queries: Optional[List[str]] = None,
 ) -> str:
     payload = {
         "topic": _normalized_search_text(topic),
@@ -99,9 +101,12 @@ def _search_cache_key(
         "organism": _normalized_search_text(organism),
         "tissue": _normalized_search_text(tissue),
         "pi_guided": bool(pi_guided),
+        "query_policy_version": int(query_policy_version),
+        "research_context": _normalized_search_text(research_context),
+        "planned_queries": [
+            _normalized_search_text(value) for value in (planned_queries or [])
+        ],
     }
-    if not pi_guided:
-        payload["query_policy_version"] = int(query_policy_version)
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -111,6 +116,7 @@ from ...models.schemas import (
     DirectionSearchQuery,
     PubMedEvidenceItem,
 )
+from ...utils.llm_client import UpstreamExhaustedError
 
 from .shared import (  # noqa: F401
     _FALLBACK_EXCEPTIONS,
@@ -433,6 +439,7 @@ IMPORTANT:
         tissue: str,
         bucket: str = "rare_unresolved",
         deadline: Optional[float] = None,
+        retain_fn: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> dict:
         """两级 focused 检索,按簇返回 {articles,status,tier}。
 
@@ -446,9 +453,10 @@ IMPORTANT:
         results: dict = {}
 
         async def _run(item, tier):
-            def exhausted(reason, error=None):
+            def exhausted(reason, error=None, articles=None):
                 return {
-                    "articles": [],
+                    "articles": list(articles or []),
+                    "retained_articles": list(articles or []),
                     "status": "exhausted",
                     "tier": tier,
                     "exhaustion_reason": reason,
@@ -486,29 +494,33 @@ IMPORTANT:
 
             if not arts:
                 return exhausted("no_pubmed_results")
+            if retain_fn is not None:
+                retain_fn(arts)
 
             timeout = remaining()
             if deadline is not None and timeout is None:
-                return exhausted("wall_clock_budget")
+                return exhausted("wall_clock_budget", articles=arts)
             try:
                 if timeout is not None:
                     await asyncio.wait_for(asyncio.sleep(0.4), timeout=timeout)
                 else:
                     await asyncio.sleep(0.4)
             except asyncio.TimeoutError:
-                return exhausted("wall_clock_budget")
+                return exhausted("wall_clock_budget", articles=arts)
 
             try:
                 timeout = remaining()
                 if deadline is not None and timeout is None:
-                    return exhausted("wall_clock_budget")
+                    return exhausted("wall_clock_budget", articles=arts)
                 judge = self._judge_focused_relevance(item, tissue, arts, bucket)
                 judged = await (
                     asyncio.wait_for(judge, timeout=timeout)
                     if timeout is not None else judge
                 )
             except asyncio.TimeoutError:
-                return exhausted("wall_clock_budget")
+                return exhausted("wall_clock_budget", articles=arts)
+            except UpstreamExhaustedError:
+                raise
             except Exception as e:
                 logger.warning(
                     "[Literature] Focused relevance judge failed for cluster %s tier %s: %s",
@@ -516,11 +528,12 @@ IMPORTANT:
                     tier,
                     e,
                 )
-                return exhausted("judge_failed", str(e))
+                return exhausted("judge_failed", str(e), articles=arts)
 
             status = judged.get("status", "exhausted") if isinstance(judged, dict) else "exhausted"
             return {
                 "articles": arts,
+                "retained_articles": arts,
                 "status": status,
                 "tier": tier,
                 "exhaustion_reason": "no_relevant_evidence" if status == "exhausted" else None,
@@ -535,10 +548,15 @@ IMPORTANT:
                 r1 = await _run(item, 1)   # discovery
                 r2 = await _run(item, 2)   # plausibility
                 best = r2 if self._focused_result_score(r2) > self._focused_result_score(r1) else r1
+                retained = list(r1.get("retained_articles") or []) + list(
+                    r2.get("retained_articles") or []
+                )
             else:
                 best = await _run(item, 1)
+                retained = list(best.get("retained_articles") or [])
                 if best["status"] in ("exhausted", "contradictory"):
                     alt = await _run(item, 2)
+                    retained.extend(alt.get("retained_articles") or [])
                     if self._focused_result_score(alt) > self._focused_result_score(best):
                         best = alt
                 # Tier 2 only drops tissue, which recovered one cluster of the
@@ -547,8 +565,13 @@ IMPORTANT:
                 # evidence gets one more attempt without it.
                 if best["status"] in ("exhausted", "contradictory"):
                     alt = await _run(item, 3)
+                    retained.extend(alt.get("retained_articles") or [])
                     if self._focused_result_score(alt) > self._focused_result_score(best):
                         best = alt
+            best = dict(best)
+            best["retained_articles"] = self._dedup_by_pmid(
+                retained, lambda article: article.get("pmid"), drop_empty=True,
+            )
             results[cid] = best
         return results
 
@@ -564,6 +587,9 @@ IMPORTANT:
         tissue: str = "",
         seed_queries: Optional[List[str]] = None,
         cluster_markers: Optional[Dict[str, List[str]]] = None,
+        research_context: str = "",
+        planned_queries: Optional[List[str]] = None,
+        deadline_override: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Multi-round PubMed search with LLM-guided query refinement.
 
@@ -577,9 +603,7 @@ IMPORTANT:
         """
         pi_guided = initial_query is not None and evaluate_fn is not None
         label = "PI-guided PubMed" if pi_guided else "PubMed"
-        active_query_policy_version = (
-            1 if pi_guided else PUBMED_QUERY_POLICY_VERSION
-        )
+        active_query_policy_version = PUBMED_QUERY_POLICY_VERSION
 
         all_articles: List[Dict[str, str]] = []
         seen_pmids: Set[str] = set()
@@ -593,6 +617,7 @@ IMPORTANT:
         plateau_streak = 0
         evaluation_count = 0
         post_triage_rounds = 0
+        technical_stop_error = ""
         post_triage_limit = int(
             getattr(self, "post_triage_refinement_rounds", 2) or 0
         )
@@ -611,7 +636,7 @@ IMPORTANT:
         plateau_min_new_articles = int(
             getattr(self, "plateau_min_new_articles", 1) or 0
         )
-        deadline = search_started + search_wall_clock_seconds
+        deadline = deadline_override or (search_started + search_wall_clock_seconds)
 
         # Generate initial PubMed query from the topic (or use provided one)
         if pi_guided:
@@ -626,8 +651,85 @@ IMPORTANT:
             tissue=tissue,
             pi_guided=pi_guided,
             query_policy_version=active_query_policy_version,
+            research_context=research_context,
+            planned_queries=planned_queries or [query, *(seed_queries or [])],
         )
         normalized_cache_query = _normalized_search_text(query)
+        source_report: Optional[LiteratureReport] = None
+        checkpoint: Dict[str, Any] = {
+            "status": "in_progress",
+            "topic": topic,
+            "research_context": str(research_context or "")[:12000],
+            "planned_queries": list(planned_queries or [query, *(seed_queries or [])])[:3],
+            "query_attempts": [],
+            "search_history": [],
+            "articles": [],
+        }
+
+        def source_references() -> List[Dict[str, str]]:
+            return [
+                {
+                    "pmid": str(article.get("pmid") or ""),
+                    "title": str(article.get("title") or ""),
+                    "url": f"https://pubmed.ncbi.nlm.nih.gov/{article.get('pmid')}/",
+                    "abstract": str(article.get("abstract") or ""),
+                    "year": str(article.get("year") or ""),
+                    "authors": str(article.get("authors") or ""),
+                    "journal": str(article.get("journal") or article.get("source") or ""),
+                }
+                for article in all_articles
+            ]
+
+        def checkpoint_sources(extra_articles: Optional[List[Dict[str, Any]]] = None) -> None:
+            nonlocal source_report, all_articles, stop_reason
+            for article in extra_articles or []:
+                pmid = str(article.get("pmid") or "")
+                if pmid and pmid not in seen_pmids:
+                    all_articles.append(article)
+                    seen_pmids.add(pmid)
+            if len(all_articles) > max_articles_per_topic:
+                all_articles = all_articles[:max_articles_per_topic]
+                stop_reason = "article_budget"
+            checkpoint.update({
+                "query_attempts": copy.deepcopy(query_attempts[-30:]),
+                "search_history": copy.deepcopy(search_history[-20:]),
+                "articles": copy.deepcopy(all_articles[:max_articles_per_topic]),
+            })
+            if all_articles:
+                refs = source_references()
+                if source_report is None:
+                    source_report = LiteratureReport(
+                        topic=topic,
+                        report=(
+                            "PubMed sources were retrieved. Synthesis is pending or unavailable; "
+                            "the retained source inventory remains available."
+                        ),
+                        references=refs,
+                    )
+                    reports = getattr(self, "reports", None)
+                    if reports is None:
+                        reports = []
+                        self.reports = reports
+                    reports.append(source_report)
+                    if state is not None:
+                        state.literature_reports.append(source_report)
+                else:
+                    source_report.references = refs
+            if state is not None:
+                cache = getattr(state, "literature_search_cache", None)
+                if cache is None:
+                    cache = {}
+                    setattr(state, "literature_search_cache", cache)
+                entry = dict(cache.get(cache_key) or {})
+                entry.update({
+                    "normalized_topic": _normalized_search_text(topic),
+                    "normalized_query": normalized_cache_query,
+                    "checkpoint": copy.deepcopy(checkpoint),
+                })
+                entry.pop("result", None)
+                cache[cache_key] = entry
+                while len(cache) > 100:
+                    cache.pop(next(iter(cache)), None)
 
         def cache_result(result: Dict[str, Any]) -> None:
             if state is None:
@@ -636,11 +738,32 @@ IMPORTANT:
             if cache is None:
                 cache = {}
                 setattr(state, "literature_search_cache", cache)
-            cache[cache_key] = {
+            search_meta = result.get("search_meta") or {}
+            technically_complete = (
+                result.get("status") == "completed"
+                and not result.get("source_processing_error")
+                and not search_meta.get("evaluation_failed")
+            )
+            checkpoint_payload = {
+                **copy.deepcopy(checkpoint),
+                "status": "complete" if technically_complete else "partial",
+                "query_attempts": copy.deepcopy(query_attempts[-30:]),
+                "search_history": copy.deepcopy(search_history[-20:]),
+                "articles": copy.deepcopy(all_articles[:max_articles_per_topic]),
+            }
+            if not technically_complete:
+                checkpoint_payload.update({
+                    "stop_reason": search_meta.get("stop_reason"),
+                    "source_processing_error": result.get("source_processing_error"),
+                })
+            entry = {
                 "normalized_topic": _normalized_search_text(topic),
                 "normalized_query": normalized_cache_query,
-                "result": copy.deepcopy(result),
+                "checkpoint": checkpoint_payload,
             }
+            if technically_complete:
+                entry["result"] = copy.deepcopy(result)
+            cache[cache_key] = entry
             while len(cache) > 100:
                 oldest_key = next(iter(cache))
                 cache.pop(oldest_key, None)
@@ -659,6 +782,10 @@ IMPORTANT:
         for round_num in range(1, self.max_search_rounds + 1):
             if time.monotonic() >= deadline:
                 stop_reason = "wall_clock_budget"
+                technical_stop_error = (
+                    "PubMed search stopped because the wall-clock budget was exhausted "
+                    "before the next query completed."
+                )
                 break
             logger.info(
                 f"[Literature] {label} round {round_num}/{self.max_search_rounds}: "
@@ -666,6 +793,7 @@ IMPORTANT:
             )
 
             # Search PubMed (first round uses validation + degradation)
+            round_attempt_start = len(query_attempts)
             try:
                 if round_num == 1:
                     query, articles = await asyncio.wait_for(
@@ -686,13 +814,41 @@ IMPORTANT:
                     )
             except asyncio.TimeoutError:
                 stop_reason = "wall_clock_budget"
+                technical_stop_error = (
+                    "PubMed search stopped because a query exceeded the remaining "
+                    "wall-clock budget."
+                )
+                if round_num > 1:
+                    query_attempts.append({
+                        "kind": "refinement", "query": query,
+                        "result_count": None, "error": "wall_clock_budget",
+                    })
                 break
+            except UpstreamExhaustedError:
+                raise
             except Exception as e:
                 logger.warning(f"[Literature] PubMed search failed in round {round_num}: {e}")
                 if round_num == 1 and not all_articles:
                     raise  # Re-raise to trigger fallback
                 stop_reason = "pubmed_error"
+                technical_stop_error = (
+                    f"PubMed search failed technically: {type(e).__name__}: {e}"
+                )[:1000]
+                if round_num > 1:
+                    query_attempts.append({
+                        "kind": "refinement", "query": query,
+                        "result_count": None, "error": str(e)[:500],
+                    })
                 break
+
+            if round_num > 1:
+                query_attempts.append({
+                    "kind": "refinement",
+                    "query": query,
+                    "result_count": len(articles),
+                })
+
+            primary_result_count = len(articles)
 
             # Deduplicate by PMID
             new_articles = []
@@ -700,7 +856,9 @@ IMPORTANT:
                 if a["pmid"] not in seen_pmids:
                     new_articles.append(a)
                     seen_pmids.add(a["pmid"])
+            primary_new_results = len(new_articles)
             all_articles.extend(new_articles)
+            checkpoint_sources()
 
             if round_num == 1 and seed_queries:
                 seed_articles = await self._run_seed_queries(
@@ -715,6 +873,7 @@ IMPORTANT:
                     # prompt both read from the front of it.
                     all_articles = seed_articles + all_articles
                     new_articles = seed_articles + new_articles
+                    checkpoint_sources()
 
             if len(all_articles) >= max_articles_per_topic:
                 all_articles = all_articles[:max_articles_per_topic]
@@ -728,30 +887,38 @@ IMPORTANT:
             search_history.append({
                 "round": round_num,
                 "query": query,
-                "new_results": len(new_articles),
+                "new_results": primary_new_results,
+                "primary_result_count": primary_result_count,
+                "supplementary_new_results": max(
+                    0, len(new_articles) - primary_new_results,
+                ),
                 "total_results": len(all_articles),
+                "query_attempts": copy.deepcopy(
+                    query_attempts[round_attempt_start:][-10:]
+                ),
             })
+            checkpoint_sources()
 
             logger.info(
                 f"[Literature] {label} round {round_num}: "
                 f"{len(new_articles)} new articles, {len(all_articles)} total"
             )
 
-            if round_num == 1 and not all_articles:
+            if round_num == 1 and not all_articles and not pi_guided:
                 stop_reason = "no_pubmed_results"
                 logger.info(f"[Literature] {label} stop: no PubMed results")
                 break
 
             # Evaluate if more searching needed
-            if stop_reason == "article_budget":
+            if stop_reason == "article_budget" and not pi_guided:
                 logger.info(f"[Literature] {label} stop: article budget")
                 break
-            if plateau_streak >= plateau_rounds:
+            if plateau_streak >= plateau_rounds and (all_articles or not pi_guided):
                 stop_reason = "marginal_yield_plateau"
                 logger.info(f"[Literature] {label} stop: marginal-yield plateau")
                 break
 
-            if round_num < self.max_search_rounds and all_articles:
+            if pi_guided or (round_num < self.max_search_rounds and all_articles):
                 if evaluation_count >= max_sufficiency_evaluations:
                     stop_reason = "sufficiency_evaluation_budget"
                     break
@@ -759,12 +926,21 @@ IMPORTANT:
                     evaluation_count += 1
                     try:
                         evaluation = await asyncio.wait_for(
-                            evaluate_fn(all_articles, search_history),
+                            evaluate_fn(
+                                copy.deepcopy(all_articles),
+                                copy.deepcopy(search_history),
+                            ),
                             timeout=max(0.001, deadline - time.monotonic()),
                         )
                     except asyncio.TimeoutError:
                         stop_reason = "wall_clock_budget"
+                        technical_stop_error = (
+                            "PI literature search review exceeded the remaining "
+                            "wall-clock budget."
+                        )
                         break
+                    except UpstreamExhaustedError:
+                        raise
                     except Exception as e:
                         logger.warning(f"[Literature] PI evaluation failed in round {round_num}: {e}, stopping")
                         evaluation = {
@@ -794,12 +970,18 @@ IMPORTANT:
                     try:
                         evaluation = await asyncio.wait_for(
                             self._evaluate_pubmed_results(
-                                topic, all_articles, search_history
+                                topic,
+                                copy.deepcopy(all_articles),
+                                copy.deepcopy(search_history),
                             ),
                             timeout=max(0.001, deadline - time.monotonic()),
                         )
                     except asyncio.TimeoutError:
                         stop_reason = "wall_clock_budget"
+                        technical_stop_error = (
+                            "Literature search evaluation exceeded the remaining "
+                            "wall-clock budget."
+                        )
                         break
 
                 latest_evaluation = evaluation
@@ -807,7 +989,13 @@ IMPORTANT:
                     evaluation, query, label, round_num
                 )
                 if decision is not None:
-                    stop_reason = decision
+                    stop_reason = (
+                        "no_pubmed_results"
+                        if not all_articles and decision == "search_exhausted"
+                        else decision
+                    )
+                    break
+                if stop_reason == "article_budget":
                     break
                 query = next_query
 
@@ -816,11 +1004,28 @@ IMPORTANT:
             # sequential loop happens to make.
 
         if not all_articles:
-            report_text = (
-                "No PubMed articles were found for the executed queries on this topic. "
-                "This records evidence scarcity for this search and does not establish "
-                "that relevant literature does not exist."
-            )
+            technical_partial = stop_reason in {"wall_clock_budget", "pubmed_error"}
+            if technical_partial and not search_history:
+                report_text = (
+                    "PubMed search stopped technically before any query completed, and "
+                    "no source inventory was obtained."
+                )
+            elif technical_partial:
+                report_text = (
+                    "Completed PubMed query attempts did not retrieve sources before the "
+                    "search stopped technically. This does not establish that relevant "
+                    "literature does not exist."
+                )
+            else:
+                report_text = (
+                    "No PubMed articles were found for the executed queries on this topic. "
+                    "This records evidence scarcity for this search and does not establish "
+                    "that relevant literature does not exist."
+                )
+            if latest_evaluation.get("reasoning"):
+                report_text += (
+                    " PI review: " + str(latest_evaluation["reasoning"])[:1000]
+                )
             report = LiteratureReport(topic=topic, report=report_text, references=[])
             self.reports.append(report)
             if state is not None:
@@ -846,26 +1051,60 @@ IMPORTANT:
                 "fallback": "none",
                 "query_policy_version": active_query_policy_version,
                 "query_attempts": copy.deepcopy(query_attempts),
-                **_evaluation_meta({
-                    "search_exhausted": True,
+                **_evaluation_meta(latest_evaluation or {
+                    "search_exhausted": stop_reason == "no_pubmed_results",
                     "evidence_strength": "unassessed",
-                    "reasoning": report_text,
+                    "reasoning": (
+                        report_text if stop_reason == "no_pubmed_results"
+                        else f"Search stopped technically: {stop_reason}."
+                    ),
                 }),
             }
+            if result["search_meta"].get("evaluation_failed"):
+                result.update({
+                    "status": "partial",
+                    "source_processing_error": (
+                        "PI literature search review failed technically; the zero-result "
+                        "search remains unassessed."
+                    ),
+                    "source_provenance": "pubmed_search_unassessed",
+                    "retained_source_report_ids": [report.id],
+                })
+            elif technical_partial:
+                result.update({
+                    "status": "partial",
+                    "source_processing_error": (
+                        technical_stop_error
+                        or f"PubMed search stopped technically: {stop_reason}."
+                    ),
+                    "source_provenance": "pubmed_search_partial",
+                    "retained_source_report_ids": [],
+                })
             cache_result(result)
             return result
 
         # --- Per-cluster evidence: run after main loop, before synthesis ---
         focused_evidence: Dict[str, Any] = {}
         focused_articles_for_synthesis: List[Dict[str, Any]] = []
-        if pi_guided and latest_triage:
+        annotation_triage = bool(
+            latest_triage
+            and any(
+                key in latest_triage
+                for key in (
+                    "covered", "rare_unresolved", "suspected_contamination",
+                    "context_dependent_state",
+                )
+            )
+        )
+        if pi_guided and annotation_triage:
             focused_evidence = await self._collect_cluster_evidence(
                 latest_triage, organism, tissue,
                 cluster_markers=cluster_markers, deadline=deadline,
+                retain_fn=checkpoint_sources,
             )
             for cid, data in focused_evidence.items():
                 adjudicated = data.get("status") in ("strong", "limited")
-                for article in data.get("articles", []):
+                for article in data.get("retained_articles", data.get("articles", [])):
                     pmid = article.get("pmid")
                     if not pmid:
                         continue
@@ -875,8 +1114,9 @@ IMPORTANT:
                     # Only adjudicated evidence is promoted ahead of the main
                     # pool for synthesis; unadjudicated references would crowd
                     # the synthesis budget with unweighed papers.
-                    if adjudicated:
+                    if adjudicated and article in data.get("articles", []):
                         focused_articles_for_synthesis.append(article)
+            checkpoint_sources()
 
         if len(all_articles) > max_articles_per_topic:
             all_articles = all_articles[:max_articles_per_topic]
@@ -903,18 +1143,64 @@ IMPORTANT:
                 synth_kwargs["max_articles"] = int(
                     getattr(self, "annotation_synthesis_max_articles", 40) or 40
                 )
-        report_text = await self._synthesize_pubmed_results(
-            topic,
-            synthesis_articles,
-            **synth_kwargs,
-        )
-
-        references = [
-            {"title": a["title"], "url": f"https://pubmed.ncbi.nlm.nih.gov/{a['pmid']}/"}
-            for a in all_articles
-        ]
-
-        final = await self._finalize_result(topic, report_text, references, state, len(search_history))
+        references = source_references()
+        try:
+            report_text = await self._synthesize_pubmed_results(
+                topic,
+                synthesis_articles,
+                **synth_kwargs,
+            )
+        except UpstreamExhaustedError:
+            raise
+        except Exception as exc:
+            failure_text = (
+                "PubMed sources were retrieved and retained, but synthesis failed "
+                f"technically ({type(exc).__name__}). No knowledge-only text replaced "
+                "the retrieved source inventory."
+            )
+            if source_report is not None:
+                source_report.report = failure_text
+                source_report.references = references
+            final = {
+                "status": "partial",
+                "report": failure_text,
+                "references": references,
+                "findings": [failure_text],
+                "report_id": source_report.id if source_report is not None else None,
+                "search_rounds": len(search_history),
+                "source_processing_error": f"{type(exc).__name__}: {exc}"[:1000],
+                "source_provenance": "pubmed_retrieved_partial",
+                "retained_source_report_ids": (
+                    [source_report.id] if source_report is not None else []
+                ),
+            }
+        else:
+            finalize = self._finalize_result
+            try:
+                finalize_parameters = inspect.signature(finalize).parameters
+            except (TypeError, ValueError):
+                finalize_parameters = {}
+            accepts_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in finalize_parameters.values()
+            )
+            if "existing_report" in finalize_parameters or accepts_kwargs:
+                finalize_kwargs = {"existing_report": source_report}
+                if (
+                    "partial_source_provenance" in finalize_parameters
+                    or accepts_kwargs
+                ):
+                    finalize_kwargs["partial_source_provenance"] = (
+                        "pubmed_retrieved_partial"
+                    )
+                final = await finalize(
+                    topic, report_text, references, state, len(search_history),
+                    **finalize_kwargs,
+                )
+            else:
+                final = await finalize(
+                    topic, report_text, references, state, len(search_history)
+                )
         final["focused_evidence"] = focused_evidence
         final["triage"] = latest_triage
         final["search_meta"] = {
@@ -932,6 +1218,34 @@ IMPORTANT:
             "query_attempts": copy.deepcopy(query_attempts),
             **_evaluation_meta(latest_evaluation),
         }
+        if final["search_meta"].get("evaluation_failed"):
+            final.update({
+                "status": "partial",
+                "source_processing_error": (
+                    "PI literature search review failed technically; retrieved sources "
+                    "were retained but scientific coverage remains unassessed."
+                ),
+                "source_provenance": "pubmed_retrieved_partial",
+                "retained_source_report_ids": (
+                    [source_report.id] if source_report is not None else []
+                ),
+            })
+        if stop_reason in {"wall_clock_budget", "pubmed_error"}:
+            stop_error = (
+                technical_stop_error
+                or f"PubMed search stopped technically: {stop_reason}."
+            )
+            existing_error = str(final.get("source_processing_error") or "")
+            final.update({
+                "status": "partial",
+                "source_processing_error": (
+                    f"{existing_error}; {stop_error}" if existing_error else stop_error
+                )[:1000],
+                "source_provenance": "pubmed_retrieved_partial",
+                "retained_source_report_ids": (
+                    [source_report.id] if source_report is not None else []
+                ),
+            })
         cache_result(final)
         return final
 
@@ -1113,6 +1427,7 @@ IMPORTANT:
         tissue: str,
         cluster_markers: Optional[Dict[str, List[str]]] = None,
         deadline: Optional[float] = None,
+        retain_fn: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> Dict[str, Any]:
         """Retrieve literature for every triaged cluster, in two regimes.
 
@@ -1143,6 +1458,14 @@ IMPORTANT:
                 )
             ):
                 focused_kwargs["deadline"] = deadline
+            if (
+                "retain_fn" in focused_parameters
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in focused_parameters.values()
+                )
+            ):
+                focused_kwargs["retain_fn"] = retain_fn
             found = await focused_search(items, organism, tissue, **focused_kwargs)
             for cid, data in (found or {}).items():
                 entry = dict(data or {})
@@ -1166,12 +1489,15 @@ IMPORTANT:
         try:
             root = ET.fromstring(xml_text)
         except ET.ParseError as e:
-            logger.warning(f"[Literature] PubMed XML parse error: {e}")
-            return []
+            raise ValueError("PubMed efetch returned malformed XML") from e
+        if root.tag != "PubmedArticleSet" or root.find(".//ERROR") is not None:
+            raise ValueError("PubMed efetch returned an unexpected or error response")
 
         for article_elem in root.findall(".//PubmedArticle"):
             try:
                 pmid = article_elem.findtext(".//PMID", "")
+                if not pmid.strip():
+                    raise ValueError("PubMed efetch article is missing its PMID")
                 title_elem = article_elem.find(".//ArticleTitle")
                 title = ''.join(title_elem.itertext()).strip() if title_elem is not None else ""
 
@@ -1320,8 +1646,20 @@ IMPORTANT:
 
         resp = await self._entrez_get(search_url, search_params, client_kwargs)
         search_data = resp.json()
-
-        pmids = search_data.get("esearchresult", {}).get("idlist", [])
+        if not isinstance(search_data, dict):
+            raise ValueError("PubMed esearch returned an invalid response object")
+        search_result = search_data.get("esearchresult")
+        if (
+            search_data.get("error") or search_data.get("ERROR")
+            or not isinstance(search_result, dict)
+            or search_result.get("error") or search_result.get("ERROR")
+        ):
+            raise ValueError("PubMed esearch returned an error or missing result")
+        pmids = search_result.get("idlist")
+        if not isinstance(pmids, list) or any(
+            not isinstance(pmid, str) or not pmid.isdigit() for pmid in pmids
+        ):
+            raise ValueError("PubMed esearch returned an invalid or missing PMID list")
         if not pmids:
             return []
 
@@ -1338,7 +1676,10 @@ IMPORTANT:
         xml_text = resp.text
 
         # Step 3: Parse XML
-        return self._parse_pubmed_xml(xml_text)
+        articles = self._parse_pubmed_xml(xml_text)
+        if not articles:
+            raise ValueError("PubMed efetch returned no articles for retrieved PMIDs")
+        return articles
 
     async def _quick_search(
         self,
@@ -1387,6 +1728,10 @@ Note: If you are not certain about specific citation information, please clearly
         else:
             response = await self.chat_without_history(prompt, temperature=0.3)
 
+        response = (
+            "Knowledge-only review; no live source retrieval supports this text.\n\n"
+            + response
+        )
         report = LiteratureReport(
             topic=topic,
             report=response,
@@ -1405,6 +1750,7 @@ Note: If you are not certain about specific citation information, please clearly
             "references": [],
             "findings": findings,
             "note": "Review based on LLM knowledge, not real-time literature search",
+            "source_provenance": "knowledge_only",
             "report_id": report.id
         }
 

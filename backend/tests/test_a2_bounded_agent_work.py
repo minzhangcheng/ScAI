@@ -10,7 +10,11 @@ from PIL import Image
 
 from backend.agents.biochemistry_agent import BiochemistryAgent
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
-from backend.agents.literature.pubmed import PubMedMixin, _search_cache_key
+from backend.agents.literature.pubmed import (
+    PUBMED_QUERY_POLICY_VERSION,
+    PubMedMixin,
+    _search_cache_key,
+)
 from backend.models.schemas import AgentType, DataFile
 
 
@@ -64,7 +68,7 @@ def test_pubmed_cache_key_includes_query_policy_version():
     )
 
     kwargs["pi_guided"] = True
-    assert _search_cache_key(**kwargs, query_policy_version=1) == _search_cache_key(
+    assert _search_cache_key(**kwargs, query_policy_version=1) != _search_cache_key(
         **kwargs, query_policy_version=2
     )
 
@@ -79,7 +83,7 @@ async def test_pubmed_each_budget_stops_and_exact_empty_result_is_cached():
     assert first["search_meta"]["stop_reason"] == "no_pubmed_results"
     assert first["search_meta"]["fallback"] == "none"
     assert first["search_meta"]["rounds"] == 1
-    assert first["search_meta"]["query_policy_version"] == 2
+    assert first["search_meta"]["query_policy_version"] == PUBMED_QUERY_POLICY_VERSION
     assert first["search_meta"]["query_attempts"] == [{
         "kind": "initial",
         "query": "  exact empty query  ",

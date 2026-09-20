@@ -13,6 +13,7 @@ from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...agents.bioinformatics_agent import count_saved_figures
 from ...agents.literature.pubmed import PUBMED_QUERY_POLICY_VERSION
 from ..helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS
+from ...agents.literature.research import literature_technical_failure
 from ...utils.blob_store import BLOB_REF_PREFIX
 from ..retry import with_retry
 
@@ -126,6 +127,15 @@ class LiteratureNodeMixin:
             return skip
 
         cached = cache_hit(analysis_state, AgentType.LITERATURE)
+        if cached is not None and (
+            literature_technical_failure(cached)
+            or any(
+                str(mode).startswith("quick_search (fallback from ")
+                for mode in (cached.get("search_modes") or [])
+            )
+        ):
+            cache_invalidate(analysis_state, AgentType.LITERATURE)
+            cached = None
         if cached is not None:
             cached_uses_pubmed = any(
                 "pubmed" in str(mode).lower()
@@ -225,6 +235,16 @@ class LiteratureNodeMixin:
 
         # Enrich topics with previous findings for round 2+
         previous_lit_context = self._build_previous_findings_context(analysis_state, "literature")
+        search_context = (
+            f"Project question: {analysis_state.initial_instruction}\n"
+            f"Round overview: {overview}\n"
+            f"Current findings: {'; '.join(current_round_findings)}"
+        )[:12000]
+        pi_search_kwargs = {
+            "pi_plan_fn": self.pi_agent.plan_literature_search,
+            "pi_review_fn": self.pi_agent.review_literature_search,
+            "research_context": search_context,
+        }
 
         # Check if Deep Research mode is available (merges topics into one call)
         is_deep_research = self.literature_agent.is_deep_research_available
@@ -279,6 +299,7 @@ class LiteratureNodeMixin:
                         analysis_state, fallback_topic, use_deep_research=True,
                         current_round_findings=current_round_findings,
                         research_brief=sub_brief,
+                        **pi_search_kwargs,
                     )
                     results.append(r)
             else:
@@ -302,13 +323,16 @@ class LiteratureNodeMixin:
                     analysis_state, merged_fallback_topic, use_deep_research=True,
                     current_round_findings=current_round_findings,
                     research_brief=merged_brief,
+                    **pi_search_kwargs,
                 )
                 results = [dr_result]
 
                 # Evaluate coverage — fallback to PubMed for gaps
                 # (also runs for a single topic so under-covered DR output can be supplemented)
                 if limited_topics:
-                    gaps = await self._evaluate_dr_coverage(limited_topics, dr_result)
+                    gaps = await self._evaluate_dr_coverage(
+                        limited_topics, dr_result, analysis_state
+                    )
                     if gaps:
                         logger.info(f"[{self.session_id}] Deep Research gaps detected, PubMed fallback for: {gaps}")
                         await self._send_message("status", f"Supplementing {len(gaps)} topic(s) via PubMed...", AgentType.LITERATURE)
@@ -317,6 +341,7 @@ class LiteratureNodeMixin:
                                 analysis_state, gap_topic, use_deep_research=True,
                                 current_round_findings=current_round_findings,
                                 mode_override="pubmed_llm",
+                                **pi_search_kwargs,
                             )
                             results.append(gap_result)
         else:
@@ -329,7 +354,8 @@ class LiteratureNodeMixin:
                     # True routes to _do_research() for full PubMed pipeline,
                     # not the external Deep Research API (guarded by is_deep_research_available).
                     use_deep_research=True,
-                    current_round_findings=current_round_findings
+                    current_round_findings=current_round_findings,
+                    **pi_search_kwargs,
                 )
                 results.append(result)
 
@@ -339,6 +365,10 @@ class LiteratureNodeMixin:
             "findings": [],
             "reports": [],
             "search_modes": [],
+            "source_provenance": [],
+            "reference_count": 0,
+            "retained_source_report_ids": [],
+            "technical_failures": [],
         }
 
         for r in results:
@@ -347,12 +377,24 @@ class LiteratureNodeMixin:
                 combined_result["reports"].append(r["report"])
             if r.get("search_mode"):
                 combined_result["search_modes"].append(r["search_mode"])
+            provenance = r.get("source_provenance") or r.get("note")
+            if provenance:
+                combined_result["source_provenance"].append(str(provenance))
+            combined_result["reference_count"] += len(r.get("references") or [])
+            combined_result["retained_source_report_ids"].extend(
+                str(value) for value in (r.get("retained_source_report_ids") or [])
+            )
+            technical_failure = literature_technical_failure(r)
+            if technical_failure:
+                combined_result["technical_failures"].append(technical_failure)
 
         if no_topic_reason:
             combined_result.update({
                 "status": "no_focused_topic",
                 "reason": no_topic_reason,
             })
+        elif combined_result["technical_failures"]:
+            combined_result["status"] = "partial"
         elif any(
             "pubmed" in str(mode).lower()
             for mode in combined_result["search_modes"]
@@ -397,7 +439,8 @@ class LiteratureNodeMixin:
             except Exception as e:
                 logger.warning(f"[{self.session_id}] mechanism signal persistence skipped: {e}")
 
-        cache_store(analysis_state, AgentType.LITERATURE, combined_result)
+        if not combined_result["technical_failures"]:
+            cache_store(analysis_state, AgentType.LITERATURE, combined_result)
         return {
             **state,
             "analysis_state": analysis_state,
@@ -502,7 +545,9 @@ class LiteratureNodeMixin:
             parts.insert(0, "\n".join(prog_lines))
         return ("\n".join(parts))[:4000]
 
-    async def _evaluate_dr_coverage(self, topics: List[str], dr_result: Dict) -> List[str]:
+    async def _evaluate_dr_coverage(
+        self, topics: List[str], dr_result: Dict, analysis_state=None
+    ) -> List[str]:
         """Evaluate which topics were NOT sufficiently covered by Deep Research.
 
         Returns a list of gap topic strings for PubMed+LLM fallback.
@@ -511,34 +556,12 @@ class LiteratureNodeMixin:
         if not report:
             return topics  # No report at all — fall back on everything
 
-        topics_list = "\n".join(f"{i+1}. {t}" for i, t in enumerate(topics))
-        prompt = f"""The following Deep Research report was generated:
-
-{report[:3000]}
-
-The original research topics were:
-{topics_list}
-
-Which topics are NOT sufficiently covered in the report? Return a JSON array of topic strings that need additional research. If all topics are well covered, return an empty array [].
-
-Return ONLY the JSON array, nothing else."""
-
         try:
-            response = await self.literature_agent.chat_without_history(prompt, temperature=0.2)
-            # Strip markdown code fences if present (e.g. ```json ... ```)
-            cleaned = response.strip()
-            if cleaned.startswith('```'):
-                first_newline = cleaned.find('\n')
-                if first_newline != -1:
-                    cleaned = cleaned[first_newline + 1:]
-                else:
-                    cleaned = cleaned[3:]
-            if cleaned.endswith('```'):
-                cleaned = cleaned[:-3]
-            cleaned = cleaned.strip()
-            gaps = json.loads(cleaned)
-            if isinstance(gaps, list):
-                return [g for g in gaps if isinstance(g, str)]
+            return await self.pi_agent.review_deep_research_coverage(
+                topics=topics,
+                report=report,
+                state=analysis_state,
+            )
         except UpstreamExhaustedError:
             raise
         except Exception as e:

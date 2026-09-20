@@ -65,6 +65,15 @@ export interface DirectionLiteratureEvidence {
   limitations?: string[]
   timed_out?: boolean
   timeout_seconds?: number | null
+  policy_version?: string
+  plan_status?: string
+  assessment_status?: string
+  assessment_uncertainty?: string[]
+  assessment_limitations?: string[]
+  task_executions?: Array<{ task_id?: string; status?: string; returned_count?: number; compiled_query?: string }>
+  article_inventory?: Array<{ pmid?: string; title?: string; source?: string; task_ids?: string[] }>
+  extractions?: Array<{ pmid?: string; finding?: string; source_passage?: string; applicability_limits?: string[] }>
+  unexecuted_task_ids?: string[]
 }
 
 export interface DirectionCandidate {

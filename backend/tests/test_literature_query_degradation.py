@@ -63,6 +63,7 @@ def _new_pubmed_agent() -> LiteratureAgent:
     agent = LiteratureAgent.__new__(LiteratureAgent)
     agent.pubmed_email = "tester@example.org"
     agent.pubmed_api_key = ""
+    agent.proxy_url = ""
     return agent
 
 
@@ -345,3 +346,83 @@ async def test_semantic_path_retries_technical_error_without_revising_topic(monk
     assert agent._pubmed_search.await_count == 2
     assert agent._revise_zero_hit_query.await_count == 0
     assert [item["kind"] for item in attempts] == ["initial", "technical_retry"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    {},
+    {"ERROR": "Search service unavailable"},
+    {"esearchresult": {}},
+    {"esearchresult": {"idlist": None}},
+    {"esearchresult": {"idlist": "123"}},
+    {"esearchresult": {"idlist": [], "ERROR": "Search failed"}},
+])
+async def test_pubmed_invalid_success_response_is_a_failed_attempt(payload):
+    agent = _new_pubmed_agent()
+    agent._entrez_get = AsyncMock(return_value=httpx.Response(200, json=payload))
+    attempts = []
+
+    with pytest.raises(ValueError, match="PubMed esearch"):
+        await agent._validate_and_degrade_query(
+            "exact query", "question", attempt_log=attempts,
+        )
+
+    assert len(attempts) == 1
+    assert attempts[0]["result_count"] is None
+    assert attempts[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_pubmed_valid_empty_search_with_term_warning_remains_zero():
+    agent = _new_pubmed_agent()
+    agent._entrez_get = AsyncMock(return_value=httpx.Response(200, json={
+        "esearchresult": {
+            "idlist": [], "count": "0",
+            "errorlist": {"phrasesnotfound": ["unmatched term"]},
+        },
+    }))
+
+    assert await agent._pubmed_search("unmatched term") == []
+    assert agent._entrez_get.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("xml", [
+    "<PubmedArticleSet><PubmedArticle>",
+    "<ERROR>Fetch service unavailable</ERROR>",
+    "<PubmedArticleSet><ERROR>Fetch failed</ERROR></PubmedArticleSet>",
+    "<PubmedArticleSet />",
+    "<PubmedArticleSet><PubmedArticle><MedlineCitation /></PubmedArticle></PubmedArticleSet>",
+])
+async def test_pubmed_failed_fetch_is_not_reported_as_no_search_hits(xml):
+    agent = _new_pubmed_agent()
+    agent._entrez_get = AsyncMock(side_effect=[
+        httpx.Response(200, json={"esearchresult": {"idlist": ["123"]}}),
+        httpx.Response(200, text=xml),
+    ])
+
+    with pytest.raises(ValueError, match="PubMed efetch"):
+        await agent._pubmed_search("query with a hit")
+
+    assert agent._entrez_get.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_pubmed_valid_fetch_preserves_source_metadata():
+    agent = _new_pubmed_agent()
+    agent._entrez_get = AsyncMock(side_effect=[
+        httpx.Response(200, json={"esearchresult": {"idlist": ["123"]}}),
+        httpx.Response(200, text="""<PubmedArticleSet><PubmedArticle><MedlineCitation>
+          <PMID>123</PMID><Article><ArticleTitle>A <i>source</i> title</ArticleTitle>
+          <Abstract><AbstractText>Original abstract.</AbstractText></Abstract>
+          <Journal><Title>Journal</Title><JournalIssue><PubDate><Year>2025</Year>
+          </PubDate></JournalIssue></Journal></Article>
+        </MedlineCitation></PubmedArticle></PubmedArticleSet>"""),
+    ])
+
+    articles = await agent._pubmed_search("query")
+
+    assert articles == [{
+        "pmid": "123", "title": "A source title", "abstract": "Original abstract.",
+        "year": "2025", "authors": "", "journal": "Journal",
+    }]

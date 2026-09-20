@@ -175,21 +175,38 @@ Please list 3-5 most important findings, one per line.
         report_text: str,
         references: List[Dict[str, str]],
         state: Optional[AnalysisState],
-        search_rounds: int
+        search_rounds: int,
+        existing_report: Optional[LiteratureReport] = None,
+        partial_source_provenance: str = "retrieved_source_partial",
     ) -> Dict[str, Any]:
-        """Create and store a LiteratureReport, extract findings, return standardized result."""
-        report = LiteratureReport(
-            topic=topic,
-            report=report_text,
-            references=references,
-        )
-        self.reports.append(report)
-        if state is not None:
-            state.literature_reports.append(report)
+        """Update the retained source report, then extract findings."""
+        report = existing_report
+        if report is None:
+            report = LiteratureReport(
+                topic=topic,
+                report=report_text,
+                references=references,
+            )
+            self.reports.append(report)
+            if state is not None:
+                state.literature_reports.append(report)
+        else:
+            report.report = report_text
+            report.references = references
 
-        findings = await self._extract_findings(report_text)
+        extraction_error = None
+        try:
+            findings = await self._extract_findings(report_text)
+        except UpstreamExhaustedError:
+            raise
+        except Exception as exc:
+            extraction_error = f"{type(exc).__name__}: {exc}"[:1000]
+            findings = [
+                "Retrieved sources and synthesis were retained, but structured "
+                "finding extraction failed technically."
+            ]
 
-        return {
+        result = {
             "status": "completed",
             "report": report_text,
             "references": references,
@@ -197,6 +214,14 @@ Please list 3-5 most important findings, one per line.
             "report_id": report.id,
             "search_rounds": search_rounds,
         }
+        if extraction_error:
+            result.update({
+                "status": "partial",
+                "source_processing_error": extraction_error,
+                "source_provenance": partial_source_provenance,
+                "retained_source_report_ids": [report.id],
+            })
+        return result
 
     @staticmethod
     def _select_references(response, report_text: str):

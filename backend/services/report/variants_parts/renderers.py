@@ -77,12 +77,15 @@ def _render_direction_evidence_section_from_lists(
         literature_novelty = c.get("literature_novelty", "N/A")
         ev = evidence_lookup.get(c.get("evidence_ref") or did, {})
         status = ev.get("status", "no_evidence") if ev else "no_evidence"
+        is_new_policy = bool(ev.get("policy_version")) if ev else False
 
         direct_count = ev.get("direct_evidence_count", 0) if ev else 0
         analogous_count = ev.get("analogous_evidence_count", 0) if ev else 0
         contradictory_count = ev.get("contradictory_evidence_count", 0) if ev else 0
         method_precedent_count = ev.get("methodological_precedent_count", 0) if ev else 0
         total_evidence = direct_count + analogous_count + contradictory_count + method_precedent_count
+        if is_new_policy:
+            total_evidence = len(ev.get("article_inventory", []) or [])
         timed_out = bool(ev.get("timed_out", False)) if ev else False
 
         row_class = ""
@@ -157,10 +160,56 @@ def _render_direction_evidence_section_from_lists(
             queries_html = "<li><strong>Queries:</strong></li>\n" + queries_html
 
         limitations_html = ""
-        for lim in (ev.get("limitations", []) if ev else []):
+        limitations = list(ev.get("limitations", []) if ev else [])
+        if is_new_policy:
+            limitations.extend(ev.get("assessment_limitations", []) or [])
+            limitations = list(dict.fromkeys(str(item) for item in limitations if item))
+        for lim in limitations:
             limitations_html += f"<li>{html_module.escape(str(lim))}</li>"
         if limitations_html:
             limitations_html = "<li><strong>Limitations:</strong></li>\n" + limitations_html
+
+        new_policy_html = ""
+        if is_new_policy:
+            inventory_html = "".join(
+                "<li class=\"ev-pmid\"><strong>Retained PMID:</strong> "
+                + html_module.escape(str(item.get("pmid") or ""))
+                + (" &mdash; " + html_module.escape(str(item.get("title") or "")[:160]) if item.get("title") else "")
+                + "</li>"
+                for item in (ev.get("article_inventory") or [])
+                if isinstance(item, dict) and item.get("pmid")
+            )
+            extraction_html = "".join(
+                "<li><strong>Source passage (PMID "
+                + html_module.escape(str(item.get("pmid") or ""))
+                + "):</strong> "
+                + html_module.escape(str(item.get("source_passage") or item.get("finding") or ""))
+                + "</li>"
+                for item in (ev.get("extractions") or [])
+                if isinstance(item, dict) and (item.get("source_passage") or item.get("finding"))
+            )
+            execution_html = "".join(
+                "<li><strong>Task "
+                + html_module.escape(str(item.get("task_id") or ""))
+                + ":</strong> "
+                + html_module.escape(str(item.get("status") or "unknown"))
+                + "</li>"
+                for item in (ev.get("task_executions") or [])
+                if isinstance(item, dict)
+            )
+            uncertainty = "; ".join(
+                html_module.escape(str(item))
+                for item in (ev.get("assessment_uncertainty") or [])
+            )
+            new_policy_html = "".join((
+                "<li><strong>PI Assessment:</strong> "
+                + html_module.escape(str(ev.get("assessment_status") or "unassessed"))
+                + "</li>",
+                ("<li><strong>Assessment Uncertainty:</strong> " + uncertainty + "</li>") if uncertainty else "",
+                inventory_html,
+                extraction_html,
+                execution_html,
+            ))
 
         warning_html = ""
         if status in ("failed", "skipped"):
@@ -191,6 +240,7 @@ def _render_direction_evidence_section_from_lists(
                     {("<li><strong>Analogous Evidence Count:</strong> " + str(analogous_count) + "</li>") if analogous_count else ""}
                     {("<li><strong>Contradictory Evidence Count:</strong> " + str(contradictory_count) + "</li>") if contradictory_count else ""}
                     {queries_html}
+                    {new_policy_html}
                     {key_pmids_html}
                     {limitations_html}
                     {prereq_html}

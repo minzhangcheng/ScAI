@@ -2,9 +2,11 @@
 
 Moved verbatim out of backend/agents/literature_agent.py; composed into LiteratureAgent.
 """
-from typing import Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional
+import asyncio
 import json
 import logging
+import time
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,56 @@ from .shared import (  # noqa: F401
 )
 
 
+def literature_technical_failure(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Project explicit technical failures without judging scientific sufficiency."""
+    search_meta = result.get("search_meta") or {}
+    if not (
+        result.get("source_failure")
+        or result.get("source_processing_error")
+        or search_meta.get("evaluation_failed")
+        or result.get("technical_failures")
+    ):
+        return {}
+    return {
+        "status": result.get("research_status") or result.get("status") or "partial",
+        **{
+            key: result[key]
+            for key in (
+                "source_failure", "source_processing_error", "source_provenance",
+                "search_meta", "technical_failures",
+            )
+            if key in result
+        },
+    }
+
+
+def literature_provenance_disclosure(result: Dict[str, Any]) -> str:
+    """Keep source and execution facts visible in text-only PI projections."""
+    metadata = {
+        key: str(result[key])[:1000]
+        for key in (
+            "research_status", "status", "search_mode", "source_provenance",
+            "source_processing_error",
+        )
+        if key in result
+    }
+    if result.get("source_failure"):
+        failure = result["source_failure"]
+        metadata["source_failure"] = (
+            {key: str(failure[key])[:1000] for key in ("mode", "reason") if key in failure}
+            if isinstance(failure, dict) else str(failure)[:1000]
+        )
+    if result.get("search_meta"):
+        metadata["search_meta"] = {
+            key: result["search_meta"][key]
+            for key in ("stop_reason", "evaluation_failed", "evidence_strength")
+            if key in result["search_meta"]
+        }
+    if not metadata:
+        return ""
+    return "Literature research provenance:\n" + json.dumps(metadata, ensure_ascii=False)
+
+
 class ResearchMixin:
     """Top-level research drivers and search-result evaluation."""
 
@@ -33,7 +85,11 @@ class ResearchMixin:
         pubmed_max_results: Optional[int] = None,
         current_round_findings: Optional[List[str]] = None,
         mode_override: Optional[str] = None,
-        research_brief: Optional[str] = None
+        research_brief: Optional[str] = None,
+        *,
+        pi_plan_fn: Optional[Callable] = None,
+        pi_review_fn: Optional[Callable] = None,
+        research_context: str = "",
     ) -> Dict[str, Any]:
         """
         Route to configured research mode with fallback chain.
@@ -49,6 +105,67 @@ class ResearchMixin:
         """
         mode = mode_override if mode_override is not None else self.literature_mode
         actual_mode = mode  # Track which mode actually produced results
+        context_parts = [str(research_context or "").strip()]
+        if research_brief:
+            context_parts.append(f"Research brief:\n{str(research_brief)[:8000]}")
+        if current_round_findings:
+            context_parts.append(
+                "Current findings:\n" + "\n".join(
+                    str(item)[:1000] for item in current_round_findings[:10]
+                )
+            )
+        research_context = "\n\n".join(part for part in context_parts if part)[:16000]
+
+        async def run_pubmed() -> Dict[str, Any]:
+            if not (pi_plan_fn and pi_review_fn):
+                return await self._multi_round_pubmed(
+                    topic, state, pubmed_max_results=pubmed_max_results,
+                    current_round_findings=current_round_findings,
+                    research_context=research_context,
+                )
+            started = time.monotonic()
+            budget = float(getattr(self, "search_wall_clock_seconds", 600) or 600)
+            deadline = started + budget
+            plan = await asyncio.wait_for(
+                pi_plan_fn(
+                    topic=topic,
+                    context=research_context,
+                    state=state,
+                    mode="pubmed",
+                ),
+                timeout=max(0.001, deadline - time.monotonic()),
+            )
+            primary_value = plan.get("primary_query") if isinstance(plan, dict) else None
+            primary = primary_value.strip() if isinstance(primary_value, str) else ""
+            raw_alternatives = plan.get("alternative_queries") if isinstance(plan, dict) else []
+            alternatives = [
+                value.strip() for value in (raw_alternatives or [])
+                if isinstance(value, str) and value.strip()
+            ][:2]
+            if not primary:
+                raise ValueError("PI literature search plan contained no primary query")
+
+            async def evaluate(articles, search_history):
+                return await pi_review_fn(
+                    topic=topic,
+                    context=research_context,
+                    articles=articles,
+                    search_history=search_history,
+                    remaining_budget_seconds=max(0.0, deadline - time.monotonic()),
+                    state=state,
+                    mode="pubmed",
+                )
+
+            return await self._multi_round_pubmed(
+                topic, state, pubmed_max_results=pubmed_max_results,
+                current_round_findings=current_round_findings,
+                initial_query=primary,
+                evaluate_fn=evaluate,
+                seed_queries=alternatives,
+                research_context=research_context,
+                planned_queries=[primary, *alternatives],
+                deadline_override=deadline,
+            )
 
         try:
             if mode == "deep_research":
@@ -56,10 +173,7 @@ class ResearchMixin:
             elif mode == "gemini_deep_research":
                 result = await self._multi_round_gemini(topic, state, research_brief=research_brief)
             elif mode == "pubmed_llm":
-                result = await self._multi_round_pubmed(
-                    topic, state, pubmed_max_results=pubmed_max_results,
-                    current_round_findings=current_round_findings
-                )
+                result = await run_pubmed()
             else:
                 logger.warning(f"[Literature] Unknown mode: {mode}, using quick search")
                 actual_mode = "quick_search"
@@ -75,26 +189,33 @@ class ResearchMixin:
             raise
         except Exception as e:
             logger.warning(f"[Literature] Mode {mode} failed: {e}")
+            final_failure = e
+            failed_source_mode = mode
 
             # Fallback: deep_research or gemini → try pubmed
             if mode in ("gemini_deep_research", "deep_research"):
                 logger.info("[Literature] Falling back to PubMed + LLM mode")
                 try:
-                    result = await self._multi_round_pubmed(
-                        topic, state, pubmed_max_results=pubmed_max_results,
-                        current_round_findings=current_round_findings
-                    )
+                    result = await run_pubmed()
                     result["search_mode"] = f"pubmed_llm (fallback from {mode})"
                     return result
                 except UpstreamExhaustedError:
                     raise
                 except Exception as e2:
                     logger.warning(f"[Literature] PubMed fallback also failed: {e2}")
+                    final_failure = e2
+                    failed_source_mode = f"pubmed_llm (fallback from {mode})"
 
             # Final fallback: quick search (LLM knowledge only)
             logger.info("[Literature] Falling back to quick search (LLM knowledge only)")
             result = await self._quick_search(topic, state)
             result["search_mode"] = f"quick_search (fallback from {mode})"
+            result["source_provenance"] = "knowledge_only"
+            result["status"] = "partial"
+            result["source_failure"] = {
+                "mode": str(failed_source_mode),
+                "reason": f"{type(final_failure).__name__}: {final_failure}"[:1000],
+            }
             return result
 
     async def _evaluate_search_results(
@@ -141,7 +262,9 @@ Respond in JSON format:
             }
         return result
 
-    async def integration_literature_search(self, state, integration_report: str) -> str:
+    async def integration_literature_search(
+        self, state, integration_report: str, *, pi_plan_fn=None, pi_review_fn=None
+    ) -> str:
         balanced_framing = (
             "For each contestable claim below, deliberately search for credible contradicting, "
             "qualifying, null, or non-replicating evidence as well as supporting work. Weight "
@@ -164,9 +287,20 @@ Respond in JSON format:
                 f"{balanced_framing}\n\n"
                 f"Findings to assess:\n{integration_report[:2000]}"
             ),
+            research_context=(
+                f"Project question: {state.initial_instruction}\n\n"
+                f"Current integration findings:\n{integration_report[:6000]}"
+            ),
+            pi_plan_fn=pi_plan_fn,
+            pi_review_fn=pi_review_fn,
         )
         if isinstance(result, dict):
             findings = result.get("findings") or []
             summary = result.get("summary") or ""
-            return (summary + "\n" + "\n".join(str(f) for f in findings)).strip()
+            evidence = (summary + "\n" + "\n".join(str(f) for f in findings)).strip()
+            if not evidence:
+                evidence = str(result.get("report") or "")
+            return "\n\n".join(
+                part for part in (literature_provenance_disclosure(result), evidence) if part
+            )
         return str(result)

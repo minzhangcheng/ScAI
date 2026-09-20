@@ -42,6 +42,200 @@ from .planning_response import (
 class ResearchPlanningMixin:
     """Plan review, plan-dialogue convergence, and per-agent task planning."""
 
+    async def plan_literature_search(
+        self,
+        *,
+        topic: str,
+        context: str = "",
+        state: Optional[AnalysisState] = None,
+        mode: str = "general",
+    ) -> Dict[str, Any]:
+        """Plan one bounded, executable PubMed search for a literature task."""
+        self.refresh_runtime_config_if_needed()
+        prompt = """You are the PI responsible for planning a PubMed search.
+
+Return JSON only with this contract:
+{
+  "primary_query": "one executable PubMed query",
+  "alternative_queries": ["zero to two executable alternative queries"],
+  "rationale": "brief reason for the decomposition"
+}
+
+Rules:
+- Decompose the evidence question into independently searchable concepts.
+- Use OR within synonymous concepts. Do not make every contextual concept a
+  mandatory AND clause or use one strict all-concepts query as the sole strategy.
+- Add species, tissue, disease, or model restrictions only when the question
+  requires them.
+- Return at most three distinct queries in total. Do not assess whether the
+  resulting evidence will be scientifically sufficient.
+
+Dynamic request:
+""" + json.dumps({
+            "mode": str(mode or "general")[:80],
+            "topic": str(topic or "")[:4000],
+            "context": str(context or "")[:8000],
+            "project_question": str(getattr(state, "initial_instruction", "") or "")[:2000],
+        }, ensure_ascii=False)
+        response = await self.chat_without_history(prompt, temperature=0.2)
+        parsed = self._safe_parse_json(response, default={})
+        if not isinstance(parsed, dict):
+            raise ValueError("PI literature search plan was not a JSON object")
+        primary_value = parsed.get("primary_query")
+        primary = primary_value.strip() if isinstance(primary_value, str) else ""
+        alternatives = parsed.get("alternative_queries")
+        if (
+            not primary
+            or not isinstance(alternatives, list)
+            or len(alternatives) > 2
+            or any(not isinstance(value, str) or not value.strip() for value in alternatives)
+        ):
+            raise ValueError("PI literature search plan is missing executable queries")
+        queries = []
+        seen = set()
+        for value in [primary, *alternatives]:
+            if not isinstance(value, str) or not value.strip():
+                continue
+            query = value.strip()
+            key = re.sub(r"\s+", " ", query).lower()
+            if key in seen:
+                raise ValueError("PI literature search plan contains duplicate queries")
+            seen.add(key)
+            queries.append(query)
+        if not queries:
+            raise ValueError("PI literature search plan contained no executable query")
+        return {
+            "primary_query": queries[0],
+            "alternative_queries": queries[1:3],
+            "rationale": str(parsed.get("rationale") or "")[:1000],
+        }
+
+    async def review_literature_search(
+        self,
+        *,
+        topic: str,
+        context: str,
+        articles: List[Dict[str, Any]],
+        search_history: List[Dict[str, Any]],
+        remaining_budget_seconds: float,
+        state: Optional[AnalysisState] = None,
+        mode: str = "general",
+    ) -> Dict[str, Any]:
+        """Review retrieved inventory and decide whether one more query is useful."""
+        self.refresh_runtime_config_if_needed()
+        valid_articles = [a for a in articles if isinstance(a, dict)]
+        retained_articles = valid_articles[-60:]
+        article_inventory = []
+        for article in retained_articles:
+            abstract = str(article.get("abstract") or "")
+            article_inventory.append({
+                "pmid": str(article.get("pmid") or ""),
+                "title": str(article.get("title") or "")[:500],
+                "abstract": abstract[:2000],
+                "abstract_source_chars": len(abstract),
+                "abstract_truncated": len(abstract) > 2000,
+                "year": str(article.get("year") or ""),
+                "source": str(article.get("journal") or article.get("source") or "")[:300],
+            })
+        prompt = """You are the PI reviewing an in-progress PubMed search.
+
+Return JSON only with this contract:
+{
+  "search_exhausted": true,
+  "evidence_strength": "strong|moderate|sparse|contradictory|insufficient|unassessed",
+  "reasoning": "what was searched and why to stop or continue",
+  "refined_query": "one executable PubMed query, or empty when stopping",
+  "missing_aspects": ["bounded missing aspect"]
+}
+
+Rules:
+- A successful zero-result query must still be reviewed. It is unassessed unless
+  you can assess the search itself; it never proves that no relevant literature exists.
+- You may stop with sparse or unknown evidence. Request one different executable
+  query only when it is useful and fits the remaining budget.
+- Use OR for synonyms and avoid turning all context into mandatory AND filters.
+- Judge scientific coverage yourself; the host validates only this response shape.
+
+Dynamic request:
+""" + json.dumps({
+            "mode": str(mode or "general")[:80],
+            "topic": str(topic or "")[:4000],
+            "context": str(context or "")[:8000],
+            "remaining_budget_seconds": max(0.0, float(remaining_budget_seconds)),
+            "search_history": list(search_history or [])[-20:],
+            "article_inventory_counts": {
+                "source": len(valid_articles),
+                "retained": len(retained_articles),
+                "omitted": max(0, len(valid_articles) - len(retained_articles)),
+            },
+            "articles": article_inventory,
+            "project_question": str(getattr(state, "initial_instruction", "") or "")[:2000],
+        }, ensure_ascii=False)
+        response = await self.chat_without_history(prompt, temperature=0.2)
+        parsed = self._safe_parse_json(response, default={})
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("search_exhausted"), bool):
+            raise ValueError("PI literature search review was not readable")
+        strength_value = parsed.get("evidence_strength")
+        strength = strength_value.strip().lower() if isinstance(strength_value, str) else ""
+        allowed = {"strong", "moderate", "sparse", "contradictory", "insufficient", "unassessed"}
+        if strength not in allowed:
+            raise ValueError("PI literature search review has invalid evidence strength")
+        reasoning = parsed.get("reasoning")
+        refined_value = parsed.get("refined_query")
+        refined = refined_value.strip() if isinstance(refined_value, str) else ""
+        missing = parsed.get("missing_aspects")
+        if (
+            not isinstance(reasoning, str)
+            or not isinstance(refined_value, str)
+            or not isinstance(missing, list)
+            or any(not isinstance(item, str) for item in missing)
+        ):
+            raise ValueError("PI literature search review has an invalid response shape")
+        if not parsed["search_exhausted"] and not refined:
+            raise ValueError("PI literature search review requested continuation without a query")
+        return {
+            "search_exhausted": parsed["search_exhausted"],
+            "evidence_strength": strength,
+            "reasoning": reasoning[:2000],
+            "refined_query": refined,
+            "missing_aspects": [item[:300] for item in missing[:10]],
+        }
+
+    async def review_deep_research_coverage(
+        self,
+        *,
+        topics: List[str],
+        report: str,
+        state: Optional[AnalysisState] = None,
+    ) -> List[str]:
+        """Return original topic strings that need bounded PubMed follow-up."""
+        self.refresh_runtime_config_if_needed()
+        report_text = str(report or "")
+        retained_report = report_text[:12000]
+        prompt = """You are the PI reviewing coverage of a Deep Research report.
+Return JSON only as {"topics_needing_followup": ["exact original topic"]}.
+Select only original topics whose evidence coverage needs PubMed follow-up.
+
+Dynamic request:
+""" + json.dumps({
+            "topics": [str(topic)[:2000] for topic in topics[:10]],
+            "report": retained_report,
+            "report_source_chars": len(report_text),
+            "report_retained_chars": len(retained_report),
+            "report_truncated": len(retained_report) < len(report_text),
+            "project_question": str(getattr(state, "initial_instruction", "") or "")[:2000],
+        }, ensure_ascii=False)
+        response = await self.chat_without_history(prompt, temperature=0.2)
+        parsed = self._safe_parse_json(response, default={})
+        values = parsed.get("topics_needing_followup") if isinstance(parsed, dict) else None
+        originals = {str(topic): str(topic) for topic in topics}
+        if (
+            not isinstance(values, list)
+            or any(not isinstance(value, str) or value not in originals for value in values)
+        ):
+            raise ValueError("PI Deep Research coverage review was not readable")
+        return list(dict.fromkeys(originals[value] for value in values))
+
     async def review_bioinfo_plan(
         self,
         state: AnalysisState,

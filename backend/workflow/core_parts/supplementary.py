@@ -2,7 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+from backend.constants import LlmFailureAction
+from backend.agents.literature.research import (
+    literature_provenance_disclosure,
+    literature_technical_failure,
+)
 from backend.services.adata_checkpoints.selection import selection_signature
+from backend.utils.llm_client import UpstreamExhaustedError
+from backend.workflow.helpers import WorkflowSupersededError, WorkflowTerminatedError
 
 import uuid
 from datetime import datetime
@@ -252,17 +259,81 @@ async def _run_supplementary_analysis(
         AgentType.PI,
     )
 
+    _skip_llm_call = object()
+    _intervention_node = (
+        "bioinformatics_analysis" if context == "annotation" else "wait_for_user_input"
+    )
+
+    async def _run_llm_call(call, stage_label: str):
+        """Retry only one failed supplementary PI/literature call."""
+        while True:
+            try:
+                return await call()
+            except WorkflowSupersededError:
+                raise
+            except asyncio.CancelledError:
+                await _mark_request_interrupted(
+                    self, state, request_id,
+                    f"Supplementary {stage_label} was interrupted.",
+                )
+                raise
+            except WorkflowTerminatedError:
+                await _mark_request_interrupted(
+                    self, state, request_id,
+                    f"Supplementary {stage_label} was terminated.",
+                )
+                raise
+            except UpstreamExhaustedError as error:
+                try:
+                    action = await self._wait_for_llm_intervention(
+                        error, _intervention_node, state,
+                    )
+                except WorkflowSupersededError:
+                    raise
+                except asyncio.CancelledError:
+                    await _mark_request_interrupted(
+                        self, state, request_id,
+                        f"Supplementary {stage_label} intervention was interrupted.",
+                    )
+                    raise
+                if action == LlmFailureAction.RETRY:
+                    continue
+                if action == LlmFailureAction.TERMINATE:
+                    await _mark_request_interrupted(
+                        self, state, request_id,
+                        f"Supplementary {stage_label} was terminated after LLM failure.",
+                    )
+                    raise WorkflowTerminatedError(
+                        f"User terminated supplementary {stage_label} after LLM failure"
+                    ) from error
+                return _skip_llm_call
+
     # PI agent plans supplementary tasks
     supp_plan = {}
     _supp_technical_failure = False
     _supp_error_summary = None
     try:
-        supp_plan = await self.pi_agent.plan_supplementary_analysis(
-            state, request_text, context
-        ) or {}
+        planned = await _run_llm_call(
+            lambda: self.pi_agent.plan_supplementary_analysis(
+                state, request_text, context
+            ),
+            "planning",
+        )
+        if planned is _skip_llm_call:
+            _supp_technical_failure = True
+            _supp_error_summary = "PI supplementary planning was skipped after LLM failure"
+        else:
+            supp_plan = planned or {}
     except asyncio.CancelledError:
         await _mark_request_interrupted(
             self, state, request_id, "Supplementary planning was interrupted."
+        )
+        raise
+    except WorkflowSupersededError:
+        raise
+    except WorkflowTerminatedError:
+        await _mark_request_interrupted(
+            self, state, request_id, "Supplementary planning was terminated."
         )
         raise
     except Exception as exc:
@@ -347,6 +418,14 @@ async def _run_supplementary_analysis(
                 "Supplementary execution was interrupted.",
             )
             raise
+        except WorkflowSupersededError:
+            raise
+        except WorkflowTerminatedError:
+            await _mark_request_interrupted(
+                self, state, request_id,
+                "Supplementary bioinformatics was terminated.",
+            )
+            raise
         except Exception as e:
             _supp_technical_failure = True
             _supp_error_summary = (
@@ -365,23 +444,73 @@ async def _run_supplementary_analysis(
 
     # Execute literature tasks if planned
     lit_tasks = supp_plan.get("literature_topics", [])
+    literature_failures = []
     if lit_tasks and self.literature_agent:
         await self._send_message("status", "Running supplementary literature research...", AgentType.LITERATURE)
         try:
             for topic in lit_tasks[:3]:
-                lit_result = await self.literature_agent.process(
-                    state, topic, topic=topic, use_deep_research=False
+                async def _research_topic():
+                    return await self.literature_agent.process(
+                        state,
+                        topic,
+                        topic=topic,
+                        use_deep_research=True,
+                        pi_plan_fn=self.pi_agent.plan_literature_search,
+                        pi_review_fn=self.pi_agent.review_literature_search,
+                        research_context=(
+                            f"Supplementary request: {request_text}\n"
+                            f"Decision context: {context}\n"
+                            f"Request checkpoint: {request_scope_id}"
+                        )[:12000],
+                    )
+
+                lit_result = await _run_llm_call(
+                    _research_topic, "literature research",
                 )
+                if lit_result is _skip_llm_call:
+                    _supp_technical_failure = True
+                    _supp_error_summary = (
+                        "Supplementary literature was skipped after LLM failure"
+                    )
+                    break
                 if lit_result:
+                    technical_failure = literature_technical_failure(lit_result)
+                    if technical_failure:
+                        literature_failures.append({"topic": topic, **technical_failure})
+                        _supp_technical_failure = True
+                        _supp_error_summary = (
+                            "Supplementary literature returned a technical failure: "
+                            + literature_provenance_disclosure(lit_result)
+                        )[:500]
                     report_text = lit_result.get("report", "") or lit_result.get("synthesis", "")
                     if report_text:
                         self._merge_supplementary_findings(
                             "literature_result", [report_text[:500]]
                         )
+                    if technical_failure:
+                        self._merge_supplementary_findings(
+                            "literature_result", [literature_provenance_disclosure(lit_result)]
+                        )
+                        graph_state = getattr(self, "_current_graph_state", None)
+                        if graph_state is not None:
+                            literature_result = graph_state.get("literature_result") or {}
+                            literature_result["status"] = "partial"
+                            literature_result.setdefault("technical_failures", []).append(
+                                {"topic": topic, **technical_failure}
+                            )
+                            graph_state["literature_result"] = literature_result
         except asyncio.CancelledError:
             await _mark_request_interrupted(
                 self, state, request_id,
                 "Supplementary execution was interrupted.",
+            )
+            raise
+        except WorkflowSupersededError:
+            raise
+        except WorkflowTerminatedError:
+            await _mark_request_interrupted(
+                self, state, request_id,
+                "Supplementary literature research was terminated.",
             )
             raise
         except Exception as e:
@@ -456,6 +585,8 @@ async def _run_supplementary_analysis(
                 "failed", "error", "timeout", "adata_source_error",
             }
             record["status"] = "failed" if _analysis_failed else "settled"
+            if literature_failures:
+                record["literature_technical_failures"] = literature_failures
             record["checkpoint_outcome"] = (
                 getattr(outcome.record, "status", None)
                 or outcome.disclosure
@@ -495,6 +626,7 @@ async def _run_supplementary_analysis(
         research_label=request_text[:240],
         summary_at_capture=str(supp_plan.get("summary") or request_text)[:600],
         outcome_at_capture=(
+            "partial" if _supp_technical_failure else
             str(supp_result.get("status") or "completed")
             if isinstance(supp_result, dict)
             else "partial"
@@ -561,7 +693,11 @@ async def _run_supplementary_analysis(
 
     await self._send_message(
         "status",
-        "Supplementary analysis complete. Updating reports...",
+        (
+            "Supplementary analysis finished with a technical failure. Updating reports..."
+            if _supp_technical_failure
+            else "Supplementary analysis complete. Updating reports..."
+        ),
         AgentType.PI,
     )
 

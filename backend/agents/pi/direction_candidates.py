@@ -2,7 +2,7 @@
 
 Moved verbatim out of backend/agents/pi_agent.py; composed into PIAgent.
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import json
 import logging
 
@@ -22,7 +22,13 @@ SCORER_EVIDENCE_BUDGET = 6000
 
 # Configure logger
 logger = logging.getLogger(__name__)
-from ...models.schemas import AnalysisState, RoundResult, ExplorationReport
+from ...models.schemas import (
+    AnalysisState,
+    RoundResult,
+    ExplorationReport,
+    DirectionSearchTask,
+    DirectionPIReview,
+)
 
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
@@ -56,6 +62,229 @@ def _candidates_are_usable(data) -> bool:
 
 class DirectionCandidatesMixin:
     """Generation and evidence-scoring of research-direction candidates."""
+
+    async def plan_direction_literature_search(
+        self,
+        state: AnalysisState,
+        candidates: List[Dict[str, Any]],
+        prior_records: Optional[List[Dict[str, Any]]] = None,
+        *,
+        phase: str = "exploration",
+    ) -> Dict[str, Any]:
+        """Ask the PI for literal, candidate-specific PubMed search tasks.
+
+        The host validates the returned task records later.  This method only
+        supplies the scientific plan; it does not compile queries or add scope
+        terms.  A dictionary result keeps planning diagnostics visible to the
+        shared Literature coordinator without changing the ordinary topic path.
+        """
+        self.refresh_runtime_config_if_needed()
+        candidate_ids = [str(c.get("direction_id") or "").strip() for c in candidates]
+        candidate_payload = [
+            {
+                "direction_id": c.get("direction_id", ""),
+                "direction": c.get("direction", ""),
+                "core_observation": c.get("core_observation", ""),
+                "main_hypothesis": c.get("main_hypothesis", ""),
+                "alternative_hypotheses": c.get("alternative_hypotheses", []),
+                "key_genes": c.get("key_genes", []),
+                "key_cell_types": c.get("key_cell_types", []),
+                "key_pathways": c.get("key_pathways", []),
+                "organism": c.get("organism", ""),
+                "tissue": c.get("tissue", ""),
+                "experimental_context": c.get("experimental_context", ""),
+            }
+            for c in candidates
+            if isinstance(c, dict)
+        ]
+        prompt = f"""You are the PI designing a bounded PubMed search for research-direction candidates.
+
+The Literature agent will execute exactly the literal concept groups you approve. You own the
+evidence question, concept relationships, explicit required scope, alternative explanations,
+and the limits of what a matching paper can establish. Do not infer aliases or add organism,
+tissue, perturbation, disease, or model terms unless you explicitly author them as terms.
+Alternatives in one concept group are OR; separate groups are AND. Exclusions are explicit
+PI-authored NOT groups with a rationale. Return a task list for every candidate; an empty task
+list for a candidate is a planning failure and must be disclosed, not replaced by a template.
+
+Phase: {phase}
+Project objective: {state.initial_instruction}
+Candidates:
+{json.dumps(candidate_payload, ensure_ascii=False)}
+Prior direction-search records (technical context only):
+{json.dumps(prior_records or [], ensure_ascii=False)[:12000]}
+
+Each task must have this shape:
+{{"task_id":"<unique>","direction_id":"<candidate id>","evidence_question":"...",
+"purpose":"...","concept_groups":[{{"group_id":"g1","terms":[{{"text":"literal term","field":"tiab"}}]}}],
+"exclusions":[{{"exclusion_id":"x1","terms":[{{"text":"literal term","field":"tiab"}}],"rationale":"..."}}],
+"scope":{{"required_group_ids":["g1"],"required_constraints":{{}},"unrestricted_dimensions":[],"rationale":"..."}},
+"mechanism_link":"...","can_establish":["..."],"cannot_establish":["..."]}}
+Use only field tags all, tiab, title, author, mesh, majr, pt, sh, subh, nm. Do not put Boolean
+operators, brackets, parentheses, quotes, or PubMed syntax inside term text.
+Use at most six initial tasks per candidate. Split separate mechanism links or alternative
+explanations into separate tasks when that makes the evidence boundary clearer; one paper or
+one task addressing a link does not establish a complete mechanism chain. Keep each term literal.
+Return JSON only: {{"tasks":[...],"planning_rationale":"..."}}."""
+        response = await self.chat_without_history(prompt, temperature=0.2)
+        parsed = self._safe_parse_json(response, default={})
+        raw_tasks = parsed.get("tasks", []) if isinstance(parsed, dict) else []
+        if not isinstance(raw_tasks, list):
+            raw_tasks = []
+        valid_tasks: List[Dict[str, Any]] = []
+        planning_errors: Dict[str, str] = {}
+        seen_tasks: set[str] = set()
+        allowed_ids = set(candidate_ids)
+        for raw in raw_tasks:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                task = DirectionSearchTask.model_validate(raw)
+                if task.direction_id not in allowed_ids:
+                    raise ValueError(f"unknown candidate id {task.direction_id!r}")
+                if task.task_id in seen_tasks:
+                    raise ValueError(f"duplicate task id {task.task_id!r}")
+                seen_tasks.add(task.task_id)
+                valid_tasks.append(task.model_dump(mode="json"))
+            except Exception as exc:
+                direction_id = str(raw.get("direction_id") or "")
+                planning_errors[direction_id] = str(exc)[:240]
+        for direction_id in candidate_ids:
+            if direction_id and not any(t.get("direction_id") == direction_id for t in valid_tasks):
+                planning_errors.setdefault(direction_id, "PI returned no valid search task")
+        return {
+            "policy_version": "direction_search_v1",
+            "plan_id": str(parsed.get("plan_id") or "") if isinstance(parsed, dict) else "",
+            "tasks": valid_tasks,
+            "planning_errors": planning_errors,
+            "planning_rationale": str(parsed.get("planning_rationale") or "") if isinstance(parsed, dict) else "",
+            "plan_status": "completed" if valid_tasks and not planning_errors else "partial",
+        }
+
+    async def review_direction_literature_search(
+        self,
+        state: AnalysisState,
+        packet: Dict[str, Any] | List[Dict[str, Any]],
+        *,
+        phase: str = "exploration",
+    ) -> Dict[str, Any]:
+        """Review retained execution/extraction evidence and choose finish/follow-up."""
+        self.refresh_runtime_config_if_needed()
+        packet_payload = packet if isinstance(packet, dict) else {"candidates": packet}
+        # Keep the packet bounded per candidate and disclose omitted details in
+        # structured fields.  Never slice the serialized tail: that silently
+        # removes the last candidates and their zero-result tasks.
+        packet_for_prompt = dict(packet_payload)
+        packet_for_prompt["candidates"] = [
+            dict(item) for item in (packet_payload.get("candidates") or [])
+            if isinstance(item, dict)
+        ]
+        packet_for_prompt["article_index"] = list(
+            packet_payload.get("article_index") or []
+        )
+        packet_for_prompt["requested_article_details"] = list(
+            packet_payload.get("requested_article_details") or []
+        )
+        packet_text = json.dumps(packet_for_prompt, ensure_ascii=False)
+        prompt = f"""You are the PI reviewing a bounded, PI-directed literature search for research directions.
+
+Every candidate packet is present, including zero-result, failed, timeout, and unexecuted tasks.
+Counts describe retrieval only. Raw article identities, source passages, study context, and
+applicability limits are the evidence you must weigh. A zero-result or a Literature provisional
+label does not establish novelty. Keep scientific classifications and uncertainty explicit.
+You may request at most one follow-up task batch per candidate, and only with an evidence gap
+and scope-change rationale. Named PMID detail requests must use retained article IDs. When
+requested_article_details are present, use those raw sources and either finish or return an
+explicit follow-up task; do not repeat a detail request that the packet already fulfilled.
+
+Phase: {phase}
+Packet:
+{packet_text}
+
+Return JSON only with one review per candidate:
+{{"reviews":[{{"direction_id":"...","action":"finish|search_more",
+"requested_detail_pmids":[],"follow_up_tasks":[{{"task_id":"<new globally unique id>",
+"direction_id":"<same candidate id>","evidence_question":"...","purpose":"...",
+"concept_groups":[{{"group_id":"g1","terms":[{{"text":"literal term","field":"tiab"}}]}}],
+"exclusions":[],"scope":{{"required_group_ids":["g1"],"required_constraints":{{}},
+"unrestricted_dimensions":[],"rationale":"..."}},"mechanism_link":"...",
+"can_establish":["..."],"cannot_establish":["..."]}}],"rationale":"...","uncertainty":[],
+"cited_article_ids":[],"final_scientific_classifications":{{"literature_novelty":"unknown",
+"support_level":"unknown","contradiction_level":"unknown","prior_art_level":"unknown"}},
+"assessment_status":"assessed|uncertain|unavailable|unassessed"}}]}}.
+Candidate and PMID IDs must be present in the packet. Every follow_up_tasks entry must use the
+same direction_id as its review and a new task_id not present anywhere in the packet. Return finish
+with unknown classifications when evidence is insufficient or technically unavailable."""
+        response = await self.chat_without_history(prompt, temperature=0.2)
+        parsed = self._safe_parse_json(response, default={})
+        raw_reviews = parsed.get("reviews", []) if isinstance(parsed, dict) else []
+        if not isinstance(raw_reviews, list):
+            raw_reviews = []
+        allowed_ids = {
+            str(item.get("direction_id") or "")
+            for item in (packet_payload.get("candidates") or [])
+            if isinstance(item, dict)
+        }
+        allowed_pmids = {
+            str(item.get("pmid") or "")
+            for item in (packet_payload.get("article_index") or [])
+            if isinstance(item, dict)
+        }
+        existing_task_ids = {
+            str(task.get("task_id") or "")
+            for candidate in (packet_payload.get("candidates") or [])
+            if isinstance(candidate, dict)
+            for task in (
+                list(candidate.get("planned_tasks") or [])
+                + list(candidate.get("tasks") or [])
+            )
+            if isinstance(task, dict)
+        }
+        candidate_pmids = {
+            str(candidate.get("direction_id") or ""): {
+                str(pmid) for pmid in (candidate.get("article_ids") or [])
+            }
+            for candidate in (packet_payload.get("candidates") or [])
+            if isinstance(candidate, dict)
+        }
+        reviews: List[Dict[str, Any]] = []
+        review_errors: Dict[str, str] = {}
+        seen: set[str] = set()
+        seen_follow_up_task_ids: set[str] = set()
+        for raw in raw_reviews:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                review = DirectionPIReview.model_validate(raw)
+                if allowed_ids and review.direction_id not in allowed_ids:
+                    raise ValueError(f"unknown candidate id {review.direction_id!r}")
+                if review.direction_id in seen:
+                    raise ValueError(f"duplicate review for {review.direction_id!r}")
+                invalid_pmids = set(review.requested_detail_pmids) | set(review.cited_article_ids)
+                invalid_pmids -= allowed_pmids & candidate_pmids.get(review.direction_id, set())
+                if invalid_pmids:
+                    raise ValueError(f"unknown article ids: {sorted(invalid_pmids)}")
+                for task in review.follow_up_tasks:
+                    if task.direction_id != review.direction_id:
+                        raise ValueError(
+                            f"follow-up task {task.task_id!r} must use review direction_id "
+                            f"{review.direction_id!r}"
+                        )
+                    if (
+                        task.task_id in existing_task_ids
+                        or task.task_id in seen_follow_up_task_ids
+                    ):
+                        raise ValueError(
+                            f"follow-up task id {task.task_id!r} is not globally unique"
+                        )
+                    seen_follow_up_task_ids.add(task.task_id)
+                seen.add(review.direction_id)
+                reviews.append(review.model_dump(mode="json"))
+            except Exception as exc:
+                review_errors[str(raw.get("direction_id") or "")] = str(exc)[:240]
+        for direction_id in sorted(allowed_ids - seen):
+            review_errors.setdefault(direction_id, "PI review unavailable for candidate")
+        return {"reviews": reviews, "review_errors": review_errors}
 
     async def generate_raw_direction_candidates(
         self,
@@ -320,6 +549,20 @@ Return a JSON array. Return [] if no sufficiently novel direction exists."""
             return []
         self.reset_history()
         candidate_count = len(raw_candidates)
+        pi_directed_evidence = any(
+            isinstance(item, dict) and item.get("policy_version")
+            for item in (literature_evidence or [])
+        )
+        policy_scoring_note = (
+            "\n## PI-directed evidence contract\n"
+            "For records with policy_version, treat counts, returned article counts, and executed "
+            "task categories as retrieval measurements only. Do not derive novelty, support, "
+            "contradiction, completion, recommendation, or candidate retention from counts. "
+            "Use explicit PI assessment, cited PMIDs, source passages, applicability limits, "
+            "and technical limitations. Keep literature_novelty and related fields unknown when "
+            "the PI did not explicitly assess them; every candidate remains eligible for scoring.\n"
+            if pi_directed_evidence else ""
+        )
         prompt = f"""You are the PI scoring NEW research direction candidates that emerged from cross-direction integration.
 
 ## Project Context
@@ -331,6 +574,7 @@ Return a JSON array. Return [] if no sufficiently novel direction exists."""
 
 ## Literature Novelty Evidence (per candidate)
 {budgeted_prompt_block(literature_evidence, EVIDENCE_PROMPT_FIELDS, SCORER_EVIDENCE_BUDGET)}
+{policy_scoring_note}
 
 Score every one of the {candidate_count} candidates. Return all {candidate_count}; this step ranks, it does not filter. Selecting which directions to pursue happens in a later step that reads your ranking, and a candidate missing from your reply cannot be reconsidered there.
 
@@ -403,6 +647,20 @@ Return a JSON array of all {candidate_count} candidates, sorted by priority_rank
         self.reset_history()
 
         ann_summary = self._format_cluster_annotation_summary(state)
+        pi_directed_evidence = any(
+            isinstance(item, dict) and item.get("policy_version")
+            for item in (literature_evidence or [])
+        )
+        policy_scoring_note = (
+            "\n## PI-directed evidence contract\n"
+            "For records with policy_version, counts and executed task categories are technical "
+            "retrieval measurements only. Do not derive novelty, support, contradiction, "
+            "completion, recommendation, or candidate retention from counts. Read the explicit "
+            "PI assessment, cited article IDs, source passages, applicability limits, and "
+            "technical limitations. Keep scientific summary fields unknown unless PI assessed "
+            "them; every candidate must reach scoring.\n"
+            if pi_directed_evidence else ""
+        )
 
         prompt = f"""You are the PI scoring research direction candidates with literature evidence.
 
@@ -425,6 +683,7 @@ Return a JSON array of all {candidate_count} candidates, sorted by priority_rank
 
 ## Literature Evidence
 {budgeted_prompt_block(literature_evidence, EVIDENCE_PROMPT_FIELDS, SCORER_EVIDENCE_BUDGET) if literature_evidence else "No literature evidence provided."}
+{policy_scoring_note}
 
 ### PI SCORING RULES
 
@@ -448,7 +707,7 @@ Apply ALL of the following scoring rules:
 For each candidate, score ALL of these dimensions:
 
 1. **data_reliability**: "high" / "medium" / "low" — Based on sample sizes, effect sizes, statistical significance, and data quality.
-2. **literature_novelty**: "high" / "medium" / "low" / "unknown" — How well-studied is this area? "unknown" only when literature evidence failed.
+2. **literature_novelty**: "high" / "medium" / "low" / "unknown" — How well-studied is this area? Use "unknown" when the PI assessment remains scientifically uncertain or unavailable, including bounded zero-result searches and technical failures.
 3. **biology_expectedness**: "expected" / "partially_expected" / "unexpected" / "unknown" — Given known pathways/mechanisms, is the finding expected, partly expected, or unexpected? This is PI reasoning, not PubMed coverage.
 4. **data_novelty**: "high" / "medium" / "low" — How unexpected or surprising is this finding in the data?
 5. **mechanistic_importance**: "high" / "medium" / "low" — How central is the proposed mechanism to the phenotype/disease?
