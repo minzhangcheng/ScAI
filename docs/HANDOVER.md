@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.59.7 · **Last updated**: 2026-09-20
+**Version**: 0.59.9 · **Last updated**: 2026-09-20
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,17 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.59.x — (2026-09-18 onward)**
 
+- `0.59.9` — Fixes missing figures in decision-time Stage 1 and Stage 2
+  review reports. Before each initial or supplementary annotation review,
+  Stage 1 merges in-flight execution receipts into session history by execution
+  ID, allowing existing figures to pass the unchanged provenance checks.
+  Stage review prompts now place the stage scope and JSON contract before
+  variable evidence and bound each review-context source independently. Missing
+  or unavailable stage artifact IDs trigger one PI correction attempt; repeated
+  failure retains the disclosed partial-review fallback without borrowing the
+  complete round gallery. Focused stage-review and round-chapter regressions
+  passed 42/42 tests. Source changes do not regenerate frozen historical reports;
+  no image build, deployment, or historical-session mutation was performed.
 - `0.59.7` — Literature retrieval now separates a valid zero-result search from
   technical failures across PubMed, ordinary rounds, supplementary research,
   integration evidence, and cluster annotation. PubMed response-shape and XML

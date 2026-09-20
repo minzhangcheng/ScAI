@@ -59,6 +59,16 @@ def bind_facade(facade) -> None:
         {name: value for name, value in vars(facade).items() if not name.startswith("__")}
     )
 
+
+def _sync_annotation_execution_receipts(state, agent) -> None:
+    """Expose in-flight receipts before the annotation gate freezes its report."""
+    existing_ids = {receipt.id for receipt in state.code_history}
+    for receipt in getattr(agent, "code_history", ()):
+        if receipt.id not in existing_ids:
+            state.code_history.append(receipt)
+            existing_ids.add(receipt.id)
+
+
 async def _generate_annotation_brief(self, cluster_markers, organism, tissue, state):
     """Ask PI for a focused annotation Deep Research brief (None on failure/empty)."""
     return await safe_pi_brief(
@@ -384,6 +394,7 @@ async def review_and_confirm_annotations(
 
             from ...services.report.stage_reviews import build_stage_review
             from ...agents.bioinformatics.annotation_preview import render_candidate_annotation_preview
+            _sync_annotation_execution_receipts(state, self.bioinformatics_agent)
             preview = await render_candidate_annotation_preview(
                 getattr(self.bioinformatics_agent, "sandbox", None), annotation_source, cluster_anns,
             )
@@ -501,6 +512,7 @@ async def review_and_confirm_annotations(
                     proportion_meta = {"group_labels": [], "proportions": {}, "column_used": None, "dimension": "group"}
                 self._apply_group_proportions(cluster_anns, proportion_meta)
 
+                _sync_annotation_execution_receipts(state, self.bioinformatics_agent)
                 preview = await render_candidate_annotation_preview(
                     getattr(self.bioinformatics_agent, "sandbox", None), annotation_source, cluster_anns,
                 )

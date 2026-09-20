@@ -41,6 +41,7 @@ class ReportsMixin:
         """Use round-report structure while letting the PI select decision-time scope."""
         import json
         from ...services.report.round_chapters import chapter_prompt
+        from ...utils.formatting import truncate_for_llm
 
         self.refresh_runtime_config_if_needed()
         scope = (
@@ -58,20 +59,56 @@ class ReportsMixin:
             "review; that does not change their foundation placement in the final report. New downstream "
             "subset UMAPs belong with their downstream analysis. Explain uncertainties."
         )
-        prompt = chapter_prompt(catalog, state=state) + """
+        # Keep the stage contract ahead of all variable evidence. Shared context
+        # compaction may retain only the head and tail of a large user message.
+        instructions = """
 
 ## Decision-time review override
-Generate an independent stage review, not the complete round chapter described above.
+Generate an independent stage review. These instructions override the reusable
+round-chapter guidance below, including its instruction to use every artifact.
 Return one JSON object with `stage_artifact_ids` (exact IDs selected for this stage)
-and `report_chapter` using the block structure above. Use every SELECTED artifact once;
+and `report_chapter`: {"title": "Review title", "blocks": [
+{"text": "Methods, findings and limitations", "artifact_ids": ["exact catalog ID"]}],
+"conclusions": "Conclusions and uncertainty"}. Use every SELECTED artifact once;
 the full catalog is available evidence, not a requirement to include all artifacts.
 Choose stage scope by scientific role and recorded analysis, not creation time or filename.
 Keep methods, parameters, findings, adjacent figures, uncertainty, and conclusions in
 actual analysis order, just as in a per-round report. Integrate supplementary evidence
 beside its owning result. This review does not replace the full final-report chapter.
-""" + scope + "\nRecorded review context:\n" + json.dumps(context, ensure_ascii=False, default=str)
-        response = await self.chat_without_history(prompt)
-        return self._safe_parse_json(response)
+""" + scope
+        # Bound each evidence source independently so a verbose execution log
+        # cannot consume the summary, annotation context, or retained chapter.
+        bounded_context = {}
+        for key, value in context.items():
+            encoded = json.dumps(value, ensure_ascii=False, default=str)
+            limit = 12 * 1024
+            bounded_context[key] = value if len(encoded) <= limit else {
+                "excerpt": truncate_for_llm(encoded, max_chars=limit).replace(
+                    "chars from sandbox output", "chars from review context",
+                ),
+                "omitted_chars": len(encoded) - limit,
+            }
+        prompt = (instructions + "\n\n" + chapter_prompt(catalog, state=state)
+                  + "\nRecorded review context:\n"
+                  + json.dumps(bounded_context, ensure_ascii=False, default=str))
+        known_ids = {item.artifact_id for item in catalog}
+        for attempt in range(2):
+            response = await self.chat_without_history(prompt)
+            raw = self._safe_parse_json(response)
+            selected = raw.get("stage_artifact_ids") if isinstance(raw, dict) else None
+            if isinstance(selected, list) and all(
+                isinstance(aid, str) and aid in known_ids for aid in selected
+            ):
+                return raw
+            if attempt == 0:
+                prompt = (
+                    "Your previous review omitted stage_artifact_ids or used unavailable IDs. "
+                    "Return the complete corrected JSON object. Select artifacts for this "
+                    "stage explicitly; do not copy the full-round gallery automatically.\n"
+                    + prompt + "\nPrevious response (possibly excerpted):\n"
+                    + truncate_for_llm(response, max_chars=16 * 1024)
+                )
+        raise ValueError("Stage artifact selection missing or contains unavailable IDs")
 
     async def generate_exploration_report(
         self,

@@ -1,4 +1,5 @@
 """Decision-time reviews retain scope, versioned media, and session ownership."""
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -6,7 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from backend.agents.pi.reports import ReportsMixin
-from backend.models.schemas import AnalysisState, ClusterAnnotation, RoundResult
+from backend.models.schemas import AnalysisState, ClusterAnnotation, CodeExecution, RoundResult
 from backend.routes.reports_parts import html_views
 from backend.services.report import stage_reviews
 from backend.services.report.round_chapters import chapter_prompt, round_artifact_catalog
@@ -112,6 +113,86 @@ async def test_pi_receives_stage_scope_and_late_annotation_role(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["stage1", "stage2"])
+async def test_stage_contract_survives_large_context_compaction(tmp_path, stage):
+    from backend.utils.context_budget import ContextBudget, compact_messages
+
+    state = _state(tmp_path)
+    pi = ReportsMixin()
+    pi.refresh_runtime_config_if_needed = lambda: None
+    pi._safe_parse_json = json.loads
+    pi.chat_without_history = AsyncMock(return_value='{"stage_artifact_ids": []}')
+    await pi.generate_stage_review_chapter(state, stage, round_artifact_catalog(state), {
+        "analysis_log": [{"code": "x" * 800_000}],
+        "summary": "Retained summary",
+        "full_round_chapter": {"conclusions": "Retained limitations"},
+    })
+    prompt = pi.chat_without_history.call_args.args[0]
+    context = json.loads(prompt.split("Recorded review context:\n", 1)[1])
+    assert context["analysis_log"]["omitted_chars"] > 700_000
+    assert context["summary"] == "Retained summary"
+    assert context["full_round_chapter"]["conclusions"] == "Retained limitations"
+    messages, report = compact_messages([
+        {"role": "system", "content": "Review recorded evidence."},
+        {"role": "user", "content": prompt},
+    ], ContextBudget(context_window=8192, completion_reserve=2048))
+    # Also exercise shared fallback truncation when the remaining evidence grows.
+    messages, report = compact_messages([
+        messages[0], {"role": "user", "content": prompt + " evidence" * 100_000},
+    ], ContextBudget(context_window=8192, completion_reserve=2048))
+    assert any(action.kind == "fallback_truncate" for action in report.actions)
+    sent = messages[1]["content"]
+    assert "stage_artifact_ids" in sent
+    assert f"Stage {1 if stage == 'stage1' else 2}: describe" in sent
+    assert '"artifact_ids": ["exact catalog ID"]' in sent
+    assert "Use every SELECTED artifact once" in sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_selection", [None, ["nonexistent"]])
+async def test_stage_selection_repair_retains_selected_figures(tmp_path, monkeypatch, invalid_selection):
+    state = _state(tmp_path)
+    monkeypatch.setattr("backend.config.get_session_workspace", lambda _: tmp_path)
+    pi = ReportsMixin()
+    pi.refresh_runtime_config_if_needed = lambda: None
+    pi._safe_parse_json = json.loads
+    corrected = {
+        "stage_artifact_ids": ["late_result"],
+        "report_chapter": {"title": "Exploration", "blocks": [
+            {"text": "Recorded finding", "artifact_ids": ["late_result"]},
+        ]},
+    }
+    original = {"report_chapter": corrected["report_chapter"]}
+    if invalid_selection is not None:
+        original["stage_artifact_ids"] = invalid_selection
+    pi.chat_without_history = AsyncMock(side_effect=[json.dumps(original), json.dumps(corrected)])
+    await stage_reviews.build_stage_review(state, pi, "stage2")
+    assert pi.chat_without_history.await_count == 2
+    assert "complete corrected JSON" in pi.chat_without_history.call_args.args[0]
+    report = state.stage_review_reports[-1]
+    assert report.status == "ready"
+    assert [a.artifact_id for a in report.chapter.artifacts] == ["late_result"]
+    assert "Original caption for late_result" in report.html
+    assert "Original caption for baseline" not in report.html
+
+
+@pytest.mark.asyncio
+async def test_stage_selection_repair_is_bounded(tmp_path, monkeypatch):
+    state = _state(tmp_path)
+    monkeypatch.setattr("backend.config.get_session_workspace", lambda _: tmp_path)
+    pi = ReportsMixin()
+    pi.refresh_runtime_config_if_needed = lambda: None
+    pi._safe_parse_json = json.loads
+    pi.chat_without_history = AsyncMock(return_value='{"stage_artifact_ids": ["invented"]}')
+    await stage_reviews.build_stage_review(state, pi, "stage2", summary="Retained summary")
+    assert pi.chat_without_history.await_count == 2
+    report = state.stage_review_reports[-1]
+    assert report.status == "partial"
+    assert report.chapter.artifacts == []
+    assert "Retained summary" in report.html
+
+
+@pytest.mark.asyncio
 async def test_fabricated_stage_ids_produce_disclosed_partial_review(tmp_path, monkeypatch):
     state = _state(tmp_path)
     monkeypatch.setattr("backend.config.get_session_workspace", lambda _: tmp_path)
@@ -143,8 +224,25 @@ async def test_annotation_gate_publishes_frozen_versions_before_both_decisions(t
     wf.session_id = state.id
     wf.pi_agent = _pi(["baseline"])
     wf.pi_agent.review_cluster_annotations = AsyncMock(return_value={})
+    receipt = CodeExecution(
+        id="baseline-execution", code="measure()", round_number=1, plan_id="stage1-plan",
+        plan_step_ids=[1], plan_binding_status="bound", evidence_schema_version=2,
+        execution_status="succeeded", executor_run_kind="ordinary",
+    )
+    # An earlier attempt with identical code must not replace the actual source ID.
+    state.code_history = [receipt.model_copy(update={"id": "earlier-attempt"})]
+    for figure in state.publication_figures:
+        figure.provenance_schema_version = 2
+        figure.plan_id = "stage1-plan"
+        figure.plan_step_id = 1
+        figure.source_execution_id = f"{figure.id}-execution"
+        figure.source_execution_validated = True
+        figure.source_execution_run_kind = "ordinary"
+        figure.producer_run_kind = "ordinary"
+    assert round_artifact_catalog(state) == []
     wf.bioinformatics_agent = SimpleNamespace(
         sandbox=object(), compute_cluster_group_proportions=AsyncMock(return_value={}),
+        code_history=[receipt, receipt],
     )
     preview = AsyncMock(side_effect=[
         {"image": "data:image/png;base64,first", "note": "First candidate preview"},
@@ -161,7 +259,16 @@ async def test_annotation_gate_publishes_frozen_versions_before_both_decisions(t
     wf._build_and_save_detailed_segment = AsyncMock()
     wf._annotation_event = asyncio.Event()
     wf._supplementary_queue = deque([("Validate candidates", "annotation")])
-    wf._run_supplementary_analysis = AsyncMock()
+    async def supplement(*args, **kwargs):
+        wf.bioinformatics_agent.code_history.append(receipt.model_copy(update={"id": "late_result-execution"}))
+        wf.pi_agent.generate_stage_review_chapter.return_value = {
+            "stage_artifact_ids": ["baseline", "late_result"],
+            "report_chapter": {"title": "Updated review", "blocks": [
+                {"text": "Additional evidence", "artifact_ids": ["baseline", "late_result"]},
+            ]},
+        }
+
+    wf._run_supplementary_analysis = AsyncMock(side_effect=supplement)
     wf._send_state_sync = AsyncMock()
     wf._set_status = lambda st, status: setattr(st, "status", status)
     published = []
@@ -193,6 +300,9 @@ async def test_annotation_gate_publishes_frozen_versions_before_both_decisions(t
     assert [r.revision for r in state.stage_review_reports] == [1, 2]
     assert state.to_api_dict()["annotation_report_url"] == published[-1]
     assert state.annotation_state.confirmed
+    assert [a.artifact_id for a in state.stage_review_reports[0].chapter.artifacts] == ["baseline"]
+    assert {a.artifact_id for a in state.stage_review_reports[1].chapter.artifacts} == {"baseline", "late_result"}
+    assert [r.id for r in state.code_history] == ["earlier-attempt", "baseline-execution", "late_result-execution"]
 
 
 @pytest.mark.asyncio
