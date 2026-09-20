@@ -272,6 +272,8 @@ class PostExecutionReviewMixin:
 
         redraw_result: Dict[str, Any] = {}
         if targeted:
+            from ..services.figure_followup import figure_followup_source_prompt
+
             lines = [
                 f"- task_id={task.id}; logical_figure_id={task.logical_figure_id}; "
                 f"plan_step_id={task.plan_step_id}; "
@@ -291,7 +293,9 @@ class PostExecutionReviewMixin:
                 "and a supporting evidence_execution_id. Normal PI figure review "
                 "applies. After attempting every task, call "
                 "complete_figure_followup with an exact delivered/unresolved task "
-                "partition and a concise render summary.\n\n" + "\n".join(lines)
+                "partition and a concise render summary.\n\n"
+                + figure_followup_source_prompt(analysis_state, followup_scope)
+                + "\n\n" + "\n".join(lines)
             )
             try:
                 redraw_result = await self.bioinformatics_agent.run_autonomous_analysis(

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.59.9 · **Last updated**: 2026-09-20
+**Version**: 0.60.1 · **Last updated**: 2026-09-20
 
 ## 1. Runtime Architecture
 
@@ -361,6 +361,19 @@ gate settings.
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.60.x — (2026-09-20 onward)**
+
+- `0.60.1` — Repairs figure follow-up and report assembly provenance. Each
+  supplementary figure task now receives its own persisted eligible execution
+  IDs in both the task request and checkpoint-safe executor context, so the
+  model cannot derive a source ID from a logical figure UUID or borrow another
+  task's receipt. Saved review chapters also resolve selected figures by exact
+  artifact ID and render hash, preserving a newer same-named revision instead
+  of letting filename deduplication retain an older image. Focused follow-up,
+  context-compaction, stage-review, and round-chapter regressions passed. The
+  recorded-session literature-search recovery evaluation is included as
+  engineering guidance; it does not alter production search behavior.
 
 **0.59.x — (2026-09-18 onward)**
 

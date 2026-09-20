@@ -187,12 +187,27 @@ async def start_turn(context) -> TurnStart:
                 PROMPT_CACHE_EPHEMERAL_TAIL_KEY: True,
             })
             prompt_cache_plan = PromptCachePlan()
+    anchor_count = context.agent._context_anchor_count(request_messages)
+    if figure_followup and state is not None:
+        from backend.services.figure_followup import figure_followup_source_prompt
+
+        # Request-only protected anchor: survives history trimming, checkpoint
+        # resume, and shared context compaction without duplicating transcripts.
+        request_messages.insert(anchor_count, {
+            "role": "user",
+            "content": figure_followup_source_prompt(
+                state, context.figure_followup_scope or {},
+            ),
+            PROMPT_CACHE_EPHEMERAL_TAIL_KEY: True,
+        })
+        anchor_count += 1
+        prompt_cache_plan = PromptCachePlan()
     try:
         response = await context.agent._budgeted_text_call(
             context.agent.llm_client.chat_with_tools,
             messages=request_messages,
             max_tokens=NO_OUTPUT_TOKEN_CAP,
-            anchor_count=context.agent._context_anchor_count(request_messages),
+            anchor_count=anchor_count,
             summarize=context.agent._summarize_dropped_messages,
             model=context.agent.model,
             tools=request_tools,

@@ -1,5 +1,7 @@
 """Decision-time reviews retain scope, versioned media, and session ownership."""
 import json
+import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,6 +14,8 @@ from backend.routes.reports_parts import html_views
 from backend.services.report import stage_reviews
 from backend.services.report.round_chapters import chapter_prompt, round_artifact_catalog
 from backend.tests.test_round_report_chapters import _state, _chapter
+from backend.tests.figure_image_helpers import write_valid_image
+from backend.utils.image_utils import compress_image_to_base64
 
 
 def _pi(ids):
@@ -21,6 +25,44 @@ def _pi(ids):
             {"text": "Recorded methods and results.", "artifact_ids": ids},
         ], "conclusions": "Descriptive evidence."},
     }))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["stage1", "stage2"])
+@pytest.mark.parametrize("select_both", [False, True])
+@pytest.mark.parametrize("corrupt_selected", [False, True])
+async def test_review_preserves_same_named_selected_versions(
+    tmp_path, monkeypatch, stage, select_both, corrupt_selected,
+):
+    state = _state(tmp_path)
+    old = state.publication_figures[1]
+    current_path = Path(old.png_path)
+    archived_path = tmp_path / ".revisions" / "old" / current_path.name
+    archived_path.parent.mkdir(parents=True)
+    current_path.rename(archived_path)
+    old.png_path = str(archived_path)
+    payload = write_valid_image(current_path, color=(220, 10, 10), min_bytes=2200)
+    new = old.model_copy(update={
+        "id": "new-baseline", "png_path": str(current_path),
+        "render_sha256": hashlib.sha256(payload).hexdigest(),
+        "description": "Selected updated baseline.",
+    })
+    state.publication_figures = [old, new]
+    selected = [old.id, new.id] if select_both else [new.id]
+    old_image = compress_image_to_base64(archived_path, max_width=1000, quality=82)
+    new_image = compress_image_to_base64(current_path, max_width=1000, quality=82)
+    assert old_image != new_image
+    if corrupt_selected:
+        # A valid older version must never substitute for corrupted selected bytes.
+        current_path.write_bytes(archived_path.read_bytes())
+    monkeypatch.setattr("backend.config.get_session_workspace", lambda _: tmp_path)
+    await stage_reviews.build_stage_review(state, _pi(selected), stage)
+    report = state.stage_review_reports[-1]
+    assert report.status == "ready"
+    assert {a.artifact_id for a in report.chapter.artifacts} == set(selected)
+    assert (old_image in report.html) is select_both
+    assert (new_image in report.html) is not corrupt_selected
+    assert ("Recorded artifact unavailable:" in report.html) is corrupt_selected
 
 
 @pytest.mark.asyncio

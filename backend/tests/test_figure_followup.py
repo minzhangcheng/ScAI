@@ -173,6 +173,14 @@ async def test_targeted_missing_figure_falls_back_to_explicit_pi_selection():
     assert is_report_eligible(selected) is True
     call = bioinformatics.run_autonomous_analysis.await_args
     assert "Render the linked contrast as a volcano plot" in call.args[1]
+    import json
+    from backend.services.figure_followup import get_figure_followup_scope
+    scope = get_figure_followup_scope(state, call.kwargs["run_scope_id"])
+    entries = json.loads(call.args[1].split("rather than inventing an ID.\n", 1)[1].split("\n\n", 1)[0])
+    assert entries[0]["figure_task_id"] == task.id
+    assert entries[0]["eligible_execution_ids"] == scope["tasks"][0]["eligible_execution_ids"] == ["source"]
+    assert entries[0]["source_receipts"][0]["plan_step_ids"] == [2]
+    assert "Never extract a UUID from logical_figure_id" in call.args[1]
     assert call.kwargs["resume_from_checkpoint"] is True
     assert call.kwargs["run_kind"] == "figure_followup"
 

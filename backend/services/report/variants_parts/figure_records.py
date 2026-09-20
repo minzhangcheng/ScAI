@@ -16,6 +16,7 @@ def resolved_record_figure_candidates(
     *,
     report_only: bool = True,
     round_numbers: Optional[set[int]] = None,
+    artifact_ids: Optional[set[str]] = None,
     state: Any = None,
 ) -> list[dict[str, Any]]:
     """Return normalized candidates resolved through artifact-owned bytes.
@@ -32,6 +33,13 @@ def resolved_record_figure_candidates(
     candidates: list[dict[str, Any]] = []
     seen_stems: set[str] = set()
     for record in records:
+        if artifact_ids is not None:
+            lineage = getattr(record, "lineage_id", "main")
+            source_id = (record.id[:-(len(lineage) + 1)]
+                         if getattr(record, "inherited_from_lineage_id", None)
+                         and record.id.endswith(f":{lineage}") else record.id)
+            if not {record.id, source_id} & artifact_ids:
+                continue
         record_round = int(getattr(record, "round_number", 0) or 0)
         if round_numbers is not None and record_round not in round_numbers:
             continue
@@ -41,7 +49,9 @@ def resolved_record_figure_candidates(
         declared = Path(str(getattr(record, "png_path", "") or ""))
         canonical_stem = declared.stem or str(getattr(record, "name", "") or "")
         canonical_stem = canonical_stem or resolved.stem
-        if canonical_stem in seen_stems:
+        # Saved chapters select exact records, including same-named versions.
+        # Keep filename deduplication only for legacy discovery consumers.
+        if artifact_ids is None and canonical_stem in seen_stems:
             continue
         seen_stems.add(canonical_stem)
         try:
@@ -49,6 +59,7 @@ def resolved_record_figure_candidates(
         except OSError:
             modified_at = 0.0
         candidates.append({
+            "artifact_id": record.id,
             # ``name`` follows discovery semantics and identifies the actual
             # file, while ``record_stem`` keeps round/step attribution stable
             # when recovery had to add a ``_record_preview`` suffix.

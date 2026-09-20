@@ -111,6 +111,36 @@ def _plan_step_ids(plan: Any, *, completed_only: bool = False) -> list[int]:
     return sorted(set(result))
 
 
+def figure_followup_source_prompt(state: Any, scope: dict[str, Any]) -> str:
+    """Describe exact persisted task capabilities without inventing source IDs."""
+    import json
+
+    receipts = _receipt_map(state)
+    tasks = []
+    for task in scope.get("tasks", []):
+        allowed = list(task.get("eligible_execution_ids") or [])
+        tasks.append({
+            "figure_task_id": task["task_id"],
+            "logical_figure_id": task["logical_figure_id"],
+            "plan_step_id": task["plan_step_id"],
+            "eligible_execution_ids": allowed,
+            "source_receipts": [{
+                "execution_id": aid,
+                "plan_step_ids": _value(receipts.get(aid), "plan_step_ids", []),
+                "description": str(_value(receipts.get(aid), "description", "") or "")[:240],
+            } for aid in allowed],
+        })
+    return (
+        "Figure follow-up source contract: copy evidence_execution_id exactly from "
+        "the current task's eligible_execution_ids. figure_task_id identifies the task; "
+        "logical_figure_id identifies the figure, NOT its source execution. Never extract "
+        "a UUID from logical_figure_id or borrow another task's execution IDs. "
+        "Choose the listed receipt supporting the plotted result. If none supports it, "
+        "report the task unresolved rather than inventing an ID.\n"
+        + json.dumps(tasks, ensure_ascii=False)
+    )
+
+
 def _receipt_map(state: Any, current_receipts: Iterable[Any] = ()) -> dict[str, Any]:
     receipts = [
         *(getattr(state, "code_history", None) or []),

@@ -39,9 +39,9 @@ def _render_saved_chapter(state, chapter):
     workspace = get_session_workspace(state.id)
     artifact_ids = {a.artifact_id for a in chapter.artifacts}
     candidates = resolved_record_figure_candidates(
-        state.publication_figures, workspace, state=state,
+        state.publication_figures, workspace, state=state, artifact_ids=artifact_ids,
     ) if artifact_ids else []
-    figures = {Path(c["path"]).name: Path(c["path"]) for c in candidates}
+    figures = {c["artifact_id"]: Path(c["path"]) for c in candidates}
     tables = eligible_artifacts(state.publication_tables, state=state)
     table_names = [{"filename": Path(t.csv_path).name, "table_id": t.id} for t in tables]
     names = report_artifact_names(state, figures, table_names, artifact_ids=artifact_ids)
@@ -51,7 +51,7 @@ def _render_saved_chapter(state, chapter):
         names[aid]: figure_reservation_notice(record)
         for aid, record in figure_records.items() if aid in names
     }
-    keys = {Path(c["path"]).name: c.get("record_stem") or c["name"] for c in candidates}
+    keys = {c["artifact_id"]: c.get("record_stem") or c["name"] for c in candidates}
     drift_notices = {
         names[aid]: render_artifact_drift_notice_html(record)
         for aid, record in figure_records.items() if aid in names

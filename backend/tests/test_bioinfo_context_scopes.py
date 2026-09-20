@@ -524,6 +524,54 @@ async def test_resume_preserves_executor_messages_and_persists_new_plan(
 
 
 @pytest.mark.asyncio
+async def test_followup_sources_survive_compaction_without_entering_history(monkeypatch, tmp_path):
+    import json
+    from backend.utils.context_budget import ContextBudget, compact_messages
+
+    agent = _bare_agent(monkeypatch, tmp_path)
+    client = MagicMock()
+    client.chat_with_tools = AsyncMock(return_value=LLMToolResponse(
+        content="continue", tool_calls=[], model="test", usage={}, raw_response=None,
+    ))
+    monkeypatch.setattr(BioinformaticsAgent, "llm_client", property(lambda self: client))
+    executor_loop.bind_facade(bioinformatics_facade)
+    state = AnalysisState(id="test-session", user_id="test-user")
+    context = await executor_loop.prepare_loop_context(
+        agent, state, "Plot retained results", max_steps=5, resume_from_checkpoint=False,
+    )
+    context.executor_run_kind = "figure_followup"
+    context.figure_followup_scope = {"tasks": [
+        {"task_id": "task-a", "logical_figure_id": "figure:not-an-execution",
+         "plan_step_id": 2, "eligible_execution_ids": ["source-a"]},
+        {"task_id": "task-b", "logical_figure_id": "figure:another-id",
+         "plan_step_id": 3, "eligible_execution_ids": ["source-b"]},
+    ]}
+    context.max_text_responses = 3
+    context.messages = [{"role": "system", "content": "Plot existing results."},
+                        {"role": "user", "content": "history " * 120_000}]
+    # Exercise dispatch-time compaction rather than the earlier history pass.
+    agent._compact_context = lambda messages, threshold: (messages, False)
+
+    async def dispatch(method, *, messages, anchor_count, **kwargs):
+        sent, report = compact_messages(messages, ContextBudget(8192, 2048), anchor_count=anchor_count)
+        assert report.actions
+        contracts = [m for m in sent if str(m.get("content", "")).startswith("Figure follow-up source contract:")]
+        assert len(contracts) == 1
+        entries = json.loads(contracts[0]["content"].split("\n", 1)[1])
+        assert [(e["figure_task_id"], e["eligible_execution_ids"]) for e in entries] == [
+            ("task-a", ["source-a"]), ("task-b", ["source-b"]),
+        ]
+        assert sent.index(contracts[0]) < anchor_count
+        return await method(messages=sent)
+
+    agent._budgeted_text_call = AsyncMock(side_effect=dispatch)
+    await executor_loop.start_turn(context)
+    await executor_loop.start_turn(context)
+    assert client.chat_with_tools.await_count == 2
+    assert not any("Figure follow-up source contract:" in str(m.get("content", "")) for m in context.messages)
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_restores_current_step_and_replaced_transcript(
     monkeypatch,
     tmp_path,
