@@ -138,7 +138,20 @@ async def handle_consult_pi(context, tool_call) -> ToolAction:
         pi_response = await context.agent.pi_callback(question, pi_context)
         await context.agent._notify("pi_response", pi_response)
     else:
-        pi_response = "PI guidance not available. Proceed with standard practices."
+        pi_response = (
+            "PI guidance is unavailable. No PI judgment was obtained; the question "
+            "remains unresolved. This is not approval to change the plan."
+        )
+
+    context.analysis_log.append(AnalysisStep(
+        step_number=context.step_count,
+        step_type="consult_pi",
+        agent_reasoning=context.agent_reasoning,
+        pi_question=question,
+        pi_context=pi_context[:1000],
+        pi_options=options or [],
+        pi_response=(pi_response or "")[:2000],
+    ))
 
     if PLAN_REVISION_NEEDED_TAG in pi_response:
         clean_response = pi_response.replace(PLAN_REVISION_NEEDED_TAG, "").strip()
@@ -162,15 +175,6 @@ async def handle_consult_pi(context, tool_call) -> ToolAction:
         "tool_call_id": tool_call.id,
         "content": f"PI Response: {pi_response}",
     })
-    context.analysis_log.append(AnalysisStep(
-        step_number=context.step_count,
-        step_type="consult_pi",
-        agent_reasoning=context.agent_reasoning,
-        pi_question=question,
-        pi_context=pi_context[:1000],
-        pi_options=options or [],
-        pi_response=(pi_response or "")[:2000],
-    ))
     return ToolAction.CONTINUE
 
 
@@ -218,6 +222,7 @@ async def handle_annotate_clusters(context, tool_call) -> ToolAction:
         })
         context.annotation_retry_required = True
         context.annotation_retry_attempts += 1
+        context.annotation_failure_reason = tool_result
         return ToolAction.CONTINUE
     # Auto-extract markers from kernel adata if LLM didn't provide them
     if n_clusters == 0 and self.sandbox:
@@ -270,6 +275,7 @@ async def handle_annotate_clusters(context, tool_call) -> ToolAction:
         })
         context.annotation_retry_required = True
         context.annotation_retry_attempts += 1
+        context.annotation_failure_reason = tool_result
         return ToolAction.CONTINUE
     await self._notify(
         "status",
@@ -466,6 +472,7 @@ async def handle_annotate_clusters(context, tool_call) -> ToolAction:
     context.annotation_completed = True
     context.annotation_retry_required = False
     context.annotation_retry_attempts = 0
+    context.annotation_failure_reason = ""
     # The workflow renders and verifies baseline figures
     # immediately after this autonomous pass.
     if context.planning_stage == "stage1":

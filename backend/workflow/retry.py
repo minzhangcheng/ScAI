@@ -142,5 +142,6 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                 "failed_node": node_name,
                 result_key: {"error": str(last_error), "findings": [], "status": "failed"}
             }
+        wrapper._retry_node_name = node_name
         return wrapper
     return decorator

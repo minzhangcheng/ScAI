@@ -81,6 +81,50 @@ async def test_structured_text_is_lossless_and_deterministic():
 
 
 @pytest.mark.asyncio
+async def test_truncated_user_feedback_cannot_approve_execution():
+    from backend.utils.llm_client import UpstreamExhaustedError
+
+    agent = _make_pi_agent()
+    agent.chat = AsyncMock(return_value='{"action":"proceed_to_execution","guidance_for_bioinfo":"')
+
+    with pytest.raises(UpstreamExhaustedError) as caught:
+        await agent.process_user_plan_feedback("Add a comparison before execution", _plan())
+
+    assert caught.value.failure_kind == "parse_error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", ['{}', '{"intent":null,"action":null}'])
+async def test_empty_feedback_decision_does_not_approve_user_modification(response):
+    agent = _make_pi_agent()
+    agent.chat = AsyncMock(return_value=response)
+    feedback = "Add a sensitivity analysis before execution"
+
+    result = await agent.process_user_plan_feedback(feedback, _plan())
+
+    assert result["action"] == "revise_with_bioinfo"
+    assert result["guidance_for_bioinfo"] == feedback
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lookup", [False, True])
+async def test_truncated_pi_review_cannot_approve_plan(lookup):
+    from backend.utils.llm_client import UpstreamExhaustedError
+
+    agent = _make_pi_agent()
+    replies = ['{"decision":"approved","feedback":"unfinished']
+    if lookup:
+        replies.insert(0, '{"checkpoint_lookup":{"page":1}}')
+    agent.chat = AsyncMock(side_effect=replies)
+
+    with pytest.raises(UpstreamExhaustedError) as caught:
+        await agent.review_bioinfo_plan(AnalysisState(user_id="test"), _plan())
+
+    assert caught.value.failure_kind == "parse_error"
+    assert agent.chat.await_count == len(replies)
+
+
+@pytest.mark.asyncio
 async def test_null_user_feedback_preserves_requested_change():
     agent = _make_pi_agent()
     agent.chat = AsyncMock(return_value=json.dumps({

@@ -48,8 +48,110 @@ def _make_state(analysis_state=None, pi_instructions=None, planning_stage="full"
 
 
 @pytest.mark.asyncio
-async def test_typed_plan_generation_failure_terminates_without_review_loop():
-    """A bounded planner failure is consumed once and stops planning."""
+@pytest.mark.parametrize("schema_failure", [False, True])
+@pytest.mark.parametrize("resolution", [LlmFailureAction.RETRY, LlmFailureAction.SKIP, LlmFailureAction.TERMINATE])
+async def test_finalizer_failure_uses_intervention_and_preserves_draft(schema_failure, resolution):
+    from backend.workflow.planning_parts import dialogue
+    from backend.workflow.helpers import WorkflowTerminatedError
+    import backend.workflow.planning as facade
+
+    dialogue.bind_facade(facade)
+    wf = _make_workflow()
+    draft = AnalysisPlan(phase="exploration", steps=[PlanStep(id=1, title="Original", method="m")])
+    original = draft.model_dump()
+    analysis_state = AnalysisState(user_id="test", current_plan=draft)
+    state = _make_state(analysis_state)
+    final = draft.model_copy(deep=True, update={"id": "final", "status": "pi_reviewing"})
+    failure = (bioinformatics_planning.PlanGenerationFailure("invalid JSON") if schema_failure
+               else UpstreamExhaustedError("timeout", agent_name="pi"))
+    wf.pi_agent = MagicMock()
+    wf.pi_agent.model = "test-model"
+    wf.pi_agent.generate_final_plan_from_dialogue = AsyncMock(side_effect=[failure, final])
+    wf._wait_for_llm_intervention = AsyncMock(return_value=resolution)
+    ctx = dict(analysis_state=analysis_state, stage="full", dialogue_history=[],
+               existing_plan=draft, round_num=2, finalization_reason="no_material_plan_change")
+
+    if resolution == LlmFailureAction.TERMINATE:
+        with pytest.raises(WorkflowTerminatedError):
+            await dialogue.finalize_planning_dialogue(wf, ctx, state)
+        assert analysis_state.status != TaskStatus.FAILED
+    else:
+        result = await dialogue.finalize_planning_dialogue(wf, ctx, state)
+        assert result.get("plan_approved", False) is (resolution == LlmFailureAction.RETRY)
+        if resolution == LlmFailureAction.SKIP:
+            assert analysis_state.current_plan is draft
+            assert result["planning_result"]["status"] == "failed"
+    assert draft.model_dump() == original
+    wf._wait_for_llm_intervention.assert_awaited_once()
+    assert wf.pi_agent.generate_final_plan_from_dialogue.await_count == (2 if resolution == LlmFailureAction.RETRY else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent", ["bioinformatics", "pi"])
+async def test_planning_terminate_is_not_consumed_as_skip(agent):
+    from backend.workflow.helpers import WorkflowTerminatedError
+
+    wf = _make_workflow()
+    plan = AnalysisPlan(phase="exploration", steps=[PlanStep(id=1, title="Original", method="m")])
+    failure = UpstreamExhaustedError("unavailable", agent_name=agent)
+    wf.bioinformatics_agent = MagicMock()
+    wf.bioinformatics_agent.generate_analysis_plan = AsyncMock(
+        side_effect=failure if agent == "bioinformatics" else None, return_value=plan,
+    )
+    wf.pi_agent = MagicMock()
+    wf.pi_agent.review_bioinfo_plan = AsyncMock(side_effect=failure)
+    wf._wait_for_llm_intervention = AsyncMock(return_value=LlmFailureAction.TERMINATE)
+    state = _make_state()
+
+    with pytest.raises(WorkflowTerminatedError):
+        await wf._planning_dialogue(state)
+
+    assert state["analysis_state"].status != TaskStatus.FAILED
+    assert not state.get("plan_approved")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", ['{"steps":[{"id":1,"title":"Incomplete', "not json", '{"steps":[]}'])
+async def test_incomplete_revision_uses_intervention_without_reviewing_retained_plan(response):
+    from backend.agents.bioinformatics_agent import BioinformaticsAgent
+
+    wf = _make_workflow()
+    analysis_state = AnalysisState(user_id="test")
+    original_plan = AnalysisPlan(phase="exploration", steps=[
+        PlanStep(id=1, title="Complete original step", method="m"),
+    ])
+    analysis_state.current_plan = original_plan
+    provider = MagicMock()
+    provider.get_model.return_value = "test-model"
+    provider.get_system_prompt.return_value = "system"
+    provider.get_temperature.return_value = 0.3
+    provider.get_vision_setting.return_value = False
+    wf.bioinformatics_agent = BioinformaticsAgent(settings_provider=provider, sandbox=None)
+    wf.bioinformatics_agent.chat_without_history = AsyncMock(return_value=response)
+    wf.pi_agent = MagicMock()
+    wf.pi_agent.review_bioinfo_plan = AsyncMock()
+    wf.pi_agent.generate_final_plan_from_dialogue = AsyncMock()
+    wf._wait_for_llm_intervention = AsyncMock(return_value=LlmFailureAction.SKIP)
+    state = _make_state(analysis_state=analysis_state)
+    state["user_plan_feedback"] = "Keep the requested comparison"
+
+    result = await wf._planning_dialogue(state)
+
+    assert wf.bioinformatics_agent.chat_without_history.await_count == 2
+    wf._wait_for_llm_intervention.assert_awaited_once()
+    assert wf._wait_for_llm_intervention.await_args.args[0].failure_kind == "parse_error"
+    wf.pi_agent.review_bioinfo_plan.assert_not_awaited()
+    wf.pi_agent.generate_final_plan_from_dialogue.assert_not_awaited()
+    assert result["user_plan_feedback"] == "Keep the requested comparison"
+    assert analysis_state.current_plan is original_plan
+    assert original_plan.steps[0].title == "Complete original step"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolution", [LlmFailureAction.SKIP, LlmFailureAction.RETRY, LlmFailureAction.TERMINATE])
+async def test_typed_plan_generation_failure_uses_intervention(resolution):
+    """A bounded schema failure uses the same explicit recovery choices."""
+    from backend.workflow.helpers import WorkflowTerminatedError
     failure_type = getattr(bioinformatics_planning, "PlanGenerationFailure", None)
     assert failure_type is not None, "A3 requires a typed plan-generation failure"
 
@@ -65,12 +167,26 @@ async def test_typed_plan_generation_failure_terminates_without_review_loop():
         stage="full",
     )
     wf.bioinformatics_agent = MagicMock()
-    wf.bioinformatics_agent.generate_analysis_plan = AsyncMock(side_effect=failure)
+    plan = AnalysisPlan(phase="exploration", steps=[PlanStep(id=1, title="Valid", method="m")])
+    wf.bioinformatics_agent.generate_analysis_plan = AsyncMock(side_effect=[failure, plan])
+    wf._wait_for_llm_intervention = AsyncMock(return_value=resolution)
     wf.pi_agent = MagicMock()
-    wf.pi_agent.review_bioinfo_plan = AsyncMock()
+    wf.pi_agent.review_bioinfo_plan = AsyncMock(return_value={"decision": "approved", "feedback": "ok"})
+
+    if resolution == LlmFailureAction.TERMINATE:
+        with pytest.raises(WorkflowTerminatedError):
+            await wf._planning_dialogue(_make_state(analysis_state=analysis_state))
+        wf.pi_agent.review_bioinfo_plan.assert_not_awaited()
+        return
 
     result = await wf._planning_dialogue(_make_state(analysis_state=analysis_state))
 
+    wf._wait_for_llm_intervention.assert_awaited_once()
+    assert wf._wait_for_llm_intervention.await_args.args[0].failure_kind == "parse_error"
+    if resolution == LlmFailureAction.RETRY:
+        assert wf.bioinformatics_agent.generate_analysis_plan.await_count == 2
+        assert result["planning_result"]["plan"]["id"] == plan.id
+        return
     assert wf.bioinformatics_agent.generate_analysis_plan.await_count == 1
     wf.pi_agent.review_bioinfo_plan.assert_not_awaited()
     assert result["failed_node"] == "planning_dialogue"
@@ -91,6 +207,7 @@ async def test_planning_dialogue_entry_resets_the_unattended_retry_budget():
 
     wf = _make_workflow()
     wf._unattended_gate_retries = {"planning_dialogue": 3}
+    wf._wait_for_llm_intervention = AsyncMock(return_value=LlmFailureAction.SKIP)
     analysis_state = AnalysisState(user_id="test")
     analysis_state.current_plan = None
     analysis_state.analysis_phase = MagicMock()

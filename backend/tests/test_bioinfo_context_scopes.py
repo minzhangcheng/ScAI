@@ -761,6 +761,10 @@ async def test_plan_revision_forces_immediate_executor_and_sandbox_checkpoint(
         if saved["step_name"].endswith("_plan_revision")
     ]
     assert len(revision_saves) == 1
+    consultation = next(
+        step for step in revision_saves[0]["analysis_log"] if step["step_type"] == "consult_pi"
+    )
+    assert PLAN_REVISION_NEEDED_TAG in consultation["pi_response"]
     assert revision_saves[0]["active_plan_id"] == "old-plan"
     assert any(msg.get("tool_call_id") == "consult-1" for msg in revision_saves[0]["messages"])
     agent.sandbox.save_session.assert_awaited_once()

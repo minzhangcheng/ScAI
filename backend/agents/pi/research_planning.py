@@ -368,8 +368,19 @@ to inherit the already-approved selection. Do not invent checkpoint paths.
 
 IMPORTANT: Be specific in your feedback. Reference exact step IDs. If you approve, modifications must be empty. If you reject, explain what the bioinformatics agent should rethink."""
 
+        from ..bioinformatics.planning import PlanningMixin
+
+        def parse_review(response):
+            result = PlanningMixin._parse_plan_response(self, response)
+            if result.get("parse_error"):
+                raise UpstreamExhaustedError(
+                    "PI plan review did not return complete, readable JSON.",
+                    agent_name="pi", model=self.model, failure_kind="parse_error",
+                )
+            return result
+
         response = await self.chat(prompt, temperature=0.2)
-        result = self._safe_parse_json(response, default={})
+        result = parse_review(response)
 
         lookup = result.get("checkpoint_lookup") if isinstance(result, dict) else None
         if isinstance(lookup, dict):
@@ -393,7 +404,7 @@ IMPORTANT: Be specific in your feedback. Reference exact step IDs. If you approv
                 + json.dumps(lookup_result, ensure_ascii=False, sort_keys=True),
                 temperature=0.2,
             )
-            result = self._safe_parse_json(response, default={})
+            result = parse_review(response)
 
         result = normalize_plan_review_result(result)
         if isinstance(result, dict):
@@ -435,6 +446,7 @@ IMPORTANT: Be specific in your feedback. Reference exact step IDs. If you approv
             stage = seed_plan.stage
 
         from ...services.plan_scope import (
+            PlanScopeValidationError,
             innovation_inventory_id,
             is_innovation_scope,
             render_innovation_scope_context,
@@ -531,9 +543,11 @@ Respond ONLY with JSON in this schema:
             analysis_state.current_plan,
             dialogue_history,
         )
+        from ..bioinformatics.planning import PlanningMixin
+
         last_validation_error: Optional[Exception] = None
         for attempt in range(2):
-            parsed = self._safe_parse_json(response, default={})
+            parsed = PlanningMixin._parse_plan_response(self, response)
             try:
                 plan = build_validated_final_plan(
                     parsed,
@@ -555,12 +569,17 @@ Respond ONLY with JSON in this schema:
                     "[PI] Final plan failed schema validation; requesting one corrected response: %s",
                     exc,
                 )
+                validation_feedback = (
+                    str(exc) if isinstance(exc, PlanScopeValidationError) else str(exc)[:4000]
+                )
                 repair_prompt = f"""Your previous FINAL AnalysisPlan JSON failed
 schema validation. Correct the complete plan and return JSON only. Preserve all
 scientific content and change only fields needed to satisfy the schema.
 
-Validation error:
-{str(exc)[:4000]}
+Validation errors (correct all listed steps and references in this one repair):
+{validation_feedback}
+
+{scope_context}
 
 Remember: ``platform_baseline`` must be exactly ``\"\"``, ``\"annotation\"``,
 ``\"batch\"``, ``\"cluster\"``, or ``\"markers\"``. It is not a figure type."""
@@ -572,20 +591,6 @@ Remember: ``platform_baseline`` must be exactly ``\"\"``, ``\"annotation\"``,
                 len(plan.steps), phase, stage,
             )
             return plan
-
-        if (
-            scope_contract_version is None
-            and seed_plan is not None
-            and seed_plan.steps
-            and seed_plan.status != "rejected"
-        ):
-            fallback = seed_plan.model_copy(deep=True)
-            fallback.status = "pi_reviewing"
-            fallback.revision_reason = (
-                f"{termination_reason} — PI finalization fallback retained the "
-                "last valid plan after two schema-invalid responses"
-            )
-            return fallback
 
         from ..bioinformatics.planning import PlanGenerationFailure
 
@@ -651,15 +656,14 @@ Respond in JSON:
 }}"""
 
         response = await self.chat(prompt, temperature=0.1)
-        result = self._safe_parse_json(response, default={})
-        
-        if not result:
-            result = {
-                "intent": "confirm",
-                "action": "proceed_to_execution",
-                "guidance_for_bioinfo": "",
-                "clarification_question": "",
-            }
+        from ..bioinformatics.planning import PlanningMixin
+
+        result = PlanningMixin._parse_plan_response(self, response)
+        if result.get("parse_error"):
+            raise UpstreamExhaustedError(
+                "PI plan feedback did not return complete, readable JSON.",
+                agent_name="pi", model=self.model, failure_kind="parse_error",
+            )
         
         return normalize_user_plan_feedback_result(
             result,
@@ -723,7 +727,25 @@ Respond in JSON:
 }}"""
 
         response = await self.chat(prompt, temperature=0.1)
-        result = self._safe_parse_json(response, default={})
+        from ..bioinformatics.planning import PlanningMixin
+
+        result = PlanningMixin._parse_plan_response(self, response)
+        if result.get("parse_error") or not result:
+            raise UpstreamExhaustedError(
+                "PI plan deviation assessment did not return complete, readable JSON.",
+                agent_name="pi", model=self.model, failure_kind="parse_error",
+            )
+        severity = result.get("severity")
+        if (
+            not isinstance(severity, str)
+            or severity.strip().casefold() not in {"minor", "major"}
+            or not isinstance(result.get("needs_user_popup"), bool)
+        ):
+            raise UpstreamExhaustedError(
+                "PI plan deviation assessment requires severity (minor or major) "
+                "and a boolean needs_user_popup; no judgment was obtained.",
+                agent_name="pi", model=self.model, failure_kind="parse_error",
+            )
         
         return normalize_plan_deviation_result(result)
 

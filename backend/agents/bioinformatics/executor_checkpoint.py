@@ -390,6 +390,9 @@ def build_checkpoint_payload(
     attempt_execution_ids: list | None = None,
     pending_dispatch: dict | None = None,
     checkpoint_identity: dict | None = None,
+    annotation_retry_required: bool = False,
+    annotation_retry_attempts: int = 0,
+    annotation_failure_reason: str = "",
 ) -> dict:
     payload = {
         # Which runtime generation this position belongs to. Spec §3.11: the
@@ -424,6 +427,9 @@ def build_checkpoint_payload(
         "code_history": code_history,
         "analysis_log": analysis_log,
         "analysis_context": analysis_context,
+        "annotation_retry_required": annotation_retry_required,
+        "annotation_retry_attempts": annotation_retry_attempts,
+        "annotation_failure_reason": annotation_failure_reason,
         "budget_exhausted": budget_exhausted,
         "completed": False,
     }

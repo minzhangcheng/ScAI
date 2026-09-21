@@ -286,15 +286,19 @@ async def test_unparseable_revision_still_preserves_the_current_plan():
     agent = _agent()
     agent.chat_without_history = AsyncMock(side_effect=["not json", "still not json"])
 
-    revised = await agent.revise_plan_incrementally(
-        state=_state(),
-        current_plan=_rich_plan(),
-        pi_feedback="Separate activity from execution.",
-        pi_tasks=["Score modules including modeA, modeB, and modeC programs."],
-    )
+    from backend.utils.llm_client import UpstreamExhaustedError
 
-    assert len(revised.steps) == 2
-    assert "modeA" in revised.steps[1].input
+    current = _rich_plan()
+    original = current.model_dump()
+    with pytest.raises(UpstreamExhaustedError) as caught:
+        await agent.revise_plan_incrementally(
+            state=_state(), current_plan=current,
+            pi_feedback="Separate activity from execution.",
+            pi_tasks=["Score modules including modeA, modeB, and modeC programs."],
+        )
+
+    assert caught.value.failure_kind == "parse_error"
+    assert current.model_dump() == original
 
 
 # --- workflow wiring -------------------------------------------------------

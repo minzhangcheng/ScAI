@@ -233,6 +233,48 @@ def _plan_scope_prompt(state: Any, phase: str) -> dict[str, Any]:
 class PlanningMixin:
     """Analysis-plan generation, incremental revision, and checkpoint discovery."""
 
+    def _parse_plan_response(self, response: str) -> dict:
+        """Require a complete JSON object before accepting executable steps.
+
+        The shared forgiving parser may synthesize closing strings/brackets for
+        truncated output. That would turn an unfinished plan into an apparently
+        valid revision and discard steps from the previous complete plan.
+        Markdown fences, surrounding prose, and syntax repair inside a closed
+        JSON envelope remain supported.
+        """
+        start = response.find("{") if response else -1
+        stack = []
+        in_string = False
+        escaped = False
+        for index in range(start, len(response or "")) if start >= 0 else ():
+            char = response[index]
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\" and in_string:
+                escaped = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char in "{[":
+                stack.append(char)
+            elif char in "}]":
+                if not stack or stack.pop() != {"}": "{", "]": "["}[char]:
+                    break
+                if not stack:
+                    parsed = self._safe_parse_json(response[start:index + 1], default={})
+                    if isinstance(parsed, dict):
+                        parsed.pop("_incomplete_plan_json", None)
+                    return parsed
+        return {
+            "steps": [],
+            "_incomplete_plan_json": start >= 0,
+            "parse_error": "Incomplete or invalid plan JSON: missing a closed JSON object",
+        }
+
     async def _call_planning_llm(self, prompt: str, *, temperature: float) -> str:
         """Run one no-history planning call with bounded outcome retries.
 
@@ -311,6 +353,10 @@ in key_decision_points for PI review.
                 "steps": [],
                 "parse_error": "Invalid plan schema: response must be a JSON object",
             }
+        if plan_data.get("_incomplete_plan_json") is True:
+            # The response parser removes this marker from model JSON. Keep
+            # this host diagnosis distinct from a model-supplied parse_error.
+            return {**plan_data, "steps": []}
         if "parse_error" in plan_data:
             return {
                 **plan_data,
@@ -470,7 +516,7 @@ in key_decision_points for PI review.
         # The retry prompt contains the complete original request, so it must not
         # inherit unrelated planning/validation turns from BaseAgent history.
         resp2 = await self._call_planning_llm(retry_prompt, temperature=0.3)
-        data2 = self._safe_parse_json(resp2, default={})
+        data2 = self._parse_plan_response(resp2)
         data2 = self._prepare_plan_data(
             data2,
             reserved_step_ids=reserved_step_ids,
@@ -490,7 +536,7 @@ in key_decision_points for PI review.
                 "returning original result (caller will handle)",
                 caller_name or self.__class__.__name__,
             )
-        return plan_data
+        return data2 if data2.get("_incomplete_plan_json") else plan_data
 
     async def generate_analysis_plan(
         self,
@@ -728,7 +774,7 @@ Return the plan as a JSON object:
         # Planning is a bounded, explicit context assembled by the workflow.
         # Keep it isolated from the autonomous executor and prior rounds.
         response = await self._call_planning_llm(prompt, temperature=0.3)
-        plan_data = self._safe_parse_json(response, default={})
+        plan_data = self._parse_plan_response(response)
 
         plan_data = await self._retry_on_parse_failure(prompt, plan_data, warn_on_double_failure=True, caller_name="generate_analysis_plan")
 
@@ -986,7 +1032,7 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
 }}"""
 
         response = await self._call_planning_llm(prompt, temperature=0.3)
-        plan_data = self._safe_parse_json(response, default={})
+        plan_data = self._parse_plan_response(response)
 
         plan_data = await self._retry_on_parse_failure(
             prompt,
@@ -996,6 +1042,15 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
             reserved_step_ids=set(completed_step_ids),
             require_complete_steps=True,
         )
+
+        if plan_data.get("parse_error") or not plan_data.get("steps"):
+            raise UpstreamExhaustedError(
+                "Plan revision failed JSON/schema validation after the bounded repair "
+                f"attempt; the previous plan has been preserved: {plan_data.get('parse_error', 'no executable steps')}",
+                agent_name="bioinformatics",
+                model=self.model,
+                failure_kind="parse_error",
+            )
 
         steps = []
         for s in plan_data.get("steps", []):
@@ -1036,20 +1091,6 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                 ),
                 status="pending",
             ))
-
-        if not steps:
-            logger.warning(
-                "[Bioinformatics] revise_plan_incrementally produced 0 steps; "
-                "retaining current_plan steps unchanged"
-            )
-            retained = current_plan.model_copy(deep=True, update={
-                "status": "draft",
-                "revision_of": current_plan.id,
-                "revision_reason": f"Retained previous plan (revision parse failed): {pi_feedback[:500]}",
-                "id": str(uuid.uuid4()),
-                "approved_at": None,
-            })
-            return retained
 
         revised_plan = AnalysisPlan(
             phase=current_plan.phase,

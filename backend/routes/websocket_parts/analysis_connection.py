@@ -80,7 +80,7 @@ async def _handle_existing_or_held_connection(
                     and not report_task.done()
                 )
                 or (
-                    (detailed_task := detailedreport_tasks.get(session_id))
+                    (detailed_task := detailed_report_tasks.get(session_id))
                     is not None
                     and not detailed_task.done()
                 )

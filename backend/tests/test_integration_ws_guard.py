@@ -77,3 +77,17 @@ def test_explicit_start_dispatches_to_fresh_run_even_after_rounds_exist():
 
     state = _final_round_state(restore_start_intent="explicit_start")
     assert should_resume_workflow(state) is False
+
+
+def test_explicit_node_retry_takes_precedence_over_report_shortcut():
+    from backend.routes.websockets import should_resume_workflow
+
+    for requested in (False, True):
+        state = _final_round_state(final_report_requested=requested)
+        state.sandbox_state["node_retry"] = {
+            "id": "retry-1", "node_name": "generate_detailed_report", "skip": False,
+        }
+        assert ws._needs_report_only(state, 2, False) is False
+        assert should_resume_workflow(state) is True
+    state.current_round = 0
+    assert should_resume_workflow(state) is True

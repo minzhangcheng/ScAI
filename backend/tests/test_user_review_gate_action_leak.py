@@ -73,6 +73,51 @@ def _make_state():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("resolution", ["retry", "skip", "terminate"])
+async def test_feedback_failure_preserves_input_and_never_implies_approval(resolution):
+    from backend.constants import LlmFailureAction
+    from backend.utils.llm_client import UpstreamExhaustedError
+    from backend.workflow.helpers import WorkflowTerminatedError
+
+    stub = _make_stub()
+    state, _ = _make_state()
+    feedback = "Add a comparison before execution"
+    stub.pi_agent.process_user_plan_feedback.side_effect = [
+        UpstreamExhaustedError("timeout", agent_name="pi"),
+        {"action": "revise_with_bioinfo", "guidance_for_bioinfo": feedback},
+    ]
+
+    async def intervene(*args, **kwargs):
+        assert state["user_plan_feedback"] == feedback
+        return LlmFailureAction(resolution)
+
+    stub._wait_for_llm_intervention = AsyncMock(side_effect=intervene)
+    task = asyncio.create_task(stub._user_review_gate(state))
+    await asyncio.sleep(0)
+    stub.signal_plan_review("modify", feedback)
+    if resolution == "terminate":
+        with pytest.raises(WorkflowTerminatedError):
+            await asyncio.wait_for(task, 1)
+    elif resolution == "retry":
+        result = await asyncio.wait_for(task, 1)
+        assert result["user_plan_feedback"] == feedback
+        assert stub.pi_agent.process_user_plan_feedback.await_count == 2
+    else:
+        for _ in range(20):
+            if sum(kind == "plan_review" for kind, _ in stub._sent) == 2:
+                break
+            await asyncio.sleep(0)
+        assert not task.done()
+        assert sum(kind == "plan_review" for kind, _ in stub._sent) == 2
+        assert state["user_plan_feedback"] == feedback
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert stub._approve_calls == []
+    stub._wait_for_llm_intervention.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_gate_waits_when_no_action_preset():
     """Fresh gate entry with no pre-set action must block on the event."""
     stub = _make_stub()

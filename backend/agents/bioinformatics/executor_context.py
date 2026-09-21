@@ -57,6 +57,7 @@ class ExecutorLoopContext:
     annotation_completed: bool = False
     annotation_retry_required: bool = False
     annotation_retry_attempts: int = 0
+    annotation_failure_reason: str = ""
     mechanism_programs_registered: bool = False
     evidence_gate_degraded: bool = False
     evidence_gate_findings: list = None

@@ -69,6 +69,8 @@ def _needs_report_only(state, effective_max_rounds: int, in_integration_loop: bo
     "write the report" intent, and it is already exempt from the integration-loop
     guard.
     """
+    if (getattr(state, "sandbox_state", None) or {}).get("node_retry"):
+        return False
     if getattr(state, "final_report_requested", False):
         return True
     if getattr(state, "restore_start_intent", None):
@@ -109,6 +111,8 @@ def should_resume_workflow(state) -> bool:
     # snapshot round; ``completed_reanalysis`` initializes the next round.
     # Dispatching either to ``resume()`` would replay an END checkpoint or
     # refuse to invent the missing initialize_round path.
+    if (getattr(state, "sandbox_state", None) or {}).get("node_retry"):
+        return True
     if getattr(state, "restore_start_intent", None):
         return False
     return state.current_round > 0 or state.status in (

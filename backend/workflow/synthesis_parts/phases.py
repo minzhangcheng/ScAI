@@ -175,6 +175,10 @@ async def synthesize_agent_results(self, state):
             payload = {"findings": findings}
             if status:
                 payload["status"] = status
+            if agent_name == "literature":
+                for key in ("source_provenance", "technical_failures"):
+                    if result.get(key):
+                        payload[key] = result[key]
             for key in (
                 "abnormal_markers",          # biochemistry: status + basis per measurement
                 "provenance_notes",          # biochemistry: group/sample conflicts

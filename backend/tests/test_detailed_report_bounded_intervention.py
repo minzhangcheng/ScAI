@@ -71,7 +71,7 @@ class _Harness(ReportingMixin):
     def _set_status(state, status):
         state.status = status
 
-    async def _send_state_sync(self, state, change_type):
+    async def _send_state_sync(self, state, change_type, **kwargs):
         self.transitions.append(change_type)
         self.persisted.append(
             AnalysisState.model_validate(state.model_dump(mode="json"))
@@ -294,3 +294,63 @@ async def test_persisted_fallback_marker_survives_restart_and_bypasses_llm(
     assert harness.persisted[0].detailed_report_fallback_pending is True
     assert result["analysis_state"].status == TaskStatus.COMPLETED
     assert result["analysis_state"].detailed_report_fallback_pending is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["summary", "integrated", "graphic"])
+async def test_report_stages_propagate_user_terminate(stage):
+    harness = _Harness(MagicMock())
+    harness._wait_for_llm_intervention = AsyncMock(return_value=LlmFailureAction.TERMINATE)
+    harness.pi_agent = MagicMock()
+    harness.pi_agent.generate_final_summary = AsyncMock(return_value="Summary")
+    harness.pi_agent.generate_integrated_report = AsyncMock(side_effect=_upstream_error())
+    harness._prepare_brief_figures = AsyncMock(return_value=([], [], []))
+    state = _state()
+
+    if stage == "summary":
+        harness.pi_agent.generate_final_summary.side_effect = _upstream_error()
+    if stage == "graphic":
+        harness.ensure_agent_ready = lambda _: False
+        harness._generate_text_graphic_abstract = AsyncMock(side_effect=_upstream_error())
+        call = harness._generate_graphic_abstract
+    else:
+        call = harness._generate_final_report
+
+    with pytest.raises(WorkflowTerminatedError):
+        await call(state)
+
+    assert state["analysis_state"].status == TaskStatus.STOPPED
+    assert harness.persisted[-1].status == TaskStatus.STOPPED
+    assert not any(call.args[0] == "completed" for call in harness._send_message.await_args_list)
+    if stage == "summary":
+        harness.pi_agent.generate_integrated_report.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_local_report_failure_preserves_retry_target(monkeypatch, tmp_path, fallback):
+    _patch_report_paths(monkeypatch, tmp_path)
+    supervisor = MagicMock()
+    supervisor.generate_detailed_report = AsyncMock(side_effect=OSError("disk full"))
+    harness = _Harness(supervisor)
+    state = _state()
+    analysis = state["analysis_state"]
+    analysis.detailed_report_fallback_pending = fallback
+    analysis.sandbox_state = {"retained": "runtime metadata"}
+
+    failed = await harness._generate_detailed_report(state)
+
+    assert analysis.status == (TaskStatus.PAUSED if fallback else TaskStatus.FAILED)
+    assert failed["failed_node"] == "generate_detailed_report"
+    assert harness.persisted[-1].sandbox_state["failed_node"] == "generate_detailed_report"
+    assert analysis.detailed_report_fallback_pending is fallback
+    assert not any(call.args[0] == "completed" for call in harness._send_message.await_args_list)
+
+    supervisor.generate_detailed_report.side_effect = None
+    supervisor.generate_detailed_report.return_value = _report()
+    recovered = await harness._generate_detailed_report(failed)
+
+    assert recovered["failed_node"] is None
+    assert analysis.status == TaskStatus.COMPLETED
+    assert analysis.sandbox_state == {"retained": "runtime metadata"}
+    assert supervisor.generate_detailed_report.await_args.kwargs["force_fallback"] is fallback

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from ..helpers import WorkflowTerminatedError
 
 
 def bind_facade(facade) -> None:
@@ -232,17 +233,35 @@ async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
 
         elif action_type == "modify" and user_input:
             # User wants modifications → PI judges intent
+            state["user_plan_feedback"] = user_input
             self._set_status(analysis_state, TaskStatus.RUNNING)
             await self._send_state_sync(
                 analysis_state,
                 "plan_feedback_processing",
             )
-            pi_judgment = await self.pi_agent.process_user_plan_feedback(
-                user_input=user_input,
-                current_plan=plan,
-            )
+            while True:
+                try:
+                    pi_judgment = await self.pi_agent.process_user_plan_feedback(
+                        user_input=user_input,
+                        current_plan=plan,
+                    )
+                    break
+                except UpstreamExhaustedError as exc:
+                    resolution = await self._wait_for_llm_intervention(
+                        exc, "user_review_gate", analysis_state,
+                    )
+                    if resolution == LlmFailureAction.RETRY:
+                        continue
+                    if resolution == LlmFailureAction.TERMINATE:
+                        raise WorkflowTerminatedError("User terminated plan feedback processing") from exc
+                    # Preserve the pending change and let the user review again.
+                    pi_judgment = None
+                    break
+            if pi_judgment is None:
+                continue
 
             if pi_judgment["action"] == "proceed_to_execution":
+                state["user_plan_feedback"] = None
                 await approve_reviewed_plan("approved_after_clarification")
                 break
 

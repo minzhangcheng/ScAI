@@ -63,6 +63,7 @@ class ToolRuntime:
     pending_dispatch: dict | None = None
     resolved_adata_source_context: dict = field(default_factory=dict)
     figure_followup_scope: dict | None = None
+    annotation_failure_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,8 @@ async def dispatch_tool(context: ToolDispatchContext, tool_call) -> ToolDispatch
     historical branch chain. This sentinel lets the turn-loop owner migrate
     handlers one family at a time without changing transcript behavior.
     """
+    from ...workflow.helpers import WorkflowSupersededError, WorkflowTerminatedError
+
     tool_name = tool_call.name
     if (
         context.allowed_tool_names is not None
@@ -140,6 +143,9 @@ async def dispatch_tool(context: ToolDispatchContext, tool_call) -> ToolDispatch
     if handler is not None:
         try:
             value = await handler(tool_call)
+        except (WorkflowTerminatedError, WorkflowSupersededError):
+            # Workflow control is not a recoverable tool failure.
+            raise
         except context.propagate_exceptions:
             raise
         except Exception as exc:

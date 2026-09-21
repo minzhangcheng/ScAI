@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.3 · **Last updated**: 2026-09-21
+**Version**: 0.60.4 · **Last updated**: 2026-09-21
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,19 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.4` — Repairs failure recovery and state continuity across planning,
+  report generation, PI intervention, and literature extraction. Incomplete
+  planning responses now remain technical failures until the existing recovery
+  path receives them; retries preserve approved context, completed results, and
+  the exact failed report or node. Cross-round skip state and terminal statuses
+  no longer leak into later work. Literature mechanism extraction now retains
+  completed searches, records explicit skip or unavailable reasons for PI review,
+  and publishes its pending checkpoint through the active workflow cache before
+  a pause can overwrite it. Focused regression coverage passed, including
+  `18/18` extraction, intervention, report-retry, and terminal-state checks at
+  `test-results/20260921T120836Z-3719624/evidence.json`. No application image
+  build, deployment, or historical-session mutation was performed.
 
 - `0.60.3` — Bioinformatics tool-turn LLM requests now replay a stream
   interruption or incomplete response up to three times before opening the

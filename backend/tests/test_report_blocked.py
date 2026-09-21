@@ -15,8 +15,6 @@ async def test_generate_report_clears_stale_report_blocked(monkeypatch):
     class _Snap:
         values = {"report_blocked": True, "analysis_state": None, "current_round": 1}
 
-    wf.compiled_graph = AsyncMock()
-    wf.compiled_graph.aget_state = AsyncMock(return_value=_Snap())
 
     seen = {}
 
@@ -39,7 +37,13 @@ async def test_generate_report_clears_stale_report_blocked(monkeypatch):
     monkeypatch.setattr(wf, "initialize", AsyncMock())
 
     st = AnalysisState(user_id="u1")
-    st.current_round = 1
+    st.current_round = 0
+    from backend.tests.test_report_retry_flow import _report_graph
+    wf.compiled_graph = _report_graph(wf)
+    await wf.compiled_graph.ainvoke({
+        **_Snap.values, "analysis_state": st,
+        "_restore_entry_plan": {"intent": "idle"},
+    }, {"configurable": {"thread_id": "tid"}})
     await wf.generate_report(st, "tid")
 
     assert seen["ga_blocked"] in (None, False)

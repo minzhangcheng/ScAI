@@ -28,6 +28,69 @@ def _make_state() -> AnalysisState:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("revise", [False, True])
+async def test_truncated_plan_requires_complete_retry_before_acceptance(revise):
+    agent = _make_agent()
+    truncated = '{"steps":[{"id":1,"title":"Partial","method":"unfinished'
+    complete = {"steps": [
+        {"id": 1, "title": "First", "method": "m"},
+        {"id": 2, "title": "Second", "method": "m", "depends_on": [1]},
+    ]}
+    agent.chat_without_history = AsyncMock(side_effect=[
+        truncated, "```json\n" + json.dumps(complete) + "\n```",
+    ])
+    if revise:
+        plan = await agent.revise_plan_incrementally(
+            _make_state(),
+            AnalysisPlan(phase="exploration", steps=[
+                PlanStep(id=1, title="Original", method="m"),
+            ]),
+            "Revise the plan",
+        )
+    else:
+        plan = await agent.generate_analysis_plan(
+            _make_state(), ["Analyse measurements"], "Strategy", "exploration",
+        )
+
+    assert agent.chat_without_history.await_count == 2
+    assert [step.title for step in plan.steps] == ["First", "Second"]
+    assert "missing a closed JSON object" in agent.chat_without_history.call_args.args[0]
+    assert "model signal" not in agent.chat_without_history.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_truncated_revision_and_retry_preserve_complete_previous_plan():
+    agent = _make_agent()
+    current = AnalysisPlan(phase="exploration", steps=[
+        PlanStep(id=1, title="Original first", method="m"),
+        PlanStep(id=2, title="Original second", method="m", depends_on=[1]),
+    ])
+    original = current.model_dump()
+    agent.chat_without_history = AsyncMock(return_value=(
+        '{"steps":[{"id":1,"title":"Partial","method":"m"},'
+        '{"id":2,"title":"Unfinished'
+    ))
+
+    with pytest.raises(UpstreamExhaustedError) as caught:
+        await agent.revise_plan_incrementally(_make_state(), current, "Revise")
+
+    assert agent.chat_without_history.await_count == 2
+    assert caught.value.failure_kind == "parse_error"
+    assert current.model_dump() == original
+
+
+def test_closed_plan_json_keeps_local_syntax_repair_compatibility():
+    agent = _make_agent()
+    parsed = agent._parse_plan_response(
+        '```json\n{"_incomplete_plan_json":true,"steps":[{"id":1,"title":"Braces } [ in text",'
+        '"method":"m",}],}\n```'
+    )
+
+    assert parsed["steps"][0]["title"] == "Braces } [ in text"
+    assert "_incomplete_plan_json" not in parsed
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("canonical_present", [False, True])
 async def test_revision_preserves_figure_aliases_without_overriding_explicit_fields(canonical_present):
     agent = _make_agent()
@@ -389,19 +452,17 @@ async def test_revise_parse_error_preserves_current_plan():
         expected_runtime="~1 step",
     )
 
-    revised = await agent.revise_plan_incrementally(
-        state=state,
-        current_plan=current_plan,
-        pi_feedback="keep existing",
-    )
+    original = current_plan.model_dump()
+    with pytest.raises(UpstreamExhaustedError) as caught:
+        await agent.revise_plan_incrementally(
+            state=state,
+            current_plan=current_plan,
+            pi_feedback="keep existing",
+        )
 
     assert agent.chat_without_history.call_count == 2
-    assert len(revised.steps) == 1
-    assert revised.steps[0].title == "Existing QC"
-    assert revised.steps[0].depends_on == [2]
-    assert revised.steps[0].depends_on is not current_plan.steps[0].depends_on
-    assert revised.revision_of == current_plan.id
-    assert revised.key_decision_points == ["decision"]
+    assert caught.value.failure_kind == "parse_error"
+    assert current_plan.model_dump() == original
 
 
 @pytest.mark.asyncio
@@ -429,18 +490,17 @@ async def test_revision_twice_malformed_retains_current_valid_plan():
         expected_runtime="~1 step",
     )
 
-    revised = await agent.revise_plan_incrementally(
-        state=state,
-        current_plan=current_plan,
-        pi_feedback="keep existing",
-    )
+    original = current_plan.model_dump()
+    with pytest.raises(UpstreamExhaustedError) as caught:
+        await agent.revise_plan_incrementally(
+            state=state,
+            current_plan=current_plan,
+            pi_feedback="keep existing",
+        )
 
     assert agent.chat_without_history.call_count == 2
-    assert revised is not current_plan
-    assert revised.steps
-    assert revised.steps[0].title == "Existing QC"
-    assert revised.steps[0].depends_on == [2]
-    assert revised.steps[0].depends_on is not current_plan.steps[0].depends_on
+    assert caught.value.failure_kind == "parse_error"
+    assert current_plan.model_dump() == original
 
 
 @pytest.mark.asyncio
@@ -459,17 +519,17 @@ async def test_revise_empty_steps_retries_then_preserves_current_plan():
         expected_runtime="~1 step",
     )
 
-    revised = await agent.revise_plan_incrementally(
-        state=state,
-        current_plan=current_plan,
-        pi_feedback="revise but preserve if empty",
-    )
+    original = current_plan.model_dump()
+    with pytest.raises(UpstreamExhaustedError) as caught:
+        await agent.revise_plan_incrementally(
+            state=state,
+            current_plan=current_plan,
+            pi_feedback="revise but preserve if empty",
+        )
 
     assert agent.chat_without_history.call_count == 2
-    assert len(revised.steps) == 1
-    assert revised.steps[0].title == "Load"
-    assert revised.overview == "stage1 plan"
-    assert revised.stage == "stage1"
+    assert caught.value.failure_kind == "parse_error"
+    assert current_plan.model_dump() == original
 
 
 @pytest.mark.asyncio

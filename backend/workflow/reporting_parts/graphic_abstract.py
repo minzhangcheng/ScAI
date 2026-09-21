@@ -578,6 +578,11 @@ class GraphicAbstractMixin:
                 )
                 if action == LlmFailureAction.RETRY:
                     continue
+                if action == LlmFailureAction.TERMINATE:
+                    from ..helpers import WorkflowTerminatedError
+                    self._set_status(analysis_state, TaskStatus.STOPPED)
+                    await self._send_state_sync(analysis_state, "graphic_abstract_terminated")
+                    raise WorkflowTerminatedError("User terminated graphic abstract generation") from e
                 # Skip: graphic abstract is optional
                 await self._send_message(
                     "error",

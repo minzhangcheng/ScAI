@@ -56,6 +56,8 @@ async def _wait_for_pause_gate(context) -> None:
 
 async def start_turn(context) -> TurnStart:
     await _wait_for_pause_gate(context)
+    if context.annotation_retry_required and context.annotation_retry_attempts > 3:
+        await _resolve_annotation_failure(context)
     context.step_count += 1
     context.force_break = False  # Reset per-iteration
     # Two independent reasons to checkpoint here. The periodic one is the
@@ -150,17 +152,6 @@ async def start_turn(context) -> TurnStart:
         if nudge_key not in context.agent._recent_sup_feedback:
             context.messages.append({"role": "user", "content": nudge})
             context.agent._recent_sup_feedback.add(nudge_key)
-    if context.annotation_retry_required and context.annotation_retry_attempts > 3:
-        logger.warning(
-            f"[Bioinformatics] annotate_clusters retries exhausted "
-            f"({context.annotation_retry_attempts}); halting loop for human review."
-        )
-        await context.agent._notify(
-            "status",
-            "Cell type annotation could not be completed automatically. "
-            "Please review the session and resume manually.",
-        )
-        return TurnStart(exit=LoopExit.TERMINAL)
     effective_tool_choice = context.agent._compute_tool_choice(
         context.text_response_count, context.max_text_responses
     )
@@ -350,6 +341,80 @@ async def start_turn(context) -> TurnStart:
     return TurnStart(response=response)
 
 
+async def _resolve_annotation_failure(context) -> None:
+    """Resolve a bounded tool failure without exiting or resetting the run."""
+    from ...constants import LlmFailureAction
+    from ...workflow.helpers import WorkflowSupersededError, WorkflowTerminatedError
+
+    reason = getattr(context, "annotation_failure_reason", "") or (
+        "annotate_clusters could not discover a clustered AnnData object or "
+        "extract cluster markers."
+    )
+    error = UpstreamExhaustedError(
+        "annotate_clusters failed after four attempts. Retry annotation, skip "
+        "this annotation attempt and continue with the limitation disclosed to "
+        f"the PI, or terminate. Last failure: {reason}",
+        agent_name="bioinformatics",
+        model=context.agent.model,
+        failure_kind="annotation_tool_failure",
+    )
+    # This checkpoint preserves the actual step cap; waiting at the decision
+    # does not consume a turn or claim that the execution budget was exhausted.
+    async def save_decision_checkpoint(label):
+        try:
+            await context.save_checkpoint(f"step_{context.step_count}_{label}")
+        except (WorkflowTerminatedError, WorkflowSupersededError):
+            raise
+        except Exception:
+            logger.warning(
+                "[Bioinformatics] Annotation intervention checkpoint failed",
+                exc_info=True,
+            )
+
+    await save_decision_checkpoint("annotation_failure")
+    callback = getattr(context.agent, "execution_intervention_callback", None)
+    if callback is None:
+        # Standalone/legacy agent callers still reach the workflow's existing
+        # exception-based intervention instead of reporting false completion.
+        raise error
+    action = await callback(error)
+    if action == LlmFailureAction.TERMINATE:
+        raise WorkflowTerminatedError(
+            "Analysis terminated by user after annotation tool failure"
+        ) from error
+    if action not in (LlmFailureAction.RETRY, LlmFailureAction.SKIP):
+        raise error
+    context.annotation_retry_attempts = 0
+    if action == LlmFailureAction.RETRY:
+        context.messages.append({
+            "role": "user",
+            "content": (
+                "[System] Annotation recovery was requested. Correct the last "
+                f"tool failure and retry annotate_clusters: {reason}"
+            ),
+        })
+        await save_decision_checkpoint("annotation_retry")
+        return
+
+    context.annotation_retry_required = False
+    detail = (
+        "The annotation tool remained unavailable after four attempts, and "
+        "the user chose Skip. Continue the remaining tasks; the PI decides "
+        f"how this limits interpretation. Last failure: {reason}"
+    )
+    observation = {
+        "gate": "annotation-tool-failure-observation",
+        "rule_id": "scai-native/annotation-tool-failure-observation",
+        "subject": "cell-type-annotation",
+        "severity": "advise",
+        "detail": detail,
+    }
+    context.evidence_gate_findings.append(observation)
+    context.findings.append("[PI review observation; non-blocking] " + detail)
+    context.messages.append({"role": "user", "content": "[System] " + detail})
+    await save_decision_checkpoint("annotation_skipped")
+
+
 async def process_response(context, response, agent_reasoning) -> TurnEffects:
     self = context.agent
     state = context.analysis_state
@@ -421,6 +486,7 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
         annotation_completed=annotation_completed,
         annotation_retry_required=annotation_retry_required,
         annotation_retry_attempts=annotation_retry_attempts,
+        annotation_failure_reason=getattr(context, "annotation_failure_reason", ""),
         consecutive_errors=consecutive_errors,
         total_errors=total_errors,
         figures_rendered=figures_rendered,
@@ -561,6 +627,7 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
     context.annotation_completed = annotation_completed
     context.annotation_retry_required = annotation_retry_required
     context.annotation_retry_attempts = annotation_retry_attempts
+    context.annotation_failure_reason = tool_runtime.annotation_failure_reason
     context.consecutive_errors = consecutive_errors
     context.total_errors = total_errors
     context.figures_rendered = figures_rendered
@@ -1280,6 +1347,9 @@ async def prepare_loop_context(
                 else None
             ),
             checkpoint_identity=_checkpoint_identity.checkpoint_fields(),
+            annotation_retry_required=loop_context.annotation_retry_required,
+            annotation_retry_attempts=loop_context.annotation_retry_attempts,
+            annotation_failure_reason=loop_context.annotation_failure_reason,
         )
         checkpoint_data["completed"] = bool(completed)
         await checkpoint_mgr.save(checkpoint_data)
@@ -1321,6 +1391,12 @@ async def prepare_loop_context(
         for s in analysis_log
     ))
     evidence_gate_findings: List[Dict[str, Any]] = []
+    # An unresolved annotation decision belongs to this execution attempt.
+    # Restore it before the next turn can call the model; an approved new plan
+    # starts its own attempt and does not inherit the previous plan's failure.
+    annotation_checkpoint = (
+        checkpoint if checkpoint_valid and not attempt_reset else {}
+    )
     loop_context = executor_context.ExecutorLoopContext(
         agent=self,
         analysis_state=state,
@@ -1338,6 +1414,15 @@ async def prepare_loop_context(
         attempt_start_step=attempt_start_step,
         step_count=step_count,
         annotation_completed=annotation_completed,
+        annotation_retry_required=bool(
+            annotation_checkpoint.get("annotation_retry_required", False)
+        ),
+        annotation_retry_attempts=int(
+            annotation_checkpoint.get("annotation_retry_attempts", 0) or 0
+        ),
+        annotation_failure_reason=str(
+            annotation_checkpoint.get("annotation_failure_reason", "") or ""
+        ),
         mechanism_programs_registered=mechanism_programs_registered,
         evidence_gate_findings=evidence_gate_findings,
         executor_run_kind=_run_kind,

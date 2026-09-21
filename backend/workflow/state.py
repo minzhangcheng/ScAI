@@ -32,6 +32,7 @@ class WorkflowState(TypedDict, total=False):
     node_retry_count: Dict[str, int]  # Retry count per node
     node_errors: Dict[str, str]  # Error messages per node
     skip_nodes: List[str]  # Nodes to skip on resume
+    node_retry_id: Optional[str]  # Last durably scheduled explicit node retry
     # Planning-related fields
     planning_stage: str  # "full", "stage1", "stage2"
     plan_approved: bool  # Whether current plan is approved for execution

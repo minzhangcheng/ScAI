@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ...models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole, TaskStatus
@@ -16,6 +17,8 @@ from ..helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cac
 from ...agents.literature.research import literature_technical_failure
 from ...utils.blob_store import BLOB_REF_PREFIX
 from ..retry import with_retry
+from ...constants import LlmFailureAction
+from ..helpers import WorkflowTerminatedError, WorkflowSupersededError
 
 if TYPE_CHECKING:
     from ..state import WorkflowState
@@ -64,10 +67,55 @@ from .shared import (  # noqa: F401
 
 
 logger = logging.getLogger(__name__)
+_EXTRACTION_RECOVERY_KEY = "literature_extraction_resume_v1"
 
 
 class LiteratureNodeMixin:
     """Literature research node, round briefs, and deep-research coverage evaluation."""
+
+    def _literature_extraction_identity(self, state) -> str:
+        analysis = state["analysis_state"]
+        instructions = state.get("pi_instructions") or {}
+        inputs = {
+            "round": analysis.current_round,
+            "lineage": analysis.restore_branch_id,
+            "plan_id": getattr(analysis.current_plan, "id", None),
+            "node_retry_id": state.get("node_retry_id"),
+            "instruction": analysis.initial_instruction,
+            "species": analysis.species,
+            "direction": analysis.current_round_direction,
+            "pi_instructions": {
+                key: instructions.get(key)
+                for key in ("literature_topics", "deferred_literature_topics", "overview", "deferred_literature_overview")
+            },
+            "results": {
+                key: {
+                    field: (state.get(key) or {}).get(field)
+                    for field in ("findings", "status", "evidence_execution_ids")
+                }
+                for key in ("bioinformatics_result", "biochemistry_result", "pathology_result")
+            },
+        }
+        return hashlib.sha256(json.dumps(
+            inputs, sort_keys=True, ensure_ascii=False, default=str,
+        ).encode()).hexdigest()
+
+    async def _save_literature_extraction_state(self, analysis_state):
+        from ...services.session_store import async_save_session
+
+        try:
+            state_callback = getattr(self, "state_callback", None)
+            if state_callback is not None:
+                # Publish through the active workflow's ownership and cache boundary.
+                saved = await state_callback(analysis_state, force=True)
+            else:
+                saved = await async_save_session(analysis_state.id, analysis_state, force=True)
+            if saved is False:
+                logger.warning("[%s] Literature extraction checkpoint was not acknowledged", self.session_id)
+        except (WorkflowTerminatedError, WorkflowSupersededError):
+            raise
+        except Exception:
+            logger.warning("[%s] Literature extraction checkpoint save failed", self.session_id, exc_info=True)
 
     def _literature_model_label(self, search_modes) -> str:
         """Resolve a list of literature search_modes into deduplicated,
@@ -125,6 +173,16 @@ class LiteratureNodeMixin:
         skip = await self._require_core_agent(state, "literature", "literature_research")
         if skip is not None:
             return skip
+
+        extraction_identity = self._literature_extraction_identity(state)
+        recovery = (analysis_state.sandbox_state or {}).get(_EXTRACTION_RECOVERY_KEY)
+        if isinstance(recovery, dict) and recovery.get("identity") == extraction_identity:
+            return await self._finish_literature_extraction(state, recovery)
+        if isinstance(recovery, dict):
+            # The older round cache has no input identity; it must not override
+            # an explicit change to the frozen extraction's research inputs.
+            cache_invalidate(analysis_state, AgentType.LITERATURE)
+            analysis_state.sandbox_state.pop(_EXTRACTION_RECOVERY_KEY, None)
 
         cached = cache_hit(analysis_state, AgentType.LITERATURE)
         if cached is not None and (
@@ -407,40 +465,81 @@ class LiteratureNodeMixin:
 
         logger.info(f"[{self.session_id}] Literature research completed: {len(combined_result['findings'])} findings from {len(topics)} topics")
 
-        await self._send_message(
-            "result",
-            combined_result,
-            AgentType.LITERATURE
-        )
-
-        analysis_state.add_message(
-            AgentType.LITERATURE,
-            MessageRole.ASSISTANT,
-            json.dumps({"findings": combined_result["findings"]}, ensure_ascii=False)
-        )
-
         # Non-critical: extract generic mechanism signals co-occurring with
         # observed data, persisted onto LiteratureReport for the cross-modal audit.
         # Gate on whether this round actually produced reports. Disabled/skipped is
         # handled by the _require_core_agent early return above; no-topic rounds have
         # an explicit status but no report IDs and therefore short-circuit here.
         report_ids = [r.get("report_id") for r in results if r.get("report_id")]
+        recovery = {
+            "identity": extraction_identity,
+            "phase": "pending",
+            "report_ids": report_ids,
+            "observed_context": None,
+            "result": deepcopy(combined_result),
+        }
         if report_ids:
-            try:
-                observed_context = self._build_observed_context_for_literature(state)
-                await self._persist_literature_mechanism_signals(
-                    analysis_state,
-                    self.literature_agent,
-                    report_ids,
-                    observed_context,
-                )
-            except UpstreamExhaustedError:
-                raise  # reaches @with_retry("literature_research")'s HITL gate
-            except Exception as e:
-                logger.warning(f"[{self.session_id}] mechanism signal persistence skipped: {e}")
+            analysis_state.sandbox_state[_EXTRACTION_RECOVERY_KEY] = recovery
+            await self._save_literature_extraction_state(analysis_state)
+        return await self._finish_literature_extraction(state, recovery)
+
+    async def _finish_literature_extraction(self, state, recovery):
+        """Resume only extraction of the frozen, already-paid search results."""
+        analysis_state = state["analysis_state"]
+        combined_result = recovery["result"]
+        report_ids = recovery["report_ids"]
+        completed = recovery.get("phase") == "completed"
+        if report_ids and not completed:
+            while True:
+                try:
+                    if recovery.get("observed_context") is None:
+                        recovery["observed_context"] = self._build_observed_context_for_literature(state)
+                        await self._save_literature_extraction_state(analysis_state)
+                    await self._persist_literature_mechanism_signals(
+                        analysis_state,
+                        self.literature_agent,
+                        report_ids,
+                        recovery["observed_context"],
+                    )
+                    break
+                except UpstreamExhaustedError as e:
+                    action = await self._wait_for_llm_intervention(
+                        e, "literature_research", analysis_state,
+                    )
+                    if action == LlmFailureAction.RETRY:
+                        continue
+                    if action == LlmFailureAction.TERMINATE:
+                        raise WorkflowTerminatedError(
+                            "User terminated literature mechanism extraction"
+                        ) from e
+                    combined_result["source_provenance"].append(
+                        "Mechanism extraction was skipped after an upstream failure; "
+                        "completed literature searches and findings were retained."
+                    )
+                    break
+                except (WorkflowTerminatedError, WorkflowSupersededError):
+                    raise
+                except Exception as e:
+                    logger.warning(f"[{self.session_id}] mechanism signal persistence skipped: {e}")
+                    combined_result["source_provenance"].append(
+                        "Mechanism extraction was unavailable after a technical failure; "
+                        f"completed literature searches were retained: {str(e)[:500]}"
+                    )
+                    break
 
         if not combined_result["technical_failures"]:
             cache_store(analysis_state, AgentType.LITERATURE, combined_result)
+        if not completed:
+            analysis_state.add_message(
+                AgentType.LITERATURE,
+                MessageRole.ASSISTANT,
+                json.dumps({"findings": combined_result["findings"]}, ensure_ascii=False),
+            )
+            recovery["phase"] = "completed"
+            if report_ids:
+                analysis_state.sandbox_state[_EXTRACTION_RECOVERY_KEY] = recovery
+                await self._save_literature_extraction_state(analysis_state)
+        await self._send_message("result", combined_result, AgentType.LITERATURE)
         return {
             **state,
             "analysis_state": analysis_state,
@@ -451,8 +550,8 @@ class LiteratureNodeMixin:
         self, analysis_state, literature_agent, report_ids, observed_context: str,
     ):
         """Extract generic mechanism signals from the current round's literature
-        reports and persist them onto the LiteratureReport models. Non-critical:
-        never raises, never changes literature_result status."""
+        reports and persist them onto the LiteratureReport models. Upstream
+        failures reach the extraction-only intervention loop."""
         reports = [
             r for r in analysis_state.literature_reports if r.id in set(report_ids)
         ] if report_ids else []

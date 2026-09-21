@@ -442,7 +442,7 @@ def _bounded_inventory_projection(
             "evidence_execution_ids": step.evidence_execution_ids[:12],
             "figure_requirement_keys": step.figure_requirement_keys[:12],
         }
-        for step in inventory.steps[:64]
+        for step in inventory.steps
     ]
     payload["adata_source_preparation_ids"] = inventory.adata_source_preparation_ids[:16]
     payload["observed_adata_structure"] = {
@@ -450,6 +450,43 @@ def _bounded_inventory_projection(
         for key, values in list(inventory.observed_adata_structure.items())[:8]
     }
     return payload
+
+
+def _render_inventory_identity(inventory: AcceptedFoundationInventory) -> str:
+    """Bound explanatory context without cutting JSON or technical identities."""
+    payload = _bounded_inventory_projection(inventory)
+
+    def encode() -> str:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+    text = encode()
+    if len(text) > 9_000:
+        for step in payload["steps"]:
+            step.pop("method", None)
+        text = encode()
+    if len(text) > 9_000:
+        # A step/checkpoint reference is sufficient; omitted receipt lists must
+        # not invite the model to reconstruct UUIDs from prose or memory.
+        for step, source in zip(payload["steps"], inventory.steps):
+            step.pop("evidence_execution_ids", None)
+            step.pop("figure_requirement_keys", None)
+            step["execution_ids_omitted"] = len(source.evidence_execution_ids)
+        payload["observed_adata_structure"] = {}
+        text = encode()
+    if len(text) > 9_000:
+        # The schema bounds the number of steps. Retain every step identity
+        # even when long descriptions would exhaust the context budget.
+        payload = {
+            "inventory_id": inventory.inventory_id,
+            "round_number": inventory.round_number,
+            "plan_id": inventory.plan_id,
+            "lineage_id": inventory.lineage_id,
+            "adata_checkpoint_id": inventory.adata_checkpoint_id,
+            "plan_step_ids": [step.plan_step_id for step in inventory.steps],
+            "execution_ids_omitted": True,
+        }
+        text = encode()
+    return text
 
 
 def render_innovation_scope_context(
@@ -463,11 +500,7 @@ def render_innovation_scope_context(
         return ""
     inventory = resolve_foundation_inventory(state, reconstruct=True)
     inventory_text = (
-        json.dumps(
-            _bounded_inventory_projection(inventory),
-            ensure_ascii=False,
-            sort_keys=True,
-        )[:9_000]
+        _render_inventory_identity(inventory)
         if inventory is not None
         else "No durable accepted Round 1 foundation inventory is currently available."
     )
@@ -486,8 +519,13 @@ foundation decision, with requested_by="user" or "pi", a concrete reason, and
 exact foundation references. New downstream work may declare relationship="new".
 Current-round figure requirements describe current-round outputs only; do not
 redeclare an earlier foundation figure merely to make it look current. Method
-overlap alone is not a Host rejection criterion. Return scope_contract_version=1,
-foundation_inventory_id, and analysis_scope for every step.
+overlap alone is not a Host rejection criterion. Return scope_contract_version=1
+and foundation_inventory_id at plan level, and analysis_scope for every step.
+relationship="reuse" also covers prior results outside this foundation inventory.
+For those results, name the retained artifact or prior plan in input and reason;
+leave foundation_refs empty unless this step also consumes foundation outputs.
+Do not relabel reuse as new just because its source is outside the foundation.
+Unavailable scientific provenance is disclosed to the PI, not fabricated.
 
 Accepted foundation inventory (Host-observed technical identity only):
 {inventory_text}
@@ -495,6 +533,8 @@ Accepted foundation inventory (Host-observed technical identity only):
 Each analysis_scope must use relationship new|reuse|revise, cohort_scope full|subset,
 foundation_refs (exact inventory_id, round_number, plan_id, plan_step_ids,
 execution_ids, optional checkpoint_id), reason, and optional requested_by.
+Copy identifiers exactly. You may reference plan_step_ids or checkpoint_id with
+execution_ids=[]; never guess omitted execution IDs or splice UUID fragments.
 """.strip() + pending_analysis_context
 
 
@@ -511,28 +551,34 @@ def _validate_reference(
     inventory: AcceptedFoundationInventory,
 ) -> None:
     data = _normalize_reference(reference)
+    errors = []
     if str(data.get("inventory_id") or "") != inventory.inventory_id:
-        raise PlanScopeValidationError(
+        errors.append(
             "foundation reference names an unknown inventory_id: "
             f"received {data.get('inventory_id')!r}; "
             f"expected {inventory.inventory_id!r}. Copy the complete ID exactly."
         )
     if int(data.get("round_number", 0) or 0) != inventory.round_number:
-        raise PlanScopeValidationError("foundation reference round_number does not match inventory")
+        errors.append(
+            f"foundation reference round_number does not match inventory; expected {inventory.round_number}"
+        )
     if str(data.get("plan_id") or "") != inventory.plan_id:
-        raise PlanScopeValidationError("foundation reference plan_id does not match inventory")
+        errors.append(
+            f"foundation reference plan_id does not match inventory; expected {inventory.plan_id!r}"
+        )
 
     inventory_steps = {step.plan_step_id: step for step in inventory.steps}
     step_ids = [int(value) for value in (data.get("plan_step_ids") or [])]
     execution_ids = [str(value) for value in (data.get("execution_ids") or [])]
     if len(step_ids) != len(set(step_ids)):
-        raise PlanScopeValidationError("foundation reference has duplicate plan_step_ids")
+        errors.append("foundation reference has duplicate plan_step_ids")
     if len(execution_ids) != len(set(execution_ids)):
-        raise PlanScopeValidationError("foundation reference has duplicate execution_ids")
+        errors.append("foundation reference has duplicate execution_ids")
     unknown_steps = sorted(set(step_ids) - set(inventory_steps))
     if unknown_steps:
-        raise PlanScopeValidationError(
-            f"foundation reference names unknown plan_step_ids: {unknown_steps}"
+        errors.append(
+            f"foundation reference names unknown plan_step_ids: {unknown_steps}; "
+            f"available plan_step_ids: {sorted(inventory_steps)}"
         )
     available_execution_ids = {
         value
@@ -541,28 +587,42 @@ def _validate_reference(
     }
     unknown_executions = sorted(set(execution_ids) - available_execution_ids)
     if unknown_executions:
-        raise PlanScopeValidationError(
-            "foundation reference names execution_ids not retained by the inventory"
+        errors.append(
+            "foundation reference names execution_ids not retained by the inventory: "
+            f"{unknown_executions}"
         )
     if step_ids and execution_ids:
         selected_execution_ids = {
             value
-            for step_id in step_ids
+            for step_id in step_ids if step_id in inventory_steps
             for value in inventory_steps[step_id].evidence_execution_ids
         }
-        if not set(execution_ids).issubset(selected_execution_ids):
-            raise PlanScopeValidationError(
-                "foundation execution_ids do not belong to the referenced plan_step_ids"
+        mismatched = set(execution_ids) - selected_execution_ids - set(unknown_executions)
+        if mismatched:
+            errors.append(
+                "foundation execution_ids do not belong to the referenced plan_step_ids: "
+                f"{sorted(mismatched)}"
+            )
+        if unknown_executions or mismatched:
+            errors.append(
+                "Available execution_ids for the referenced plan_step_ids: "
+                f"{sorted(selected_execution_ids)[:12]}. Copy a retained ID exactly, "
+                "or use the exact plan_step_ids with execution_ids=[]; do not guess IDs."
             )
     checkpoint_id = data.get("checkpoint_id")
     if checkpoint_id is not None and str(checkpoint_id) != str(
         inventory.adata_checkpoint_id or ""
     ):
-        raise PlanScopeValidationError("foundation checkpoint_id does not match inventory")
+        errors.append(
+            "foundation checkpoint_id does not match inventory; "
+            f"expected {inventory.adata_checkpoint_id!r}"
+        )
     if not step_ids and not execution_ids and not checkpoint_id:
-        raise PlanScopeValidationError(
+        errors.append(
             "foundation reference must identify a plan step, execution, or checkpoint"
         )
+    if errors:
+        raise PlanScopeValidationError("; ".join(errors))
 
 
 def validate_innovation_plan_scope(
@@ -576,8 +636,9 @@ def validate_innovation_plan_scope(
         return
     if allow_legacy_approved and getattr(plan, "scope_contract_version", None) is None:
         return
+    errors = []
     if getattr(plan, "scope_contract_version", None) != SCOPE_CONTRACT_VERSION:
-        raise PlanScopeValidationError(
+        errors.append(
             "Innovation plan must use scope_contract_version=1 before approval"
         )
     inventory = resolve_foundation_inventory(state, reconstruct=True)
@@ -587,23 +648,24 @@ def validate_innovation_plan_scope(
             "an approved retained plan and successful receipts before approving this plan"
         )
     if str(getattr(plan, "foundation_inventory_id", "") or "") != inventory.inventory_id:
-        raise PlanScopeValidationError(
+        errors.append(
             "Innovation plan foundation_inventory_id does not resolve in the current lineage"
         )
     if (inventory.lineage_id or "main") != current_lineage_id(state):
-        raise PlanScopeValidationError(
+        errors.append(
             "Accepted foundation inventory belongs to another lineage"
         )
 
     for step in getattr(plan, "steps", None) or []:
         scope = getattr(step, "analysis_scope", None)
+        step_label = f"Innovation step {getattr(step, 'id', '?')}"
         if scope is None:
-            raise PlanScopeValidationError(
-                f"Innovation step {getattr(step, 'id', '?')} is missing analysis_scope"
-            )
+            errors.append(f"{step_label} is missing analysis_scope")
+            continue
         refs = list(getattr(scope, "foundation_refs", None) or [])
         if len(refs) > _MAX_FOUNDATION_REFERENCES:
-            raise PlanScopeValidationError("analysis_scope has too many foundation references")
+            errors.append(f"{step_label} analysis_scope has too many foundation references")
+            continue
         ref_keys = []
         for reference_index, reference in enumerate(refs):
             data = _normalize_reference(reference)
@@ -618,29 +680,33 @@ def validate_innovation_plan_scope(
             try:
                 _validate_reference(reference, inventory)
             except PlanScopeValidationError as exc:
-                raise PlanScopeValidationError(
-                    f"Innovation step {getattr(step, 'id', '?')} "
+                errors.append(
+                    f"{step_label} "
                     f"analysis_scope.foundation_refs[{reference_index}]: {exc}"
-                ) from exc
+                )
         if len(ref_keys) != len(set(ref_keys)):
-            raise PlanScopeValidationError("analysis_scope has duplicate foundation references")
+            errors.append(f"{step_label} analysis_scope has duplicate foundation references")
         relationship = str(getattr(scope, "relationship", "") or "")
-        if relationship in {"reuse", "revise"} and not refs:
-            raise PlanScopeValidationError(
-                f"Innovation step {getattr(step, 'id', '?')} declares {relationship} "
+        # Reuse may concern a prior result outside the foundation inventory.
+        # Validate every claimed identity, without inventing a foundation link.
+        if relationship == "revise" and not refs:
+            errors.append(
+                f"{step_label} declares {relationship} "
                 "without an exact foundation reference"
             )
         if relationship == "revise":
             if getattr(scope, "requested_by", None) not in {"user", "pi"}:
-                raise PlanScopeValidationError(
-                    f"Innovation step {getattr(step, 'id', '?')} revises a foundation "
+                errors.append(
+                    f"{step_label} revises a foundation "
                     "without requested_by='user' or 'pi'"
                 )
             if not str(getattr(scope, "reason", "") or "").strip():
-                raise PlanScopeValidationError(
-                    f"Innovation step {getattr(step, 'id', '?')} revises a foundation "
+                errors.append(
+                    f"{step_label} revises a foundation "
                     "without a reason"
                 )
+    if errors:
+        raise PlanScopeValidationError("\n".join(errors))
 
 
 def innovation_inventory_id(state: Any, plan: Any = None) -> Optional[str]:

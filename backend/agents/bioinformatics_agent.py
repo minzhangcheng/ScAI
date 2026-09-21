@@ -387,6 +387,7 @@ class BioinformaticsAgent(
         technique_agent=None,
         species_validation_callback: Optional[Callable[[List[str], str, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None,
         marker_db_intervention_callback: Optional[Callable[[], Awaitable["LlmFailureAction"]]] = None,
+        execution_intervention_callback: Optional[Callable[[UpstreamExhaustedError], Awaitable["LlmFailureAction"]]] = None,
     ):
         super().__init__(
             agent_type=AgentType.BIOINFORMATICS,
@@ -403,6 +404,7 @@ class BioinformaticsAgent(
         self.technique_agent = technique_agent
         self.species_validation_callback = species_validation_callback
         self.marker_db_intervention_callback = marker_db_intervention_callback
+        self.execution_intervention_callback = execution_intervention_callback
 
         # Track execution history
         self.code_history: List[CodeExecution] = []

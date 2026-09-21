@@ -570,6 +570,9 @@ async def initialize(self):
         technique_agent=self.technique_agent,
         species_validation_callback=self._species_validation_callback,
         marker_db_intervention_callback=self._marker_db_intervention_callback,
+        execution_intervention_callback=lambda error: self._wait_for_llm_intervention(
+            error, "bioinformatics_analysis", self._current_analysis_state,
+        ),
     )
     self.bioinformatics_agent.set_session(self.session_id)
     self.bioinformatics_agent._pause_event = self._pause_event

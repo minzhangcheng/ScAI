@@ -362,6 +362,8 @@ _LEGAL_RESUME_STATUSES = frozenset({
 
 
 async def _resume_analysis_locked(session_id: str, user_id: str):
+    from uuid import uuid4
+
     state = await bindings.require_session_ownership(session_id=session_id, user_id=user_id)
 
     # Status validation is deliberately first and side-effect free. A stale
@@ -374,6 +376,23 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         raise HTTPException(
             status_code=400,
             detail="Analysis not paused, waiting, or completed",
+        )
+
+    if (
+        state.status == TaskStatus.WAITING_INPUT
+        and state.wait_input_reason in {
+            WaitInputReason.LLM_FAILURE.value,
+            WaitInputReason.AGENT_DISABLED.value,
+            WaitInputReason.MARKER_DB_MISSING.value,
+        }
+        and session_id in bindings.workflows
+    ):
+        # This gate owns a different event from the ordinary round-end wait.
+        # Keep its status/generation intact so its action endpoint remains usable.
+        return APIResponse(
+            success=True,
+            message="Resolve the active error dialog with Retry, Skip, or Terminate.",
+            data={"needs_reconnect": False, "status": state.status.value},
         )
 
     from backend.utils.runtime_pairing import refresh_runtime_availability
@@ -606,6 +625,14 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
                 data={"needs_reconnect": True},
             )
     elif state.status == TaskStatus.PAUSED:
+        if (state.sandbox_state or {}).get("failed_node") and not state.pre_pause_status:
+            state.sandbox_state = {
+                **(state.sandbox_state or {}),
+                "node_retry": state.sandbox_state.get("node_retry") or {
+                    "id": uuid4().hex,
+                    "node_name": state.sandbox_state["failed_node"], "skip": False,
+                },
+            }
         if state.pre_pause_status in WAITING_HITL_STATUSES:
             restored_status = state.pre_pause_status
             state.status = restored_status
@@ -614,7 +641,9 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
             state.status = TaskStatus.RUNNING
             state.pre_pause_status = None
         await bindings._update_session_cache(session_id, state)
-        await bindings.async_save_session(session_id, state)
+        await bindings.async_save_session(
+            session_id, state, force=bool((state.sandbox_state or {}).get("node_retry")),
+        )
         async with _state_lock:
             workflow = bindings.workflows.get(session_id)
         if workflow:
@@ -642,9 +671,20 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         )
     elif state.status in (TaskStatus.GENERATING_REPORT, TaskStatus.FAILED):
         # Interrupted during report generation or failed — allow re-run
+        if state.status == TaskStatus.FAILED:
+            state.sandbox_state = {
+                **(state.sandbox_state or {}),
+                "node_retry": (state.sandbox_state or {}).get("node_retry") or {
+                    "id": uuid4().hex,
+                    "node_name": (state.sandbox_state or {}).get("failed_node"),
+                    "skip": False,
+                },
+            }
         state.status = TaskStatus.RUNNING
         await bindings._update_session_cache(session_id, state)
-        await bindings.async_save_session(session_id, state)
+        await bindings.async_save_session(
+            session_id, state, force=bool((state.sandbox_state or {}).get("node_retry")),
+        )
         return APIResponse(
             success=True,
             message="Resuming analysis",

@@ -696,6 +696,51 @@ async def test_activity_classifier_observes_unfinished_analysis_task():
             _run_tasks.pop("run-task-only", None)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["analysis", "detailed_report"])
+async def test_observer_exits_cleanly_when_last_task_finishes(monkeypatch, owner):
+    from unittest.mock import AsyncMock
+
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.state import _run_tasks, detailed_report_tasks, initializing_sessions
+
+    session_id = f"observer-last-{owner}"
+    state = AnalysisState(id=session_id, user_id="owner", status=TaskStatus.RUNNING)
+    pending = asyncio.get_running_loop().create_future()
+    registry = _run_tasks if owner == "analysis" else detailed_report_tasks
+    monkeypatch.setitem(registry, session_id, pending)
+    monkeypatch.setattr(
+        websocket_routes, "ws_authenticate_and_load",
+        AsyncMock(return_value=("owner", state)),
+    )
+    monkeypatch.setattr(
+        websocket_routes, "resolve_config_for_user",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        websocket_routes, "assert_generation_writable", lambda *_: None,
+    )
+
+    class FinishingSocket(_Socket):
+        receive_calls = 0
+
+        async def receive_text(self):
+            self.receive_calls += 1
+            assert websockets[session_id] is self
+            pending.set_result(None)
+            state.status = TaskStatus.FAILED
+            return "heartbeat"
+
+    socket = FinishingSocket()
+    await websocket_routes.websocket_endpoint(socket, session_id)
+
+    assert socket.receive_calls == 1
+    assert socket.sent[0]["type"] == "status"
+    assert session_id not in websockets
+    assert session_id not in initializing_sessions
+    assert state.status == TaskStatus.FAILED
+
+
 def test_registry_contention_is_safe_across_separate_event_loops():
     async def exercise(label: str):
         socket = _Socket(block=True)

@@ -19,6 +19,7 @@ from ...models.schemas import (
 from ...utils.llm_client import UpstreamExhaustedError
 from ...constants import LlmFailureAction
 from ..helpers import reset_unattended_gate_budget
+from ..helpers import WorkflowTerminatedError
 from ...config import get_session_reports, get_session_workspace
 from ...services.report import DetailedReportGenerator, compress_image_to_base64
 from ...services.report.figure_discovery import discover_workspace_figures
@@ -153,6 +154,10 @@ class FinalReportMixin:
                 )
                 if action == LlmFailureAction.RETRY:
                     continue
+                if action == LlmFailureAction.TERMINATE:
+                    self._set_status(analysis_state, TaskStatus.STOPPED)
+                    await self._send_state_sync(analysis_state, "final_report_terminated")
+                    raise WorkflowTerminatedError("User terminated final summary generation") from e
                 # Skip: use minimal fallback summary
                 analysis_state.final_summary = (
                     "Analysis completed. Summary generation was skipped due to LLM failure."
@@ -243,6 +248,10 @@ class FinalReportMixin:
                 )
                 if action == LlmFailureAction.RETRY:
                     continue
+                if action == LlmFailureAction.TERMINATE:
+                    self._set_status(analysis_state, TaskStatus.STOPPED)
+                    await self._send_state_sync(analysis_state, "final_report_terminated")
+                    raise WorkflowTerminatedError("User terminated integrated report generation") from e
                 await self._send_message(
                     "error",
                     "Integrated report generation skipped due to LLM failure.",
@@ -464,21 +473,35 @@ class FinalReportMixin:
                 await self._send_message(
                     "error",
                     f"Detailed report generation failed: {str(e)}. "
-                    "Analysis is still complete.",
+                    "Completed analysis results were retained; resume to retry the report.",
                     AgentType.PI,
                 )
                 break
 
         # === POST-PROCESSING: ALWAYS RUNS (even on Error) ===
-        if analysis_state.detailed_report_fallback_pending and report is None:
-            # Keep the durable marker retryable if local fallback assembly (for
-            # example a disk write) failed. Do not publish a false COMPLETED.
-            self._set_status(analysis_state, TaskStatus.PAUSED)
-            await self._send_state_sync(
-                analysis_state, "detailed_report_fallback_failed"
+        if report is None:
+            # Preserve the failed node across graph END and process restarts.
+            # Fallback remains authorized only by an explicit user Skip.
+            analysis_state.sandbox_state = {
+                **(analysis_state.sandbox_state or {}),
+                "failed_node": "generate_detailed_report",
+            }
+            fallback_pending = analysis_state.detailed_report_fallback_pending
+            self._set_status(
+                analysis_state,
+                TaskStatus.PAUSED if fallback_pending else TaskStatus.FAILED,
             )
-            return {**state, "analysis_state": analysis_state}
+            await self._send_state_sync(
+                analysis_state,
+                "detailed_report_fallback_failed" if fallback_pending else "detailed_report_failed",
+            )
+            return {
+                **state, "analysis_state": analysis_state,
+                "failed_node": "generate_detailed_report",
+            }
 
+        if (analysis_state.sandbox_state or {}).get("failed_node") == "generate_detailed_report":
+            analysis_state.sandbox_state.pop("failed_node")
         analysis_state.detailed_report_fallback_pending = False
         self._set_status(analysis_state, TaskStatus.COMPLETED)
         await self._send_message(
@@ -492,4 +515,5 @@ class FinalReportMixin:
         return {
             **state,
             "analysis_state": analysis_state,
+            "failed_node": None,
         }

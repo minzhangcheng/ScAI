@@ -6,7 +6,12 @@ from ..constants import PLAN_REVISION_NEEDED_TAG, NO_OUTPUT_TOKEN_CAP, StateSync
 from ..models.schemas import AgentType, AnalysisState, ClusterAnnotation, PublicationFigure, TaskStatus
 from ..utils.formatting import safe_parse_json
 from ..services.report.artifacts import has_blocking_layout_defects
-from .helpers import wait_with_skip_time
+from .helpers import (
+    wait_with_skip_time, reset_unattended_gate_budget,
+    WorkflowTerminatedError, WorkflowSupersededError,
+)
+from ..constants import LlmFailureAction
+from ..utils.llm_client import UpstreamExhaustedError
 
 logger = logging.getLogger(__name__)
 
@@ -277,8 +282,34 @@ CONTEXT FROM ANALYSIS:
 
 QUESTION: {question}"""
 
+        async def call_with_intervention(call, skipped):
+            while True:
+                try:
+                    return await call()
+                except UpstreamExhaustedError as error:
+                    if analysis_state is None:
+                        raise
+                    action = await self._wait_for_llm_intervention(
+                        error, "bioinformatics_analysis", analysis_state,
+                    )
+                    if action == LlmFailureAction.RETRY:
+                        continue
+                    if action == LlmFailureAction.TERMINATE:
+                        raise WorkflowTerminatedError(
+                            "User terminated PI consultation"
+                        ) from error
+                    return skipped
+
+        reset_unattended_gate_budget(self, "bioinformatics_analysis")
         try:
-            response = await self.pi_agent.chat_without_history(prompt, temperature=self._settings_provider.get_temperature('pi'))
+            response = await call_with_intervention(
+                lambda: self.pi_agent.chat_without_history(
+                    prompt, temperature=self._settings_provider.get_temperature('pi'),
+                ),
+                "PI consultation was skipped after an upstream failure. No PI judgment "
+                "was obtained; the question remains unresolved. This is not approval "
+                "to change the plan or proceed with a proposed decision.",
+            )
             await self._send_message("pi_response", response, AgentType.PI)
 
             # Check if plan revision is needed based on PI's response
@@ -298,19 +329,30 @@ QUESTION: {question}"""
                             affected_ids = [pending[0]]
 
                     try:
-                        judgment = await self.pi_agent.judge_plan_deviation(
+                        judgment = await call_with_intervention(lambda: self.pi_agent.judge_plan_deviation(
                             deviation_description=f"QUESTION: {question}\nCONTEXT: {context}",
                             current_plan=plan,
                             affected_step_ids=affected_ids,
-                        )
+                        ), None)
 
-                        if judgment.get("needs_user_popup"):
+                        if judgment is None:
+                            response += (
+                                "\n\nPlan deviation assessment was skipped after an upstream failure; "
+                                "the PI's explicit revision request remains unresolved."
+                            )
+                        if judgment is None or judgment.get("needs_user_popup"):
                             response += "\n\n" + PLAN_REVISION_NEEDED_TAG
                             # Pre-major-revision snapshot is handled by the
                             # post-PI-synthesis snapshot in core.py. No need
                             # for a dedicated snapshot here.
+                    except (UpstreamExhaustedError, WorkflowTerminatedError, WorkflowSupersededError):
+                        raise
                     except Exception as e:
                         logger.warning(f"[{self.session_id}] Plan deviation judgment failed: {e}")
+                        response += (
+                            "\n\nPlan deviation assessment failed technically; the PI's "
+                            "explicit revision request remains unresolved.\n" + PLAN_REVISION_NEEDED_TAG
+                        )
 
             if analysis_state is not None:
                 from ..models.schemas import PIDecisionRecord
@@ -328,10 +370,16 @@ QUESTION: {question}"""
                 analysis_state.pi_decision_records = analysis_state.pi_decision_records[-40:]
 
             return response
+        except (UpstreamExhaustedError, WorkflowTerminatedError, WorkflowSupersededError):
+            raise
         except Exception as e:
             error_msg = f"PI consultation failed: {str(e)}"
             await self._send_message("error", error_msg, AgentType.PI)
-            return "Unable to get PI guidance. Please proceed with standard bioinformatics practices."
+            return (
+                "PI consultation failed technically. No PI judgment was obtained; "
+                "the question remains unresolved. This is not approval to change "
+                "the plan or proceed with a proposed decision."
+            )
 
     async def _figure_review_callback(self, figure: PublicationFigure) -> Dict[str, Any]:
         """

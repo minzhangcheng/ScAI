@@ -6,7 +6,7 @@ from backend.routes._helpers import (
     send_gate_action_received,
 )
 
-_OWNED_NAMES = frozenset({'_llm_failure_action_locked', 'retry_node', 'llm_failure_action', 'get_failed_node', 'resume_bioinformatics'})
+_OWNED_NAMES = frozenset({'_retry_node_locked', '_llm_failure_action_locked', 'retry_node', 'llm_failure_action', 'get_failed_node', 'resume_bioinformatics'})
 
 bindings = None
 
@@ -80,6 +80,15 @@ async def _llm_failure_action_locked(session_id: str, user_id: str, req: LlmFail
 async def retry_node(session_id: str, request: Request, body: RetryNodeRequest):
     """Retry or skip a failed node"""
     bindings.validate_session_id(session_id)
+    async with get_session_lock(session_id):
+        return await _retry_node_locked(session_id, request, body)
+
+
+async def _retry_node_locked(session_id: str, request: Request, body: RetryNodeRequest):
+    from uuid import uuid4
+    from backend.constants import WORKFLOW_GRAPH_NODES
+    from backend.workflow import SingleCellAnalysisWorkflow
+
     node_name = body.node_name
     skip = body.skip
 
@@ -89,24 +98,30 @@ async def retry_node(session_id: str, request: Request, body: RetryNodeRequest):
     if state.status != TaskStatus.FAILED:
         raise HTTPException(status_code=400, detail="Session is not in failed state")
 
-    # Note: The actual retry/skip logic is handled by the workflow's with_retry decorator
-    # This endpoint just updates the state to allow resumption
+    if node_name not in WORKFLOW_GRAPH_NODES or node_name == "restore_entry":
+        raise HTTPException(status_code=400, detail="Unknown retry target")
+    handler = getattr(SingleCellAnalysisWorkflow, f"_{node_name}", None)
+    if skip and getattr(handler, "_retry_node_name", None) != node_name:
+        raise HTTPException(
+            status_code=400,
+            detail="This node has no skip action. Retry it or explicitly stop the analysis.",
+        )
+
+    # Save an explicit target, not just a status change. The workflow verifies
+    # it against its checkpoint before rearming an already-ended graph.
+    state.sandbox_state = {
+        **(state.sandbox_state or {}),
+        "node_retry": {"id": uuid4().hex, "node_name": node_name, "skip": skip},
+    }
 
     if skip:
-        # Store skip_nodes in sandbox_state (used by workflow on resume)
-        if state.sandbox_state is None:
-            state.sandbox_state = {}
-        if "skip_nodes" not in state.sandbox_state:
-            state.sandbox_state["skip_nodes"] = []
-        if node_name not in state.sandbox_state["skip_nodes"]:
-            state.sandbox_state["skip_nodes"].append(node_name)
         message = f"Node {node_name} will be skipped on resume"
     else:
         # Clear failed status for retry
         state.status = TaskStatus.PAUSED  # Allow resumption
         message = f"Session ready to retry from node {node_name}"
 
-    await bindings.async_save_session(session_id, state)
+    await bindings.async_save_session(session_id, state, force=True)
 
     return APIResponse(
         success=True,

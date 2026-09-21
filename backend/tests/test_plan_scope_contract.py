@@ -1,6 +1,7 @@
 """Technical Innovation scope and accepted-foundation identity contracts."""
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -147,6 +148,81 @@ def test_valid_subset_reuse_may_overlap_a_foundation_method_family():
     plan = _plan()
 
     validate_innovation_plan_scope(state, plan)
+
+
+def test_reuse_of_other_prior_results_does_not_invent_a_foundation_link():
+    plan = _plan(PlanAnalysisScope(
+        relationship="reuse",
+        cohort_scope="full",
+        foundation_refs=[],
+        reason="Reuse the stored result from prior-plan-other, outside the foundation inventory.",
+    ))
+    plan.steps[0].input = "Stored result table from prior-plan-other; execution provenance unavailable."
+    before = plan.model_dump(mode="json")
+
+    validate_innovation_plan_scope(_state(), plan)
+    restored = AnalysisPlan.model_validate(before)
+    validate_innovation_plan_scope(_state(), restored)
+
+    assert restored.model_dump(mode="json") == before
+    assert plan.model_dump(mode="json") == before
+    assert plan.steps[0].analysis_scope.relationship == "reuse"
+
+
+def test_scope_validation_reports_independent_errors_without_rewriting_references():
+    plan = _plan()
+    plan.steps[0].analysis_scope.foundation_refs[0].execution_ids = ["spliced-receipt"]
+    plan.steps.append(PlanStep(
+        id=8, title="Other reuse", method="Read retained measurements",
+        analysis_scope=PlanAnalysisScope(
+            relationship="reuse", cohort_scope="subset",
+            foundation_refs=[_reference(plan_step_ids=[99], checkpoint_id="wrong-checkpoint")],
+        ),
+    ))
+    before = plan.model_dump(mode="json")
+
+    with pytest.raises(PlanScopeValidationError) as error:
+        validate_innovation_plan_scope(_state(), plan)
+
+    message = str(error.value)
+    assert "Innovation step 1 analysis_scope.foundation_refs[0]" in message
+    assert "spliced-receipt" in message
+    assert "receipt-r1-step4" in message
+    assert "Innovation step 8 analysis_scope.foundation_refs[0]" in message
+    assert "unknown plan_step_ids: [99]" in message
+    assert "expected 'checkpoint-r1'" in message
+    assert plan.model_dump(mode="json") == before
+
+
+@pytest.mark.parametrize("step_count", [11, 128])
+def test_large_inventory_context_preserves_parseable_identity_and_last_step(step_count):
+    state = _state()
+    inventory = state.accepted_foundation_inventories[0]
+    inventory.steps = [AcceptedFoundationStep(
+        plan_step_id=index,
+        title="Accepted baseline " + "x" * 220,
+        method="m" * 600,
+        evidence_execution_ids=[f"receipt-{index}-{receipt}" for receipt in range(12)],
+        figure_requirement_keys=[f"plan.{index}.figure"],
+    ) for index in range(1, step_count + 1)]
+    before = inventory.model_dump(mode="json")
+
+    context = render_innovation_scope_context(state)
+    inventory_text = context.split(
+        "Accepted foundation inventory (Host-observed technical identity only):\n", 1
+    )[1].split("\n\nEach analysis_scope", 1)[0]
+    payload = json.loads(inventory_text)
+
+    assert len(inventory_text) <= 9_000
+    assert payload["inventory_id"] == inventory.inventory_id
+    assert payload["plan_id"] == inventory.plan_id
+    ids = payload.get("plan_step_ids") or [step["plan_step_id"] for step in payload["steps"]]
+    assert ids == list(range(1, step_count + 1))
+    assert inventory.model_dump(mode="json") == before
+    if "steps" in payload:
+        assert payload["steps"][-1]["evidence_execution_ids"] == inventory.steps[-1].evidence_execution_ids
+    else:
+        assert payload["execution_ids_omitted"] is True
 
 
 def test_valid_foundation_revision_requires_and_accepts_authority_and_reason():

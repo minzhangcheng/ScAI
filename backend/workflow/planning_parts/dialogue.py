@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from ..helpers import WorkflowTerminatedError
 
 
 def bind_facade(facade) -> None:
@@ -68,6 +69,8 @@ async def prepare_planning_dialogue(self, state):
     }
 
 async def run_planning_dialogue_rounds(self, ctx, state):
+    from ...agents.bioinformatics.planning import PlanGenerationFailure
+
     analysis_state = ctx["analysis_state"]
     stage = ctx["stage"]
     phase = ctx["phase"]
@@ -158,12 +161,18 @@ async def run_planning_dialogue_rounds(self, ctx, state):
                         state["user_plan_feedback"] = None
                 populate_plan_scope(plan, analysis_state)
                 break  # success, exit inner retry loop
-            except UpstreamExhaustedError as e:
+            except (UpstreamExhaustedError, PlanGenerationFailure) as e:
+                error = e if isinstance(e, UpstreamExhaustedError) else UpstreamExhaustedError(
+                    str(e), agent_name="bioinformatics", model=self.bioinformatics_agent.model,
+                    failure_kind="parse_error",
+                )
                 action = await self._wait_for_llm_intervention(
-                    e, "planning_dialogue", analysis_state
+                    error, "planning_dialogue", analysis_state
                 )
                 if action == LlmFailureAction.RETRY:
                     continue  # retry same bioinfo call
+                if action == LlmFailureAction.TERMINATE:
+                    raise WorkflowTerminatedError("User terminated planning after LLM failure") from e
                 # SKIP
                 await self._send_message(
                     "error",
@@ -200,6 +209,8 @@ async def run_planning_dialogue_rounds(self, ctx, state):
             # Bioinfo plan generation: no retry on generic Exception.
             # Unlike PI review below (which retries), bioinfo failures
             # are typically deterministic — retrying won't help.
+            except WorkflowTerminatedError:
+                raise
             except Exception as e:
                 logger.exception(
                     f"[{self.session_id}] Bioinformatics plan generation failed "
@@ -240,6 +251,8 @@ async def run_planning_dialogue_rounds(self, ctx, state):
                 )
                 if action == LlmFailureAction.RETRY:
                     continue  # retry same PI review call
+                if action == LlmFailureAction.TERMINATE:
+                    raise WorkflowTerminatedError("User terminated PI plan review") from e
                 # A plan cannot be accepted when the PI review did not complete.
                 await self._send_message(
                     "error",
@@ -256,6 +269,8 @@ async def run_planning_dialogue_rounds(self, ctx, state):
                 analysis_state.status = TaskStatus.FAILED
                 await self._send_state_sync(analysis_state, "planning_aborted")
                 return state
+            except WorkflowTerminatedError:
+                raise
             except Exception as e:
                 pi_review_attempt += 1
                 if pi_review_attempt <= MAX_NODE_RETRIES:
@@ -398,11 +413,31 @@ async def finalize_planning_dialogue(self, ctx, state):
             AgentType.PI,
         )
         try:
-            final_plan = await self.pi_agent.generate_final_plan_from_dialogue(
-                analysis_state,
-                dialogue_history,
-                current_plan=seed_plan,
-            )
+            from ...agents.bioinformatics.planning import PlanGenerationFailure
+
+            while True:
+                try:
+                    final_plan = await self.pi_agent.generate_final_plan_from_dialogue(
+                        analysis_state,
+                        dialogue_history,
+                        current_plan=seed_plan,
+                    )
+                    break
+                except (UpstreamExhaustedError, PlanGenerationFailure) as exc:
+                    error = exc if isinstance(exc, UpstreamExhaustedError) else UpstreamExhaustedError(
+                        str(exc), agent_name="pi", model=self.pi_agent.model,
+                        failure_kind="parse_error",
+                    )
+                    action = await self._wait_for_llm_intervention(
+                        error, "planning_dialogue", analysis_state,
+                    )
+                    if action == LlmFailureAction.RETRY:
+                        continue
+                    if action == LlmFailureAction.TERMINATE:
+                        raise WorkflowTerminatedError("User terminated PI plan finalization") from exc
+                    # Skipping an unavailable finalizer cannot approve its draft.
+                    state["plan_approved"] = False
+                    raise exc
             from ...services.plan_scope import validate_innovation_plan_scope
 
             validate_innovation_plan_scope(analysis_state, final_plan)
@@ -420,6 +455,8 @@ async def finalize_planning_dialogue(self, ctx, state):
                 "PI has finalized the plan unilaterally.",
                 AgentType.PI,
             )
+        except WorkflowTerminatedError:
+            raise
         except Exception as e:
             logger.exception(
                 f"[{self.session_id}] PI failed to generate final plan "
