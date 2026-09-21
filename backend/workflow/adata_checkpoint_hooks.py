@@ -75,7 +75,17 @@ async def capture_and_persist_boundary(
 ) -> CaptureOutcome:
     sandbox = getattr(workflow, "sandbox", None)
     lock = getattr(sandbox, "_exec_lock", None)
+    from backend.agents.bioinformatics.checkpoint_preflight import (
+        select_checkpoint_adata, bind_selected_checkpoint_adata,
+    )
+
+    selected = await select_checkpoint_adata(
+        getattr(workflow, "bioinformatics_agent", None), sandbox, analysis_state,
+        boundary=boundary, summary=summary_at_capture,
+    )
+
     if lock is None:
+        await bind_selected_checkpoint_adata(sandbox, selected)
         outcome = await capture_boundary_locked(
             sandbox,
             analysis_state,
@@ -103,6 +113,7 @@ async def capture_and_persist_boundary(
         )
     else:
         async with lock:
+            await bind_selected_checkpoint_adata(sandbox, selected)
             outcome = await capture_boundary_locked(
                 sandbox,
                 analysis_state,
@@ -129,7 +140,7 @@ async def capture_and_persist_boundary(
                 attempt_execution_ids_at_capture=attempt_execution_ids_at_capture,
             )
 
-    # Capture above is the only kernel operation before Host-state settlement.
+    # Binding and capture finish before Host-state settlement.
     # The remaining mutations apply equally to sandboxes without an explicit
     # execution lock (test/fallback implementations).
     callback_changed = False

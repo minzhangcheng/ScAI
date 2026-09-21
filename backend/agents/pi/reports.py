@@ -38,7 +38,7 @@ class ReportsMixin:
     """Exploration report, integrated report, and research briefs."""
 
     async def generate_stage_review_chapter(self, state, stage, catalog, context):
-        """Use round-report structure while letting the PI select decision-time scope."""
+        """Explain and order all available results for a decision-time review."""
         import json
         from ...services.report.round_chapters import chapter_prompt
         from ...utils.formatting import truncate_for_llm
@@ -51,27 +51,24 @@ class ReportsMixin:
             "Do not describe candidate labels as accepted or invent an annotation plot."
             if stage == "stage1" else
             "Stage 2: describe the performed unbiased exploration and evidence for research "
-            "directions, after a brief statement of the confirmed annotation basis. Do not "
-            "repeat the Stage 1 QC/annotation gallery. Full-dataset confirmed annotation UMAP "
-            "and foundation_annotation artifacts belong to the foundation section of the final "
-            "report even if created late. Include newly available confirmed-label views here "
-            "when they are needed for direction review and were absent from the Stage 1 "
-            "review; that does not change their foundation placement in the final report. New downstream "
-            "subset UMAPs belong with their downstream analysis. Explain uncertainties."
+            "directions together with the QC and confirmed annotation foundation. Include "
+            "the existing Stage 1 results as context for the user's decision. Organize "
+            "foundation views before downstream analyses, regardless of creation time. "
+            "Explain uncertainties."
         )
         # Keep the stage contract ahead of all variable evidence. Shared context
         # compaction may retain only the head and tail of a large user message.
         instructions = """
 
 ## Decision-time review override
-Generate an independent stage review. These instructions override the reusable
-round-chapter guidance below, including its instruction to use every artifact.
-Return one JSON object with `stage_artifact_ids` (exact IDs selected for this stage)
-and `report_chapter`: {"title": "Review title", "blocks": [
+Generate an independent stage review containing all available results.
+Return one JSON object with `report_chapter`: {"title": "Review title", "blocks": [
 {"text": "Methods, findings and limitations", "artifact_ids": ["exact catalog ID"]}],
-"conclusions": "Conclusions and uncertainty"}. Use every SELECTED artifact once;
-the full catalog is available evidence, not a requirement to include all artifacts.
-Choose stage scope by scientific role and recorded analysis, not creation time or filename.
+"conclusions": "Conclusions and uncertainty"}. Use every catalog artifact once.
+Do not select a subset or omit results because they were already reviewed, appear
+less relevant, or have scientific limitations. Include pending, rejected, and
+superseded versions, explaining their review status, recorded issues, and revision
+relationships without presenting them as approved. Explain limitations instead.
 Keep methods, parameters, findings, adjacent figures, uncertainty, and conclusions in
 actual analysis order, just as in a per-round report. Integrate supplementary evidence
 beside its owning result. This review does not replace the full final-report chapter.
@@ -91,24 +88,19 @@ beside its owning result. This review does not replace the full final-report cha
         prompt = (instructions + "\n\n" + chapter_prompt(catalog, state=state)
                   + "\nRecorded review context:\n"
                   + json.dumps(bounded_context, ensure_ascii=False, default=str))
-        known_ids = {item.artifact_id for item in catalog}
         for attempt in range(2):
             response = await self.chat_without_history(prompt)
             raw = self._safe_parse_json(response)
-            selected = raw.get("stage_artifact_ids") if isinstance(raw, dict) else None
-            if isinstance(selected, list) and all(
-                isinstance(aid, str) and aid in known_ids for aid in selected
-            ):
+            if isinstance(raw, dict) and isinstance(raw.get("report_chapter"), dict):
                 return raw
             if attempt == 0:
                 prompt = (
-                    "Your previous review omitted stage_artifact_ids or used unavailable IDs. "
-                    "Return the complete corrected JSON object. Select artifacts for this "
-                    "stage explicitly; do not copy the full-round gallery automatically.\n"
+                    "Your previous review omitted a report_chapter object. "
+                    "Return the complete corrected JSON object covering all catalog artifacts.\n"
                     + prompt + "\nPrevious response (possibly excerpted):\n"
                     + truncate_for_llm(response, max_chars=16 * 1024)
                 )
-        raise ValueError("Stage artifact selection missing or contains unavailable IDs")
+        raise ValueError("Stage review chapter missing or malformed")
 
     async def generate_exploration_report(
         self,

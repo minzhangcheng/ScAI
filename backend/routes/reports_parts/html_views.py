@@ -188,8 +188,13 @@ async def get_round_report_html(
     by_id = {item.id: item for item in state.detailed_report_segments}
     supplements = [by_id[sid] for sid in dict.fromkeys(result.report_supplement_ids)
                    if sid in by_id and sid != segment.id]
+    if segment.decision_content_html:
+        segment = segment.model_copy(update={"content_html": segment.decision_content_html})
     return HTMLResponse(
-        render_detailed_report_document(state, segment=segment, supplements=supplements),
+        render_detailed_report_document(
+            state, segment=segment, supplements=supplements,
+            deduplicate_figures=not bool(segment.decision_content_html),
+        ),
         headers={
             "Content-Disposition": f'attachment; filename="round_{result.round_number}_report.html"',
             "Cache-Control": "no-store",

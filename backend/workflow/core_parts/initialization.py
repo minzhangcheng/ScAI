@@ -696,7 +696,12 @@ async def _build_and_save_detailed_segment(
         graph_state=dict(graph_state) if graph_state else None,
         round_result=round_result,
     )
+    decision_content_html = ""
+    if round_result is not None:
+        from ...services.report.decision_reviews import render_round_decision_content
+        decision_content_html = render_round_decision_content(state, round_result, phase, title)
     segment = DetailedReportSegment(
+        decision_content_html=decision_content_html,
         result_identity_key=report_result_identity(round_result) if round_result is not None else "",
         chapter_sha256=round_chapter_digest(round_result),
         phase=phase,

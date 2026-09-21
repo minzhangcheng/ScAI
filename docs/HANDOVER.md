@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.1 · **Last updated**: 2026-09-20
+**Version**: 0.60.2 · **Last updated**: 2026-09-21
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,17 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.2` — Decision-time Stage 1 annotation, Stage 2 direction, and later
+  round confirmation reports now show the complete registered result catalogue,
+  including pending, rejected, superseded, and revision-status items with their
+  review state and outstanding issues. AnnData checkpoint preflight now checks
+  the live namespace before figure follow-up and checkpoint capture; when the
+  completed primary object uses another variable name, the Bioinformatics Agent
+  selects it and the runtime records the technical `adata` alias after identity
+  and shape validation. Focused report, checkpoint, and figure-follow-up
+  regressions passed. No image build, deployment, or historical-session
+  mutation was performed.
 
 - `0.60.1` — Repairs figure follow-up and report assembly provenance. Each
   supplementary figure task now receives its own persisted eligible execution

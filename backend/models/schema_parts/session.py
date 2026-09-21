@@ -202,6 +202,7 @@ class DetailedReportSegment(BaseModel):
     phase: str  # "pre_annotation" | "exploration_complete" | "supplementary_annotation_N" | "supplementary_direction_N"
     title: str  # Human-readable, e.g. "Pre-Annotation Analysis Summary"
     content_html: str = ""  # Pre-rendered HTML
+    decision_content_html: str = ""  # Complete result inventory for human review.
     timestamp: datetime = Field(default_factory=datetime.now)
     round_number: int = 0
 

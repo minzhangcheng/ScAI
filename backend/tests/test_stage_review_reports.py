@@ -31,7 +31,7 @@ def _pi(ids):
 @pytest.mark.parametrize("stage", ["stage1", "stage2"])
 @pytest.mark.parametrize("select_both", [False, True])
 @pytest.mark.parametrize("corrupt_selected", [False, True])
-async def test_review_preserves_same_named_selected_versions(
+async def test_review_preserves_all_same_named_versions(
     tmp_path, monkeypatch, stage, select_both, corrupt_selected,
 ):
     state = _state(tmp_path)
@@ -59,8 +59,8 @@ async def test_review_preserves_same_named_selected_versions(
     await stage_reviews.build_stage_review(state, _pi(selected), stage)
     report = state.stage_review_reports[-1]
     assert report.status == "ready"
-    assert {a.artifact_id for a in report.chapter.artifacts} == set(selected)
-    assert (old_image in report.html) is select_both
+    assert {a.artifact_id for a in report.chapter.artifacts} == {old.id, new.id}
+    assert old_image in report.html
     assert (new_image in report.html) is not corrupt_selected
     assert ("Recorded artifact unavailable:" in report.html) is corrupt_selected
 
@@ -81,12 +81,12 @@ async def test_reviews_freeze_independently_of_final_round_and_live_artifacts(tm
     assert 'data:image/' in frozen
     assert 'Candidate &lt;type&gt;' in frozen
     assert 'not accepted labels' in frozen
-    assert "Original caption for late_result" not in frozen
+    assert "Original caption for late_result" in frozen
     pi = _pi(["late_result"])
     url2 = await stage_reviews.build_stage_review(state, pi, "stage2", round_result=result)
     second = state.stage_review_reports[-1]
     assert url1 != url2
-    assert "Original caption for baseline" not in second.html
+    assert "Original caption for baseline" in second.html
     assert "Original caption for late_result" in second.html
     await stage_reviews.build_stage_review(state, pi, "stage2", round_result=result)
     assert state.stage_review_reports[-1].revision == 2
@@ -113,7 +113,7 @@ async def test_reviews_freeze_independently_of_final_round_and_live_artifacts(tm
 
 
 @pytest.mark.asyncio
-async def test_failure_never_reuses_previous_or_cumulative_report(tmp_path, monkeypatch):
+async def test_failure_retains_all_artifacts_without_reusing_previous_report(tmp_path, monkeypatch):
     state = _state(tmp_path)
     monkeypatch.setattr("backend.config.get_session_workspace", lambda _: tmp_path)
     await stage_reviews.build_stage_review(state, _pi(["baseline"]), "stage2")
@@ -122,7 +122,7 @@ async def test_failure_never_reuses_previous_or_cumulative_report(tmp_path, monk
     await stage_reviews.build_stage_review(state, pi, "stage2", summary="Retained finding")
     partial = state.stage_review_reports[-1]
     assert partial.status == "partial"
-    assert partial.chapter.artifacts == []
+    assert {a.artifact_id for a in partial.chapter.artifacts} == {"baseline", "late_result"}
     assert "Retained finding" in partial.html
     monkeypatch.setattr(stage_reviews, "render_detailed_report_document",
                         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("render failed")))
@@ -141,14 +141,14 @@ async def test_pi_receives_stage_scope_and_late_annotation_role(tmp_path):
     state.publication_figures[0].report_role = "foundation_annotation"
     pi = ReportsMixin()
     pi.refresh_runtime_config_if_needed = lambda: None
-    pi.chat_without_history = AsyncMock(return_value='{"stage_artifact_ids": []}')
+    pi.chat_without_history = AsyncMock(return_value='{"report_chapter": {}}')
     pi._safe_parse_json = json.loads
     catalog = round_artifact_catalog(state)
     await pi.generate_stage_review_chapter(state, "stage2", catalog, {})
     prompt = pi.chat_without_history.call_args.args[0]
     assert '"report_role": "foundation_annotation"' in prompt
-    assert "New downstream" in prompt
-    assert "not creation time" in prompt
+    assert "the existing Stage 1 results" in prompt
+    assert "regardless of creation time" in prompt
     final_prompt = chapter_prompt(catalog, state=state)
     assert "even when rendered during Stage 2" in final_prompt
     assert "do not move every UMAP" in final_prompt
@@ -163,7 +163,7 @@ async def test_stage_contract_survives_large_context_compaction(tmp_path, stage)
     pi = ReportsMixin()
     pi.refresh_runtime_config_if_needed = lambda: None
     pi._safe_parse_json = json.loads
-    pi.chat_without_history = AsyncMock(return_value='{"stage_artifact_ids": []}')
+    pi.chat_without_history = AsyncMock(return_value='{"report_chapter": {}}')
     await pi.generate_stage_review_chapter(state, stage, round_artifact_catalog(state), {
         "analysis_log": [{"code": "x" * 800_000}],
         "summary": "Retained summary",
@@ -184,63 +184,64 @@ async def test_stage_contract_survives_large_context_compaction(tmp_path, stage)
     ], ContextBudget(context_window=8192, completion_reserve=2048))
     assert any(action.kind == "fallback_truncate" for action in report.actions)
     sent = messages[1]["content"]
-    assert "stage_artifact_ids" in sent
+    assert "report_chapter" in sent
     assert f"Stage {1 if stage == 'stage1' else 2}: describe" in sent
     assert '"artifact_ids": ["exact catalog ID"]' in sent
-    assert "Use every SELECTED artifact once" in sent
+    assert "Use every catalog artifact once" in sent
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid_selection", [None, ["nonexistent"]])
-async def test_stage_selection_repair_retains_selected_figures(tmp_path, monkeypatch, invalid_selection):
+@pytest.mark.parametrize("legacy_selection", [None, [], ["nonexistent"], ["late_result"]])
+async def test_stage_selection_cannot_hide_existing_results(tmp_path, monkeypatch, legacy_selection):
     state = _state(tmp_path)
     monkeypatch.setattr("backend.config.get_session_workspace", lambda _: tmp_path)
     pi = ReportsMixin()
     pi.refresh_runtime_config_if_needed = lambda: None
     pi._safe_parse_json = json.loads
-    corrected = {
-        "stage_artifact_ids": ["late_result"],
+    raw = {
         "report_chapter": {"title": "Exploration", "blocks": [
             {"text": "Recorded finding", "artifact_ids": ["late_result"]},
         ]},
     }
-    original = {"report_chapter": corrected["report_chapter"]}
-    if invalid_selection is not None:
-        original["stage_artifact_ids"] = invalid_selection
-    pi.chat_without_history = AsyncMock(side_effect=[json.dumps(original), json.dumps(corrected)])
+    if legacy_selection is not None:
+        raw["stage_artifact_ids"] = legacy_selection
+    pi.chat_without_history = AsyncMock(return_value=json.dumps(raw))
     await stage_reviews.build_stage_review(state, pi, "stage2")
-    assert pi.chat_without_history.await_count == 2
-    assert "complete corrected JSON" in pi.chat_without_history.call_args.args[0]
+    assert pi.chat_without_history.await_count == 1
     report = state.stage_review_reports[-1]
     assert report.status == "ready"
-    assert [a.artifact_id for a in report.chapter.artifacts] == ["late_result"]
+    assert {a.artifact_id for a in report.chapter.artifacts} == {"late_result", "baseline"}
     assert "Original caption for late_result" in report.html
-    assert "Original caption for baseline" not in report.html
+    assert "Original caption for baseline" in report.html
 
 
 @pytest.mark.asyncio
-async def test_stage_selection_repair_is_bounded(tmp_path, monkeypatch):
+async def test_stage_chapter_repair_is_bounded_and_preserves_all_results(tmp_path, monkeypatch):
     state = _state(tmp_path)
     monkeypatch.setattr("backend.config.get_session_workspace", lambda _: tmp_path)
     pi = ReportsMixin()
     pi.refresh_runtime_config_if_needed = lambda: None
     pi._safe_parse_json = json.loads
-    pi.chat_without_history = AsyncMock(return_value='{"stage_artifact_ids": ["invented"]}')
+    pi.chat_without_history = AsyncMock(return_value='{}')
     await stage_reviews.build_stage_review(state, pi, "stage2", summary="Retained summary")
     assert pi.chat_without_history.await_count == 2
+    assert "complete corrected JSON" in pi.chat_without_history.call_args.args[0]
     report = state.stage_review_reports[-1]
     assert report.status == "partial"
-    assert report.chapter.artifacts == []
+    assert {a.artifact_id for a in report.chapter.artifacts} == {"baseline", "late_result"}
     assert "Retained summary" in report.html
+    assert report.html.count('<img ') == 2
 
 
 @pytest.mark.asyncio
-async def test_fabricated_stage_ids_produce_disclosed_partial_review(tmp_path, monkeypatch):
+async def test_fabricated_reference_does_not_remove_real_results(tmp_path, monkeypatch):
     state = _state(tmp_path)
     monkeypatch.setattr("backend.config.get_session_workspace", lambda _: tmp_path)
     await stage_reviews.build_stage_review(state, _pi(["nonexistent"]), "stage2")
-    assert state.stage_review_reports[-1].status == "partial"
-    assert state.stage_review_reports[-1].chapter.artifacts == []
+    report = state.stage_review_reports[-1]
+    assert report.status == "partial"
+    assert {a.artifact_id for a in report.chapter.artifacts} == {"baseline", "late_result"}
+    assert report.html.count('<img ') == 2
 
 
 def test_upstream_failure_clears_current_link_and_restored_urls(tmp_path):
@@ -342,7 +343,7 @@ async def test_annotation_gate_publishes_frozen_versions_before_both_decisions(t
     assert [r.revision for r in state.stage_review_reports] == [1, 2]
     assert state.to_api_dict()["annotation_report_url"] == published[-1]
     assert state.annotation_state.confirmed
-    assert [a.artifact_id for a in state.stage_review_reports[0].chapter.artifacts] == ["baseline"]
+    assert {a.artifact_id for a in state.stage_review_reports[0].chapter.artifacts} == {"baseline", "late_result"}
     assert {a.artifact_id for a in state.stage_review_reports[1].chapter.artifacts} == {"baseline", "late_result"}
     assert [r.id for r in state.code_history] == ["earlier-attempt", "baseline-execution", "late_result-execution"]
 
@@ -364,3 +365,33 @@ async def test_legacy_download_only_before_any_new_stage_review(tmp_path, monkey
     assert "/stage-review-report/" in state.to_api_dict()[api_field]
     stage_reviews.record_stage_review_failure(state, stage)
     assert state.to_api_dict()[api_field] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["stage1", "stage2"])
+async def test_decision_review_discloses_unapproved_and_superseded_results(tmp_path, monkeypatch, stage):
+    from backend.models.schemas import PublicationTable
+    state = _state(tmp_path)
+    older, newer = state.publication_figures
+    older.review_status = "revision_requested"
+    older.pi_feedback = "Revise the axis labels."
+    older.unresolved_must_fix = ["Clarify the units"]
+    older.is_current = False
+    older.invalidation_reason = "Superseded by a later render"
+    newer.review_status = "pending"
+    newer.logical_figure_id = older.logical_figure_id = "same-result"
+    newer.revision_of_id = newer.supersedes_id = older.id
+    state.publication_tables = [PublicationTable(
+        id="table", name="Measurements", description="All measured values",
+        csv_path=str(tmp_path / "table.csv"), columns=["value"],
+        preview_data=[{"value": 42}], round_number=1, review_status="pending",
+    )]
+    monkeypatch.setattr("backend.config.get_session_workspace", lambda _: tmp_path)
+    await stage_reviews.build_stage_review(state, _pi([]), stage)
+    report = state.stage_review_reports[-1]
+    assert {a.artifact_id for a in report.chapter.artifacts} == {older.id, newer.id, "table"}
+    assert report.html.count('<img ') == 2
+    for text in ("revision_requested", "pending", "Clarify the units", "Revise the axis labels.",
+                 "Later versions", "Superseded by a later render", "All measured values", "42"):
+        assert text in report.html
+    assert round_artifact_catalog(state) == []

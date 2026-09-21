@@ -30,7 +30,7 @@ from ..round_chapters import report_artifact_names
 logger = __import__('logging').getLogger(__name__)
 
 
-def _render_saved_chapter(state, chapter):
+def _render_saved_chapter(state, chapter, *, decision_review=False):
     """Use the same saved blocks, captions and ordering as the final report."""
     from backend.config import get_session_workspace
     from backend.services.report.artifacts import figure_reservation_notice
@@ -38,20 +38,37 @@ def _render_saved_chapter(state, chapter):
 
     workspace = get_session_workspace(state.id)
     artifact_ids = {a.artifact_id for a in chapter.artifacts}
-    candidates = resolved_record_figure_candidates(
-        state.publication_figures, workspace, state=state, artifact_ids=artifact_ids,
-    ) if artifact_ids else []
-    figures = {c["artifact_id"]: Path(c["path"]) for c in candidates}
-    tables = eligible_artifacts(state.publication_tables, state=state)
-    table_names = [{"filename": Path(t.csv_path).name, "table_id": t.id} for t in tables]
-    names = report_artifact_names(state, figures, table_names, artifact_ids=artifact_ids)
     figure_records = {f.id: f for f in state.publication_figures}
-    table_records = {Path(t.csv_path).name: t for t in tables}
+    if decision_review:
+        from ..artifacts import resolve_archival_render, publication_figure_provenance_error
+        from ..decision_reviews import decision_artifact_notice
+
+        figures = {}
+        for aid in artifact_ids:
+            record = figure_records.get(aid)
+            if record is not None and not publication_figure_provenance_error(state, record):
+                path = resolve_archival_render(record, workspace)
+                if path is not None:
+                    figures[aid] = path
+        tables = [t for t in state.publication_tables if t.id in artifact_ids]
+        names = {aid: aid for aid in figures}
+        names.update({t.id: t.id for t in tables})
+        table_records = {t.id: t for t in tables}
+        keys = {aid: aid for aid in figures}
+    else:
+        candidates = resolved_record_figure_candidates(
+            state.publication_figures, workspace, state=state, artifact_ids=artifact_ids,
+        ) if artifact_ids else []
+        figures = {c["artifact_id"]: Path(c["path"]) for c in candidates}
+        tables = eligible_artifacts(state.publication_tables, state=state)
+        table_names = [{"filename": Path(t.csv_path).name, "table_id": t.id} for t in tables]
+        names = report_artifact_names(state, figures, table_names, artifact_ids=artifact_ids)
+        table_records = {Path(t.csv_path).name: t for t in tables}
+        keys = {c["artifact_id"]: c.get("record_stem") or c["name"] for c in candidates}
     notices = {
         names[aid]: figure_reservation_notice(record)
         for aid, record in figure_records.items() if aid in names
     }
-    keys = {c["artifact_id"]: c.get("record_stem") or c["name"] for c in candidates}
     drift_notices = {
         names[aid]: render_artifact_drift_notice_html(record)
         for aid, record in figure_records.items() if aid in names
@@ -90,6 +107,12 @@ def _render_saved_chapter(state, chapter):
             artifact = artifacts.get(aid)
             if artifact is None:
                 continue
+            if decision_review:
+                record = figure_records.get(aid) or table_records.get(aid)
+                if record is not None:
+                    parts.append(decision_artifact_notice(
+                        record, [*state.publication_figures, *state.publication_tables],
+                    ))
             name = names.get(aid)
             if name is None:
                 parts.append('<p>Recorded artifact unavailable: '
@@ -197,6 +220,8 @@ def generate_detailed_report_segment_html(
     title: str,
     graph_state: Optional[Dict[str, Any]] = None,
     round_result=None,
+    *,
+    decision_review: bool = False,
 ) -> str:
     """Generate one segment of the incremental detailed report as HTML.
 
@@ -230,7 +255,7 @@ def generate_detailed_report_segment_html(
         parts.append(_technical_evidence_observations_html(state, round_result))
 
     if round_result is not None and getattr(round_result, "report_chapter", None):
-        parts.append(_render_saved_chapter(state, round_result.report_chapter))
+        parts.append(_render_saved_chapter(state, round_result.report_chapter, decision_review=decision_review))
         parts.append('</div>')
         return "\n".join(parts)
 
@@ -432,7 +457,9 @@ def _deduplicate_detailed_figure_blocks(html: str) -> str:
     parts.append(html[cursor:])
     return "".join(parts)
 
-def render_detailed_report_document(state, *, segment=None, supplements=(), document_title=None) -> str:
+def render_detailed_report_document(
+    state, *, segment=None, supplements=(), document_title=None, deduplicate_figures=True,
+) -> str:
     """Wrap retained HTML in a standalone document without regenerating findings."""
     segments = [segment, *supplements] if segment is not None else state.detailed_report_segments
     title = document_title or (
@@ -447,7 +474,8 @@ def render_detailed_report_document(state, *, segment=None, supplements=(), docu
     )
     # A figure can be visible at several workflow gates. Keep its first segment
     # occurrence so the combined report does not repeat the same image gallery.
-    segments_html = _deduplicate_detailed_figure_blocks(segments_html)
+    if deduplicate_figures:
+        segments_html = _deduplicate_detailed_figure_blocks(segments_html)
     # Stored chapter HTML is immutable; later provenance notices are appended
     # independently so downloading a frozen chapter still discloses data changes.
     from ..quality import render_artifact_drift_notice_html

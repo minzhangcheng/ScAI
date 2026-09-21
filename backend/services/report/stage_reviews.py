@@ -6,7 +6,8 @@ import logging
 
 from backend.models.schema_parts.round_report import StageReviewReport
 from backend.models.schema_parts.session import DetailedReportSegment
-from .round_chapters import assemble_round_chapter, round_artifact_catalog
+from .round_chapters import assemble_round_chapter
+from .decision_reviews import decision_artifact_catalog
 from .variants_parts.detailed import _render_saved_chapter, render_detailed_report_document
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ async def build_stage_review(state, pi_agent, stage, *, summary="", annotations=
         stage=stage, revision=previous.revision + 1 if previous else 1,
     )
     state.stage_review_reports.append(report)
-    catalog = round_artifact_catalog(state)
+    catalog = decision_artifact_catalog(state)
     annotation_data = [item.model_dump(mode="json") for item in annotations]
     summary = summary or (round_result.pi_summary if round_result else "")
     context = {
@@ -75,22 +76,15 @@ async def build_stage_review(state, pi_agent, stage, *, summary="", annotations=
     try:
         try:
             raw = await pi_agent.generate_stage_review_chapter(state, stage, catalog, context)
-            # The PI chooses scope. Only enforce exact catalog identity and schema.
-            selected_ids = raw["stage_artifact_ids"]
-            known = {a.artifact_id for a in catalog}
-            if (not isinstance(selected_ids, list)
-                    or any(not isinstance(aid, str) or aid not in known for aid in selected_ids)):
-                raise ValueError("Stage artifact selection contains unavailable IDs")
-            selected = [a for a in catalog if a.artifact_id in selected_ids]
-            chapter = assemble_round_chapter(raw.get("report_chapter"), selected, summary, 1)
+            # The PI orders and explains evidence; it cannot hide catalog results.
+            chapter = assemble_round_chapter(raw.get("report_chapter"), catalog, summary, 1)
         except Exception:
             logger.warning("Stage review PI composition unavailable for %s/%s", state.id, stage,
                            exc_info=True)
-            # Never turn the complete Round 1 gallery into a Stage 2 review by fallback.
-            chapter = assemble_round_chapter(None, catalog if stage == "stage1" else [], summary, 1)
+            chapter = assemble_round_chapter(None, catalog, summary, 1)
             chapter.assembly_notes.append(
-                "Stage-specific narrative composition was unavailable. This is a partial "
-                "review of retained evidence; the stage-specific figure selection is incomplete."
+                "Stage-specific narrative composition was unavailable. All available "
+                "artifacts are retained with their recorded captions."
             )
         report.chapter = chapter
         report.status = "partial" if chapter.source == "fallback" or chapter.assembly_notes else "ready"
@@ -101,7 +95,7 @@ async def build_stage_review(state, pi_agent, stage, *, summary="", annotations=
                   "places confirmed annotation figures in the QC/annotation foundation section.")
         content = f'<section id="{stage}" class="report-segment"><h2>{title}</h2><p>{notice}</p>'
         content += f'<p>Review version {report.revision}; status: {report.status}.</p>'
-        content += _render_saved_chapter(state, chapter)
+        content += _render_saved_chapter(state, chapter, decision_review=True)
         if annotation_data:
             # The exact candidates being confirmed must survive narrative summarization.
             content += '<h3>Candidate Annotations Awaiting Confirmation</h3>'
@@ -133,7 +127,9 @@ async def build_stage_review(state, pi_agent, stage, *, summary="", annotations=
 
         content += '</section>'
         segment = DetailedReportSegment(phase=stage, title=title, content_html=content, round_number=1)
-        report.html = render_detailed_report_document(state, segment=segment, document_title=title)
+        report.html = render_detailed_report_document(
+            state, segment=segment, document_title=title, deduplicate_figures=False,
+        )
     except Exception:
         report.status = "failed"
         report.html = ""

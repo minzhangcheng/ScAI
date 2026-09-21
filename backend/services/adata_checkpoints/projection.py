@@ -97,9 +97,9 @@ def _ordered_entries(
             {
                 "entry_kind": "current",
                 "checkpoint_id": None,
-                "availability": "live",
+                "availability": "requires_runtime_verification",
                 "research_label": "",
-                "summary_at_capture": "Current live `adata`; no checkpoint ancestor recorded.",
+                "summary_at_capture": "No checkpoint ancestor recorded; live `adata` presence is unverified.",
             }
         )
 
@@ -231,8 +231,8 @@ def build_prompt_catalog_text(state: Any, *, max_entries: int = 12) -> str:
         elif entry.get("entry_kind") == "current":
             ancestor = entry.get("checkpoint_id") or "none"
             lines.append(
-                f"- current: live `adata`; last known checkpoint ancestor "
-                f"{ancestor}, not reloaded"
+                f"- current: `adata` binding requires runtime verification; "
+                f"last known checkpoint ancestor {ancestor}, not reloaded"
             )
         else:
             shape = (

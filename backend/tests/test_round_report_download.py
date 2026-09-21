@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from backend.models.schemas import AnalysisPhase, AnalysisState, DetailedReportSegment, RoundResult
+from backend.models.schemas import AnalysisPhase, AnalysisState, DetailedReportSegment, FigureReviewStatus, RoundResult
 from backend.routes.reports_parts import html_views
 from backend.routes.serialization import serialize_round_results
 from backend.tests.test_pi_synthesis_cross_modal import _make_wf_for_synthesis
@@ -23,6 +23,13 @@ async def test_round_ready_before_feedback_and_download_survives_reload(monkeypa
     for figure in state.publication_figures:
         figure.round_number = 2
     result = RoundResult(round_number=2, pi_summary="Summary", report_chapter=_chapter(state))
+    # Human review retains a pending revision omitted from the publication chapter.
+    rejected = state.publication_figures[0].model_copy(update={
+        "id": "pending-revision", "review_status": FigureReviewStatus.PENDING, "pi_feedback": "Needs review",
+        "revision_of_id": state.publication_figures[0].id,
+        "description": "PENDING REVIEW RESULT",
+    })
+    state.publication_figures.append(rejected)
     monkeypatch.setattr("backend.config.get_session_workspace", lambda _: tmp_path)
     monkeypatch.setattr("backend.config.get_session_reports", lambda _: tmp_path / "reports")
     wf = _make_wf_for_synthesis(state)
@@ -39,14 +46,16 @@ async def test_round_ready_before_feedback_and_download_survives_reload(monkeypa
     assert state.round_results[0].report_segment_id == segment_id
     assert serialize_round_results(state.round_results)[0]["report_segment_id"] == segment_id
 
-    loaded = AnalysisState.model_validate_json(state.model_dump_json())
+    from backend.utils.blob_store import externalize_blobs, inline_blobs
+    saved_payload = externalize_blobs(state.model_dump(mode="json"), tmp_path / "blobs")
+    loaded = AnalysisState.model_validate(inline_blobs(saved_payload, tmp_path / "blobs"))
     loaded.detailed_report_segments.append(DetailedReportSegment(
         phase="later", title="Later round", content_html="UNRELATED ROUND", round_number=3,
     ))
     # The download uses the frozen HTML, including embedded images, even after
     # workspace outputs disappear or later metadata changes.
     for figure in loaded.publication_figures:
-        Path(figure.png_path).unlink()
+        Path(figure.png_path).unlink(missing_ok=True)
     owner = AsyncMock(return_value=loaded)
     monkeypatch.setattr(html_views, "require_session_ownership", owner)
     response = await html_views.get_round_report_html(
@@ -59,6 +68,12 @@ async def test_round_ready_before_feedback_and_download_survives_reload(monkeypa
     assert "Original caption for baseline." in html
     assert "data:image/" in html
     assert "UNRELATED ROUND" not in html
+    assert "PENDING REVIEW RESULT" in html
+    assert html.count("<img ") == 3
+    assert "Needs review" in html
+    saved = next(s for s in loaded.detailed_report_segments if s.id == segment_id)
+    assert "PENDING REVIEW RESULT" not in saved.content_html
+    assert "PENDING REVIEW RESULT" in saved.decision_content_html
     assert 'filename="round_2_report.html"' in response.headers["content-disposition"]
 
 

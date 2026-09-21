@@ -69,6 +69,93 @@ class AdataCheckpointMixin:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         return root / f"adata-checkpoint-{uuid.uuid4().hex}.h5ad"
 
+    async def inspect_checkpoint_adata_locked(self) -> Dict[str, Any]:
+        """Inspect public AnnData bindings without selecting a scientific source."""
+        excluded = repr(sorted(self.host_managed_global_names()))
+        code = f'''
+def _scai_inspect_checkpoint_adata():
+    import json
+    from anndata import AnnData
+    namespace = globals()
+    candidates = []
+    for name, obj in list(namespace.items()):
+        if name.startswith("_") or name in {excluded} or not isinstance(obj, AnnData):
+            continue
+        candidates.append({{
+            "name": name, "identity": id(obj),
+            "n_obs": int(obj.n_obs), "n_vars": int(obj.n_vars),
+            "obs_columns": [str(key) for key in obj.obs.columns[:80]],
+            "layers": [str(key) for key in list(obj.layers)[:30]],
+            "obsm": [str(key) for key in list(obj.obsm)[:30]],
+            "is_view": bool(obj.is_view), "isbacked": bool(obj.isbacked),
+            "matrix_shape_consistent": (
+                None if obj.isbacked else obj.X is None or obj.X.shape == obj.shape
+            ),
+        }})
+    canonical = namespace.get("adata")
+    canonical_info = next((item for item in candidates if item["name"] == "adata"), None)
+    ready = bool(canonical_info and not canonical_info["is_view"]
+                 and not canonical_info["isbacked"]
+                 and canonical_info["matrix_shape_consistent"])
+    return {{"canonical_present": canonical is not None,
+             "canonical_identity": id(canonical) if canonical is not None else None,
+             "canonical_ready": ready,
+             "canonical_type": type(canonical).__name__,
+             "candidates": candidates}}
+import json as _scai_json
+print("__SCAI_ADATA_PREFLIGHT__:" + _scai_json.dumps(_scai_inspect_checkpoint_adata()))
+del _scai_inspect_checkpoint_adata
+'''
+        result = await self._execute_unlocked(
+            code, records_history=False, skip_safety_check=True,
+        )
+        if result.error:
+            return {"error": "kernel_execution_failed"}
+        return _marker_payload(result.output, "__SCAI_ADATA_PREFLIGHT__:") or {
+            "error": "missing_preflight_marker"
+        }
+
+    async def bind_checkpoint_adata_locked(
+        self, *, name: str, identity: int, canonical_identity: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Install an agent-selected alias only if the inspected object still exists."""
+        code = f'''
+def _scai_bind_checkpoint_adata():
+    from anndata import AnnData
+    namespace = globals()
+    canonical = namespace.get("adata")
+    actual_identity = id(canonical) if canonical is not None else None
+    if actual_identity != {canonical_identity!r}:
+        return {{"bound": False, "reason": "canonical_changed"}}
+    if isinstance(canonical, AnnData) and not canonical.is_view and not canonical.isbacked:
+        if canonical.X is None or canonical.X.shape == canonical.shape:
+            return {{"bound": False, "reason": "canonical_already_ready"}}
+    obj = namespace.get({name!r})
+    if not isinstance(obj, AnnData) or id(obj) != {int(identity)}:
+        return {{"bound": False, "reason": "candidate_changed"}}
+    if obj.is_view or obj.isbacked:
+        return {{"bound": False, "reason": "unsupported_view_or_backed"}}
+    if obj.X is not None and obj.X.shape != obj.shape:
+        return {{"bound": False, "reason": "inconsistent_matrix_shape"}}
+    preserved_name = None
+    if canonical is not None:
+        import uuid
+        preserved_name = "adata_before_binding_repair_" + uuid.uuid4().hex
+        namespace[preserved_name] = canonical
+    namespace["adata"] = obj
+    return {{"bound": True, "source_name": {name!r}, "preserved_name": preserved_name}}
+import json as _scai_json
+print("__SCAI_ADATA_BOUND__:" + _scai_json.dumps(_scai_bind_checkpoint_adata()))
+del _scai_bind_checkpoint_adata
+'''
+        result = await self._execute_unlocked(
+            code, records_history=False, skip_safety_check=True,
+        )
+        payload = _marker_payload(result.output, "__SCAI_ADATA_BOUND__:") or {}
+        if payload.get("bound"):
+            self._note_execution_effect(mutates_namespace=True, reached_kernel=True)
+        return payload
+
     async def serialize_adata_candidate_locked(
         self, candidate_path: Path,
     ) -> Dict[str, Any]:
@@ -78,15 +165,20 @@ class AdataCheckpointMixin:
         code = f"""
 import json as _scai_json
 import os as _scai_os
+from anndata import AnnData as _scai_AnnData
 _scai_result = {{"ok": False, "reason": "unknown"}}
 try:
     _scai_obj = globals().get("adata")
-    if _scai_obj is None or not hasattr(_scai_obj, "write_h5ad"):
+    if _scai_obj is None:
         _scai_result = {{"ok": False, "reason": "no_canonical_adata"}}
+    elif not isinstance(_scai_obj, _scai_AnnData):
+        _scai_result = {{"ok": False, "reason": "invalid_canonical_type"}}
     elif getattr(_scai_obj, "is_view", False):
         _scai_result = {{"ok": False, "reason": "unsupported_view"}}
     elif getattr(_scai_obj, "isbacked", False):
         _scai_result = {{"ok": False, "reason": "unsupported_backed"}}
+    elif _scai_obj.X is not None and _scai_obj.X.shape != _scai_obj.shape:
+        _scai_result = {{"ok": False, "reason": "inconsistent_matrix_shape"}}
     else:
         _scai_obj.write_h5ad(
             {candidate},

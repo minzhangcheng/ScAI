@@ -273,7 +273,15 @@ class PostExecutionReviewMixin:
         redraw_result: Dict[str, Any] = {}
         if targeted:
             from ..services.figure_followup import figure_followup_source_prompt
+            from ..agents.bioinformatics.checkpoint_preflight import ensure_checkpoint_adata
 
+            # Repair the owner namespace before the disposable renderer pins and
+            # saves its generation. The checkpoint boundary also rechecks later.
+            await ensure_checkpoint_adata(
+                self.bioinformatics_agent, getattr(self, "sandbox", None), analysis_state,
+                boundary="before_figure_followup",
+                summary="\n".join(str(task.pi_instruction or "") for task in targeted),
+            )
             lines = [
                 f"- task_id={task.id}; logical_figure_id={task.logical_figure_id}; "
                 f"plan_step_id={task.plan_step_id}; "
@@ -285,7 +293,11 @@ class PostExecutionReviewMixin:
             instruction = (
                 "Complete only the PI-directed publication-figure tasks below. "
                 "Use only objects already present in the committed runtime and the "
-                "pre-existing execution receipts named in the task scope. Do not "
+                "pre-existing execution receipts named in the task scope. Use the "
+                "canonical adata for the primary AnnData when present; honor any "
+                "explicit working binding in the source context. A filename such "
+                "as adata_annotated.h5ad does not establish an adata_annotated "
+                "variable. Do not guess alternative variable names. Do not "
                 "load data, perform or persist scientific analysis, or introduce "
                 "new scientific claims. Each task owns ONE DISTINCT output. Use a "
                 "distinct filename for each task. Call generate_publication_figure "

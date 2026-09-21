@@ -828,7 +828,7 @@ async def finalize_bioinformatics_analysis(self, ctx, result):
         if not capture_outcome.available:
             notice = (
                 "No clean Stage 1 AnnData checkpoint is currently available; "
-                "Stage 2 will continue against the live `adata`."
+                "Stage 2 must verify the available live AnnData binding before use."
             )
             result_state["adata_checkpoint_notice"] = notice
             try:
