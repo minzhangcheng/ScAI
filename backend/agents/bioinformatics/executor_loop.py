@@ -10,6 +10,7 @@ import hashlib
 import uuid
 
 from ...constants import NO_OUTPUT_TOKEN_CAP
+from ...utils.llm_client_parts.retry import retry_replay_safe_llm_call
 from ...utils.llm_client_parts.prompt_cache import (
     PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
     PromptCachePlan,
@@ -202,9 +203,34 @@ async def start_turn(context) -> TurnStart:
         })
         anchor_count += 1
         prompt_cache_plan = PromptCachePlan()
+
+    async def dispatch_tool_request(**kwargs):
+        # No tool has run yet. Replay only this request, keeping context
+        # budgeting, turn counters, checkpointing and tool execution outside.
+        client = context.agent.llm_client
+
+        async def request():
+            await _wait_for_pause_gate(context)
+            return await client.chat_with_tools(**kwargs)
+
+        async def notify_retry(attempt, maximum, delay, error):
+            await context.agent._notify(
+                "status",
+                f"LLM response incomplete; retrying request "
+                f"({attempt}/{maximum}) in {delay:.0f}s...",
+            )
+
+        return await retry_replay_safe_llm_call(
+            request,
+            agent_name="bioinformatics",
+            model_name=str(kwargs.get("model") or ""),
+            llm_server=str(getattr(client, "base_url", "") or ""),
+            on_retry=notify_retry,
+        )
+
     try:
         response = await context.agent._budgeted_text_call(
-            context.agent.llm_client.chat_with_tools,
+            dispatch_tool_request,
             messages=request_messages,
             max_tokens=NO_OUTPUT_TOKEN_CAP,
             anchor_count=anchor_count,

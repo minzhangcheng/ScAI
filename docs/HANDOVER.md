@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.2 · **Last updated**: 2026-09-21
+**Version**: 0.60.3 · **Last updated**: 2026-09-21
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,16 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.3` — Bioinformatics tool-turn LLM requests now replay a stream
+  interruption or incomplete response up to three times before opening the
+  existing failure intervention. The replay is scoped to the LLM request, so
+  context budgeting, turn counters, checkpoints, and tool execution are not
+  repeated; a later request receives a fresh replay budget even within the same
+  workflow node. Focused Bioinformatics executor and context-scope regressions
+  passed `19/19` at
+  `test-results/20260921T012653Z-2527296/evidence.json`. No application image
+  build, deployment, or historical-session mutation was performed.
 
 - `0.60.2` — Decision-time Stage 1 annotation, Stage 2 direction, and later
   round confirmation reports now show the complete registered result catalogue,
