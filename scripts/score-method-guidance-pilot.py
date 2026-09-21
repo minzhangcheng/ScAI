@@ -267,7 +267,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--case-limit", type=int, default=0)
-    parser.add_argument("--max-tokens", type=int, default=8192)
+    parser.add_argument("--max-tokens", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument("--resume", action="store_true")
     asyncio.run(_score(parser.parse_args()))

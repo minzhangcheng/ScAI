@@ -43,7 +43,6 @@ logger = logging.getLogger(__name__)
 
 # Model limits for google/gemini-3-pro-image-preview
 _TOTAL_CONTEXT_TOKENS = 65_536
-_MAX_OUTPUT_TOKENS = 32_800
 _SAFE_INPUT_TOKEN_LIMIT = 30_000  # Conservative: 64K - 32.8K ≈ 31.2K, use 30K
 
 _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"

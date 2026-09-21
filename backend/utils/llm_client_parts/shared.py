@@ -90,8 +90,6 @@ from ..llm_client_parts.retry import (  # noqa: F401
     RETRYABLE_EXCEPTIONS,
     MAX_JSON_RETRIES,
     EMPTY_CONTENT_PLACEHOLDER,
-    _TRUNCATION_RETRY_FLOOR,
-    _TRUNCATION_RETRY_CEILING,
     EMPTY_RESPONSE_MAX_RETRIES,
     REPLAY_SAFE_OUTCOME_MAX_RETRIES,
     compute_rate_limit_delay,

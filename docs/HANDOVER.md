@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.5 · **Last updated**: 2026-09-21
+**Version**: 0.60.6 · **Last updated**: 2026-09-22
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,25 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.6` — Removes ScAI-selected output-token ceilings from the OpenAI-compatible
+  text, image-chat, delegation, context-budget, and reasoning-retry paths. The
+  evaluation scripts also default to no output cap; explicitly supplied budgets
+  remain supported. Anthropic Messages requires `max_tokens`: its default now
+  starts at 65,536 and halves only after an explicit upstream output-limit
+  rejection. The first accepted value is cached per provider URL and full model
+  ID in backend process memory, shared across clients and text, tool, vision, and
+  streaming calls. Concurrent first calls negotiate once; process restart clears
+  the cache. Authentication, rate-limit, context-overflow, and transient errors do
+  not reduce the output budget. Innovation planning permits `relationship="revise"`
+  for retained results outside the accepted Round 1 foundation without inventing a
+  foundation reference; authority, reason, and any explicitly supplied foundation
+  identities remain technically validated. Focused checks passed: planning
+  `32/32` (`test-results/20260921T223520Z-687612/evidence.json`), output budgets
+  `50/50` (`test-results/20260921T224119Z-702312/evidence.json`), and Anthropic
+  negotiation/protocols `62/62` (`test-results/20260921T225226Z-729112/evidence.json`).
+  These are focused results, not full-suite evidence. No application image build,
+  deployment, or historical-session mutation was performed.
 
 - `0.60.5` — Adds provider-aware explicit prompt caching for repeated PI
   consultations and figure reviews on supported GPT-5.6+ Responses routes.

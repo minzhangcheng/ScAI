@@ -380,7 +380,6 @@ async def _execute_chat_agent_inner(
             dispatch = await provider.budget_text_dispatch(
                 PI_AGENT_NAME,
                 [{"role": "user", "content": prompt}],
-                max_tokens=2048,
             )
             resp = await llm_client.chat(
                 model=pi_model,

@@ -1,7 +1,7 @@
 """Reasoning models (e.g. mimo-v2.5) can spend the entire max_tokens budget on
 reasoning_content, leaving the visible content empty and the response truncated
 (finish_reason == 'length'). _chat_inline must detect this and retry ONCE with a
-larger budget instead of handing the EMPTY_CONTENT_PLACEHOLDER to callers (which
+no output cap instead of handing the EMPTY_CONTENT_PLACEHOLDER to callers (which
 silently swallow it — e.g. the supervisor's no-intervention fallback)."""
 import sys
 from pathlib import Path
@@ -58,21 +58,29 @@ async def client():
 
 
 @pytest.mark.asyncio
-async def test_length_truncated_empty_content_retries_with_bigger_budget(client):
+async def test_length_truncated_empty_content_retries_without_output_cap(client):
     truncated = _resp(None, finish_reason="length")          # reasoning ate the budget
     recovered = _resp('{"severity": "none"}', finish_reason="stop")
     call = AsyncMock(side_effect=[truncated, recovered])
-    with patch.object(client, "_call_with_temp_fallback", call), \
+
+    async def invoke(make_request, *_args):
+        return await make_request()
+
+    with patch.object(client.client.chat.completions, "create", call), \
+         patch.object(client, "_call_with_temp_fallback", side_effect=invoke), \
          patch_facade("backend.utils.llm_client", "logger"):
         result = await client._chat_inline("mimo-v2.5", [{"role": "user", "content": "x"}], max_tokens=512)
     assert result.content == '{"severity": "none"}'
     assert call.await_count == 2  # retried once after the truncated empty response
+    retry_params = call.await_args_list[1].kwargs
+    assert "max_tokens" not in retry_params
+    assert "max_completion_tokens" not in retry_params
 
 
 @pytest.mark.asyncio
 async def test_private_truncated_reasoning_still_retries(client):
     # A private reasoning field is not answer content. The empty public answer
-    # plus length truncation must still trigger the larger-budget retry.
+    # plus length truncation must still trigger the uncapped retry.
     truncated = _resp(None, finish_reason="length", reasoning="First, the user is asking me to...")
     recovered = _resp('{"severity": "warning"}', finish_reason="stop")
     call = AsyncMock(side_effect=[truncated, recovered])

@@ -371,7 +371,6 @@ async def _chat_image_attempt(
             {"role": "user", "content": user_content},
         ],
         temperature=runtime.temperature,
-        max_tokens=4096,
         extra_body={"modalities": ["image", "text"]},
     )
     return self._extract_image_from_response(response)

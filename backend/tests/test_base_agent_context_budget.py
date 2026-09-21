@@ -60,13 +60,13 @@ def _pending(state):
 
 
 @pytest.mark.asyncio
-async def test_small_context_sends_the_reduced_completion_maximum():
+async def test_small_context_does_not_turn_input_reserve_into_output_cap():
     state = AnalysisState(user_id="user-1")
     state.agent_server_configs["pi"] = {"context_window": 8_192}
     client = _Client()
 
     assert await _agent(state, client).chat("review") == "answer"
-    assert client.calls[0]["max_tokens"] == 7_679
+    assert client.calls[0].get("max_tokens") is None
     assert client.calls[0]["prefer_stream"] is True
 
 

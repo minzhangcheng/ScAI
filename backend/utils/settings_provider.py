@@ -382,13 +382,12 @@ class AgentSettingsProvider:
                 session_id=self._session_id,
             )
 
-        effective_max_tokens = max_tokens
-        if report.effective_completion_reserve != report.requested_completion_reserve:
-            effective_max_tokens = report.effective_completion_reserve
+        # The completion reserve sizes the input context only. It must not
+        # silently become an API output cap when the context window is small.
         return BudgetedTextDispatch(
             messages=budgeted,
             report=report,
-            max_tokens=effective_max_tokens,
+            max_tokens=max_tokens,
             pi_observation_ids=observation_ids,
         )
 

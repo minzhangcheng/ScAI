@@ -521,10 +521,11 @@ Current-round figure requirements describe current-round outputs only; do not
 redeclare an earlier foundation figure merely to make it look current. Method
 overlap alone is not a Host rejection criterion. Return scope_contract_version=1
 and foundation_inventory_id at plan level, and analysis_scope for every step.
-relationship="reuse" also covers prior results outside this foundation inventory.
+relationship="reuse" and "revise" also cover prior results outside this foundation inventory.
 For those results, name the retained artifact or prior plan in input and reason;
 leave foundation_refs empty unless this step also consumes foundation outputs.
-Do not relabel reuse as new just because its source is outside the foundation.
+For revise, retain requested_by="user" or "pi" and explain the revision reason.
+Do not relabel reuse or revise as new just because its source is outside the foundation.
 Unavailable scientific provenance is disclosed to the PI, not fabricated.
 
 Accepted foundation inventory (Host-observed technical identity only):
@@ -687,22 +688,17 @@ def validate_innovation_plan_scope(
         if len(ref_keys) != len(set(ref_keys)):
             errors.append(f"{step_label} analysis_scope has duplicate foundation references")
         relationship = str(getattr(scope, "relationship", "") or "")
-        # Reuse may concern a prior result outside the foundation inventory.
+        # Reuse and revision may concern results outside the foundation inventory.
         # Validate every claimed identity, without inventing a foundation link.
-        if relationship == "revise" and not refs:
-            errors.append(
-                f"{step_label} declares {relationship} "
-                "without an exact foundation reference"
-            )
         if relationship == "revise":
             if getattr(scope, "requested_by", None) not in {"user", "pi"}:
                 errors.append(
-                    f"{step_label} revises a foundation "
+                    f"{step_label} revises prior work "
                     "without requested_by='user' or 'pi'"
                 )
             if not str(getattr(scope, "reason", "") or "").strip():
                 errors.append(
-                    f"{step_label} revises a foundation "
+                    f"{step_label} revises prior work "
                     "without a reason"
                 )
     if errors:

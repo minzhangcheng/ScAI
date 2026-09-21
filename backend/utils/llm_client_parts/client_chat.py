@@ -112,8 +112,6 @@ from .shared import (  # noqa: F401
     RETRYABLE_EXCEPTIONS,
     MAX_JSON_RETRIES,
     EMPTY_CONTENT_PLACEHOLDER,
-    _TRUNCATION_RETRY_FLOOR,
-    _TRUNCATION_RETRY_CEILING,
     EMPTY_RESPONSE_MAX_RETRIES,
     compute_rate_limit_delay,
     retry_with_backoff,
@@ -393,17 +391,16 @@ class ClientChatMixin:
             # entire max_tokens budget on reasoning the response comes back with an
             # empty answer field AND length-truncated. Gate on the raw answer
             # content field so the placeholder does not suppress the retry.
-            # Retry once with a larger budget so the model can finish.
+            # Retry once without an output cap so the model can finish.
             if (
                 not _truncation_retried
                 and max_tokens is not None
                 and self._response_length_truncated(response)
                 and self._answer_content_empty(response)
             ):
-                bumped = min(max(max_tokens * 4, _TRUNCATION_RETRY_FLOOR), _TRUNCATION_RETRY_CEILING)
                 logger.warning(
                     f"[{self.agent_name}] Empty content from a length-truncated response "
-                    f"(max_tokens={max_tokens}); retrying once with max_tokens={bumped}"
+                    f"(max_tokens={max_tokens}); retrying once without an output cap"
                 )
                 await self._emit_log_response(
                     interaction=interaction,
@@ -412,7 +409,7 @@ class ClientChatMixin:
                     duration_ms=(time.time() - start_time) * 1000,
                 )
                 return await self._chat_inline(
-                    model, messages, temperature, bumped, stream, timeout, max_retries,
+                    model, messages, temperature, None, stream, timeout, max_retries,
                     _truncation_retried=True,
                     _reasoning_only_retried=_reasoning_only_retried,
                     non_retryable_predicate=non_retryable_predicate,

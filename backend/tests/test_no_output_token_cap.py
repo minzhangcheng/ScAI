@@ -65,10 +65,12 @@ class TestNoOutputCapOnTheWire:
             "backend/agents/pi/figures.py",
             "backend/agents/technique_agent.py",
             "backend/agents/biochemistry_agent.py",
+            "backend/agents/painter_parts/protocols.py",
             "backend/services/report/llm_calls.py",
             "backend/services/report/pi_review.py",
             "backend/services/report/planning.py",
             "backend/workflow/callbacks.py",
+            "backend/routes/chat_parts/delegation.py",
         ],
     )
     def test_no_output_cap_at_call_sites(self, module_path):
@@ -92,7 +94,7 @@ class TestNoOutputCapOnTheWire:
         # A pass-through forwards a value chosen elsewhere rather than picking
         # a cap here: a parameter of the same name (its caller is covered by its
         # own entry in this table), or `<budgeted dispatch>.max_tokens`, which
-        # is None unless the context window is too small to hold the reserve.
+        # remains None when the caller has not explicitly requested a cap.
         allowed = {"NO_OUTPUT_TOKEN_CAP", "max_tokens"}
 
         def describe(node):

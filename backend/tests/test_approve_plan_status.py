@@ -14,6 +14,7 @@ from backend.models.schemas import (
     AnalysisPhase,
     AnalysisState,
     AnalysisPlan,
+    PlanAnalysisScope,
     PlanStep,
     TaskStatus,
 )
@@ -60,6 +61,50 @@ def state_dict():
 
 class TestApprovePlanStatus:
     """Verify _approve_plan transitions TaskStatus to RUNNING."""
+
+    @pytest.mark.asyncio
+    async def test_revision_outside_foundation_can_be_approved(self, wf, state_dict):
+        analysis_state = AnalysisState(
+            user_id="test",
+            current_round=2,
+            analysis_phase=AnalysisPhase.INNOVATION,
+            status=TaskStatus.WAITING_PLAN_REVIEW,
+            accepted_foundation_inventories=[AcceptedFoundationInventory(
+                inventory_id="foundation-v1-r1",
+                round_number=1,
+                plan_id="round1-plan",
+                planning_stage="stage1",
+            )],
+        )
+        plan = AnalysisPlan(
+            phase="innovation",
+            status="user_reviewing",
+            scope_contract_version=1,
+            foundation_inventory_id="foundation-v1-r1",
+            steps=[PlanStep(
+                id=2,
+                title="Revise prior differential expression",
+                method="Apply the PI's revised contrast to retained counts",
+                input="Retained counts from prior-plan-other, outside the foundation inventory",
+                analysis_scope=PlanAnalysisScope(
+                    relationship="revise",
+                    cohort_scope="full",
+                    foundation_refs=[],
+                    reason="The PI requested a revised contrast for prior-plan-other.",
+                    requested_by="pi",
+                ),
+            )],
+        )
+
+        assert await wf._approve_plan(state_dict, plan, analysis_state, "approved") is True
+        assert state_dict["plan_approved"] is True
+        assert "user_plan_feedback" not in state_dict
+        assert plan.status == "approved"
+        assert plan.steps[0].analysis_scope.relationship == "revise"
+        assert plan.steps[0].analysis_scope.foundation_refs == []
+        assert analysis_state.current_plan is plan
+        assert analysis_state.status == TaskStatus.RUNNING
+        wf._send_state_sync.assert_awaited_once_with(analysis_state, "plan_approved")
 
     @pytest.mark.asyncio
     async def test_approve_plan_sets_status_running(self, wf, plan, analysis_state, state_dict):

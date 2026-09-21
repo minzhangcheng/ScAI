@@ -150,12 +150,14 @@ def test_valid_subset_reuse_may_overlap_a_foundation_method_family():
     validate_innovation_plan_scope(state, plan)
 
 
-def test_reuse_of_other_prior_results_does_not_invent_a_foundation_link():
+@pytest.mark.parametrize("relationship", ["reuse", "revise"])
+def test_other_prior_results_do_not_invent_a_foundation_link(relationship):
     plan = _plan(PlanAnalysisScope(
-        relationship="reuse",
+        relationship=relationship,
         cohort_scope="full",
         foundation_refs=[],
-        reason="Reuse the stored result from prior-plan-other, outside the foundation inventory.",
+        reason="Reevaluate the stored result from prior-plan-other under the PI's updated method.",
+        requested_by="pi" if relationship == "revise" else None,
     ))
     plan.steps[0].input = "Stored result table from prior-plan-other; execution provenance unavailable."
     before = plan.model_dump(mode="json")
@@ -166,7 +168,7 @@ def test_reuse_of_other_prior_results_does_not_invent_a_foundation_link():
 
     assert restored.model_dump(mode="json") == before
     assert plan.model_dump(mode="json") == before
-    assert plan.steps[0].analysis_scope.relationship == "reuse"
+    assert plan.steps[0].analysis_scope.relationship == relationship
 
 
 def test_scope_validation_reports_independent_errors_without_rewriting_references():
@@ -269,6 +271,35 @@ def test_valid_foundation_revision_requires_and_accepts_authority_and_reason():
                 requested_by=None,
             ),
             "without requested_by",
+        ),
+        (
+            PlanAnalysisScope(
+                relationship="revise",
+                cohort_scope="full",
+                foundation_refs=[],
+                reason="Reevaluate a retained result outside the foundation inventory.",
+            ),
+            "without requested_by",
+        ),
+        (
+            PlanAnalysisScope(
+                relationship="revise",
+                cohort_scope="full",
+                foundation_refs=[],
+                requested_by="pi",
+                reason="   ",
+            ),
+            "without a reason",
+        ),
+        (
+            PlanAnalysisScope(
+                relationship="revise",
+                cohort_scope="full",
+                foundation_refs=[_reference(checkpoint_id="non-foundation-checkpoint")],
+                requested_by="pi",
+                reason="Reevaluate a prior result while claiming a foundation reference.",
+            ),
+            "foundation checkpoint_id does not match inventory",
         ),
     ],
 )

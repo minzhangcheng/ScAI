@@ -31,6 +31,10 @@ from .model_traits import _WEB_SEARCH_TOOL_NAMES, _get_effective_temperature, _i
 from .protocol import _NO_BACKGROUND_ENDPOINT, _anthropic_messages_translate, _anthropic_restore_thinking, _anthropic_translate_tool_choice, _anthropic_translate_tools, _parse_anthropic_dump, _parse_responses_dump, _responses_messages_to_input, _responses_translate_tool_choice, _responses_translate_tools
 from .responses import LLMResponse, LLMToolResponse, _tool_calls_to_raw_assistant
 from .retry import DEFAULT_REQUEST_TIMEOUT
+from .anthropic_output_tokens import (
+    INITIAL_MAX_TOKENS as _ANTHROPIC_DEFAULT_MAX_TOKENS,
+    negotiate_output_tokens,
+)
 from .prompt_cache import (
     PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
     PromptCacheController,
@@ -39,13 +43,6 @@ from .prompt_cache import (
     apply_responses_prefix_cache,
     _is_openrouter_url,
 )
-
-
-# Anthropic's Messages API rejects a request without max_tokens, so this is the
-# one protocol that cannot honour NO_OUTPUT_TOKEN_CAP.  Sized to the ceiling the
-# rest of the tree used before it was removed.  A model whose own output limit
-# is lower will reject this value; no adaptation exists for that yet.
-_ANTHROPIC_DEFAULT_MAX_TOKENS = 32768
 
 
 async def _close_stream(stream) -> None:
@@ -231,19 +228,31 @@ class _AnthropicAdapter:
         modality: str = "text",
         cache_mode: PromptCacheMode = "auto",
         fallback_params: Optional[Dict[str, Any]] = None,
+        negotiate_max_tokens: bool = False,
     ):
         controller = getattr(self, "_prompt_cache_controller", None)
-        if controller is None:
-            return await self.client.messages.create(**params)
-        return await controller.request(
-            self.client.messages.create,
-            params,
-            model=model,
-            protocol="anthropic",
-            modality=modality,
-            cache_mode=cache_mode,
-            fallback_params=fallback_params,
-        )
+
+        async def request(value):
+            effective = {**params, "max_tokens": value}
+            fallback = (
+                {**fallback_params, "max_tokens": value}
+                if fallback_params is not None else None
+            )
+            if controller is None:
+                return await self.client.messages.create(**effective)
+            return await controller.request(
+                self.client.messages.create,
+                effective,
+                model=model,
+                protocol="anthropic",
+                modality=modality,
+                cache_mode=cache_mode,
+                fallback_params=fallback,
+            )
+
+        if negotiate_max_tokens:
+            return await negotiate_output_tokens(str(self.client.base_url), model, request)
+        return await request(params["max_tokens"])
 
     def _build_params(self, model, messages, temperature, max_tokens,
                       tools=None, tool_choice=None, skip_temperature=False,
@@ -409,6 +418,7 @@ class _AnthropicAdapter:
             model=model,
             cache_mode=cache_mode,
             fallback_params=fallback_params,
+            negotiate_max_tokens=max_tokens is None,
         )
         if stream:
             started = await _start_stream(
@@ -449,6 +459,7 @@ class _AnthropicAdapter:
             modality="tools",
             cache_mode=cache_mode,
             fallback_params=fallback_params,
+            negotiate_max_tokens=max_tokens is None,
         )
         return self._to_tool_response(resp, model)
 
@@ -505,6 +516,7 @@ class _AnthropicAdapter:
             modality="vision",
             cache_mode=cache_mode,
             fallback_params=fallback_params,
+            negotiate_max_tokens=max_tokens is None,
         )
         if stream:
             started = await _start_stream(
@@ -523,7 +535,9 @@ class _AnthropicAdapter:
     async def stream(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False):
         params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
         params["stream"] = True
-        stream = await self._create(params, model=model)
+        stream = await self._create(
+            params, model=model, negotiate_max_tokens=max_tokens is None,
+        )
         try:
             async for event in stream:
                 if getattr(event, "type", "") == "content_block_delta":

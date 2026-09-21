@@ -68,14 +68,6 @@ MAX_JSON_RETRIES = 2
 
 EMPTY_CONTENT_PLACEHOLDER = "[Error: LLM generated a response but content extraction failed. Please retry.]"
 
-# Floor for the one-shot retry budget when a reasoning model truncates an empty
-# response — large enough to hold reasoning_content plus a short JSON answer.
-_TRUNCATION_RETRY_FLOOR = 4096
-
-# Ceiling so an already-large budget that truncates empty doesn't balloon into an
-# oversized request the endpoint may reject.
-_TRUNCATION_RETRY_CEILING = 32768
-
 # A provider/proxy that replies HTTP 200 with an empty answer AND
 # completion_tokens == 0 generated nothing at all — a transient upstream blip
 # (silent proxy failure, dropped stream). Retry the same request with backoff
