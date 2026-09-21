@@ -15,9 +15,10 @@ from backend.models.schemas import (
 
 
 @pytest.mark.asyncio
-async def test_figure_review_receives_the_linked_plan_deliverable():
+@pytest.mark.parametrize("model", ["test-model", "openai/gpt-5.6-sol"])
+async def test_figure_review_receives_the_linked_plan_deliverable(model):
     provider = MagicMock()
-    provider.get_model.return_value = "test-model"
+    provider.get_model.return_value = model
     provider.get_system_prompt.return_value = ""
     provider.get_temperature.return_value = 0.2
     provider.get_vision_setting.return_value = True
@@ -26,6 +27,7 @@ async def test_figure_review_receives_the_linked_plan_deliverable():
         '"strengths":[],"issues":[],"suggestions":[],"must_fix":[]}'
     )))
     provider.get_llm_client.return_value = SimpleNamespace(
+        base_url="https://openrouter.ai/api/v1",
         chat_with_vision=vision,
         set_context=lambda *_args: None,
     )
@@ -112,3 +114,11 @@ async def test_figure_review_receives_the_linked_plan_deliverable():
     assert "REVISION LENIENCY POLICY" in revised_tail
     assert "REVISION LENIENCY POLICY" not in prompt
     assert vision.await_args.kwargs["images"] == ["revised-base64"]
+    for call in vision.await_args_list:
+        if model == "test-model":
+            assert "prompt_cache_plan" not in call.kwargs
+        else:
+            plan = call.kwargs["prompt_cache_plan"]
+            assert plan.responses_prefix == prefix
+            assert plan.prefer_anthropic_messages is False
+            assert "**Figure Information:**" not in plan.responses_prefix

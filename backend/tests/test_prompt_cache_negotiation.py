@@ -2,9 +2,11 @@
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+import json
 
+import httpx
 import pytest
-from openai import BadRequestError, RateLimitError
+from openai import AsyncOpenAI, BadRequestError, RateLimitError
 
 from backend.utils.llm_client import OpenAICompatibleClient
 from backend.utils.llm_client_parts.adapters import (
@@ -15,6 +17,7 @@ from backend.utils.llm_client_parts.prompt_cache import (
     PromptCacheController,
     _is_openrouter_url,
     is_prompt_cache_rejection,
+    responses_prefix_cache_plan,
 )
 
 
@@ -33,6 +36,95 @@ def test_openrouter_detection_rejects_lookalike_hosts():
     assert _is_openrouter_url("https://openrouter.ai/api/v1") is True
     assert _is_openrouter_url("https://api.openrouter.ai/v1") is True
     assert _is_openrouter_url("https://openrouter.ai.example.com/v1") is False
+
+
+@pytest.mark.parametrize("base_url,model,enabled", [
+    ("https://openrouter.ai/api/v1", "openai/gpt-5.6-sol", True),
+    ("https://api.openai.com/v1", "gpt-5.6-sol", True),
+    ("https://openrouter.ai/api/v1", "openai/gpt-5.4-mini", False),
+    ("https://openrouter.ai/api/v1", "google/gemini-3.1-pro-preview", False),
+    ("https://openrouter.ai/api/v1", "anthropic/claude-sonnet-5", False),
+    ("https://api.openai.com.example.test/v1", "gpt-5.6-sol", False),
+    ("https://openrouter.ai/api/v1/chat/completions", "openai/gpt-5.6-sol", False),
+])
+def test_responses_prefix_plan_only_opts_in_documented_routes(base_url, model, enabled):
+    plan = responses_prefix_cache_plan(base_url, model, "Stable content")
+    assert (plan is not None) is enabled
+
+
+@pytest.mark.asyncio
+async def test_responses_prefix_survives_sdk_http_serialization():
+    sent = []
+
+    def handle(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "resp-test", "object": "response", "created_at": 0,
+            "model": "openai/gpt-5.6-sol", "status": "completed",
+            "output": [],
+        })
+
+    base_url = "https://openrouter.ai/api/v1"
+    prefix = "Reusable review rules.\n"
+    model = "openai/gpt-5.6-sol"
+    async with AsyncOpenAI(
+        api_key="test", base_url=base_url,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+    ) as sdk:
+        adapter = _ResponsesAdapter(sdk, base_url=base_url)
+        await adapter.complete_vision(
+            model, prefix + "Current figure", ["aW1hZ2U="], 0.2, None,
+            system_prompt="PI system rules", cache_mode="explicit",
+            prompt_cache_plan=responses_prefix_cache_plan(base_url, model, prefix),
+        )
+    assert len(sent) == 1
+    body = sent[0]
+    assert body["prompt_cache_options"] == {"mode": "explicit"}
+    blocks = body["input"][0]["content"]
+    assert blocks[0]["text"] == prefix
+    assert blocks[0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+    assert blocks[1] == {"type": "input_text", "text": "Current figure"}
+    assert blocks[2]["type"] == "input_image"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rejected", ["prompt_cache_options", "input.0.content.0.prompt_cache_breakpoint", "extra_body"])
+async def test_responses_prefix_rejection_restores_full_input_and_is_remembered(rejected):
+    base_url = "https://openrouter.ai/api/v1"
+    model = "openai/gpt-5.6-sol"
+    prefix = "Stable rules.\n"
+    plan = responses_prefix_cache_plan(base_url, model, prefix)
+    error = (
+        TypeError("create() got an unexpected keyword argument 'extra_body'")
+        if rejected == "extra_body" else
+        _api_error(BadRequestError, f"Unsupported parameter: {rejected}", 400, param=rejected)
+    )
+    create = AsyncMock(side_effect=[error, "fallback", "next"])
+    controller = PromptCacheController(base_url, lambda: ("session-1", "pi"))
+    adapter = _ResponsesAdapter(
+        SimpleNamespace(responses=SimpleNamespace(create=create)),
+        base_url=base_url, prompt_cache_controller=controller,
+    )
+    params = {
+        "model": model, "instructions": "System rules",
+        "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": prefix + "Dynamic feedback"},
+            {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="},
+        ]}],
+    }
+    for expected in ["fallback", "next"]:
+        assert await adapter._create_responses_with_fallback(
+            params, modality="vision", cache_mode="explicit", prompt_cache_plan=plan,
+        ) == expected
+    assert create.await_count == 3
+    assert "prompt_cache_breakpoint" in create.await_args_list[0].kwargs["input"][0]["content"][0]
+    for call in create.await_args_list[1:]:
+        assert call.kwargs["input"] == params["input"]
+        assert call.kwargs["instructions"] == "System rules"
+        assert "prompt_cache_options" not in call.kwargs.get("extra_body", {})
+        if rejected != "extra_body":
+            assert "session_id" in call.kwargs["extra_body"]
+    assert controller.describe(model, "responses", "vision", "explicit")["capability"] == "unsupported"
 
 
 def test_openrouter_anthropic_adapter_uses_bearer_auth(monkeypatch):

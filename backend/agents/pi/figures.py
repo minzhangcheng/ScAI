@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState, PublicationFigure
 from ...constants import NO_OUTPUT_TOKEN_CAP
 from ...utils.llm_client import is_vision_capability_mismatch
+from ...utils.llm_client_parts.prompt_cache import responses_prefix_cache_plan
 from ..vision_replay import replay_safe_vision_call
 from .figure_adoption_prompt import build_figure_adoption_prompt
 
@@ -419,7 +420,7 @@ they are present, regardless of revision count.
         pi_decision_block = self._figure_pi_decision_text(state, figure)
 
         # Keep review rules and project context ahead of per-figure changes.
-        prompt = f"""## Figure Review for Publication Quality
+        cache_prefix = f"""## Figure Review for Publication Quality
 
 You are reviewing a figure for publication in a high-impact scientific journal.
 
@@ -470,7 +471,8 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
 
 **CRITICAL CONSTRAINT:** The experiment contains ONLY the groups listed above. Do NOT suggest adding, referencing, or comparing groups that are not in the experimental design. If the figure shows groups not listed above, flag this as a critical data accuracy issue.
 
-**Figure Information:**
+"""
+        prompt = cache_prefix + f"""**Figure Information:**
 - Name: {figure.name}
 - Type: {figure.figure_type}
 - Description: {figure.description}
@@ -503,6 +505,9 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
         if self.has_vision:
             try:
                 self._set_llm_context()
+                cache_plan = responses_prefix_cache_plan(
+                    getattr(self.llm_client, "base_url", ""), self.model, cache_prefix,
+                )
                 response = await replay_safe_vision_call(
                     self.llm_client, agent_name="pi", model=self.model,
                     text_prompt=prompt,
@@ -510,6 +515,7 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
                     temperature=0.3,
                     system_prompt=self.system_prompt,
                     prefer_stream=True,
+                    **({"prompt_cache_plan": cache_plan} if cache_plan is not None else {}),
                 )
                 response_text = response.content if response and response.content else ""
             except Exception as e:

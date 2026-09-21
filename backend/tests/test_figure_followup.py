@@ -254,3 +254,10 @@ async def test_pi_consultation_keeps_plan_prefix_stable_as_progress_changes():
     assert "Updated evidence" in second_tail and "QUESTION: Second question?" in second_tail
     assert "First evidence" not in second and "First question?" not in second
     assert [r.question for r in state.pi_decision_records] == ["First question?", "Second question?"]
+    first_call, second_call = host.pi_agent.chat_without_history.await_args_list
+    cache_prefix = first_call.kwargs["cache_prefix"]
+    assert cache_prefix == second_call.kwargs["cache_prefix"]
+    assert first.startswith(cache_prefix) and second.startswith(cache_prefix)
+    assert "Step 1: Summarize results" in cache_prefix
+    assert "Current Plan Progress" not in cache_prefix
+    assert "First evidence" not in cache_prefix and "First question?" not in cache_prefix

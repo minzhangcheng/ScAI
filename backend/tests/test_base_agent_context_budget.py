@@ -137,6 +137,28 @@ async def test_pi_standalone_chat_propagates_disabled_cache_without_marker():
 
 
 @pytest.mark.asyncio
+async def test_pi_responses_prefix_is_opt_in_and_preserves_standalone_input():
+    state = AnalysisState(user_id="user-1")
+    state.custom_models["pi"] = "openai/gpt-5.6-sol"
+    client = _Client()
+    client.base_url = "https://openrouter.ai/api/v1"
+    agent = _agent(state, client)
+    prefix = "Fixed consultation rules and the approved plan.\n"
+    prompt = prefix + "Current progress and a new question."
+
+    await agent.chat_without_history(prompt, cache_prefix=prefix)
+    await agent.chat_without_history(prompt)
+    await agent.chat_without_history("Budget-rewritten input", cache_prefix=prefix)
+
+    request = client.calls[0]
+    assert request["prompt_cache_plan"].responses_prefix == prefix
+    assert request["messages"][-1]["content"] == prompt
+    assert "prompt_cache_plan" not in client.calls[1]
+    assert "prompt_cache_plan" not in client.calls[2]
+    assert agent.message_history == []
+
+
+@pytest.mark.asyncio
 async def test_non_pi_history_chat_keeps_the_default_cache_policy():
     state = AnalysisState(user_id="user-1")
     client = _Client(prompt_cache_plan=PromptCachePlan())

@@ -262,7 +262,7 @@ If the question reveals that the current plan cannot be executed as-is, you shou
                 )
 
         # Keep reusable instructions and plan text ahead of per-call state.
-        prompt = f"""The bioinformatics analyst is asking for your guidance on a biological decision:
+        cache_prefix = f"""The bioinformatics analyst is asking for your guidance on a biological decision:
 
 Please provide clear guidance on:
 1. Your recommended decision/direction
@@ -275,7 +275,8 @@ Be specific and actionable in your response.
 IMPORTANT: Respond in English only. Do not use any other language.
 {stage_context}
 {plan_context}
-{plan_progress}
+"""
+        prompt = f"""{cache_prefix}{plan_progress}
 
 CONTEXT FROM ANALYSIS:
 {context}
@@ -305,6 +306,7 @@ QUESTION: {question}"""
             response = await call_with_intervention(
                 lambda: self.pi_agent.chat_without_history(
                     prompt, temperature=self._settings_provider.get_temperature('pi'),
+                    cache_prefix=cache_prefix,
                 ),
                 "PI consultation was skipped after an upstream failure. No PI judgment "
                 "was obtained; the question remains unresolved. This is not approval "

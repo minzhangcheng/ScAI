@@ -583,9 +583,7 @@ class ClientDispatchMixin:
                 lambda skip_temperature: adapter_call(adapter, skip_temperature)
             )
             cache_mode: PromptCacheMode = (
-                prompt_cache_plan.mode
-                if prompt_cache_plan is not None and protocol == "anthropic"
-                else "disabled"
+                prompt_cache_plan.mode_for_protocol(protocol)
                 if prompt_cache_plan is not None
                 else "auto"
             )

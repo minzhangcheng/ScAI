@@ -459,16 +459,18 @@ class ClientStreamVisionMixin:
                 (Responses, Chat Completions or Anthropic), falling back to the
                 non-streaming request when the endpoint rejects streaming or
                 the stream ends before its first event
-            prompt_cache_plan: Optional request-scoped cache plan. Explicit
-                plans cache the stable system prompt only; non-Anthropic
-                fallbacks keep cache writes disabled.
+            prompt_cache_plan: Optional request-scoped cache plan. Anthropic
+                plans cache the system prompt; Responses prefix plans also
+                cache caller-declared reusable text before dynamic text/images.
+                Other protocol fallbacks omit explicit cache controls.
 
         Returns:
             LLMResponse object
         """
         normalized_images = [normalize_image_input(image)[0] for image in images]
         cache_mode: PromptCacheMode = (
-            prompt_cache_plan.mode if prompt_cache_plan is not None else "auto"
+            prompt_cache_plan.mode_for_protocol("anthropic")
+            if prompt_cache_plan is not None else "auto"
         )
         fallback_cache_mode: PromptCacheMode = (
             "disabled" if prompt_cache_plan is not None else "auto"
@@ -517,7 +519,10 @@ class ClientStreamVisionMixin:
                 "timeout": request_timeout,
                 "skip_temperature": skip_temperature,
                 "system_prompt": system_prompt,
-                "prompt_cache_plan": prompt_cache_plan,
+                "prompt_cache_plan": (
+                    None if prompt_cache_plan is not None and prompt_cache_plan.responses_prefix
+                    else prompt_cache_plan
+                ),
                 "cache_mode": cache_mode,
             }
             return await _vision_stream_first(
@@ -565,6 +570,9 @@ class ClientStreamVisionMixin:
                 "system_prompt": system_prompt,
                 "cache_mode": fallback_cache_mode,
             }
+            if prompt_cache_plan is not None and prompt_cache_plan.responses_prefix:
+                kwargs["prompt_cache_plan"] = prompt_cache_plan
+                kwargs["cache_mode"] = prompt_cache_plan.mode_for_protocol("responses")
             if not responses_stream_enabled:
                 return await adapter.complete_vision(**kwargs)
 

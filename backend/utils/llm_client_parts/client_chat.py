@@ -590,7 +590,8 @@ class ClientChatMixin:
 
         enforced = _inject_english_enforcement(messages)
         cache_mode: PromptCacheMode = (
-            prompt_cache_plan.mode if prompt_cache_plan is not None else "auto"
+            prompt_cache_plan.mode_for_protocol("anthropic")
+            if prompt_cache_plan is not None else "auto"
         )
         fallback_cache_mode: PromptCacheMode = (
             "disabled" if prompt_cache_plan is not None else "auto"
@@ -637,7 +638,10 @@ class ClientChatMixin:
                 "max_tokens": max_tokens,
                 "timeout": timeout,
                 "skip_temperature": skip_temperature,
-                "prompt_cache_plan": prompt_cache_plan,
+                "prompt_cache_plan": (
+                    None if prompt_cache_plan is not None and prompt_cache_plan.responses_prefix
+                    else prompt_cache_plan
+                ),
                 "cache_mode": cache_mode,
             }
             return await _stream_first(
@@ -659,6 +663,9 @@ class ClientChatMixin:
                 "tools": tools,
                 "cache_mode": fallback_cache_mode,
             }
+            if prompt_cache_plan is not None and prompt_cache_plan.responses_prefix:
+                kwargs["prompt_cache_plan"] = prompt_cache_plan
+                kwargs["cache_mode"] = prompt_cache_plan.mode_for_protocol("responses")
             return await _stream_first(
                 "responses",
                 lambda: adapter.complete(

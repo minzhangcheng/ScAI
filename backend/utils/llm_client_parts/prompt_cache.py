@@ -27,7 +27,7 @@ PROMPT_CACHE_EPHEMERAL_TAIL_KEY = "_scai_prompt_cache_ephemeral_tail"
 PROMPT_CACHE_STABLE_BOUNDARY_KEY = "_scai_prompt_cache_stable_boundary"
 _PROMPT_CACHE_METADATA_PREFIX = "_scai_prompt_cache_"
 PromptCacheMode = Literal["auto", "explicit", "disabled"]
-_CACHE_PARAMETER_PATTERN = r"cache[\s_-]*control"
+_CACHE_PARAMETER_PATTERN = r"(?:cache[\s_-]*control|prompt_cache_breakpoint|prompt_cache_options)"
 _CACHE_PARAMETER_RE = re.compile(_CACHE_PARAMETER_PATTERN, re.IGNORECASE)
 _CACHE_REJECTION_AFTER = (
     r"(?:unsupported|not supported|unknown|unrecognized|unexpected|invalid|"
@@ -57,10 +57,81 @@ _EXTRA_BODY_TYPE_ERROR_RE = re.compile(
 
 @dataclass(frozen=True)
 class PromptCachePlan:
-    """Request-scoped preference for explicit Anthropic prompt caching."""
+    """Request-scoped cache boundaries; existing plans target Anthropic."""
 
     mode: Literal["explicit", "disabled"] = "explicit"
     prefer_anthropic_messages: bool = True
+    responses_prefix: str = ""
+
+    def mode_for_protocol(self, protocol: str) -> PromptCacheMode:
+        target = "responses" if self.responses_prefix else "anthropic"
+        return self.mode if protocol == target else "disabled"
+
+
+def responses_prefix_cache_plan(
+    base_url: str, model: str, prefix: str,
+) -> Optional[PromptCachePlan]:
+    """Opt in only on documented OpenAI GPT-5.6+ Responses routes."""
+    if not isinstance(base_url, str) or not isinstance(model, str):
+        return None
+    if not prefix:
+        return None
+    parsed = urlparse(base_url)
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.path.rstrip("/").endswith(("/messages", "/chat/completions")):
+        return None
+    name = model.lower()
+    if _is_openrouter_url(base_url):
+        if name.startswith("openrouter/"):
+            name = name[len("openrouter/"):]
+        if name.startswith("openai/"):
+            name = name[len("openai/"):]
+        else:
+            return None
+    elif host != "api.openai.com":
+        return None
+    match = re.fullmatch(r"gpt-(\d+)(?:\.(\d+))?(?:-[a-z0-9-]+)?", name)
+    if not match or (int(match[1]), int(match[2] or 0)) < (5, 6):
+        return None
+    return PromptCachePlan(
+        prefer_anthropic_messages=False, responses_prefix=prefix,
+    )
+
+
+def apply_responses_prefix_cache(
+    params: Mapping[str, Any], prefix: str,
+) -> Optional[Dict[str, Any]]:
+    """Split the final user text without changing bytes, roles, or image order.
+
+    A budget rewrite may have replaced the prefix. In that case leave the
+    request unmarked rather than caching a different portion of the input.
+    """
+    items = list(params.get("input") or [])
+    if not items or items[-1].get("role") != "user":
+        return None
+    content = items[-1].get("content")
+    blocks = ([{"type": "input_text", "text": content}]
+              if isinstance(content, str) else list(content or []))
+    if not blocks or blocks[0].get("type") != "input_text":
+        return None
+    text = blocks[0].get("text")
+    if not prefix or not isinstance(text, str) or not text.startswith(prefix):
+        return None
+    split = [{
+        **blocks[0], "text": prefix,
+        "prompt_cache_breakpoint": {"mode": "explicit"},
+    }]
+    if text[len(prefix):]:
+        split.append({**blocks[0], "text": text[len(prefix):]})
+    items[-1] = {**items[-1], "content": split + blocks[1:]}
+    return {
+        **params,
+        "input": items,
+        "extra_body": {
+            **(params.get("extra_body") or {}),
+            "prompt_cache_options": {"mode": "explicit"},
+        },
+    }
 
 
 def strip_prompt_cache_metadata(
@@ -141,7 +212,7 @@ def is_prompt_cache_rejection(error: Exception) -> bool:
             parameter = str(detail.get("param") or "").lower().replace("-", "_")
             if parameter:
                 return bool(re.search(
-                    r"(?:^|[.\[])cache_control(?:$|[.\]])", parameter
+                    rf"(?:^|[.\[]){_CACHE_PARAMETER_PATTERN}(?:$|[.\]])", parameter
                 ))
     if not _CACHE_PARAMETER_RE.search(text):
         return False
@@ -153,7 +224,8 @@ class PromptCacheController:
 
     Automatic cache control is used only on Anthropic's wire protocol or on a
     confidently identified Anthropic model routed through OpenRouter. Other
-    providers retain their native implicit-cache behavior.
+    providers retain their native implicit-cache behavior unless a caller
+    supplies an explicit prefix plan with marker-free fallback parameters.
     """
 
     def __init__(
@@ -347,7 +419,7 @@ class PromptCacheController:
                 and _EXTRA_BODY_TYPE_ERROR_RE.search(str(error))
             ):
                 self._extra_body_unsupported_protocols.add(protocol)
-                if cache_mode == "auto" and cache_enabled:
+                if cache_enabled:
                     self._capabilities[key] = "unsupported"
                 _session_id, agent_name = self._context_getter()
                 logger.warning(
@@ -359,7 +431,7 @@ class PromptCacheController:
                     protocol,
                     str(error)[:200],
                 )
-                fallback = dict(params)
+                fallback = dict(fallback_params if cache_mode == "explicit" else params)
                 fallback.pop("extra_body", None)
                 return await create(**fallback)
             if not cache_enabled or not is_prompt_cache_rejection(error):
@@ -369,7 +441,7 @@ class PromptCacheController:
             _session_id, agent_name = self._context_getter()
             logger.warning(
                 "[%s] Prompt cache control rejected for model=%s protocol=%s; "
-                "retrying once without cache_control: %s: %s",
+                "retrying once without cache parameters: %s: %s",
                 agent_name,
                 model,
                 protocol,

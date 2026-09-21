@@ -36,6 +36,7 @@ from .prompt_cache import (
     PromptCacheController,
     PromptCacheMode,
     PromptCachePlan,
+    apply_responses_prefix_cache,
     _is_openrouter_url,
 )
 
@@ -588,11 +589,24 @@ class _ResponsesAdapter:
         *,
         modality: str = "text",
         cache_mode: PromptCacheMode = "auto",
+        prompt_cache_plan: Optional[PromptCachePlan] = None,
     ):
         """Call responses.create with web_search tool name fallback.
         On an unknown-tool error for an auto-injected web_search tool,
         retries once with the alternate name."""
         async def create(request_params):
+            effective_mode = cache_mode
+            fallback_params = None
+            if prompt_cache_plan is not None and prompt_cache_plan.responses_prefix:
+                marked = apply_responses_prefix_cache(
+                    request_params, prompt_cache_plan.responses_prefix,
+                ) if cache_mode == "explicit" else None
+                if marked is not None:
+                    fallback_params, request_params = request_params, marked
+                    if self._prompt_cache_controller is None:
+                        self._prompt_cache_controller = PromptCacheController(self.base_url)
+                else:
+                    effective_mode = "disabled"
             if self._prompt_cache_controller is None:
                 return await self.client.responses.create(**request_params)
             return await self._prompt_cache_controller.request(
@@ -601,7 +615,8 @@ class _ResponsesAdapter:
                 model=params["model"],
                 protocol="responses",
                 modality=modality,
-                cache_mode=cache_mode,
+                cache_mode=effective_mode,
+                fallback_params=fallback_params,
             )
 
         try:
@@ -798,6 +813,7 @@ class _ResponsesAdapter:
     async def complete(self, model, messages, temperature, max_tokens, timeout=None,
                        skip_temperature=False, tools=None, stream=False,
                        defer_stream=False,
+                       prompt_cache_plan: Optional[PromptCachePlan] = None,
                        cache_mode: PromptCacheMode = "auto") -> LLMResponse:
         params = self._build_params(
             model,
@@ -811,7 +827,7 @@ class _ResponsesAdapter:
             stream=stream,
         )
         resp = await self._create_responses_with_fallback(
-            params, cache_mode=cache_mode
+            params, cache_mode=cache_mode, prompt_cache_plan=prompt_cache_plan
         )
         if stream:
             started = await _start_stream(
@@ -861,6 +877,7 @@ class _ResponsesAdapter:
                               max_tokens, timeout=None, skip_temperature=False,
                               system_prompt=None, stream=False,
                               defer_stream=False,
+                              prompt_cache_plan: Optional[PromptCachePlan] = None,
                               cache_mode: PromptCacheMode = "auto") -> LLMResponse:
         content = [{"type": "input_text", "text": text_prompt}]
         for img_b64 in images:
@@ -876,7 +893,8 @@ class _ResponsesAdapter:
             timeout=timeout, skip_temperature=skip_temperature,
         )
         resp = await self._create_responses_with_fallback(
-            params, modality="vision", cache_mode=cache_mode
+            params, modality="vision", cache_mode=cache_mode,
+            prompt_cache_plan=prompt_cache_plan,
         )
         if stream:
             started = await _start_stream(

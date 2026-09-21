@@ -24,6 +24,7 @@ from ..utils.llm_client_parts.prompt_cache import (
     PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
     PROMPT_CACHE_STABLE_BOUNDARY_KEY,
     PromptCachePlan,
+    responses_prefix_cache_plan,
 )
 from ..utils.formatting import safe_parse_json as _safe_parse_json_impl
 from ..utils.settings_provider import AgentSettingsProvider
@@ -363,7 +364,7 @@ class BaseAgent(ABC):
         finally:
             self._provider.release_client(client)
 
-    async def chat_without_history(self, message: str, temperature: Optional[float] = None, system_prompt: Optional[str] = None, timeout: Optional[float] = None, max_retries: Optional[int] = None, on_retry=None) -> str:
+    async def chat_without_history(self, message: str, temperature: Optional[float] = None, system_prompt: Optional[str] = None, timeout: Optional[float] = None, max_retries: Optional[int] = None, on_retry=None, *, cache_prefix: Optional[str] = None) -> str:
         """Send a message and get a response without using or modifying message history.
 
         Useful for isolated Q&A interactions that should not be influenced by
@@ -378,6 +379,8 @@ class BaseAgent(ABC):
             on_retry: Awaited as ``(attempt, max_retries, delay, error)`` before
                 each replay, so a caller can surface the wait it is about to
                 spend without owning a second retry budget.
+            cache_prefix: Caller-declared reusable start of a standalone PI
+                prompt. Dynamic questions and evidence must follow this text.
         """
         self.refresh_runtime_config_if_needed()
         client = self.llm_client
@@ -412,6 +415,15 @@ class BaseAgent(ABC):
                 user_message,
             ]
             dispatch = await self._apply_context_budget(messages)
+
+            if self.agent_type == AgentType.PI and cache_prefix:
+                content = dispatch.messages[-1].get("content") if dispatch.messages else None
+                if isinstance(content, str) and content.startswith(cache_prefix):
+                    prefix_plan = responses_prefix_cache_plan(
+                        getattr(client, "base_url", ""), model, cache_prefix,
+                    )
+                    if prefix_plan is not None:
+                        prompt_cache_plan = prefix_plan
 
             actual_temp = temperature if temperature is not None else self.config.temperature
 

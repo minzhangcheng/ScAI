@@ -12,6 +12,7 @@ from backend.utils.llm_client_parts.prompt_cache import (
     PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
     PROMPT_CACHE_STABLE_BOUNDARY_KEY,
     PromptCachePlan,
+    responses_prefix_cache_plan,
 )
 
 
@@ -49,6 +50,66 @@ def _client(base_url):
     c = OpenAICompatibleClient(api_key="k", base_url=base_url, agent_name="t")
     _OPEN_CLIENTS.append(c)
     return c
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vision", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_pi_prefix_reaches_responses_wire_without_caching_dynamic_tail(vision, stream):
+    model = "openai/gpt-5.6-sol"
+    client = _client("https://openrouter.ai/api/v1/responses")
+    prefix = "Review rules and project background.\n" * 160
+    plan = responses_prefix_cache_plan(client.base_url, model, prefix)
+    completed = MagicMock()
+    completed.model = model
+    completed.model_dump.return_value = {
+        "status": "completed",
+        "output": [{"type": "message", "content": [{
+            "type": "output_text", "text": "Reviewed.",
+        }]}],
+        "usage": {"input_tokens": 1800, "output_tokens": 3, "total_tokens": 1803},
+    }
+
+    async def events():
+        yield SimpleNamespace(type="response.completed", response=completed)
+
+    create = AsyncMock(side_effect=lambda **_kwargs: events() if stream else completed)
+    client.client.responses.create = create
+    for suffix, image in [("First question", "aW1hZ2U="), ("Revised feedback", "bmV3LWltYWdl")]:
+        kwargs = dict(model=model, prefer_stream=stream, prompt_cache_plan=plan)
+        if vision:
+            result = await client.chat_with_vision(
+                **kwargs, text_prompt=prefix + suffix, images=[image],
+                system_prompt="PI system rules",
+            )
+        else:
+            result = await client.chat(**kwargs, messages=[
+                {"role": "system", "content": "PI system rules"},
+                {"role": "user", "content": prefix + suffix},
+            ])
+        assert result.content == "Reviewed."
+        wire = create.await_args.kwargs
+        blocks = wire["input"][-1]["content"]
+        assert blocks[0] == {
+            "type": "input_text", "text": prefix,
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        }
+        assert blocks[1] == {"type": "input_text", "text": suffix}
+        assert "PI system rules" in wire["instructions"]
+        assert "exclusively in English" in wire["instructions"]
+        assert wire["extra_body"]["prompt_cache_options"] == {"mode": "explicit"}
+        assert "session_id" in wire["extra_body"]
+        assert bool(wire.get("stream")) is stream
+        if vision:
+            assert blocks[2] == {
+                "type": "input_image", "image_url": f"data:image/png;base64,{image}",
+            }
+        else:
+            assert len(blocks) == 2
+    assert create.await_count == 2
+    assert client._prompt_cache_controller.describe(
+        model, "responses", "vision" if vision else "text", "explicit",
+    )["capability"] == "supported"
 
 
 @pytest.mark.asyncio
