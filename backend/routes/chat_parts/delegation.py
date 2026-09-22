@@ -176,6 +176,94 @@ def _try_parse_delegation(content: str) -> Optional[Dict[str, Any]]:
             pass
     return None
 
+def _synthesis_evidence_text(value: Any, *, limit: int) -> str:
+    """Bound prompt evidence without silently presenting excerpts as complete."""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + (
+        f"\n[Evidence truncated: {len(text) - limit} characters omitted. "
+        "Missing details cannot be verified from this excerpt.]"
+    )
+
+
+def _build_execution_context(result: Dict[str, Any]) -> str:
+    """Expose executor records that are not part of the top-level findings."""
+    summaries = []
+    for step in result.get("analysis_log") or []:
+        if not isinstance(step, dict):
+            step = step.model_dump(mode="json")
+        if step.get("findings_summary"):
+            summaries.append({
+                key: step.get(key)
+                for key in (
+                    "step_number", "findings_summary", "evidence_execution_ids",
+                )
+            })
+
+    executions = []
+    for execution in result.get("code_history") or []:
+        if not isinstance(execution, dict):
+            execution = execution.model_dump(mode="json", exclude={"figures"})
+        # Keep failed/partial attempts visible so the PI can distinguish them
+        # from the computation supporting a result. Do not copy image payloads.
+        executions.append({
+            key: execution.get(key)
+            for key in (
+                "id", "round_number", "plan_id", "execution_status",
+                "code", "output", "error",
+            )
+        })
+
+    score_definitions = []
+    for score in result.get("score_definitions") or []:
+        if not isinstance(score, dict):
+            score = score.model_dump(mode="json")
+        score_definitions.append(score)
+
+    scoring_plans = []
+    for plan in result.get("scoring_plans") or []:
+        if not isinstance(plan, dict):
+            plan = plan.model_dump(mode="json")
+        scoring_plans.append(plan)
+
+    parts = []
+    if summaries:
+        parts.append(
+            "Executor report summaries (agent-authored):\n"
+            + _synthesis_evidence_text(summaries, limit=16000)
+        )
+    if executions:
+        parts.append(
+            "Execution records returned by the delegate (including any restored "
+            "history; match execution IDs to the reported results):\n"
+            + _synthesis_evidence_text(executions, limit=48000)
+        )
+    if score_definitions:
+        parts.append(
+            "Registered score definitions (structured method records):\n"
+            + _synthesis_evidence_text(score_definitions, limit=16000)
+        )
+    if scoring_plans:
+        parts.append(
+            "Frozen scoring plans (structured pre-specified method records):\n"
+            + _synthesis_evidence_text(scoring_plans, limit=16000)
+        )
+    if (
+        result.get("analysis_log")
+        or result.get("code_history")
+        or result.get("score_definitions")
+        or result.get("scoring_plans")
+    ):
+        parts.append(
+            "Record availability: "
+            f"{len(summaries)} report summaries; {len(executions)} execution records; "
+            f"{len(score_definitions)} score definitions; {len(scoring_plans)} scoring plans. "
+            "Absent records do not establish how a computation was performed."
+        )
+    return "\n".join(parts)
+
+
 def _build_synthesis_prompt(
     user_message: str,
     delegation: Dict[str, Any],
@@ -193,6 +281,9 @@ def _build_synthesis_prompt(
     for agent_name, result in agent_results.items():
         if "error" in result and not result.get("findings"):
             parts.append(f"\n### {agent_name.upper()} Agent: ERROR\n{result['error']}")
+            execution_context = _build_execution_context(result)
+            if execution_context:
+                parts.append(execution_context)
         else:
             # Extract the most useful content from agent result
             summary = result.get("synthesis", result.get("report", result.get("summary", "")))
@@ -205,9 +296,16 @@ def _build_synthesis_prompt(
                 findings_text = str(findings) if findings else ""
             agent_text = ""
             if summary:
-                agent_text += f"Summary:\n{str(summary)[:6000]}\n"
+                agent_text += (
+                    "Summary:\n"
+                    + _synthesis_evidence_text(str(summary), limit=6000)
+                    + "\n"
+                )
             if findings_text:
                 agent_text += f"Key Findings:\n{findings_text}\n"
+            execution_context = _build_execution_context(result)
+            if execution_context:
+                agent_text += f"\n{execution_context}\n"
             if not agent_text:
                 agent_text = json.dumps(result, ensure_ascii=False, indent=2)[:4000]
             parts.append(f"\n### {agent_name.upper()} Agent\n{agent_text}")
@@ -216,6 +314,18 @@ def _build_synthesis_prompt(
         "\n## Instructions\n"
         "- Synthesize these results into a comprehensive response\n"
         "- Reference specific findings from each agent\n"
+        "- Before writing Methods or figure legends, reconcile agent summaries and "
+        "findings with the supplied execution records. Describe what actually ran, "
+        "distinguishing successful computations from failed attempts and proposed work.\n"
+        "- Preserve the recorded feature lists, input representation, parameters, "
+        "sample units, and execution IDs. Do not substitute a familiar method or "
+        "reconstruct missing details from domain knowledge. Variable or layer names "
+        "alone do not establish how the data were transformed.\n"
+        "- If records conflict, explain the discrepancy and anchor the method "
+        "description to the relevant execution. If a detail or library default "
+        "cannot be verified from the supplied records, explicitly say it is "
+        "unverified rather than inventing a value, including when evidence is "
+        "missing or truncated. Scientific interpretation remains your responsibility.\n"
         "- If figures were generated during the analysis, you can reference them with [[FIGURE:figure_name]]\n"
         "- Always respond in English\n"
     )
@@ -425,6 +535,19 @@ async def _execute_chat_agent_inner(
             result = await bio_agent.run_autonomous_analysis(
                 state, instruction, max_steps=30
             )
+            # These records live on AnalysisState. Include them in the PI
+            # handoff so Methods are grounded in registered panels and
+            # parameters instead of only in prose findings.
+            result["score_definitions"] = [
+                score.model_dump(mode="json")
+                if hasattr(score, "model_dump") else score
+                for score in (getattr(state, "score_definitions", None) or [])
+            ]
+            result["scoring_plans"] = [
+                plan.model_dump(mode="json")
+                if hasattr(plan, "model_dump") else plan
+                for plan in (getattr(state, "scoring_plans", None) or [])
+            ]
             # Collect only figures generated during THIS analysis (not historical ones)
             result["figures"] = _collect_session_figures(session_id, since_time=analysis_start_time)
             return result, extra_clients

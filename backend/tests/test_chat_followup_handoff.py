@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from backend.config import SystemConfig
-from backend.models.schemas import AnalysisState
+from backend.models.schemas import AnalysisState, AnalysisStep, CodeExecution
 from backend.routes.chat_parts import delegation as chat_delegation
 from backend.routes.chat_parts import delegation_flow
 from backend.routes.chat_parts import endpoints as chat_endpoints
@@ -80,8 +80,9 @@ async def test_invalid_branch_reference_is_rejected_before_upload_or_message_mut
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("agent_name", ["literature", "bioinformatics"])
 async def test_delegation_receives_server_resolved_context_and_keeps_handoff_identity(
-    monkeypatch,
+    monkeypatch, agent_name,
 ):
     chat_delegation.delegation_flow.bind_facade(chat_delegation)
     state = AnalysisState(id="chat-followup-delegation", user_id="owner")
@@ -103,6 +104,20 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         _session_id, _state, _agent_name, instruction, _client, _callback, _files,
     ):
         delegate_instructions.append(instruction)
+        if agent_name == "bioinformatics":
+            return {
+                "findings": ["Delegate completed a score."],
+                "analysis_log": [AnalysisStep(
+                    step_number=2, step_type="report_findings",
+                    findings_summary="Executed panel: GeneA, GeneB.",
+                    evidence_execution_ids=["delegated-execution"],
+                )],
+                "code_history": [CodeExecution(
+                    id="delegated-execution",
+                    code="score(genes=['GeneA', 'GeneB'], bins=25)",
+                    output="Input is log-normalized.",
+                )],
+            }, []
         return {"summary": "delegate completed", "findings": []}, []
 
     class Provider:
@@ -151,7 +166,7 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         {
             "plan": "delegate the selected question",
             "delegates": [{
-                "agent": "literature",
+                "agent": agent_name,
                 "instruction": "Assess the selected question",
                 "priority": 1,
             }],
@@ -171,6 +186,12 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
     assert result is not delegation_flow._DELEGATION_STOP
     assert source_context in delegate_instructions[0]
     assert source_context in client.last_kwargs["messages"][0]["content"]
+    if agent_name == "bioinformatics":
+        synthesis_input = client.last_kwargs["messages"][0]["content"]
+        assert "Executed panel: GeneA, GeneB." in synthesis_input
+        assert "score(genes=['GeneA', 'GeneB'], bins=25)" in synthesis_input
+        assert "delegated-execution" in synthesis_input
+        assert "Input is log-normalized." in synthesis_input
     terminal = state.chat_messages[-1]
     assert terminal["id"] == "placeholder-id"
     assert terminal["reply_to"] == "user-id"

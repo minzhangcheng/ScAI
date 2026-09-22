@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.8 · **Last updated**: 2026-09-22
+**Version**: 0.60.9 · **Last updated**: 2026-09-22
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,18 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.9` — Repairs Chat delegation method provenance. PI synthesis now receives
+  executor report summaries, code execution records, execution status, and
+  evidence IDs that were previously retained by the Bioinformatics executor but
+  omitted from the synthesis prompt. Registered score definitions and frozen
+  scoring plans now accompany the handoff, preserving panels, parameters, plan
+  IDs, and drift observations. The synthesis instructions require reconciliation
+  of recorded feature lists, input representations, parameters, sample units, and
+  execution IDs; conflicting or unavailable details must be reported as
+  unresolved instead of reconstructed from domain knowledge. Bounded evidence
+  truncation is explicit, failed attempts remain visible, and focused regressions
+  cover serialized and live executor records.
 
 - `0.60.8` — Fixes Chat message rendering for publication-style analysis output.
   Assistant messages now support GitHub-Flavored Markdown tables and aligned
