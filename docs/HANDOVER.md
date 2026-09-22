@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.7 · **Last updated**: 2026-09-22
+**Version**: 0.60.8 · **Last updated**: 2026-09-22
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,15 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.8` — Fixes Chat message rendering for publication-style analysis output.
+  Assistant messages now support GitHub-Flavored Markdown tables and aligned
+  cells, with scoped table, heading, list, quotation, and code-block styling.
+  Inline and display LaTeX are converted to MathML through the existing pinned
+  `remark-math` and `rehype-katex` stack with `trust: false`, while fenced code
+  remains literal. Wide tables stay inside the message bubble and scroll
+  horizontally instead of overflowing the chat layout. Adds focused regression
+  coverage for tables, formulas, code, and the surrounding Markdown elements.
 
 - `0.60.7` — Fixes annotation, supplementary execution, report submission, figure
   follow-up, and literature failures identified in a deployed-session audit.

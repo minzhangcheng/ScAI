@@ -1,4 +1,3 @@
-import ReactMarkdown from 'react-markdown'
 import {
   AlertCircle, Bot, Download, FileText, Image as ImageIcon, Loader2, User,
 } from 'lucide-react'
@@ -6,6 +5,7 @@ import {
 import { base64ToDataUri } from '../utils/image'
 import { ChatAttachments } from './chat/ChatAttachments'
 import { ChatComposer } from './chat/ChatComposer'
+import { ChatMarkdown } from './chat/ChatMarkdown'
 import { isImageFile, useChatHistory } from './chat/useChatHistory'
 import { useChatSend } from './chat/useChatSend'
 
@@ -53,7 +53,7 @@ export function ChatPanel() {
                 </div>
               )}
               <div
-                className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+                className={`min-w-0 max-w-[80%] rounded-2xl px-4 py-3 ${
                   msg.role === 'user'
                     ? 'bg-accent-600 text-white'
                     : 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100'
@@ -89,9 +89,7 @@ export function ChatPanel() {
                 {/* Message content */}
                 {msg.content && (
                   msg.role === 'assistant' ? (
-                    <div className="prose prose-sm prose-slate max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                      <ReactMarkdown>{msg.content}</ReactMarkdown>
-                    </div>
+                    <ChatMarkdown content={msg.content} />
                   ) : (
                     <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                   )
