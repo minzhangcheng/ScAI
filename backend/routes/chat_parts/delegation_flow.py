@@ -110,41 +110,32 @@ async def _execute_delegation_success(
                     "status": "agent_error", "agent": agent_name, "error": str(e),
                 })
         else:
-            # Multiple agents at same priority — execute in parallel
+            # Own every child so cancellation and setup errors settle cleanup
+            # before the caller closes clients. Individual model/code budgets
+            # apply inside each agent, just as in the single-agent branch.
             tasks = []
-            for d in group:
-                a_name = d.get("agent", "unknown")
-                a_client = get_agent_llm_client(state, config, a_name, session_id)
-                if a_client is not llm_manager.openrouter:
-                    extra_clients.append(a_client)
-                tasks.append(_execute_chat_agent(
-                    session_id, state, a_name,
-                    _delegation_instruction(d.get("instruction", "")),
-                    a_client, chat_msg_callback, saved_files
-                ))
-            # Global timeout to prevent indefinite hang if an agent's LLM call stalls
-            from backend.config import CHAT_DELEGATION_TIMEOUT
             try:
-                raw_results = await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=CHAT_DELEGATION_TIMEOUT
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"Chat delegation timed out after {CHAT_DELEGATION_TIMEOUT}s for session {session_id}")
-                # Cancel all tasks and wait for them to finish cleanup
+                for d in group:
+                    a_name = d.get("agent", "unknown")
+                    a_client = get_agent_llm_client(state, config, a_name, session_id)
+                    if a_client is not llm_manager.openrouter:
+                        extra_clients.append(a_client)
+                    tasks.append(asyncio.create_task(_execute_chat_agent(
+                        session_id, state, a_name,
+                        _delegation_instruction(d.get("instruction", "")),
+                        a_client, chat_msg_callback, saved_files
+                    )))
+                raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+            except BaseException:
                 for task in tasks:
                     if not task.done():
                         task.cancel()
-                for task in tasks:
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception:
-                        pass
-                raw_results = [TimeoutError(f"Delegation timed out after {CHAT_DELEGATION_TIMEOUT}s")] * len(tasks)
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
             for d, raw_result in zip(group, raw_results):
                 agent_name = d.get("agent", "unknown")
+                if isinstance(raw_result, asyncio.CancelledError):
+                    raise raw_result
                 if isinstance(raw_result, Exception):
                     logger.error(f"Chat delegation agent {agent_name} failed: {raw_result}")
                     agent_results[agent_name] = {"error": str(raw_result), "findings": []}

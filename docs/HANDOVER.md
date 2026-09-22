@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.6 · **Last updated**: 2026-09-22
+**Version**: 0.60.7 · **Last updated**: 2026-09-22
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,46 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.7` — Fixes annotation, supplementary execution, report submission, figure
+  follow-up, and literature failures identified in a deployed-session audit.
+  Annotation resolves the requested clustering column on an explicit or unique
+  AnnData object, carries the same source through markers, validation, counts,
+  previews, and label application, and persists partition identity with the
+  confirmation. Supplementary work reuses the approved preparation or annotation
+  source, exposes that source to the PI, and records legally rebound inputs as
+  evolved instead of retaining a stale exact identity. Malformed `report_findings`
+  arguments receive the required sibling-field structure and instructions to
+  resubmit the complete intended report; legitimate single-finding reports remain
+  valid. Explicit PI redraws can use matching successful execution receipts for
+  pending steps without declaring those steps complete. Figure revision receives
+  bounded live object names, shapes, and columns rather than guessing inputs.
+  LLM request timeouts have a 600-second minimum across transports, streaming,
+  vision, research, validation, supplementary work, and image generation; longer
+  900/1800-second settings remain supported. Retrieval and aggregate work budgets
+  no longer truncate started generations, and parallel chat delegation retains
+  cancellation cleanup without imposing a whole-agent generation deadline. PI
+  literature planning has a separate budget, persists specific timeout failures,
+  and uses technical retry without consuming scientific follow-up. Nonmatching
+  source passages retain their findings and original abstracts as explicitly
+  unverified evidence for PI review. Adds `pypath-omnipath==0.16.17` for nonhuman
+  PROGENy orthology and guidance to distinguish failed from unexecuted resource
+  calls. The explicit `--update-preserving-existing` lock mode retains all 324
+  prior package versions and hashes while adding 18 required packages; hash-locked
+  clean installation and the lock contract pass with the existing decoupler/numba
+  compatibility exception unchanged. Focused application regressions on the
+  preceding immutable dependency image recorded 581 passes and six failures
+  (`test-results/20260922T002832Z-919300/evidence.json`); three test fixtures were
+  corrected and their 30-test file passed on rerun
+  (`test-results/20260922T003023Z-928821/evidence.json`), yielding 584 distinct
+  passing nodes. The remaining figure-accounting fixture failure and two PubMed
+  empty-fetch fixture failures reproduce on unmodified `0.60.6`. New dependency
+  runtime/lock-mode regressions and real nonhuman resource retrieval remain
+  unverified pending a matching test image. Release version content checks pass,
+  but the runner could not start `test_version_consistency.py` because no verified
+  local image matches the updated dependency lock. These are not full-suite or
+  deployment claims. No image build, deployment, or historical-session mutation
+  was performed.
 
 - `0.60.6` — Removes ScAI-selected output-token ceilings from the OpenAI-compatible
   text, image-chat, delegation, context-budget, and reasoning-retry paths. The

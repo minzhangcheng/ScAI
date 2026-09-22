@@ -125,6 +125,8 @@ squidpy>=1.4.0,<2.0
 # ============================================
 liana>=1.0.0,<2.0  # Comprehensive cell communication analysis (integrates CellChat, CellPhoneDB, etc.)
 omnipath>=1.0.7,<2.0  # Ligand-receptor database
+# Nonhuman PROGENy orthology in decoupler 1.8; newer pypath pins cffi<2.
+pypath-omnipath==0.16.17
 
 # ============================================
 # Deep Learning Methods (requires PyTorch)

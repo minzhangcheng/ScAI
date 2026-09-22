@@ -92,12 +92,12 @@ class AnnotationMixin:
     async def _run_annotation_validation_round(
         self, state, annotations, cluster_markers, tissue, organism,
         triage=None, database_priors=None, focused_evidence=None,
-        literature_report="", force=False,
+        literature_report="", force=False, annotation_source=None,
     ):
         annotation_validation.bind_facade(sys.modules[__name__])
         return await annotation_validation._run_annotation_validation_round(
             self, state, annotations, cluster_markers, tissue, organism,
             triage=triage, database_priors=database_priors,
             focused_evidence=focused_evidence, literature_report=literature_report,
-            force=force,
+            force=force, annotation_source=annotation_source,
         )

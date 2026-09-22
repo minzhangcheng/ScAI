@@ -84,7 +84,7 @@ async def _generate_annotation_brief(self, cluster_markers, organism, tissue, st
 
 async def begin_annotation(
     self, cluster_markers, tissue, organism, analysis_log=None,
-    database_priors=None,
+    database_priors=None, annotation_source=None,
 ):
     n_clusters = len(cluster_markers)
     if n_clusters == 0:
@@ -104,6 +104,14 @@ async def begin_annotation(
 
     # Early exit: if annotations were already confirmed, return cached results
     if state.annotation_state and state.annotation_state.confirmed:
+        saved_source = getattr(state.annotation_state, "annotation_source", None)
+        if annotation_source and (
+            not saved_source or not saved_source.get("partition_digest")
+            or saved_source.get("partition_digest") != annotation_source.get("partition_digest")
+        ):
+            return {"status": "error", "annotations": {}, "error":
+                    "The confirmed annotations have no matching source partition identity. "
+                    "Keep the historical confirmation and request an explicit annotation revision for this source."}
         logger.info(f"[{self.session_id}] Annotation already confirmed, returning cached annotations")
         cached_annotations = {}
         for ca in state.annotation_state.cluster_annotations:
@@ -132,7 +140,8 @@ async def begin_annotation(
     pi_search_guided = False
     pi_query = None
     pi_evaluate = None
-    search_deadline = time.monotonic() + float(
+    from backend.utils.llm_client_parts.retry import llm_timeout_seconds
+    search_deadline = time.monotonic() + llm_timeout_seconds(
         getattr(self.literature_agent, "search_wall_clock_seconds", 600) or 600
     )
 
@@ -146,7 +155,7 @@ async def begin_annotation(
                     tissue=tissue,
                     state=state,
                 ),
-                timeout=max(0.001, search_deadline - time.monotonic()),
+                timeout=llm_timeout_seconds(search_deadline - time.monotonic()),
             )
             logger.info(f"[{self.session_id}] PI generated annotation query: {pi_query[:100]}")
 
@@ -351,6 +360,7 @@ async def review_and_confirm_annotations(
                 triage=result.get("triage", {}), database_priors=database_priors,
                 focused_evidence=result.get("focused_evidence", {}),
                 literature_report=result.get("literature_report", ""),
+                annotation_source=annotation_source,
             )
             result["annotations"] = annotations
         except Exception as e:
@@ -360,7 +370,7 @@ async def review_and_confirm_annotations(
             )
 
         try:
-            proportion_meta = await self.bioinformatics_agent.compute_cluster_group_proportions(state)
+            proportion_meta = await self.bioinformatics_agent.compute_cluster_group_proportions(state, annotation_source=annotation_source)
         except Exception as e:
             logger.warning(f"[{self.session_id}] cluster group proportion calculation failed (non-fatal): {e}")
             proportion_meta = {"group_labels": [], "proportions": {}, "column_used": None, "dimension": "group"}
@@ -415,6 +425,7 @@ async def review_and_confirm_annotations(
 
         ann_state = AnnotationConfirmationState(
             cluster_annotations=cluster_anns,
+            annotation_source=annotation_source,
             tissue=tissue,
             organism=organism,
             tissue_summary=result.get("tissue_summary", ""),
@@ -495,6 +506,7 @@ async def review_and_confirm_annotations(
                         triage=result.get("triage", {}), database_priors=database_priors,
                         focused_evidence=result.get("focused_evidence", {}),
                         literature_report=result.get("literature_report", ""),
+                        annotation_source=annotation_source,
                         force=True,
                     )
                     result["annotations"] = annotations
@@ -506,7 +518,7 @@ async def review_and_confirm_annotations(
                     )
 
                 try:
-                    proportion_meta = await self.bioinformatics_agent.compute_cluster_group_proportions(state)
+                    proportion_meta = await self.bioinformatics_agent.compute_cluster_group_proportions(state, annotation_source=annotation_source)
                 except Exception as e:
                     logger.warning(f"[{self.session_id}] post-supplementary proportion calculation failed (non-fatal): {e}")
                     proportion_meta = {"group_labels": [], "proportions": {}, "column_used": None, "dimension": "group"}
@@ -526,6 +538,7 @@ async def review_and_confirm_annotations(
 
                 ann_state = AnnotationConfirmationState(
                     cluster_annotations=cluster_anns,
+                    annotation_source=annotation_source,
                     tissue=tissue,
                     organism=organism,
                     tissue_summary=result.get("tissue_summary", ""),
@@ -572,7 +585,7 @@ async def annotate_clusters_callback(
     database_priors=None, annotation_source=None,
 ):
     ctx = await begin_annotation(
-        self, cluster_markers, tissue, organism, analysis_log, database_priors
+        self, cluster_markers, tissue, organism, analysis_log, database_priors, annotation_source
     )
     if "_continue" not in ctx:
         return ctx

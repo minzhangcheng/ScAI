@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError, BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError
 
 from ..llm_logger import get_llm_logger, LLMInteraction
+from .retry import llm_timeout_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,7 @@ class GoogleDeepResearchClient:
             Research results
         """
         url = f"{self.BASE_URL}/interactions/{interaction_id}"
+        max_wait = llm_timeout_seconds(max_wait)
         start_time = time.time()
         
         while (time.time() - start_time) < max_wait:

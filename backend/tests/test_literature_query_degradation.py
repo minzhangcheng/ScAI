@@ -426,3 +426,54 @@ async def test_pubmed_valid_fetch_preserves_source_metadata():
         "pmid": "123", "title": "A source title", "abstract": "Original abstract.",
         "year": "2025", "authors": "", "journal": "Journal",
     }]
+
+
+@pytest.mark.asyncio
+async def test_query_batch_triage_has_600_seconds_even_after_retrieval_deadline(monkeypatch):
+    import asyncio
+    import time
+    from backend.models.schemas import DirectionSearchQuery
+
+    agent = _new_pubmed_agent()
+    timeouts = []
+    original_wait_for = asyncio.wait_for
+
+    async def record_wait(awaitable, timeout):
+        timeouts.append((awaitable.cr_code.co_name, timeout))
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    async def search(query, max_results=20):
+        return [{"pmid": "1", "title": "Source", "abstract": "Retained source"}]
+
+    async def triage(*args):
+        await asyncio.sleep(0.02)
+        return [], {"assessed": True}
+
+    monkeypatch.setattr(asyncio, "wait_for", record_wait)
+    monkeypatch.setattr(agent, "_pubmed_search", search)
+    monkeypatch.setattr(agent, "_triage_articles_with_llm", triage)
+    elapsed = []
+    _, meta, timed_out, limitations = await agent._execute_query_batch(
+        DirectionSearchQuery(category="direct_prior_work", query="literal query"), {}, [],
+        query_timeout_seconds=0.01, deadline=time.monotonic() + 0.01,
+        pause_deadlines_fn=elapsed.append,
+    )
+    assert meta == {"assessed": True}
+    assert not timed_out and not limitations
+    assert dict(timeouts)["triage"] >= 600
+    assert dict(timeouts)["search"] <= 0.01
+    assert elapsed[0] >= 0.02
+
+
+@pytest.mark.asyncio
+async def test_literature_model_timeout_uses_upstream_intervention_error():
+    import asyncio
+
+    agent = _new_pubmed_agent()
+
+    async def timed_out():
+        raise asyncio.TimeoutError
+
+    with pytest.raises(UpstreamExhaustedError, match="600s") as raised:
+        await agent._await_literature_llm(timed_out(), timeout_seconds=0.01)
+    assert raised.value.failure_kind == "timeout"

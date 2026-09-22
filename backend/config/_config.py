@@ -620,7 +620,7 @@ class SystemConfig(BaseModel):
     annotation_validation_timeout_seconds: int = Field(
         default=600,
         ge=1,
-        description="Wall-clock timeout (seconds) for the whole annotation validation executor. The default covers several bounded LLM/code iterations on large datasets; on timeout it returns a partial result rather than blocking the annotation dialog.",
+        description="Annotation validation budget in seconds, with an effective minimum of 600. The budget controls admission of another iteration; each admitted LLM request receives the full budget without an outer timer cancelling it early. Incomplete checks remain visible as partial observations.",
     )
     annotation_validation_max_iterations: int = Field(
         default=5,
@@ -653,7 +653,7 @@ class SystemConfig(BaseModel):
     post_execution_review_total_timeout_seconds: int = Field(
         default=0,
         ge=0,
-        description="Wall-clock ceiling (seconds) for the whole supplementary pass. 0 (default) derives it as the sum of the per-step budgets, i.e. it never becomes the thing that cuts a step off and only backstops a pass that never converges. Lower it to cap the worst case (all steps running to their limit); it is always raised to at least one step's budget.",
+        description="Admission budget (seconds) for the supplementary pass. 0 derives it as the sum of the per-step budgets. It is raised to at least one step's budget, and expiration prevents another step from starting without cancelling a started step. Each step has an effective minimum of 600 seconds for its LLM call.",
     )
 
     # State persistence (deprecated: use get_session_states/get_session_workspace instead)

@@ -17,6 +17,7 @@ def compute_validation_attempt_id(
     organism: str,
     cluster_key: str,
     cluster_markers: Dict[str, Any],
+    source_identity: Dict[str, Any] | None = None,
 ) -> str:
     """Deterministic id for one pending annotation attempt.
 
@@ -35,6 +36,7 @@ def compute_validation_attempt_id(
             "organism": (organism or "").strip().lower(),
             "cluster_key": cluster_key or "",
             "markers": normalized,
+            **({"source_identity": source_identity} if source_identity else {}),
         },
         sort_keys=True,
         ensure_ascii=False,

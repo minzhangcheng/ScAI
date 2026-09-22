@@ -379,7 +379,8 @@ async def test_anthropic_adapter_none_tool_choice_omits_tools():
 
 
 @pytest.mark.asyncio
-async def test_anthropic_adapter_complete_vision_passes_timeout():
+@pytest.mark.parametrize("requested, effective", [(42.0, 600.0), (900.0, 900.0)])
+async def test_anthropic_adapter_complete_vision_passes_timeout(requested, effective):
     dump = {"content": [{"type": "text", "text": "vision"}], "stop_reason": "end_turn", "usage": {}}
     client = _fake_anthropic(dump)
     adapter = _AnthropicAdapter.__new__(_AnthropicAdapter)
@@ -388,11 +389,11 @@ async def test_anthropic_adapter_complete_vision_passes_timeout():
 
     await adapter.complete_vision(
         model="claude-x", text_prompt="describe", images=[],
-        temperature=0.5, max_tokens=1000, timeout=42.0,
+        temperature=0.5, max_tokens=1000, timeout=requested,
         system_prompt="PATHOLOGY ROLE")
 
     kwargs = client.messages.create.call_args.kwargs
-    assert kwargs["timeout"] == 42.0
+    assert kwargs["timeout"] == effective
     assert "PATHOLOGY ROLE" in kwargs["system"]
     assert "respond exclusively in English" in kwargs["system"]
 

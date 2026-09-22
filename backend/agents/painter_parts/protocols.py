@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 
+from ...utils.llm_client_parts.retry import llm_timeout_seconds
+
 _MAX_RETRY_ROUNDS = 5
 
 
@@ -83,7 +85,7 @@ async def _generate_image_dashscope(
         f"(model={runtime.model})"
     )
     resp = await runtime.llm_client.http_client.post(
-        create_url, json=payload, headers=headers, timeout=30.0
+        create_url, json=payload, headers=headers, timeout=llm_timeout_seconds()
     )
     resp.raise_for_status()
     data = resp.json()
@@ -94,7 +96,7 @@ async def _generate_image_dashscope(
     logger.info(f"[{self.session_id}][Painter] DashScope: task submitted, id={task_id}")
 
     poll_url = f"{_DASHSCOPE_BASE_URL}/api/v1/tasks/{task_id}"
-    for attempt in range(60):  # up to 5 minutes (60 × 5 s)
+    for attempt in range(120):  # At least ten minutes for generation (120 × 5 s).
         await asyncio.sleep(5)
         poll_resp = await runtime.llm_client.http_client.get(
             poll_url, headers=headers, timeout=30.0
@@ -105,7 +107,7 @@ async def _generate_image_dashscope(
         task_status = status_data.get("output", {}).get("task_status", "")
         logger.debug(
             f"[{self.session_id}][Painter] DashScope task {task_id}: status={task_status} "
-            f"(attempt {attempt + 1}/60)"
+            f"(attempt {attempt + 1}/120)"
         )
 
         if task_status == "SUCCEEDED":
@@ -126,7 +128,7 @@ async def _generate_image_dashscope(
             )
 
     raise ValueError(
-        f"DashScope image generation timed out after 5 minutes (task_id={task_id})"
+        f"DashScope image generation timed out after 10 minutes (task_id={task_id})"
     )
 
 async def _generate_image(self, prompt: str) -> str:
@@ -252,8 +254,9 @@ async def _run_protocol_cascade(
     a full round fails, back off (2/4/8/16s) and retry the whole cascade, up to
     ``max_rounds`` rounds. Deterministic auth/capability errors disable that
     protocol; operation-wide content-policy failures abort immediately. Each
-    protocol carrying a ``timeout`` is bounded by it and by the optional total
-    deadline.
+    protocol carrying a ``timeout`` receives at least 600 seconds. The optional
+    total deadline controls whether another attempt starts; it never truncates
+    a started generation to a smaller leftover budget.
 
     Returns the first successfully parsed base64 image; raises ValueError if all
     protocols fail across all rounds.
@@ -261,7 +264,10 @@ async def _run_protocol_cascade(
     errors: Dict[str, str] = {}
     disabled: set[str] = set()
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + total_timeout if total_timeout is not None else None
+    deadline = (
+        loop.time() + llm_timeout_seconds(total_timeout)
+        if total_timeout is not None else None
+    )
 
     def _remaining() -> Optional[float]:
         if deadline is None:
@@ -298,7 +304,8 @@ async def _run_protocol_cascade(
             if remaining is not None:
                 if remaining <= 0:
                     break
-                timeout = min(float(timeout), remaining) if timeout else remaining
+            if timeout is not None:
+                timeout = llm_timeout_seconds(timeout)
             try:
                 if timeout:
                     return await asyncio.wait_for(proto["run"](), timeout=timeout)

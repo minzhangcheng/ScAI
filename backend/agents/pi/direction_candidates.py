@@ -192,6 +192,9 @@ Every candidate packet is present, including zero-result, failed, timeout, and u
 Counts describe retrieval only. Raw article identities, source passages, study context, and
 applicability limits are the evidence you must weigh. A zero-result or a Literature provisional
 label does not establish novelty. Keep scientific classifications and uncertainty explicit.
+A source_passage marked unverified is not an exact quotation: inspect its retained abstract in
+requested_article_details and its limitation before weighing the finding. Do not discard the
+article or infer that its scientific observation is false solely from quotation mismatch.
 You may request at most one follow-up task batch per candidate, and only with an evidence gap
 and scope-change rationale. Named PMID detail requests must use retained article IDs. When
 requested_article_details are present, use those raw sources and either finish or return an

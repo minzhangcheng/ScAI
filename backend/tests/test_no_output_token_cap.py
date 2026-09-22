@@ -226,17 +226,18 @@ class TestStreamTotalDeadline:
         assert "TimeoutError" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_start_stream_arms_the_deadline(self):
+    @pytest.mark.parametrize("requested, effective", [(7.0, 600.0), (900.0, 900.0)])
+    async def test_start_stream_arms_the_deadline(self, requested, effective):
         """The clock starts with the request, not with the first event."""
         stream = _FakeStream(_SlowIterator(0.0))
         before = time.monotonic()
         started = await _start_stream(
-            stream, consumer=None, timeout=7.0, label="test stream"
+            stream, consumer=None, timeout=requested, label="test stream"
         )
         after = time.monotonic()
 
-        assert started.total_timeout == 7.0
-        assert before + 7.0 <= started.deadline <= after + 7.0
+        assert started.total_timeout == effective
+        assert before + effective <= started.deadline <= after + effective
 
     @pytest.mark.asyncio
     async def test_unbounded_stream_has_no_deadline(self):

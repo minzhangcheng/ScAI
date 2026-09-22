@@ -276,9 +276,7 @@ class OpenAICompatibleClient(
         # Always create an explicit HTTP client with tuned timeouts and pool settings,
         # so both proxy and non-proxy scenarios get the same configuration.
         http_client_kwargs = {
-            "timeout": httpx.Timeout(
-                connect=10.0, read=DEFAULT_REQUEST_TIMEOUT, write=30.0, pool=10.0
-            ),
+            "timeout": httpx.Timeout(DEFAULT_REQUEST_TIMEOUT),
         }
         if proxy_url and not _proxy_bypass_for_url(self.base_url):
             http_client_kwargs["proxy"] = proxy_url

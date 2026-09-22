@@ -598,6 +598,11 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
 """
 
         layout_section = _layout_feedback_block(layout_violations)
+        from .figure_context import figure_input_context
+
+        input_context = await figure_input_context(
+            getattr(self, "sandbox", None), original_code,
+        )
 
         # Build revision history section (show previous rounds, exclude current which is shown below)
         history_section = ""
@@ -646,7 +651,7 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
 2. Address as many of the improvement suggestions below as possible
 3. CRITICAL: Do NOT revert previously applied fixes. If Round 1 changed grid lines to dashed, keep them dashed. If Round 2 added axis labels, keep them.
 4. You MAY change the figure size, the GridSpec, the number of rows/columns, and where legends and annotations sit — resolving a collision usually requires exactly that. Do NOT change which data is plotted.
-5. Keep using the same data variables (assume they exist), but REMOVE any fabricated/dummy data for groups not in the experimental design
+5. Reuse the original data variables and verify names and columns against the live input inventory below. Do not invent a new matrix or column to satisfy feedback. If a requested panel needs unavailable data or new analysis, preserve the existing valid panels and explain that limitation in the figure instead of fabricating data. Remove fabricated/dummy data for groups not in the experimental design.
 6. Before calling set_xticklabels()/set_yticklabels(), ALWAYS call set_xticks()/set_yticks() first with matching count
 7. For pandas Categorical columns, use .cat.add_categories() before assigning new category values
 8. Use legend_.get_legend_handles_labels() instead of legend_.legendHandles (deprecated in newer matplotlib)
@@ -678,6 +683,12 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
 ```
 
 **Figure Type:** {figure_type}
+**Measured live input inventory (bounded metadata, not scientific validation):**
+{input_context}
+Names missing from this inventory are not proof of absence because it is bounded;
+check existing code bindings before use. Locally defined names in the plotting code
+need not already exist in the kernel. An unavailable raw matrix must never be
+replaced by normalized values and labeled as raw.
 {exp_design_constraint}
 {history_section}**PI Feedback (Current Round):** {feedback}
 {layout_section}

@@ -147,7 +147,7 @@ def _bio_agent(
     agent.chat = _chat
     agent.refresh_runtime_config_if_needed = lambda *a, **k: None
 
-    async def _introspect(_hint):
+    async def _introspect(_hint, **kwargs):
         return {"var": "adata", "cluster_key": "leiden", "artifact_dir": "supplementary"}
 
     async def _capture(var_name, cluster_key):
@@ -618,11 +618,18 @@ async def test_unparseable_pi_answer_degrades_to_no_action():
 
 
 @pytest.mark.asyncio
-async def test_a_slow_step_is_interrupted_and_the_pass_continues():
+async def test_a_slow_step_is_interrupted_and_the_pass_continues(monkeypatch):
     """A step that overruns its budget must not abandon the pass: the kernel is
     interrupted, the executor is told, and the remaining steps still run."""
     import asyncio
 
+    original_wait_for = asyncio.wait_for
+
+    async def short_test_wait(awaitable, *, timeout):
+        assert timeout >= 600
+        return await original_wait_for(awaitable, timeout=0.01)
+
+    monkeypatch.setattr(asyncio, "wait_for", short_test_wait)
     state = _state_and_plan()
     interrupts = []
     executed = []
@@ -662,11 +669,24 @@ async def test_a_slow_step_is_interrupted_and_the_pass_continues():
 
 
 @pytest.mark.asyncio
-async def test_total_budget_still_backstops_a_non_converging_pass():
+async def test_total_budget_still_backstops_a_non_converging_pass(monkeypatch):
     """The total ceiling remains, for a pass that keeps producing cheap steps
     forever rather than one expensive one."""
     import asyncio
 
+    from backend.agents.bioinformatics import supplementary_support
+    clock = [0.0]
+    original_wait_for = asyncio.wait_for
+
+    async def expire_step(awaitable, *, timeout):
+        assert timeout >= 600
+        try:
+            return await original_wait_for(awaitable, timeout=0.01)
+        finally:
+            clock[0] += timeout
+
+    monkeypatch.setattr(asyncio, "wait_for", expire_step)
+    monkeypatch.setattr(supplementary_support, "time", SimpleNamespace(monotonic=lambda: clock[0], perf_counter=lambda: clock[0]))
     state = _state_and_plan()
     interrupts = []
 
@@ -686,7 +706,7 @@ async def test_total_budget_still_backstops_a_non_converging_pass():
 
     assert result["status"] == "partial"
     assert any("timeout" in w for w in result["warnings"])
-    assert interrupts, "the total ceiling must interrupt the kernel too"
+    assert interrupts, "the expired step must interrupt the kernel before admission stops"
 
 
 @pytest.mark.asyncio
@@ -696,7 +716,7 @@ async def test_no_active_object_fails_the_pass_not_the_round():
     bio = _bio_agent([json.dumps({"done": True, "result": {}})])
     bio._current_analysis_state = state
 
-    async def _no_object(_hint):
+    async def _no_object(_hint, **kwargs):
         return {}
 
     bio.introspect_validation_metadata = _no_object
@@ -746,3 +766,79 @@ async def test_final_figure_snapshot_updates_same_review_without_rewriting_pi_as
     assert snapshots["at_review"]["figure_contract"]["passed"] is False
     assert snapshots["after_figure_followup"]["figure_contract"]["passed"] is True
     assert snapshots["after_figure_followup"]["persistence_status"] == "acknowledged"
+
+
+@pytest.mark.asyncio
+async def test_supplementary_uses_exact_preparation_and_retains_source_receipt():
+    from backend.models.schema_parts.adata_checkpoints import AdataSourcePreparation, AdataSourceSelection
+    state = _state_and_plan()
+    prep = AdataSourcePreparation(
+        owner_id=state.current_plan.id, preparation_id="prep_test", binding_name="scai_work_test",
+        selection=AdataSourceSelection(mode="checkpoint_copy", checkpoint_id="checkpoint_test"),
+        anchor_name="scai_anchor_test", binding_id="binding_test", binding_identity_status="exact",
+        adata_lineage_id="source_lineage", loaded_checkpoint_id="checkpoint_test",
+    )
+    state.adata_source_preparations.append(prep)
+    bio = _bio_agent([
+        json.dumps({"code": "print(scai_work_test.n_obs)"}),
+        json.dumps({"done": True, "result": {"summary": "Source checked", "findings": []}}),
+    ])
+    bio._current_analysis_state = state
+    observed = []
+
+    async def inspect_source(hint, **kwargs):
+        observed.append((hint, kwargs))
+        return {"var": "scai_work_test", "cluster_key": "leiden", "obs_columns": ["leiden", "condition"], "partition_digest": "final"}
+
+    bio.introspect_validation_metadata = inspect_source
+    source = {"preparation_id": "prep_test", "cluster_key": "leiden"}
+    names = await _Harness(_pi_agent([]), bio)._collect_session_names(
+        state, {"resolved_adata_source_context": source}, True,
+    )
+    rendered = PIAgent._format_session_names(names)
+    assert '"cluster_key": "leiden"' in rendered and "scai_work_test" in rendered
+    result = await bio.run_supplementary_tasks(
+        tasks=["Inspect final leiden cluster counts"], context_summary="", direction="d",
+        source_context=source, max_iterations=2,
+    )
+    assert observed[-1] == ("leiden", {
+        "preferred_var_name": "scai_work_test", "require_preferred": True,
+        "expected_anchor_name": "scai_anchor_test",
+    })
+    assert result["active_object_selection"]["name"] == "scai_work_test"
+    assert result["code_history"][0].adata_source_preparation_id == "prep_test"
+    assert result["code_history"][0].adata_input_binding_id == "binding_test"
+
+
+@pytest.mark.asyncio
+async def test_supplementary_rechecks_binding_and_keeps_authorized_rebinding_visible():
+    from backend.models.schema_parts.adata_checkpoints import AdataSourcePreparation, AdataSourceSelection
+    state = _state_and_plan()
+    prep = AdataSourcePreparation(
+        owner_id=state.current_plan.id, preparation_id="prep_test", binding_name="scai_work_test",
+        selection=AdataSourceSelection(mode="checkpoint_copy", checkpoint_id="checkpoint_test"),
+        anchor_name="scai_anchor_test", binding_id="binding_test", binding_identity_status="exact",
+    )
+    state.adata_source_preparations.append(prep)
+    bio = _bio_agent([json.dumps({"code": "print(scai_work_test.n_obs)"})])
+    bio._current_analysis_state = state
+
+    async def inspect_source(hint, **kwargs):
+        return {"var": "scai_work_test", "cluster_key": "leiden"}
+
+    async def execute_and_rebind(code, **kwargs):
+        prep.binding_identity_status = "evolved"
+        return SimpleNamespace(output="first check completed", error=None, figures=[])
+
+    bio.introspect_validation_metadata = inspect_source
+    bio.sandbox.execute = execute_and_rebind
+    result = await bio.run_supplementary_tasks(
+        tasks=["Inspect final clusters"], context_summary="", direction="d",
+        source_context={"preparation_id": "prep_test", "cluster_key": "leiden"}, max_iterations=3,
+    )
+    assert result["status"] == "partial"
+    assert len(result["code_history"]) == 3
+    assert result["code_history"][0].adata_input_binding_status == "exact"
+    assert result["code_history"][1].adata_input_binding_status == "evolved"
+    assert "evolved after entry" in " ".join(result["warnings"])
+    assert len(bio.prompts_seen) == 3

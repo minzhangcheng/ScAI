@@ -30,7 +30,7 @@ from .media import _detect_image_mime_type, _inject_english_enforcement
 from .model_traits import _WEB_SEARCH_TOOL_NAMES, _get_effective_temperature, _is_deep_research_model
 from .protocol import _NO_BACKGROUND_ENDPOINT, _anthropic_messages_translate, _anthropic_restore_thinking, _anthropic_translate_tool_choice, _anthropic_translate_tools, _parse_anthropic_dump, _parse_responses_dump, _responses_messages_to_input, _responses_translate_tool_choice, _responses_translate_tools
 from .responses import LLMResponse, LLMToolResponse, _tool_calls_to_raw_assistant
-from .retry import DEFAULT_REQUEST_TIMEOUT
+from .retry import DEFAULT_REQUEST_TIMEOUT, llm_timeout_seconds
 from .anthropic_output_tokens import (
     INITIAL_MAX_TOKENS as _ANTHROPIC_DEFAULT_MAX_TOKENS,
     negotiate_output_tokens,
@@ -140,7 +140,7 @@ class _StartedStream:
 
 async def _start_stream(stream, consumer, *, timeout, label) -> _StartedStream:
     """Receive the first event before returning control to the retry layer."""
-    idle_timeout = timeout if timeout is not None else DEFAULT_REQUEST_TIMEOUT
+    idle_timeout = llm_timeout_seconds(timeout)
     # Total deadline, matching the non-streaming path: without an output-token
     # cap, a runaway thinking chain that keeps emitting deltas would otherwise
     # never trip the per-event idle bound (one observed upstream generation ran
@@ -399,7 +399,7 @@ class _AnthropicAdapter:
         if stream:
             params["stream"] = True
         if timeout is not None:
-            params["timeout"] = timeout
+            params["timeout"] = llm_timeout_seconds(timeout)
         fallback_params = None
         if cache_mode == "explicit":
             fallback_params = self._build_params(
@@ -412,7 +412,7 @@ class _AnthropicAdapter:
             if stream:
                 fallback_params["stream"] = True
             if timeout is not None:
-                fallback_params["timeout"] = timeout
+                fallback_params["timeout"] = llm_timeout_seconds(timeout)
         resp = await self._create(
             params,
             model=model,
@@ -494,7 +494,7 @@ class _AnthropicAdapter:
             prompt_cache_plan=prompt_cache_plan,
         )
         if timeout is not None:
-            params["timeout"] = timeout
+            params["timeout"] = llm_timeout_seconds(timeout)
         if stream:
             params["stream"] = True
         fallback_params = None
@@ -507,7 +507,7 @@ class _AnthropicAdapter:
                 skip_temperature=skip_temperature,
             )
             if timeout is not None:
-                fallback_params["timeout"] = timeout
+                fallback_params["timeout"] = llm_timeout_seconds(timeout)
             if stream:
                 fallback_params["stream"] = True
         resp = await self._create(
@@ -534,6 +534,7 @@ class _AnthropicAdapter:
 
     async def stream(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False):
         params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
+        params["timeout"] = llm_timeout_seconds(timeout)
         params["stream"] = True
         stream = await self._create(
             params, model=model, negotiate_max_tokens=max_tokens is None,
@@ -594,7 +595,7 @@ class _ResponsesAdapter:
         if stream:
             params["stream"] = True
         if timeout is not None:
-            params["timeout"] = timeout
+            params["timeout"] = llm_timeout_seconds(timeout)
         return params
 
     async def _create_responses_with_fallback(

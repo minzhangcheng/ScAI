@@ -153,16 +153,25 @@ def _receipt_map(state: Any, current_receipts: Iterable[Any] = ()) -> dict[str, 
     }
 
 
-def eligible_figure_source_ids(state: Any, *, plan_step_id: int | None = None) -> list[str]:
-    """Return current-plan successful ordinary receipts bound to completed steps."""
+def eligible_figure_source_ids(
+    state: Any, *, plan_step_id: int | None = None, pi_authorized_redraw: bool = False,
+) -> list[str]:
+    """Return successful receipts for completed steps or an explicit PI redraw.
+
+    A step can remain pending because its figure is missing. The PI's redraw
+    authorization permits rendering its existing receipts without granting the
+    step scientific completion or authorizing new analysis.
+    """
     plan = getattr(state, "current_plan", None)
     plan_id = str(getattr(plan, "id", "") or "")
     round_number = int(getattr(state, "current_round", 0) or 0)
     lineage_id = _lineage_id(state)
-    completed_ids = set(_plan_step_ids(plan, completed_only=True))
+    source_step_ids = set(_plan_step_ids(
+        plan, completed_only=not (pi_authorized_redraw and plan_step_id is not None),
+    ))
     if plan_step_id is not None:
-        completed_ids &= {int(plan_step_id)}
-    if not plan_id or round_number < 1 or not completed_ids:
+        source_step_ids &= {int(plan_step_id)}
+    if not plan_id or round_number < 1 or not source_step_ids:
         return []
     preparation_id = _active_preparation_id(state)
     eligible = []
@@ -186,9 +195,7 @@ def eligible_figure_source_ids(state: Any, *, plan_step_id: int | None = None) -
             for raw in (getattr(receipt, "plan_step_ids", None) or [])
             if str(raw).isdigit() and int(raw) > 0
         }
-        if not receipt_steps.intersection(completed_ids):
-            continue
-        if not receipt_steps.intersection(set(_plan_step_ids(plan, completed_only=True))):
+        if not receipt_steps.intersection(source_step_ids):
             continue
         source_preparation_id = str(
             getattr(receipt, "adata_source_preparation_id", "") or ""
@@ -215,6 +222,7 @@ def build_figure_followup_scope(
     if not plan_id or round_number < 1 or not run_scope_id:
         raise ValueError("Figure follow-up scope has no current plan, round, or run identity")
     completed_ids = set(_plan_step_ids(plan, completed_only=True))
+    plan_step_ids = set(_plan_step_ids(plan))
     receipt_map = _receipt_map(state)
     task_entries = []
     seen_task_ids = set()
@@ -229,9 +237,20 @@ def build_figure_followup_scope(
             step_id = int(_value(task, "plan_step_id", 0) or 0)
         except (TypeError, ValueError):
             step_id = 0
-        if not task_id or task_id in seen_task_ids or step_id not in completed_ids:
+        authorized_redraw = (
+            _value(task, "pi_disposition") == "targeted_redraw"
+            and _value(task, "plan_id") == plan_id
+            and int(_value(task, "round_number", 0) or 0) == round_number
+            and (_value(task, "lineage_id") or "main") == lineage_id
+        )
+        if (
+            not task_id or task_id in seen_task_ids or step_id not in plan_step_ids
+            or (step_id not in completed_ids and not authorized_redraw)
+        ):
             continue
-        allowed_ids = eligible_figure_source_ids(state, plan_step_id=step_id)
+        allowed_ids = eligible_figure_source_ids(
+            state, plan_step_id=step_id, pi_authorized_redraw=authorized_redraw,
+        )
         task_entries.append({
             "task_id": task_id[:240],
             "logical_figure_id": str(_value(task, "logical_figure_id", "") or "")[:240],

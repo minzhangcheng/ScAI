@@ -368,6 +368,10 @@ Reply with STRICT JSON only:
         """
         names = session_names or {}
         lines: List[str] = []
+        source = names.get("analysis_source") or {}
+        if isinstance(source, dict) and source:
+            lines.append("- Resolved analysis source: " + json.dumps(source, ensure_ascii=False))
+            lines.append("- Frame supplementary tasks against this source and its exact cluster_key; do not reuse cluster IDs from another partition. A selection_error is a technical source limitation, not missing scientific evidence.")
         for key, label in cls._NAME_CATEGORIES:
             values = [
                 str(v)[:_MAX_NAME_LEN] for v in (names.get(key) or []) if str(v).strip()

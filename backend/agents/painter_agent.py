@@ -54,7 +54,7 @@ _MAX_RETRY_ROUNDS = 5          # full-cascade rounds before giving up
 _REVISION_MAX_RETRY_ROUNDS = 2
 _REVISION_TOTAL_TIMEOUT = 720.0
 _INTER_PROTOCOL_DELAY = 1.0    # seconds to wait when switching protocols within a round
-_PROTOCOL_TIMEOUT = 180.0      # per-attempt timeout for Images API / Chat protocols
+_PROTOCOL_TIMEOUT = 600.0      # per-attempt timeout for Images API / Chat protocols
 
 
 @dataclass(frozen=True)

@@ -96,7 +96,8 @@ def _add_eligible_source(state: AnalysisState, *, execution_id: str = "source"):
 
 
 @pytest.mark.asyncio
-async def test_targeted_missing_figure_falls_back_to_explicit_pi_selection():
+@pytest.mark.parametrize("step_status", ["completed", "pending"])
+async def test_targeted_missing_figure_falls_back_to_explicit_pi_selection(step_status):
     state = AnalysisState(
         id="figure-followup", user_id="user", current_round=3,
         initial_instruction="Analyze the declared contrast.",
@@ -105,6 +106,7 @@ async def test_targeted_missing_figure_falls_back_to_explicit_pi_selection():
         id="plan-1", phase="innovation", status="approved", steps=[],
     )
     _add_eligible_source(state)
+    state.current_plan.steps[0].status = step_status
     requirement = RequiredFigure(
         key="plan.2.1",
         figure_type="volcano",
@@ -183,6 +185,61 @@ async def test_targeted_missing_figure_falls_back_to_explicit_pi_selection():
     assert "Never extract a UUID from logical_figure_id" in call.args[1]
     assert call.kwargs["resume_from_checkpoint"] is True
     assert call.kwargs["run_kind"] == "figure_followup"
+    assert state.current_plan.steps[0].status == step_status
+
+
+@pytest.mark.parametrize("invalid_source", [
+    "missing", "failed", "wrong_plan", "wrong_lineage", "supplementary",
+    "wrong_step", "wrong_preparation",
+])
+def test_pending_step_redraw_preserves_receipt_identity_checks(invalid_source):
+    from backend.services.figure_followup import build_figure_followup_scope
+
+    state = AnalysisState(user_id="figure-identity", current_round=3)
+    state.current_plan = AnalysisPlan(
+        id="plan-1", phase="innovation", status="approved", steps=[],
+    )
+    receipt = _add_eligible_source(state)
+    state.current_plan.steps[0].status = "pending"
+    if invalid_source == "missing":
+        state.code_history = []
+    elif invalid_source == "failed":
+        receipt.execution_status = "failed"
+    elif invalid_source == "wrong_plan":
+        receipt.plan_id = "other-plan"
+    elif invalid_source == "wrong_lineage":
+        receipt.lineage_id = "other-lineage"
+    elif invalid_source == "supplementary":
+        receipt.executor_run_kind = "supplementary"
+    elif invalid_source == "wrong_step":
+        receipt.plan_step_ids = [3]
+    else:
+        receipt.adata_source_preparation_id = "other-preparation"
+    task = {
+        "id": "task", "plan_id": "plan-1", "plan_step_id": 2,
+        "round_number": 3, "lineage_id": "main",
+        "pi_disposition": "targeted_redraw",
+    }
+    scope = build_figure_followup_scope(state, [task], run_scope_id="redraw")
+    assert scope["tasks"][0]["eligible_execution_ids"] == []
+    assert state.current_plan.steps[0].status == "pending"
+
+
+@pytest.mark.parametrize("disposition", [None, "omit", "needs_new_analysis"])
+def test_pending_step_requires_explicit_pi_redraw(disposition):
+    from backend.services.figure_followup import build_figure_followup_scope
+
+    state = AnalysisState(user_id="figure-authority", current_round=3)
+    state.current_plan = AnalysisPlan(
+        id="plan-1", phase="innovation", status="approved", steps=[],
+    )
+    _add_eligible_source(state)
+    state.current_plan.steps[0].status = "pending"
+    scope = build_figure_followup_scope(state, [{
+        "id": "task", "plan_id": "plan-1", "plan_step_id": 2,
+        "round_number": 3, "lineage_id": "main", "pi_disposition": disposition,
+    }], run_scope_id="redraw")
+    assert scope["tasks"] == []
 
 
 @pytest.mark.asyncio

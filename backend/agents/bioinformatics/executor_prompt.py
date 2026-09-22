@@ -292,8 +292,10 @@ PACKAGE API LOOKUP:
   NEVER swallow an API error (AttributeError / TypeError / ImportError / ModuleNotFoundError) with
   try/except and then record a skip decision. An API or version mismatch (e.g. a function that does
   not exist in the installed version) is FIXABLE: call lookup_documentation for the failing function,
-  correct the call, and retry. Only skip an analysis when the DATA itself is incompatible (e.g. no
-  spliced/unspliced layers, no overlapping barcodes).
+  correct the call, and retry. If a required dependency is genuinely absent and no documented
+  installed route works, report that specific technical limitation to the PI; do not invent a
+  successful result. Data incompatibility (e.g. no spliced/unspliced layers or no overlapping
+  barcodes) is a separate reason an analysis may be unavailable.
   When you do skip, do NOT present a different method as though it answered the same
   question. RNA velocity infers direction from splicing kinetics; DPT and PAGA infer
   ordering and connectivity from expression similarity and need a root cell you must
@@ -400,6 +402,7 @@ Do NOT call open('filename', 'w') with bare filenames — use open(_WORKSPACE_DI
 
 **MISSING DEPENDENCIES**:
 If an optional package is missing, do not install packages directly from notebook code. Report the missing dependency, explain which analysis step is limited, and use an already-installed alternative only when the substitution is scientifically valid.
+Probe independent optional resources in separate execute_code calls so each has its own execution receipt. When a cell raises before a later call, that later call was not executed: do not describe it as failed, successful, or sharing the first call's dependency problem. Verify each resource and organism-specific route independently, then report the observed outcome and traceback for that route.
 
 **CRITICAL: DATA PREPROCESSING (MUST DO BEFORE PCA)**
 Before running sc.tl.pca() or any dimensionality reduction:

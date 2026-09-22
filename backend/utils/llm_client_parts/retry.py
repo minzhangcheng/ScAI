@@ -38,6 +38,17 @@ from ..context_overflow import is_context_overflow
 # still bills the full response. A deadline that is too tight therefore pays for
 # the same tokens on every retry and receives nothing.
 DEFAULT_REQUEST_TIMEOUT = 600.0
+MIN_LLM_TIMEOUT_SECONDS = 600.0
+
+
+def llm_timeout_seconds(value: Optional[float] = None) -> float:
+    """Keep every started model request's timeout at least ten minutes.
+
+    Business budgets may decide whether to start another request, but must not
+    shorten an in-flight generation using a network-query or leftover budget.
+    Longer caller timeouts retain their meaning.
+    """
+    return max(MIN_LLM_TIMEOUT_SECONDS, float(value or DEFAULT_REQUEST_TIMEOUT))
 
 # Retry configuration
 MAX_RETRIES = 4
@@ -229,6 +240,7 @@ async def retry_with_backoff(
     Raises:
         The last exception if all retries fail
     """
+    request_timeout = llm_timeout_seconds(request_timeout)
     last_exception = None
     caller_max = max(0, max_retries)
     effective_max = caller_max

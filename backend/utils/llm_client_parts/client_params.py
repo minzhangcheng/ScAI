@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Implementations live in ./llm_client_parts/; re-exported here so existing
 # importers and tests keep resolving them from this module.
 
-from .retry import DEFAULT_REQUEST_TIMEOUT
+from .retry import DEFAULT_REQUEST_TIMEOUT, llm_timeout_seconds
 from .prompt_cache import PromptCacheMode
 from .shared import (  # noqa: F401
     base64,
@@ -325,7 +325,7 @@ class ClientParamsMixin:
                 tools=tools, max_tokens=max_tokens, expected_context=expected_context,
             )
         if request_timeout is not None:
-            kwargs["request_timeout"] = request_timeout
+            kwargs["request_timeout"] = llm_timeout_seconds(request_timeout)
         if max_retries_override is not None:
             kwargs["max_retries"] = max_retries_override
         elif request_timeout is not None and request_timeout > DEFAULT_REQUEST_TIMEOUT:
@@ -373,14 +373,14 @@ class ClientParamsMixin:
             params = {**base_params}
             self._apply_model_params(params, model, temperature, max_tokens)
             if request_timeout is not None:
-                params["timeout"] = request_timeout
+                params["timeout"] = llm_timeout_seconds(request_timeout)
             return await send(params)
 
         async def make_request_no_temp():
             params = {**base_params}
             self._apply_model_params(params, model, temperature, max_tokens, skip_temperature=True)
             if request_timeout is not None:
-                params["timeout"] = request_timeout
+                params["timeout"] = llm_timeout_seconds(request_timeout)
             return await send(params)
 
         return make_request, make_request_no_temp

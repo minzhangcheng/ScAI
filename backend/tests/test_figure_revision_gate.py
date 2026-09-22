@@ -1081,6 +1081,23 @@ class _PromptAgent(FiguresMixin):
         return await method(**kwargs)
 
 
+@pytest.mark.asyncio
+async def test_figure_revision_receives_measured_columns(monkeypatch):
+    from backend.agents.bioinformatics import figure_context
+
+    inventory = AsyncMock(return_value='{"objects": [{"name": "ad", "obs_columns": ["condition"]}]}')
+    monkeypatch.setattr(figure_context, "figure_input_context", inventory)
+    agent = _PromptAgent()
+    await agent._revise_figure_code(
+        "plot(ad)", "Fix labels", [], [], "barplot", image_base64=None,
+    )
+    prompt = agent.llm_client.calls[0][1]["messages"][0]["content"]
+    assert '"obs_columns": ["condition"]' in prompt
+    assert "Do not invent a new matrix or column" in prompt
+    assert "unavailable raw matrix must never be" in prompt
+    inventory.assert_awaited_once_with(None, "plot(ad)")
+
+
 class _PayloadRejectLLM(_PromptLLM):
     async def chat_with_vision(self, **kwargs):
         self.calls.append(("vision", kwargs))

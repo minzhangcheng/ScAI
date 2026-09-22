@@ -202,17 +202,18 @@ async def handle_annotate_clusters(context, tool_call) -> ToolAction:
     cluster_markers = self._sanitize_cluster_markers(cluster_markers)
     n_clusters = len(cluster_markers)
     # Discover the active AnnData variable and clustering key in sandbox
-    adata_var, cluster_key = await self._discover_adata_in_sandbox(cluster_key_hint)
+    annotation_source = await self.resolve_analysis_source_metadata(
+        getattr(context, "resolved_adata_source_context", None),
+        cluster_key=cluster_key_hint, preferred_var_name=args.get("adata_var"),
+    )
+    adata_var, cluster_key = annotation_source.get("var"), annotation_source.get("cluster_key")
+    annotation_source["adata_var"] = adata_var
     if adata_var is None:
         tool_result = (
-            "Error: Could not find an AnnData object with a clustering column "
-            "(leiden/louvain/cluster, or any column starting with 'leiden'/'louvain') "
-            "in the sandbox. Before calling annotate_clusters, "
-            "you must: (1) load data into an AnnData variable, (2) run clustering "
-            "(e.g., sc.tl.leiden(adata)), and (3) run differential expression "
-            "(sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')). "
-            "If using non-default column names (e.g., 'leiden_broad'), pass "
-            "cluster_key explicitly."
+            "Error: annotation source could not be resolved: "
+            + str(annotation_source.get("selection_error") or "no AnnData matches the requested clustering column")
+            + ". Pass adata_var and the exact cluster_key for the object whose markers are supplied; "
+            "do not substitute another partition."
         )
         logger.warning("[Bioinformatics] annotate_clusters called but no AnnData with clustering found")
         messages.append({
@@ -224,6 +225,11 @@ async def handle_annotate_clusters(context, tool_call) -> ToolAction:
         context.annotation_retry_attempts += 1
         context.annotation_failure_reason = tool_result
         return ToolAction.CONTINUE
+    context.resolved_adata_source_context.update({
+        key: annotation_source[key]
+        for key in ("adata_var", "cluster_key", "partition_digest", "preparation_id")
+        if annotation_source.get(key)
+    })
     # Auto-extract markers from kernel adata if LLM didn't provide them
     if n_clusters == 0 and self.sandbox:
         logger.info(f"[Bioinformatics] cluster_markers empty, auto-extracting from {adata_var}.uns[{rank_key_hint!r}]")
@@ -235,6 +241,8 @@ async def handle_annotate_clusters(context, tool_call) -> ToolAction:
             "_markers = {}\n"
             "try:\n"
             "    import scanpy as sc\n"
+            f"    _rank_groupby = {adata_var}.uns.get({rank_key_hint!r}, {{}}).get('params', {{}}).get('groupby')\n"
+            f"    if _rank_groupby and _rank_groupby != {cluster_key!r}: raise ValueError('Marker ranking belongs to another clustering column: ' + str(_rank_groupby))\n"
             f"    for _cl in {adata_var}.obs['{cluster_key}'].cat.categories:\n"
             f"        _df = sc.get.rank_genes_groups_df({adata_var}, group=str(_cl), key={rank_key_hint!r})\n"
             f"        _df = _df[_df['pvals_adj'] < {_padj_cutoff}]\n"
@@ -342,7 +350,7 @@ async def handle_annotate_clusters(context, tool_call) -> ToolAction:
                 cluster_markers, tissue, organism,
                 analysis_log=analysis_log,
                 database_priors=database_priors,
-                annotation_source={"adata_var": adata_var, "cluster_key": cluster_key},
+                annotation_source=annotation_source,
             )
         finally:
             self.pending_tool_checkpoint = None
@@ -428,6 +436,11 @@ async def handle_annotate_clusters(context, tool_call) -> ToolAction:
     # Auto-apply annotations to adata.obs['cell_type'] in sandbox
     # so the agent doesn't need to manually execute the mapping code
     if annotations and self.sandbox:
+        current_source = await self.resolve_analysis_source_metadata(annotation_source)
+        if (not current_source.get("var") or current_source.get("partition_digest") != annotation_source.get("partition_digest")):
+            messages.append({"role": "tool", "tool_call_id": tool_call.id,
+                             "content": "Error: annotation source or cluster partition changed during review; annotations were not applied. Re-resolve the source before retrying."})
+            return ToolAction.CONTINUE
         cell_type_dict = {
             str(cid): (info.get("cell_type", "Unknown") if isinstance(info, dict) else "Unknown")
             for cid, info in annotations.items()

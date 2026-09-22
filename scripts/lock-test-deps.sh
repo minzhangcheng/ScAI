@@ -415,6 +415,7 @@ run_check() {
 }
 
 run_update() {
+    local preserve_existing="${1:-0}"
     check_inputs_exist
     command -v docker >/dev/null 2>&1 || die "docker is unavailable; --update requires a daemon"
     docker version >/dev/null 2>&1 || die "docker daemon is unavailable; --update requires a daemon"
@@ -422,6 +423,7 @@ run_update() {
     prepare_lock_output
     base_ref="python:3.11.15-slim-bookworm@$BASE_DIGEST"
     docker run --rm -i --network default --platform "$PLATFORM" \
+        --env "SCAI_LOCK_PRESERVE_EXISTING=$preserve_existing" \
         --volume "$REPO_ROOT:/workspace/scai:ro" \
         --volume "$LOCK_OUTPUT_DIR:/out:rw" \
         --entrypoint python3 "$base_ref" - <<'PY'
@@ -443,6 +445,22 @@ constraints = repo / 'build-constraints.txt'
 resolver_python = Path(sys.executable)
 resolver_pip_spec = 'pip>=25.3,<27'
 resolver_bootstrap_specs = [resolver_pip_spec, 'setuptools<82', 'wheel']
+preserve_existing = os.environ.get('SCAI_LOCK_PRESERVE_EXISTING') == '1'
+existing_constraints = out / 'existing-versions.txt'
+preserved_lock_hashes = {}
+if preserve_existing:
+    pins = []
+    for relative in ['docker/test-deps/requirements-test.lock', 'docker/test-deps/requirements-test-nodeps.lock']:
+        source = repo / relative
+        preserved_lock_hashes[relative] = hashlib.sha256(source.read_bytes()).hexdigest()
+        for line in source.read_text().splitlines():
+            if not line.strip() or line.lstrip().startswith('#'):
+                continue
+            match = re.fullmatch(r'([A-Za-z0-9][A-Za-z0-9_.-]*==[^\s]+) --hash=sha256:[0-9a-f]{64}', line.strip())
+            if match is None:
+                raise SystemExit(f'Cannot preserve malformed existing lock line: {line!r}')
+            pins.append(match.group(1))
+    existing_constraints.write_text('\n'.join(pins) + '\n')
 
 
 def run(args: list[str], **kwargs):
@@ -464,6 +482,8 @@ run(["apt-get", "clean"])
 
 def report(requirements: list[str], output_path: Path, download_dir: Path, *, no_deps: bool = False) -> list[dict[str, str]]:
     args = [str(resolver_python), '-m', 'pip', 'install', '--dry-run', '--ignore-installed', '--report', str(output_path)]
+    if preserve_existing:
+        args += ['-c', str(existing_constraints)]
     if no_deps:
         args.append('--no-deps')
     for path in requirements:
@@ -476,6 +496,8 @@ def report(requirements: list[str], output_path: Path, download_dir: Path, *, no
         str(resolver_python), '-m', 'pip', 'download', '--disable-pip-version-check',
         '--no-input', '--no-cache-dir', '--dest', str(download_dir),
     ]
+    if preserve_existing:
+        download_args += ['-c', str(existing_constraints)]
     if no_deps:
         download_args.append('--no-deps')
     for path in requirements:
@@ -627,7 +649,8 @@ manifest = {
     'expected_final_freeze': expected,
     'final_actual_freeze': final,
     'allowed_pip_check': [expected_pip_check],
-    'generation_command': 'scripts/lock-test-deps.sh --update',
+    'generation_command': 'scripts/lock-test-deps.sh ' + ('--update-preserving-existing' if preserve_existing else '--update'),
+    'preserved_lock_sha256': preserved_lock_hashes,
     'generated_at_utc': datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
     'lock_tool': {'path': 'scripts/lock-test-deps.sh', 'contract_version': 1, 'sha256': hashlib.sha256((repo / 'scripts/lock-test-deps.sh').read_bytes()).hexdigest()},
 }
@@ -644,5 +667,6 @@ PY
 case "${1:-}" in
     --check) run_check ;;
     --update) run_update ;;
-    *) die "usage: scripts/lock-test-deps.sh --check|--update" ;;
+    --update-preserving-existing) run_update 1 ;;
+    *) die "usage: scripts/lock-test-deps.sh --check|--update|--update-preserving-existing" ;;
 esac

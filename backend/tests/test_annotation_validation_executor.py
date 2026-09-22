@@ -91,10 +91,11 @@ async def test_executor_stops_at_max_iterations():
         tissue="liver", organism="mouse", context=_META, max_iterations=3, timeout_seconds=30)
     assert out["status"] in ("partial", "failed")
     assert len([c for c in a.sandbox.executed if "print('x')" in c]) <= 3
+    assert len(out["execution_observations"]) == 3
 
 
 @pytest.mark.asyncio
-async def test_executor_timeout_releases_validation_copy():
+async def test_executor_timeout_releases_validation_copy(monkeypatch):
     sandbox = _Sandbox()
     a = _agent(sandbox, [])
 
@@ -102,6 +103,14 @@ async def test_executor_timeout_releases_validation_copy():
         await asyncio.sleep(1)
 
     a.chat = slow_chat
+    original_wait_for = asyncio.wait_for
+    observed_timeouts = []
+
+    async def expire_request(awaitable, *, timeout):
+        observed_timeouts.append(timeout)
+        return await original_wait_for(awaitable, timeout=0.01)
+
+    monkeypatch.setattr(asyncio, "wait_for", expire_request)
     out = await a.validate_annotations_with_plan(
         validation_plan={"tasks": []}, annotations={"0": {}}, cluster_markers={"0": ["A"]},
         tissue="liver", organism="mouse", context=_META,
@@ -110,6 +119,7 @@ async def test_executor_timeout_releases_validation_copy():
 
     assert out["status"] == "partial"
     assert out["warnings"] == ["timeout"]
+    assert observed_timeouts == [600]
     assert "adata_val = adata.copy()" in sandbox.executed
     assert "globals().pop('adata_val', None)" in sandbox.executed
 

@@ -212,8 +212,9 @@ async def test_timeout_switches_protocol():
         # Collapse inter-protocol / backoff sleeps but keep wait_for's timer real
         await real_sleep(0)
 
-    # Shrink the timeout so the hanging protocol trips it fast.
-    with patch_facade("backend.agents.painter_agent", "_PROTOCOL_TIMEOUT", 0.05), \
+    # Simulate the production deadline without waiting ten minutes in the test.
+    with patch("backend.utils.llm_client_parts.retry.MIN_LLM_TIMEOUT_SECONDS", 0.05), \
+         patch_facade("backend.agents.painter_agent", "_PROTOCOL_TIMEOUT", 0.05), \
          patch("backend.agents.painter_agent.asyncio.sleep", new=_fast_sleep):
         result = await painter._generate_image("a prompt")
 

@@ -270,6 +270,7 @@ class SupplementaryMixin:
         max_iterations: int = 5,
         timeout_seconds: int = 5520,
         total_timeout_seconds: Optional[int] = None,
+        source_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Execute PI-proposed supplementary tasks on the live analysis object."""
         return await supplementary_support.run_supplementary_tasks(
@@ -280,6 +281,7 @@ class SupplementaryMixin:
             max_iterations=max_iterations,
             timeout_seconds=timeout_seconds,
             total_timeout_seconds=total_timeout_seconds,
+            source_context=source_context,
         )
 
 

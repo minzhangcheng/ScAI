@@ -139,3 +139,27 @@ def test_callback_wires_group_proportion_computation_before_confirmation_state()
     assert "proportion_group_labels=proportion_meta.get(\"group_labels\", [])" in src
     assert "proportion_dimension=proportion_meta.get(\"dimension\", \"group\")" in src
     assert src.count("compute_cluster_group_proportions") >= 2
+
+
+@pytest.mark.asyncio
+async def test_confirmed_annotation_requires_same_partition_without_overwriting_history():
+    from types import SimpleNamespace
+    from backend.models.schemas import AnnotationConfirmationState, ClusterAnnotation
+    from backend.workflow.annotation import AnnotationMixin
+    confirmed = AnnotationConfirmationState(
+        confirmed=True, annotation_source={"partition_digest": "final"},
+        cluster_annotations=[ClusterAnnotation(cluster_id="0", cell_type="TypeA")],
+    )
+    host = AnnotationMixin()
+    host.session_id = "source-test"
+    host._current_analysis_state = SimpleNamespace(annotation_state=confirmed)
+    same = await host._annotate_clusters_callback(
+        {"0": ["GeneA"]}, "tissue", "human", annotation_source={"partition_digest": "final"},
+    )
+    assert same["already_confirmed"] is True
+    changed = await host._annotate_clusters_callback(
+        {"0": ["GeneA"]}, "tissue", "human", annotation_source={"partition_digest": "different"},
+    )
+    assert changed["status"] == "error"
+    assert host._current_analysis_state.annotation_state is confirmed
+    assert confirmed.cluster_annotations[0].cell_type == "TypeA"

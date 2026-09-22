@@ -225,68 +225,61 @@ class IntrospectionMixin:
         self,
         cluster_key_hint: Optional[str] = None,
     ) -> Tuple[Optional[str], Optional[str]]:
-        """Discover the active AnnData variable name and clustering key in the sandbox.
+        """Resolve a unique source with the exact requested clustering column."""
+        metadata = await self.introspect_validation_metadata(cluster_key_hint)
+        return metadata.get("var"), metadata.get("cluster_key")
 
-        Resolution order for cluster key:
-          1. cluster_key_hint (from LLM tool args), if the column exists.
-          2. Default names 'leiden', 'louvain', 'cluster'.
-          3. First column whose name starts with 'leiden' or 'louvain'.
-
-        Returns:
-            Tuple of (variable_name, clustering_key), or (None, None) on failure.
-        """
-        if not self.sandbox:
-            return (None, None)
-
-        hint_repr = repr(cluster_key_hint)
-        _managed_getter = getattr(self.sandbox, "host_managed_global_names", None)
-        _managed = set(_managed_getter()) if callable(_managed_getter) else set()
-        managed_repr = repr(sorted(_managed))
-        discover_code = (
-            "import json as _json, anndata as _ad\n"
-            f"_hint = {hint_repr}\n"
-            f"_managed = set({managed_repr})\n"
-            "_seen_ids = set()\n"
-            "_result = {}\n"
-            "for _name, _obj in list(globals().items()):\n"
-            "    if not isinstance(_obj, _ad.AnnData) or _name.startswith('_'):\n"
-            "        continue\n"
-            "    if _name in _managed or id(_obj) in _seen_ids:\n"
-            "        continue\n"
-            "    _seen_ids.add(id(_obj))\n"
-            "    _cols = list(_obj.obs.columns)\n"
-            "    _key = None\n"
-            "    if _hint and _hint in _cols:\n"
-            "        _key = _hint\n"
-            "    if _key is None:\n"
-            "        for _k in ['leiden', 'louvain', 'cluster']:\n"
-            "            if _k in _cols:\n"
-            "                _key = _k; break\n"
-            "    if _key is None:\n"
-            "        for _c in _cols:\n"
-            "            if _c.startswith('leiden') or _c.startswith('louvain'):\n"
-            "                _key = _c; break\n"
-            "    if _key is not None:\n"
-            "        _result = {'var': _name, 'cluster_key': _key}\n"
-            "        break\n"
-            "print(_json.dumps(_result))\n"
+    async def resolve_analysis_source_metadata(
+        self, source_context=None, *, cluster_key=None, preferred_var_name=None,
+        permit_evolved_binding=False,
+    ) -> Dict[str, Any]:
+        """Resolve an existing preparation or annotation source without guessing."""
+        state = getattr(self, "_current_analysis_state", None)
+        source = dict(source_context or {})
+        if source.get("selection_error"):
+            return {"selection_error": str(source["selection_error"])}
+        preparation_id = source.get("preparation_id")
+        if not preparation_id and not (source.get("adata_var") or source.get("var")):
+            preparation_id = getattr(getattr(state, "current_plan", None), "adata_source_preparation_id", None)
+        anchor = None
+        binding_status = None
+        if preparation_id:
+            preparation = next((record for record in getattr(state, "adata_source_preparations", [])
+                                if record.preparation_id == preparation_id), None)
+            allowed_statuses = {"exact", "evolved"} if permit_evolved_binding else {"exact"}
+            if preparation is None or preparation.binding_identity_status not in allowed_statuses:
+                return {"selection_error": "Analysis source preparation is missing or no longer exact"}
+            if getattr(getattr(preparation, "selection", None), "mode", None) == "checkpoint_branch":
+                preferred_var_name = "adata"
+            else:
+                preferred_var_name = preparation.binding_name or preferred_var_name
+            binding_status = preparation.binding_identity_status
+            anchor = preparation.anchor_name
+            if not preferred_var_name or (not anchor and not permit_evolved_binding):
+                return {"selection_error": "Analysis source preparation has no exact working binding"}
+        elif not preferred_var_name:
+            preferred_var_name = source.get("adata_var") or source.get("var")
+        cluster_key = cluster_key or source.get("cluster_key")
+        metadata = await self.introspect_validation_metadata(
+            cluster_key, preferred_var_name=preferred_var_name,
+            require_preferred=bool(preferred_var_name), expected_anchor_name=anchor,
         )
-        try:
-            result = await self.sandbox.execute(discover_code, records_history=False, skip_safety_check=True, mutates_namespace=False)
-            if result.success and result.output and result.output.strip():
-                parsed = json.loads(result.output.strip())
-                var_name = parsed.get("var")
-                cluster_key = parsed.get("cluster_key")
-                if var_name and cluster_key:
-                    logger.info(
-                        f"[Bioinformatics] Discovered AnnData var={var_name}, "
-                        f"cluster_key={cluster_key} (hint={cluster_key_hint!r})"
-                    )
-                    return (var_name, cluster_key)
-        except Exception as e:
-            logger.warning(f"[Bioinformatics] AnnData discovery failed: {e}")
-
-        return (None, None)
+        if preparation_id and permit_evolved_binding and not metadata.get("var"):
+            # The supplementary contract permits live rebinding. After exact
+            # entry resolution, keep the named object available but disclose the
+            # evolved input identity on each subsequent execution receipt.
+            metadata = await self.introspect_validation_metadata(
+                cluster_key, preferred_var_name=preferred_var_name,
+                require_preferred=True, allow_managed_preferred=True,
+            )
+            binding_status = "evolved"
+        if preparation_id:
+            metadata.update({"preparation_id": preparation_id,
+                             "binding_id": preparation.binding_id,
+                             "binding_identity_status": binding_status,
+                             "adata_lineage_id": preparation.adata_lineage_id,
+                             "loaded_checkpoint_id": preparation.loaded_checkpoint_id})
+        return metadata
 
     async def introspect_validation_metadata(
         self,
@@ -294,14 +287,10 @@ class IntrospectionMixin:
         preferred_var_name: Optional[str] = None,
         *,
         require_preferred: bool = False,
+        expected_anchor_name: Optional[str] = None,
+        allow_managed_preferred: bool = False,
     ) -> Dict[str, Any]:
-        """Inspect one active AnnData without depending on globals insertion order.
-
-        Existing callers that do not name a preferred variable retain the legacy
-        first-available behavior. Supplementary execution supplies the durable
-        resolved source name (or the legacy ``adata`` convention) and can require
-        an exact match for an explicitly selected working binding.
-        """
+        """Inspect an exact preferred source or the sole matching AnnData object."""
         if not self.sandbox:
             return {}
         hint_repr = repr(cluster_key_hint)
@@ -316,6 +305,8 @@ class IntrospectionMixin:
             f"_hint = {hint_repr}\n"
             f"_preferred = {preferred_repr}\n"
             f"_require_preferred = {bool(require_preferred)!r}\n"
+            f"_expected_anchor = {expected_anchor_name!r}\n"
+            f"_allow_managed_preferred = {bool(allow_managed_preferred)!r}\n"
             "_qc = ('n_genes','n_counts','total_counts','pct_counts','percent','mito','ribo','hb',"
             "'hemoglobin','doublet','scrublet','ambient','cycle','phase','s_score','g2m')\n"
             "_cond = ('condition','treatment','genotype','disease','status','group','arm','cohort')\n"
@@ -324,7 +315,8 @@ class IntrospectionMixin:
             "def _cluster_key(_o):\n"
             "    _cols = [str(_c) for _c in _o.obs.columns]\n"
             "    _cand = [_c for _c in _cols if _c.startswith('leiden') or _c.startswith('louvain') or _c=='cluster']\n"
-            "    _key = _hint if (_hint and _hint in _cols) else None\n"
+            "    if _hint: return (_hint if _hint in _cols else None), _cand\n"
+            "    _key = None\n"
             "    if _key is None:\n"
             "        for _k in ['leiden', 'louvain', 'cluster']:\n"
             "            if _k in _cols: _key = _k; break\n"
@@ -332,14 +324,18 @@ class IntrospectionMixin:
             "    return _key, _cand\n"
             "_candidates = {}\n"
             "_seen_ids = set()\n"
-            "for _name, _o in list(globals().items()):\n"
+            "_items = list(globals().items())\n"
+            "_items.sort(key=lambda item: item[0] != _preferred)\n"
+            "for _name, _o in _items:\n"
             "    if not isinstance(_o, _ad.AnnData) or _name.startswith('_'): continue\n"
-            "    if _name in _managed or id(_o) in _seen_ids: continue\n"
+            "    if (_name in _managed and not (_name == _preferred and (_expected_anchor or _allow_managed_preferred))) or id(_o) in _seen_ids: continue\n"
             "    _seen_ids.add(id(_o))\n"
             "    _key, _cand = _cluster_key(_o)\n"
             "    if _key is not None: _candidates[_name] = (_key, _cand)\n"
             "_selected = None; _selection_source = None; _selection_error = None\n"
-            "if _preferred and _preferred in _candidates:\n"
+            "if _expected_anchor and (globals().get(_expected_anchor) is None or globals().get(_expected_anchor) is not globals().get(_preferred)):\n"
+            "    _selection_error = 'Analysis source working binding no longer matches its exact anchor'\n"
+            "elif _preferred and _preferred in _candidates:\n"
             "    _selected = _preferred; _selection_source = 'preferred'\n"
             "elif _preferred and _require_preferred:\n"
             "    _selection_error = 'preferred AnnData is unavailable or has no clustering key'\n"
@@ -347,13 +343,18 @@ class IntrospectionMixin:
             "    _selected = next(iter(_candidates)); _selection_source = 'sole_candidate'\n"
             "elif _preferred and len(_candidates) > 1:\n"
             "    _selection_error = 'multiple AnnData candidates and no authoritative preferred object'\n"
-            "elif _candidates:\n"
-            "    _selected = next(iter(_candidates)); _selection_source = 'first_available'\n"
+            "elif len(_candidates) == 1:\n"
+            "    _selected = next(iter(_candidates)); _selection_source = 'sole_candidate'\n"
+            "elif len(_candidates) > 1:\n"
+            "    _selection_error = 'multiple AnnData candidates and no authoritative preferred object'\n"
             "_out = {'candidate_names': list(_candidates), 'selection_source': _selection_source, 'selection_error': _selection_error}\n"
             "if _selected is not None:\n"
             "    _name = _selected; _o = globals()[_name]\n"
             "    _cols = [str(_c) for _c in _o.obs.columns]; _low = {_c: _c.lower() for _c in _cols}\n"
             "    _key, _cand = _candidates[_name]\n"
+            "    import hashlib as _hashlib\n"
+            "    _partition = sorted(zip(map(str, _o.obs_names), map(str, _o.obs[_key])))\n"
+            "    _out['partition_digest'] = _hashlib.sha256(_json.dumps(_partition).encode()).hexdigest()\n"
             "    _summ = {}\n"
             "    for _c in _cols:\n"
             "        try:\n"
@@ -475,12 +476,14 @@ class IntrospectionMixin:
         self,
         state: AnalysisState,
         cluster_key_hint: Optional[str] = None,
+        annotation_source: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if not self.sandbox:
             return self._empty_cluster_group_proportions()
 
         try:
-            meta = await self.introspect_validation_metadata(cluster_key_hint)
+            meta = (await self.resolve_analysis_source_metadata(annotation_source, cluster_key=cluster_key_hint)
+                    if annotation_source else await self.introspect_validation_metadata(cluster_key_hint))
             var_name = meta.get("var")
             cluster_key = meta.get("cluster_key")
             if not var_name or not cluster_key:

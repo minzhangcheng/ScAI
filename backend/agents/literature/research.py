@@ -123,18 +123,18 @@ class ResearchMixin:
                     current_round_findings=current_round_findings,
                     research_context=research_context,
                 )
-            started = time.monotonic()
             budget = float(getattr(self, "search_wall_clock_seconds", 600) or 600)
-            deadline = started + budget
-            plan = await asyncio.wait_for(
+            plan = await self._await_literature_llm(
                 pi_plan_fn(
                     topic=topic,
                     context=research_context,
                     state=state,
                     mode="pubmed",
                 ),
-                timeout=max(0.001, deadline - time.monotonic()),
+                timeout_seconds=budget,
             )
+            # Planning has its own LLM budget; retrieval starts after it settles.
+            deadline = time.monotonic() + budget
             primary_value = plan.get("primary_query") if isinstance(plan, dict) else None
             primary = primary_value.strip() if isinstance(primary_value, str) else ""
             raw_alternatives = plan.get("alternative_queries") if isinstance(plan, dict) else []
@@ -146,15 +146,20 @@ class ResearchMixin:
                 raise ValueError("PI literature search plan contained no primary query")
 
             async def evaluate(articles, search_history):
-                return await pi_review_fn(
-                    topic=topic,
-                    context=research_context,
-                    articles=articles,
-                    search_history=search_history,
-                    remaining_budget_seconds=max(0.0, deadline - time.monotonic()),
-                    state=state,
-                    mode="pubmed",
-                )
+                nonlocal deadline
+                review_started = time.monotonic()
+                try:
+                    return await pi_review_fn(
+                        topic=topic,
+                        context=research_context,
+                        articles=articles,
+                        search_history=search_history,
+                        remaining_budget_seconds=max(0.0, deadline - time.monotonic()),
+                        state=state,
+                        mode="pubmed",
+                    )
+                finally:
+                    deadline += max(0.0, time.monotonic() - review_started)
 
             return await self._multi_round_pubmed(
                 topic, state, pubmed_max_results=pubmed_max_results,

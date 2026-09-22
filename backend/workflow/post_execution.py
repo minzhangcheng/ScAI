@@ -79,7 +79,7 @@ class PostExecutionReviewMixin:
     # Per-iteration allowance for the executor's own LLM call, on top of the code
     # execution budget. Generous: a code-generation call on a saturated round
     # context is the slowest kind this workflow makes.
-    _REVIEW_LLM_ALLOWANCE_SECONDS = 120
+    _REVIEW_LLM_ALLOWANCE_SECONDS = 600
 
     # Fallbacks for a config that cannot be read at all: `sandbox_timeout`'s own
     # default, put through the same derivation the configured path applies.
@@ -89,7 +89,7 @@ class PostExecutionReviewMixin:
     def _post_execution_review_limits(self) -> Tuple[int, int, int, int]:
         """(max_iterations, step_timeout, total_timeout, max_tasks) from config.
 
-        Clamped defensively — iterations in [1,8], timeouts >= 1, tasks in [0,10] —
+        Clamped defensively — iterations in [1,8], timeouts >= 600, tasks in [0,10] —
         so a stray config cannot make the pass loop unboundedly or commission an
         open-ended study.
 
@@ -116,7 +116,7 @@ class PostExecutionReviewMixin:
                         or self._DEFAULT_SANDBOX_TIMEOUT
                     )
                 step = sandbox_timeout + self._REVIEW_LLM_ALLOWANCE_SECONDS
-            step = max(1, step)
+            step = max(600, step)
 
             total = int(getattr(cfg, "post_execution_review_total_timeout_seconds", 0) or 0)
             if total <= 0:
@@ -247,7 +247,7 @@ class PostExecutionReviewMixin:
                     task.status = "blocked"
                     task.pi_report_note = (
                         "No pre-existing successful ordinary execution receipt is "
-                        "bound to this completed plan step; figure follow-up did "
+                        "bound to this task's plan step and execution scope; figure follow-up did "
                         "not dispatch an analysis or render."
                     )
                     task.followup_finished_at = datetime.now()
@@ -1202,6 +1202,10 @@ class PostExecutionReviewMixin:
             raw_result = await self.bioinformatics_agent.run_supplementary_tasks(
                 tasks=review_plan["supplementary_tasks"],
                 context_summary=self._build_supplementary_context(result, review_plan),
+                source_context={
+                    **dict(result.get("resolved_adata_source_context") or {}),
+                    **dict(session_names.get("analysis_source") or {}),
+                },
                 direction=direction,
                 max_iterations=max_iterations,
                 timeout_seconds=step_timeout,
@@ -1573,11 +1577,18 @@ class PostExecutionReviewMixin:
             return names
 
         try:
-            metadata = await self.bioinformatics_agent.introspect_validation_metadata(None)
+            source = dict(result.get("resolved_adata_source_context") or {})
+            if not source and not getattr(getattr(analysis_state, "current_plan", None), "adata_source_preparation_id", None):
+                source = dict(getattr(getattr(analysis_state, "annotation_state", None), "annotation_source", None) or {})
+            metadata = await self.bioinformatics_agent.resolve_analysis_source_metadata(source)
         except Exception as e:
             logger.debug(f"[{self.session_id}] object introspection for review failed: {e}")
             return names
         if isinstance(metadata, dict) and metadata:
+            names["analysis_source"] = {
+                key: metadata[key] for key in ("var", "cluster_key", "partition_digest", "preparation_id", "selection_error")
+                if metadata.get(key)
+            }
             for source_key, target_key in (
                 ("obs_columns", "obs_columns"),
                 ("layers", "layers"),

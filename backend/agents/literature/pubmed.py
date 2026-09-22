@@ -117,6 +117,7 @@ from ...models.schemas import (
     PubMedEvidenceItem,
 )
 from ...utils.llm_client import UpstreamExhaustedError
+from ...utils.llm_client_parts.retry import llm_timeout_seconds
 
 from .shared import (  # noqa: F401
     _FALLBACK_EXCEPTIONS,
@@ -183,6 +184,21 @@ def _evaluation_meta(evaluation) -> dict:
 class PubMedMixin:
     """PubMed search execution, XML parsing, and batched query rounds."""
 
+    async def _await_literature_llm(self, awaitable, *, timeout_seconds=None, on_elapsed=None):
+        """Keep model latency outside retrieval deadlines and route timeouts upstream."""
+        timeout = llm_timeout_seconds(timeout_seconds)
+        started = time.monotonic()
+        try:
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise UpstreamExhaustedError(
+                f"Literature model call timed out after {timeout:g}s",
+                agent_name="literature", failure_kind="timeout",
+            ) from exc
+        finally:
+            if on_elapsed is not None:
+                on_elapsed(max(0.0, time.monotonic() - started))
+
     async def _execute_query_batch(
         self,
         query: DirectionSearchQuery,
@@ -191,11 +207,19 @@ class PubMedMixin:
         query_timeout_seconds: float,
         deadline: Optional[float] = None,
         triaged_pmids: Optional[Set[str]] = None,
+        pause_deadlines_fn: Optional[Callable[[float], None]] = None,
     ) -> Tuple[List[PubMedEvidenceItem], Dict[str, Any], bool, List[str]]:
         evidence: List[PubMedEvidenceItem] = []
         limitations: List[str] = []
         timed_out = False
         meta: Dict[str, Any] = {}
+
+        def exclude_llm_time(elapsed):
+            nonlocal deadline
+            if deadline is not None:
+                deadline += elapsed
+            if pause_deadlines_fn is not None:
+                pause_deadlines_fn(elapsed)
 
         def remaining_timeout() -> Optional[float]:
             if deadline is None:
@@ -214,23 +238,12 @@ class PubMedMixin:
         # Cached articles matching this candidate are computed once per candidate
         # by the caller and passed in.
         if matching_cache:
-            try:
-                step_timeout = remaining_timeout()
-                if step_timeout is None:
-                    mark_direction_timeout()
-                    return evidence, meta, timed_out, limitations
-                cache_ev, cache_meta = await asyncio.wait_for(
-                    self._triage_articles_with_llm(matching_cache, candidate, query),
-                    timeout=step_timeout,
-                )
-                evidence.extend(cache_ev)
-                meta = cache_meta
-            except asyncio.TimeoutError:
-                if deadline is not None and time.monotonic() >= deadline:
-                    mark_direction_timeout()
-                else:
-                    limitations.append(f"Cache triage timeout for query: {query.category}")
-                    timed_out = True
+            cache_ev, cache_meta = await self._await_literature_llm(
+                self._triage_articles_with_llm(matching_cache, candidate, query),
+                timeout_seconds=query_timeout_seconds, on_elapsed=exclude_llm_time,
+            )
+            evidence.extend(cache_ev)
+            meta = cache_meta
 
         # PubMed search
         try:
@@ -281,26 +294,14 @@ class PubMedMixin:
             if not articles:
                 return evidence, meta, timed_out, limitations
 
-        # LLM triage
-        try:
-            step_timeout = remaining_timeout()
-            if step_timeout is None:
-                mark_direction_timeout()
-                return evidence, meta, timed_out, limitations
-            llm_ev, llm_meta = await asyncio.wait_for(
-                self._triage_articles_with_llm(articles, candidate, query),
-                timeout=step_timeout,
-            )
-            evidence.extend(llm_ev)
-            meta = llm_meta
-            query.relevant_count = len(llm_ev)
-        except asyncio.TimeoutError:
-            if deadline is not None and time.monotonic() >= deadline:
-                mark_direction_timeout()
-            else:
-                limitations.append(f"LLM triage timeout for query: {query.category}")
-                timed_out = True
-
+        # Retrieved sources still receive a complete model-call budget.
+        llm_ev, llm_meta = await self._await_literature_llm(
+            self._triage_articles_with_llm(articles, candidate, query),
+            timeout_seconds=query_timeout_seconds, on_elapsed=exclude_llm_time,
+        )
+        evidence.extend(llm_ev)
+        meta = llm_meta
+        query.relevant_count = len(llm_ev)
         return evidence, meta, timed_out, limitations
 
     def _extract_session_cached_pubmed_articles(self, state: Optional[AnalysisState]) -> List[Dict[str, Any]]:
@@ -509,16 +510,15 @@ IMPORTANT:
                 return exhausted("wall_clock_budget", articles=arts)
 
             try:
-                timeout = remaining()
-                if deadline is not None and timeout is None:
-                    return exhausted("wall_clock_budget", articles=arts)
-                judge = self._judge_focused_relevance(item, tissue, arts, bucket)
-                judged = await (
-                    asyncio.wait_for(judge, timeout=timeout)
-                    if timeout is not None else judge
+                def exclude_judge_time(elapsed):
+                    nonlocal deadline
+                    if deadline is not None:
+                        deadline += elapsed
+
+                judged = await self._await_literature_llm(
+                    self._judge_focused_relevance(item, tissue, arts, bucket),
+                    on_elapsed=exclude_judge_time,
                 )
-            except asyncio.TimeoutError:
-                return exhausted("wall_clock_budget", articles=arts)
             except UpstreamExhaustedError:
                 raise
             except Exception as e:
@@ -638,11 +638,18 @@ IMPORTANT:
         )
         deadline = deadline_override or (search_started + search_wall_clock_seconds)
 
+        def exclude_llm_time(elapsed):
+            nonlocal deadline
+            deadline += elapsed
+
         # Generate initial PubMed query from the topic (or use provided one)
         if pi_guided:
             query = initial_query
         else:
-            query = await self._generate_pubmed_query(topic, state, current_round_findings)
+            query = await self._await_literature_llm(
+                self._generate_pubmed_query(topic, state, current_round_findings),
+                on_elapsed=exclude_llm_time,
+            )
 
         cache_key = _search_cache_key(
             topic=topic,
@@ -796,16 +803,15 @@ IMPORTANT:
             round_attempt_start = len(query_attempts)
             try:
                 if round_num == 1:
-                    query, articles = await asyncio.wait_for(
-                        self._validate_and_degrade_query(
-                            query, topic,
-                            max_results=pubmed_max_results or 20,
-                            state=state,
-                            current_round_findings=current_round_findings,
-                            enable_semantic_revision=not pi_guided,
-                            attempt_log=query_attempts,
-                        ),
-                        timeout=max(0.001, deadline - time.monotonic()),
+                    query, articles = await self._validate_and_degrade_query(
+                        query, topic,
+                        max_results=pubmed_max_results or 20,
+                        state=state,
+                        current_round_findings=current_round_findings,
+                        enable_semantic_revision=not pi_guided,
+                        attempt_log=query_attempts,
+                        llm_elapsed_fn=exclude_llm_time,
+                        retrieval_timeout_fn=lambda: deadline - time.monotonic(),
                     )
                 else:
                     articles = await asyncio.wait_for(
@@ -925,20 +931,13 @@ IMPORTANT:
                 if pi_guided:
                     evaluation_count += 1
                     try:
-                        evaluation = await asyncio.wait_for(
+                        evaluation = await self._await_literature_llm(
                             evaluate_fn(
                                 copy.deepcopy(all_articles),
                                 copy.deepcopy(search_history),
                             ),
-                            timeout=max(0.001, deadline - time.monotonic()),
+                            on_elapsed=exclude_llm_time,
                         )
-                    except asyncio.TimeoutError:
-                        stop_reason = "wall_clock_budget"
-                        technical_stop_error = (
-                            "PI literature search review exceeded the remaining "
-                            "wall-clock budget."
-                        )
-                        break
                     except UpstreamExhaustedError:
                         raise
                     except Exception as e:
@@ -968,21 +967,16 @@ IMPORTANT:
                 else:
                     evaluation_count += 1
                     try:
-                        evaluation = await asyncio.wait_for(
+                        evaluation = await self._await_literature_llm(
                             self._evaluate_pubmed_results(
                                 topic,
                                 copy.deepcopy(all_articles),
                                 copy.deepcopy(search_history),
                             ),
-                            timeout=max(0.001, deadline - time.monotonic()),
+                            on_elapsed=exclude_llm_time,
                         )
-                    except asyncio.TimeoutError:
-                        stop_reason = "wall_clock_budget"
-                        technical_stop_error = (
-                            "Literature search evaluation exceeded the remaining "
-                            "wall-clock budget."
-                        )
-                        break
+                    except UpstreamExhaustedError:
+                        raise
 
                 latest_evaluation = evaluation
                 decision, next_query = _search_continuation(
@@ -1759,10 +1753,18 @@ Note: If you are not certain about specific citation information, please clearly
         all_evidence, executed_categories, triage_metadata_list, all_limitations,
         deadline: Optional[float] = None,
         triaged_pmids: Optional[Set[str]] = None,
+        pause_deadlines_fn: Optional[Callable[[float], None]] = None,
     ) -> bool:
         """Run a list of query batches, accumulating into the passed-in lists.
         Returns True if any batch timed out or the direction deadline expired."""
         timed_out = False
+
+        def exclude_llm_time(elapsed):
+            nonlocal deadline
+            if deadline is not None:
+                deadline += elapsed
+            if pause_deadlines_fn is not None:
+                pause_deadlines_fn(elapsed)
 
         def direction_deadline_expired() -> bool:
             return deadline is not None and time.monotonic() >= deadline
@@ -1778,6 +1780,7 @@ Note: If you are not certain about specific citation information, please clearly
             evidence, meta, q_timedout, limitations = await self._execute_query_batch(
                 q, candidate, matching_cache, timeout, deadline=deadline,
                 triaged_pmids=triaged_pmids,
+                pause_deadlines_fn=exclude_llm_time,
             )
             all_evidence.extend(evidence)
             if not q.degraded:

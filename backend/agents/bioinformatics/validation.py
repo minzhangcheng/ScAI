@@ -178,7 +178,11 @@ class ValidationMixin:
         import asyncio as _asyncio
         from ...workflow.annotation_validation import signatures_match, sanitize_validation_result
 
+        from backend.utils.llm_client_parts.retry import llm_timeout_seconds
         max_iterations = max(1, min(int(max_iterations), 8))
+        step_timeout = llm_timeout_seconds(timeout_seconds)
+        transcript: List[str] = []
+        deadline = time.monotonic() + step_timeout
         var_name = context.get("var")
         cluster_key = context.get("cluster_key")
         empty = {"status": "failed", "cluster_results": {}, "suggested_annotation_changes": {},
@@ -207,7 +211,6 @@ class ValidationMixin:
                 return {**empty,
                         "summary": "Validation aborted: could not capture pre-validation main-object signature.",
                         "warnings": ["pre-validation main-object signature unavailable"]}
-            transcript: List[str] = []
             final_result: Optional[Dict[str, Any]] = None
 
             # Copy the main object once.  Re-copying a large AnnData before every
@@ -226,11 +229,15 @@ class ValidationMixin:
 
             try:
                 for _ in range(max_iterations):
+                    if time.monotonic() >= deadline:
+                        return {**empty, "status": "partial",
+                                "summary": "Validation budget reached before starting another check.",
+                                "warnings": ["timeout"], "execution_observations": list(transcript)}
                     prompt = self._build_validation_executor_prompt(
                         validation_plan, annotations, cluster_markers, tissue, organism,
                         ctx, "\n\n".join(transcript[-3:]))
                     parsed = self._safe_parse_json(
-                        await self.chat(prompt, temperature=0.2),
+                        await _asyncio.wait_for(self.chat(prompt, temperature=0.2), timeout=step_timeout),
                         default={},
                     )
                     if not isinstance(parsed, dict):
@@ -283,18 +290,20 @@ class ValidationMixin:
             if final_result is None:
                 return {**empty, "status": "partial",
                         "summary": "Validation reached its iteration limit without a final result.",
-                        "warnings": ["max_iterations reached"]}
+                        "warnings": ["max_iterations reached"],
+                        "execution_observations": list(transcript)}
             return sanitize_validation_result(final_result)
 
         try:
-            return await _asyncio.wait_for(_run(), timeout=timeout_seconds)
+            return await _run()
         except _asyncio.TimeoutError:
             logger.warning(f"[{getattr(self, 'session_id', '?')}] validation executor timed out")
             return {**empty, "status": "partial", "summary": "Validation executor timed out.",
-                    "warnings": ["timeout"]}
+                    "warnings": ["timeout"], "execution_observations": list(transcript)}
         except Exception as e:
             logger.exception(f"[{getattr(self, 'session_id', '?')}] validation executor failed")
-            return {**empty, "summary": f"Validation executor error: {e}", "warnings": [str(e)]}
+            return {**empty, "summary": f"Validation executor error: {e}", "warnings": [str(e)],
+                    "execution_observations": list(transcript)}
 
     def _build_validation_executor_prompt(
         self, validation_plan, annotations, cluster_markers, tissue, organism, context, transcript_tail: str,

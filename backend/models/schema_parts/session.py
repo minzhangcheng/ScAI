@@ -102,6 +102,7 @@ class AnnotationConfirmationState(BaseModel):
     confirmed: bool = False
     proportion_group_labels: List[str] = Field(default_factory=list)
     proportion_dimension: str = "group"
+    annotation_source: Optional[Dict[str, Any]] = None
     # Annotation validation round (all optional for backward/snapshot compatibility)
     validation_attempt_id: Optional[str] = None
     validation_status: Optional[str] = None  # not_run | completed | failed | partial | skipped
@@ -169,6 +170,7 @@ class AnnotationClusterEntry(BaseModel):
 
 class AnnotationRecord(BaseModel):
     """Immutable snapshot of the annotation gate at confirm/auto-confirm time."""
+    annotation_source: Optional[Dict[str, Any]] = None
     timestamp: datetime = Field(default_factory=datetime.now)
     organism: str = ""
     tissue: str = ""
@@ -494,6 +496,7 @@ class DirectionLiteratureExtraction(BaseModel):
     study_context: Dict[str, str] = Field(default_factory=dict, max_length=12)
     finding: str = Field(default="", max_length=2000)
     source_passage: str = Field(default="", max_length=1200)
+    source_passage_status: Literal["unknown", "verified", "unverified", "not_provided"] = "unknown"
     addressed_link: str = Field(default="", max_length=1000)
     applicability_limits: List[str] = Field(default_factory=list, max_length=12)
     provisional_classification: Literal[

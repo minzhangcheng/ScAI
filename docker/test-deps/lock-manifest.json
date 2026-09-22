@@ -89,6 +89,10 @@
       "version": "4.3.0"
     },
     {
+      "name": "beautifulsoup4",
+      "version": "4.15.0"
+    },
+    {
       "name": "bokeh",
       "version": "3.9.2"
     },
@@ -253,6 +257,10 @@
       "version": "2.2.1"
     },
     {
+      "name": "face",
+      "version": "26.0.1"
+    },
+    {
       "name": "fastapi",
       "version": "0.141.1"
     },
@@ -311,6 +319,10 @@
     {
       "name": "geosketch",
       "version": "1.3"
+    },
+    {
+      "name": "glom",
+      "version": "25.12.0"
     },
     {
       "name": "grpcio",
@@ -391,6 +403,10 @@
     {
       "name": "intervaltree",
       "version": "3.2.1"
+    },
+    {
+      "name": "invoke",
+      "version": "3.0.3"
     },
     {
       "name": "ipykernel",
@@ -527,6 +543,10 @@
     {
       "name": "loompy",
       "version": "3.0.8"
+    },
+    {
+      "name": "lxml",
+      "version": "6.1.3"
     },
     {
       "name": "lz4",
@@ -765,6 +785,10 @@
       "version": "2.4.1"
     },
     {
+      "name": "paramiko",
+      "version": "5.0.0"
+    },
+    {
       "name": "parso",
       "version": "0.8.7"
     },
@@ -873,6 +897,10 @@
       "version": "0.6.0"
     },
     {
+      "name": "pycurl",
+      "version": "7.48.0"
+    },
+    {
       "name": "pydantic",
       "version": "2.13.4"
     },
@@ -897,6 +925,10 @@
       "version": "1.0.4"
     },
     {
+      "name": "pynacl",
+      "version": "1.6.2"
+    },
+    {
       "name": "pynndescent",
       "version": "0.6.0"
     },
@@ -907,6 +939,14 @@
     {
       "name": "pyparsing",
       "version": "3.3.2"
+    },
+    {
+      "name": "pypath-common",
+      "version": "0.2.6"
+    },
+    {
+      "name": "pypath-omnipath",
+      "version": "0.16.17"
     },
     {
       "name": "pyproj",
@@ -927,6 +967,10 @@
     {
       "name": "pyscenic",
       "version": "0.12.1"
+    },
+    {
+      "name": "pysftp",
+      "version": "0.2.9"
     },
     {
       "name": "pytest",
@@ -979,6 +1023,10 @@
     {
       "name": "pyzmq",
       "version": "27.2.0"
+    },
+    {
+      "name": "rdata",
+      "version": "1.1.0"
     },
     {
       "name": "referencing",
@@ -1093,6 +1141,10 @@
       "version": "2.4.0"
     },
     {
+      "name": "soupsieve",
+      "version": "2.9.2"
+    },
+    {
       "name": "sparse",
       "version": "0.19.2"
     },
@@ -1111,6 +1163,10 @@
     {
       "name": "sqlite-vec",
       "version": "0.1.9"
+    },
+    {
+      "name": "sqlparse",
+      "version": "0.6.0"
     },
     {
       "name": "squidpy",
@@ -1135,6 +1191,10 @@
     {
       "name": "sympy",
       "version": "1.14.0"
+    },
+    {
+      "name": "tabulate",
+      "version": "0.10.0"
     },
     {
       "name": "tblib",
@@ -1167,6 +1227,14 @@
     {
       "name": "tifffile",
       "version": "2026.3.3"
+    },
+    {
+      "name": "timeloop",
+      "version": "1.0.2"
+    },
+    {
+      "name": "toml",
+      "version": "0.10.2"
     },
     {
       "name": "toolz",
@@ -1279,6 +1347,10 @@
     {
       "name": "xarray-spatial",
       "version": "0.5.3"
+    },
+    {
+      "name": "xlrd",
+      "version": "2.0.2"
     },
     {
       "name": "xxhash",
@@ -1395,6 +1467,10 @@
       "version": "4.3.0"
     },
     {
+      "name": "beautifulsoup4",
+      "version": "4.15.0"
+    },
+    {
       "name": "bokeh",
       "version": "3.9.2"
     },
@@ -1559,6 +1635,10 @@
       "version": "2.2.1"
     },
     {
+      "name": "face",
+      "version": "26.0.1"
+    },
+    {
       "name": "fastapi",
       "version": "0.141.1"
     },
@@ -1617,6 +1697,10 @@
     {
       "name": "geosketch",
       "version": "1.3"
+    },
+    {
+      "name": "glom",
+      "version": "25.12.0"
     },
     {
       "name": "grpcio",
@@ -1697,6 +1781,10 @@
     {
       "name": "intervaltree",
       "version": "3.2.1"
+    },
+    {
+      "name": "invoke",
+      "version": "3.0.3"
     },
     {
       "name": "ipykernel",
@@ -1833,6 +1921,10 @@
     {
       "name": "loompy",
       "version": "3.0.8"
+    },
+    {
+      "name": "lxml",
+      "version": "6.1.3"
     },
     {
       "name": "lz4",
@@ -2071,6 +2163,10 @@
       "version": "2.4.1"
     },
     {
+      "name": "paramiko",
+      "version": "5.0.0"
+    },
+    {
       "name": "parso",
       "version": "0.8.7"
     },
@@ -2179,6 +2275,10 @@
       "version": "0.6.0"
     },
     {
+      "name": "pycurl",
+      "version": "7.48.0"
+    },
+    {
       "name": "pydantic",
       "version": "2.13.4"
     },
@@ -2203,6 +2303,10 @@
       "version": "1.0.4"
     },
     {
+      "name": "pynacl",
+      "version": "1.6.2"
+    },
+    {
       "name": "pynndescent",
       "version": "0.6.0"
     },
@@ -2213,6 +2317,14 @@
     {
       "name": "pyparsing",
       "version": "3.3.2"
+    },
+    {
+      "name": "pypath-common",
+      "version": "0.2.6"
+    },
+    {
+      "name": "pypath-omnipath",
+      "version": "0.16.17"
     },
     {
       "name": "pyproj",
@@ -2233,6 +2345,10 @@
     {
       "name": "pyscenic",
       "version": "0.12.1"
+    },
+    {
+      "name": "pysftp",
+      "version": "0.2.9"
     },
     {
       "name": "pytest",
@@ -2285,6 +2401,10 @@
     {
       "name": "pyzmq",
       "version": "27.2.0"
+    },
+    {
+      "name": "rdata",
+      "version": "1.1.0"
     },
     {
       "name": "referencing",
@@ -2399,6 +2519,10 @@
       "version": "2.4.0"
     },
     {
+      "name": "soupsieve",
+      "version": "2.9.2"
+    },
+    {
       "name": "sparse",
       "version": "0.19.2"
     },
@@ -2417,6 +2541,10 @@
     {
       "name": "sqlite-vec",
       "version": "0.1.9"
+    },
+    {
+      "name": "sqlparse",
+      "version": "0.6.0"
     },
     {
       "name": "squidpy",
@@ -2441,6 +2569,10 @@
     {
       "name": "sympy",
       "version": "1.14.0"
+    },
+    {
+      "name": "tabulate",
+      "version": "0.10.0"
     },
     {
       "name": "tblib",
@@ -2473,6 +2605,14 @@
     {
       "name": "tifffile",
       "version": "2026.3.3"
+    },
+    {
+      "name": "timeloop",
+      "version": "1.0.2"
+    },
+    {
+      "name": "toml",
+      "version": "0.10.2"
     },
     {
       "name": "toolz",
@@ -2587,6 +2727,10 @@
       "version": "0.5.3"
     },
     {
+      "name": "xlrd",
+      "version": "2.0.2"
+    },
+    {
       "name": "xxhash",
       "version": "4.0.1"
     },
@@ -2621,8 +2765,8 @@
       "version": "24.0"
     }
   ],
-  "generated_at_utc": "2026-08-22T18:10:28Z",
-  "generation_command": "scripts/lock-test-deps.sh --update",
+  "generated_at_utc": "2026-09-22T00:31:27Z",
+  "generation_command": "scripts/lock-test-deps.sh --update-preserving-existing",
   "initial_actual_bootstrap_installers": [
     {
       "name": "pip",
@@ -2637,8 +2781,8 @@
     "build-constraints.txt": "0bfd877831a5ab382f952de2ddf96c45bac4ee49054d45d2802d40fdc2965351",
     "docker/test-deps/requirements-test.in": "24001314dbc2c58a596b9b4bef2899492e10b190cbd03f93c667eb87726028b4",
     "requirements-nodeps.txt": "57b229b994ab7ef2797edf08e4fdb8b25eb71407aa05838efc13a9f60545ae02",
-    "requirements.txt": "7ddc468bbc8dfd92221b4e9e05744b0d26ca40898afc440d8b9d582fcb09636e",
-    "scripts/lock-test-deps.sh": "6307bce2785f79d515ef4e87c56068d641c4852e6ff47f28d4293ae5f1747452"
+    "requirements.txt": "9a5c5b6c91a73780a3da83e48bfc936ba75ba54122fc7d29df2c0838abf0ce9c",
+    "scripts/lock-test-deps.sh": "d6e6dd026ca5fbdfce408fa8e6d5017744f8dce964565ce4cdfc63138d8beb7d"
   },
   "installer": {
     "argv": [
@@ -2652,7 +2796,7 @@
   "lock_tool": {
     "contract_version": 1,
     "path": "scripts/lock-test-deps.sh",
-    "sha256": "6307bce2785f79d515ef4e87c56068d641c4852e6ff47f28d4293ae5f1747452"
+    "sha256": "d6e6dd026ca5fbdfce408fa8e6d5017744f8dce964565ce4cdfc63138d8beb7d"
   },
   "nodeps": [
     {
@@ -2664,6 +2808,10 @@
   "platform": {
     "os": "linux/amd64",
     "python": "3.11.15"
+  },
+  "preserved_lock_sha256": {
+    "docker/test-deps/requirements-test-nodeps.lock": "4778e6bfdacc0a92d07bc3db68e935d2930b54b48cb1dce60bb0b1f1a6ddc5c3",
+    "docker/test-deps/requirements-test.lock": "d4df0f49351c6854bbcb53130959f53aca557e8420bc64470a2698da4900aaf4"
   },
   "replaced_bootstrap_installers": [
     {
@@ -2777,6 +2925,11 @@
       "name": "bcrypt",
       "sha256": "531457e5c839d8caea9b589a1bcfe3756b0547d7814e9ce3d437f17da75c32b0",
       "version": "4.3.0"
+    },
+    {
+      "name": "beautifulsoup4",
+      "sha256": "d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9",
+      "version": "4.15.0"
     },
     {
       "name": "bokeh",
@@ -2979,6 +3132,11 @@
       "version": "2.2.1"
     },
     {
+      "name": "face",
+      "sha256": "ab0a83c37c9789dce658a67a9a80eafaa113c9ec37c5a9d950ff5480542a062d",
+      "version": "26.0.1"
+    },
+    {
       "name": "fastapi",
       "sha256": "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3",
       "version": "0.141.1"
@@ -3052,6 +3210,11 @@
       "name": "geosketch",
       "sha256": "b820d4d2fa727cc8f3a2cface7169f752a4a809e0930ca277fd987328b439c7e",
       "version": "1.3"
+    },
+    {
+      "name": "glom",
+      "sha256": "b9f21e77f71a6576a43864e85066b8cc3f0f778d0d50961563f8981377a6dcb1",
+      "version": "25.12.0"
     },
     {
       "name": "grpcio",
@@ -3152,6 +3315,11 @@
       "name": "intervaltree",
       "sha256": "a8a8381bbd35d48ceebee932c77ffc988492d22fb1d27d0ba1d74a7694eb8f0b",
       "version": "3.2.1"
+    },
+    {
+      "name": "invoke",
+      "sha256": "f11327165e5cbb89b2ad1d88d3292b5113332c43b8553b494da435d6ec6f5053",
+      "version": "3.0.3"
     },
     {
       "name": "ipykernel",
@@ -3322,6 +3490,11 @@
       "name": "loompy",
       "sha256": "c1f48d0bf21aa2bbdeee21a0577553cba9609d9435d7c32b687686bbb5869ca7",
       "version": "3.0.8"
+    },
+    {
+      "name": "lxml",
+      "sha256": "527195c188d7d0af748cd48d220ab8cdc5cb99be3d49ac4d9be7324d8abf9bc0",
+      "version": "6.1.3"
     },
     {
       "name": "lz4",
@@ -3619,6 +3792,11 @@
       "version": "2.4.1"
     },
     {
+      "name": "paramiko",
+      "sha256": "b7044611c30140d9a75261653210e2002977b71a0497ff3ba0d98d7edbf62f7c",
+      "version": "5.0.0"
+    },
+    {
       "name": "parso",
       "sha256": "a8926eb2a1b915486941fdbd31e86a4baf88fe8c210f25f2f35ecec5b574ca1c",
       "version": "0.8.7"
@@ -3749,6 +3927,11 @@
       "version": "0.6.0"
     },
     {
+      "name": "pycurl",
+      "sha256": "778644ae698228a4dc028871a8394bc937830d5e9e0c3380a75d49d615c2c5c8",
+      "version": "7.48.0"
+    },
+    {
       "name": "pydantic",
       "sha256": "45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba",
       "version": "2.13.4"
@@ -3779,6 +3962,11 @@
       "version": "1.0.4"
     },
     {
+      "name": "PyNaCl",
+      "sha256": "c8a231e36ec2cab018c4ad4358c386e36eede0319a0c41fed24f840b1dac59f6",
+      "version": "1.6.2"
+    },
+    {
       "name": "pynndescent",
       "sha256": "dc8c74844e4c7f5cbd1e0cd6909da86fdc789e6ff4997336e344779c3d5538ef",
       "version": "0.6.0"
@@ -3792,6 +3980,16 @@
       "name": "pyparsing",
       "sha256": "850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d",
       "version": "3.3.2"
+    },
+    {
+      "name": "pypath_common",
+      "sha256": "f45dc942a6a959c3c73d03c13c3a905ceed577fb389f527e3e4e927ad0667e6c",
+      "version": "0.2.6"
+    },
+    {
+      "name": "pypath-omnipath",
+      "sha256": "b4eb2cd958bcc4c9d71845d14b4cc0733fb08dd827fd94565ab1f0a1861af91e",
+      "version": "0.16.17"
     },
     {
       "name": "pyproj",
@@ -3817,6 +4015,11 @@
       "name": "pyscenic",
       "sha256": "a250d682e073e67dc80505843764d9cade68dada45a40a622e1aefbae78756e9",
       "version": "0.12.1"
+    },
+    {
+      "name": "pysftp",
+      "sha256": "fbf55a802e74d663673400acd92d5373c1c7ee94d765b428d9f977567ac4854a",
+      "version": "0.2.9"
     },
     {
       "name": "pytest",
@@ -3882,6 +4085,11 @@
       "name": "pyzmq",
       "sha256": "39755dc4a923021bd0677990ffdbc21cff0e1ee1cf07fe3817acea153ef4cb67",
       "version": "27.2.0"
+    },
+    {
+      "name": "rdata",
+      "sha256": "12efb7597725d6db6cc78d84eb522a9634008f8fce1c2733b7fd42b9013bc41f",
+      "version": "1.1.0"
     },
     {
       "name": "referencing",
@@ -4024,6 +4232,11 @@
       "version": "2.4.0"
     },
     {
+      "name": "soupsieve",
+      "sha256": "8089a26fd974ca7a1f30276d3d8492ab266ab15af581642dfe8aa162e0c1c823",
+      "version": "2.9.2"
+    },
+    {
       "name": "sparse",
       "sha256": "2fcad7b83dacb5c70123a7de76db3626cbdaf567fcf12bdbf637aca6c4ee1bbe",
       "version": "0.19.2"
@@ -4047,6 +4260,11 @@
       "name": "sqlite-vec",
       "sha256": "1515727990b49e79bcaf75fdee2ffc7d461f8b66905013231251f1c8938e7786",
       "version": "0.1.9"
+    },
+    {
+      "name": "sqlparse",
+      "sha256": "b861c0288ce2fa56209a9a6412d2e066ac664b3873b89c26c9d8415e8e32996f",
+      "version": "0.6.0"
     },
     {
       "name": "squidpy",
@@ -4077,6 +4295,11 @@
       "name": "sympy",
       "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5",
       "version": "1.14.0"
+    },
+    {
+      "name": "tabulate",
+      "sha256": "f0b0622e567335c8fabaaa659f1b33bcb6ddfe2e496071b743aa113f8774f2d3",
+      "version": "0.10.0"
     },
     {
       "name": "tblib",
@@ -4117,6 +4340,16 @@
       "name": "tifffile",
       "sha256": "e8be15c94273113d31ecb7aa3a39822189dd11c4967e3cc88c178f1ad2fd1170",
       "version": "2026.3.3"
+    },
+    {
+      "name": "timeloop",
+      "sha256": "4e716c67fe6bcadcee7ddb91e2520792426818a70f27e630cfbbbd9becc48a13",
+      "version": "1.0.2"
+    },
+    {
+      "name": "toml",
+      "sha256": "806143ae5bfb6a3c6e736a764057db0e6a0e05e338b5630894a5f779cabb4f9b",
+      "version": "0.10.2"
     },
     {
       "name": "toolz",
@@ -4257,6 +4490,11 @@
       "name": "xarray-spatial",
       "sha256": "84f5a3e07a1ac3212bcfff3c4677daa3c529a533f1493eb555f8e498b7d9746e",
       "version": "0.5.3"
+    },
+    {
+      "name": "xlrd",
+      "sha256": "ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9",
+      "version": "2.0.2"
     },
     {
       "name": "xxhash",

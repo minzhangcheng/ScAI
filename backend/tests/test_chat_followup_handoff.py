@@ -246,3 +246,72 @@ async def test_cancelled_delegation_preserves_followup_identity(monkeypatch):
     assert terminal["branch_id"] == "branch-a"
     cancel_events = [event for event in ws_events if event[0] == "chat_cancelled"]
     assert cancel_events and cancel_events[-1][1]["followup_id"] == "fu-cancel"
+
+
+class _ReachedSynthesis(Exception):
+    pass
+
+
+def _parallel_delegation(monkeypatch, execute):
+    chat_delegation.delegation_flow.bind_facade(chat_delegation)
+    state = AnalysisState(id="parallel-delegation-budget", user_id="owner")
+    client = SimpleNamespace()
+
+    async def send_ws(_session_id, msg_type, content):
+        if msg_type == "chat_delegation" and content.get("status") == "synthesizing":
+            raise _ReachedSynthesis
+
+    monkeypatch.setattr(delegation_flow, "_execute_chat_agent", execute)
+    monkeypatch.setattr(delegation_flow, "_send_chat_ws", send_ws)
+    monkeypatch.setattr("backend.utils.agent_llm.get_agent_llm_client", lambda *_args: client)
+    return delegation_flow._execute_delegation_success(
+        state.id, state,
+        {"delegates": [
+            {"agent": "literature", "instruction": "Review", "priority": 1},
+            {"agent": "technique", "instruction": "Review", "priority": 1},
+        ]},
+        "review the evidence", [], SimpleNamespace(openrouter=client), _config(),
+        time.time(), [],
+    )
+
+
+@pytest.mark.asyncio
+async def test_parallel_delegation_does_not_cancel_later_generation_at_whole_agent_deadline(monkeypatch):
+    completed = []
+    monkeypatch.setattr("backend.config.CHAT_DELEGATION_TIMEOUT", 0.01)
+
+    async def execute(_session_id, _state, name, *_args):
+        for generation in range(2):
+            await asyncio.sleep(0.02)
+            completed.append((name, generation))
+        return {"findings": []}, []
+
+    with pytest.raises(_ReachedSynthesis):
+        await _parallel_delegation(monkeypatch, execute)
+    assert set(completed) == {
+        (name, generation) for name in ("literature", "technique") for generation in range(2)
+    }
+
+
+@pytest.mark.asyncio
+async def test_parallel_delegation_parent_cancel_awaits_all_child_cleanup(monkeypatch):
+    started = {name: asyncio.Event() for name in ("literature", "technique")}
+    cleaned = set()
+    children = []
+
+    async def execute(_session_id, _state, name, *_args):
+        children.append(asyncio.current_task())
+        started[name].set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleaned.add(name)
+
+    parent = asyncio.create_task(_parallel_delegation(monkeypatch, execute))
+    await asyncio.gather(*(event.wait() for event in started.values()))
+    parent.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await parent
+    assert cleaned == set(started)
+    assert all(child.done() for child in children)

@@ -405,7 +405,7 @@ def test_step_budget_is_derived_so_it_never_cuts_off_a_single_analysis():
         post_execution_review_max_iterations=5, post_execution_review_max_tasks=5,
         post_execution_review_timeout_seconds=0, sandbox_timeout=5400)
     assert iterations == 5
-    assert step == 5400 + 120
+    assert step == 5400 + 600
     assert step > 5400, "the ceiling must not be the thing that cuts a cell off"
     assert total == step * 5, "the total defaults to the sum of the step budgets"
 
@@ -413,7 +413,7 @@ def test_step_budget_is_derived_so_it_never_cuts_off_a_single_analysis():
     _, small_step, _, _ = _limits_for(
         post_execution_review_max_iterations=2, post_execution_review_max_tasks=5,
         post_execution_review_timeout_seconds=0, sandbox_timeout=600)
-    assert small_step == 600 + 120
+    assert small_step == 600 + 600
 
 
 def test_explicit_budgets_override_the_derivation():

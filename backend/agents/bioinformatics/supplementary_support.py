@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import time
 from typing import Any, Dict, List, Optional, Set
@@ -140,6 +139,7 @@ async def _execute_supplementary_pass(
     round_number,
     max_iterations,
     step_timeout,
+    total_timeout,
     produced,
     analysis_log,
     warnings,
@@ -158,8 +158,20 @@ async def _execute_supplementary_pass(
         is being timed.
         """
         nonlocal final_result, abort_envelope
+        step_metadata = await agent.resolve_analysis_source_metadata(metadata, permit_evolved_binding=True)
+        if not step_metadata.get("var"):
+            abort_envelope = envelope(
+                "partial" if produced else "failed",
+                "The supplementary source binding is no longer available.",
+                [str(step_metadata.get("selection_error") or "Analysis source identity could not be verified")],
+            )
+            return "abort"
+        if step_metadata.get("binding_identity_status") == "evolved":
+            warning = "The supplementary working binding evolved after entry; subsequent execution receipts identify the input as evolved."
+            if warning not in warnings:
+                warnings.append(warning)
         prompt = agent._build_supplementary_executor_prompt(
-            clean_tasks, context_summary, direction, metadata,
+            clean_tasks, context_summary, direction, step_metadata,
             "\n\n".join(transcript[-3:]),
             registered_data_files=registered_data_files,
         )
@@ -217,6 +229,11 @@ async def _execute_supplementary_pass(
             plan_id=str(getattr(plan, "id", "") or "") or None,
             plan_step_ids=[],
             execution_purpose="repair",
+            adata_source_preparation_id=step_metadata.get("preparation_id"),
+            adata_input_binding_id=step_metadata.get("binding_id"),
+            adata_input_binding_status=step_metadata.get("binding_identity_status"),
+            adata_input_lineage_id=step_metadata.get("adata_lineage_id"),
+            adata_loaded_checkpoint_id=step_metadata.get("loaded_checkpoint_id"),
             plan_binding_status="unverified",
             plan_binding_reason=(
                 "Supplementary repair execution is retained for PI review."
@@ -260,7 +277,12 @@ async def _execute_supplementary_pass(
 
         return "continue"
 
+    deadline = time.monotonic() + total_timeout
     for _ in range(max_iterations):
+        if time.monotonic() >= deadline:
+            return envelope("partial", "Supplementary pass reached its total budget.", ["timeout"])
+        # Admit a step with its full budget; the aggregate budget controls whether
+        # another step starts, never truncates an in-flight LLM request.
         try:
             signal = await asyncio.wait_for(_one_step(), timeout=step_timeout)
         except asyncio.TimeoutError:
@@ -342,6 +364,7 @@ async def run_supplementary_tasks(
     max_iterations: int = 5,
     timeout_seconds: int = 5520,
     total_timeout_seconds: Optional[int] = None,
+    source_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute PI-proposed supplementary tasks on the LIVE analysis object.
 
@@ -370,7 +393,8 @@ async def run_supplementary_tasks(
         else ""
     )
     max_iterations = max(1, min(int(max_iterations), 8))
-    step_timeout = max(1, int(timeout_seconds))
+    from backend.utils.llm_client_parts.retry import llm_timeout_seconds
+    step_timeout = llm_timeout_seconds(timeout_seconds)
     total_timeout = int(total_timeout_seconds or 0)
     if total_timeout <= 0:
         total_timeout = step_timeout * max_iterations
@@ -435,30 +459,19 @@ async def run_supplementary_tasks(
     if not clean_tasks:
         return _envelope("completed", "No supplementary tasks were requested.", [])
 
-    preferred_var_name = "adata"
-    introspect = agent.introspect_validation_metadata
-    try:
-        parameters = inspect.signature(introspect).parameters.values()
-        supports_preferred = (
-            "preferred_var_name" in inspect.signature(introspect).parameters
-            or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
-        )
-    except (TypeError, ValueError):
-        supports_preferred = True
-    metadata = await (
-        introspect(
-            None,
-            preferred_var_name=preferred_var_name,
-            require_preferred=False,
-        )
-        if supports_preferred else introspect(None)
-    )
+    source = dict(source_context or {})
+    if not source and not getattr(getattr(state, "current_plan", None), "adata_source_preparation_id", None):
+        source = dict(getattr(getattr(state, "annotation_state", None), "annotation_source", None) or {})
+    metadata = await agent.resolve_analysis_source_metadata(source)
     var_name = metadata.get("var")
     cluster_key = metadata.get("cluster_key")
     active_object_selection.update({
         "name": str(var_name or ""),
         "selection_source": str(metadata.get("selection_source") or "unresolved"),
         "canonical_verified": False,
+        "preparation_id": metadata.get("preparation_id"),
+        "cluster_key": cluster_key,
+        "partition_digest": metadata.get("partition_digest"),
         "candidate_names": [
             str(name)[:100] for name in (metadata.get("candidate_names") or [])[:20]
         ],
@@ -477,8 +490,7 @@ async def run_supplementary_tasks(
     round_number = int(getattr(agent._current_analysis_state, "current_round", 0) or 0)
 
     try:
-        return await asyncio.wait_for(
-            _execute_supplementary_pass(
+        return await _execute_supplementary_pass(
                 agent,
                 clean_tasks=clean_tasks,
                 context_summary=context_summary,
@@ -490,13 +502,12 @@ async def run_supplementary_tasks(
                 round_number=round_number,
                 max_iterations=max_iterations,
                 step_timeout=step_timeout,
+                total_timeout=total_timeout,
                 produced=produced,
                 analysis_log=analysis_log,
                 warnings=warnings,
                 envelope=_envelope,
-            ),
-            timeout=total_timeout,
-        )
+            )
     except asyncio.TimeoutError:
         logger.warning(
             f"[{getattr(agent, 'session_id', '?')}] supplementary pass exceeded its "

@@ -10,20 +10,15 @@ import json
 import logging
 import time
 from ...utils.llm_client import UpstreamExhaustedError
+from ...utils.llm_client_parts.retry import llm_timeout_seconds
 
 
 logger = logging.getLogger(__name__)
 
-# Step and direction budgets for the novelty gate.
-#
-# These were 30s and 180s. A triage call's median latency on the models this
-# agent runs on sits just under 30s, so roughly half of every step hit the bound
-# and the direction budget was spent producing nothing: an entire integration
-# gate could return "unknown_due_to_timeout" for every candidate after ~16
-# minutes of work. The bounds below sit above the observed p90 instead, and the
-# wall clock is paid back by evaluating candidates concurrently rather than one
-# after another.
+# Retrieval budgets for the novelty gate. Model calls have an independent
+# minimum 600-second budget; their elapsed time does not consume these windows.
 NOVELTY_QUERY_TIMEOUT_SECONDS = 90.0
+PI_DIRECTION_LLM_TIMEOUT_SECONDS = 600.0
 NOVELTY_DIRECTION_TIMEOUT_SECONDS = 420.0
 NOVELTY_TIER3_QUERY_TIMEOUT_SECONDS = 90.0
 
@@ -218,9 +213,16 @@ class DirectionNoveltyMixin:
             str(a.get("pmid") or "") for a in matching_cache if a.get("pmid")
         }
         deadline = time.monotonic() + direction_timeout_seconds
+
+        def exclude_llm_time(elapsed):
+            nonlocal deadline
+            if deadline is not None:
+                deadline += elapsed
+
         cache_ev, cache_meta, cache_timed_out, cache_limits = (
             await self._triage_cached_articles_once(
-                candidate, matching_cache, query_timeout_seconds, deadline
+                candidate, matching_cache, query_timeout_seconds, deadline,
+                pause_deadlines_fn=exclude_llm_time,
             )
         )
         evidence.extend(cache_ev)
@@ -238,6 +240,7 @@ class DirectionNoveltyMixin:
             all_limitations=limitations,
             deadline=deadline,
             triaged_pmids=triaged_pmids,
+            pause_deadlines_fn=exclude_llm_time,
         )
         timed_out = timed_out or cache_timed_out
         if timed_out and "Minimum-attempt query timed out" not in limitations:
@@ -257,6 +260,7 @@ class DirectionNoveltyMixin:
         matching_cache: List[Dict[str, Any]],
         query_timeout_seconds: float,
         deadline: Optional[float],
+        pause_deadlines_fn: Optional[Callable[[float], None]] = None,
     ) -> Tuple[List[PubMedEvidenceItem], Dict[str, Any], bool, List[str]]:
         """Triage this candidate's cached articles once, not once per query.
 
@@ -271,12 +275,6 @@ class DirectionNoveltyMixin:
         limitations: List[str] = []
         if not matching_cache:
             return evidence, meta, False, limitations
-        step_timeout = query_timeout_seconds
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return evidence, meta, True, ["Direction-level timeout exceeded"]
-            step_timeout = min(step_timeout, remaining)
         cache_query = DirectionSearchQuery(
             category="session_cache",
             query="",
@@ -284,14 +282,11 @@ class DirectionNoveltyMixin:
             notes="Session-cached articles, triaged once per candidate",
         )
         try:
-            evidence, meta = await asyncio.wait_for(
+            evidence, meta = await self._await_literature_llm(
                 self._triage_articles_with_llm(matching_cache, candidate, cache_query),
-                timeout=step_timeout,
+                timeout_seconds=query_timeout_seconds,
+                on_elapsed=pause_deadlines_fn,
             )
-        except asyncio.TimeoutError:
-            if deadline is not None and time.monotonic() >= deadline:
-                return evidence, meta, True, ["Direction-level timeout exceeded"]
-            return evidence, meta, True, ["Cache triage timeout for query: session_cache"]
         except UpstreamExhaustedError:
             raise
         except Exception as exc:
@@ -324,6 +319,11 @@ class DirectionNoveltyMixin:
             if "Direction-level timeout exceeded" not in all_limitations:
                 all_limitations.append("Direction-level timeout exceeded")
 
+        def exclude_llm_time(elapsed):
+            nonlocal deadline
+            if deadline is not None:
+                deadline += elapsed
+
         def direction_deadline_expired() -> bool:
             return deadline is not None and time.monotonic() >= deadline
 
@@ -343,7 +343,8 @@ class DirectionNoveltyMixin:
         if not timed_out_flag:
             cache_ev, cache_meta, cache_timed_out, cache_limits = (
                 await self._triage_cached_articles_once(
-                    candidate, matching_cache, query_timeout_seconds, deadline
+                    candidate, matching_cache, query_timeout_seconds, deadline,
+                pause_deadlines_fn=exclude_llm_time,
                 )
             )
             all_evidence.extend(cache_ev)
@@ -363,6 +364,7 @@ class DirectionNoveltyMixin:
                 all_evidence=all_evidence, executed_categories=executed_categories,
                 triage_metadata_list=triage_metadata_list, all_limitations=all_limitations,
                 deadline=deadline, triaged_pmids=triaged_pmids,
+                pause_deadlines_fn=exclude_llm_time,
             ):
                 timed_out_flag = True
 
@@ -389,6 +391,7 @@ class DirectionNoveltyMixin:
                 all_evidence=all_evidence, executed_categories=executed_categories,
                 triage_metadata_list=triage_metadata_list, all_limitations=all_limitations,
                 deadline=deadline, triaged_pmids=triaged_pmids,
+                pause_deadlines_fn=exclude_llm_time,
             ):
                 timed_out_flag = True
 
@@ -964,30 +967,35 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         phase: str,
         intervention_fn: Optional[Callable[..., Any]],
         timeout_seconds: Optional[float] = None,
-        deadline_fn: Optional[Callable[[], float]] = None,
         pause_deadlines_fn: Optional[Callable[[float], None]] = None,
+        failure_fn: Optional[Callable[[UpstreamExhaustedError], None]] = None,
+        agent_name: str = "pi",
     ) -> Any:
-        """Call a PI callback and reuse the workflow's existing HITL action."""
+        """Give LLM calls their own budget and preserve the workflow HITL path.
+
+        Retrieval deadlines never shorten a model request. Time spent awaiting
+        the model or a human is excluded from the remaining retrieval budget.
+        """
+        current_timeout = llm_timeout_seconds(timeout_seconds)
         while True:
             try:
-                current_timeout = timeout_seconds
-                if deadline_fn is not None:
-                    remaining = deadline_fn() - time.monotonic()
-                    current_timeout = (
-                        remaining
-                        if current_timeout is None
-                        else min(current_timeout, remaining)
-                    )
-                if current_timeout is not None and current_timeout <= 0:
-                    raise asyncio.TimeoutError
-                result = callback(*args, **kwargs)
-                if hasattr(result, "__await__"):
-                    if current_timeout is not None:
+                started = time.monotonic()
+                try:
+                    result = callback(*args, **kwargs)
+                    if hasattr(result, "__await__"):
                         result = await asyncio.wait_for(result, timeout=current_timeout)
-                    else:
-                        result = await result
-                return result
+                    return result
+                except asyncio.TimeoutError as exc:
+                    raise UpstreamExhaustedError(
+                        f"Direction literature {agent_name} call timed out after {current_timeout:g}s",
+                        agent_name=agent_name, failure_kind="timeout",
+                    ) from exc
+                finally:
+                    if pause_deadlines_fn is not None:
+                        pause_deadlines_fn(max(0.0, time.monotonic() - started))
             except UpstreamExhaustedError as error:
+                if failure_fn is not None:
+                    failure_fn(error)
                 if intervention_fn is None:
                     raise
                 intervention_node = (
@@ -1086,6 +1094,8 @@ Articles (do not invent absent context):
 {json.dumps(article_payload, ensure_ascii=False)}
 
 Return JSON only: {{"items":[{{"pmid":"...","study_context":{{"species":"unknown","tissue":"unknown","cell_type":"unknown","perturbation":"unknown","design":"unknown","outcomes":"unknown"}},"finding":"...","source_passage":"a short exact passage from the abstract or empty if none","addressed_link":"...","applicability_limits":["..."],"provisional_classification":"direct|linked|background|conflicting|irrelevant|uncertain|unknown"}}]}}.
+Copy source_passage as one contiguous substring, preserving internal text and punctuation.
+Do not paraphrase, replace names with aliases, remove parentheticals, or add a terminal period.
 Keep every PMID you can assess. Literature labels are provisional and never delete an article."""
         response = await self.chat_without_history(prompt, temperature=0.1)
         parsed = self._safe_parse_json(response, default={})
@@ -1120,15 +1130,20 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                 continue
             passage = str(raw.get("source_passage") or "")
             abstract = str(article.get("abstract") or "")
+            passage_status = "verified" if passage else "not_provided"
+            passage_limitation = None
             if passage and self._normalised_passage(passage) not in self._normalised_passage(abstract):
-                limitations.append(f"Extraction passage for PMID {pmid} was not found in the retained abstract.")
-                continue
+                passage_status = "unverified"
+                passage_limitation = f"Extraction passage for PMID {pmid} was not found in the retained abstract."
+                limitations.append(passage_limitation)
             try:
                 extraction = DirectionLiteratureExtraction.model_validate({
                     **raw,
                     "pmid": pmid,
                     "task_ids": [task.task_id],
                     "source_passage": passage,
+                    "source_passage_status": passage_status,
+                    "limitation": passage_limitation or raw.get("limitation"),
                 })
             except Exception as exc:
                 limitations.append(f"Invalid extraction for PMID {pmid}: {str(exc)[:140]}")
@@ -1240,9 +1255,11 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                 "omitted_article_detail_count": len(articles),
                 "omitted_extraction_detail_count": max(0, len(extractions) - extraction_limit),
                 "remaining_budget_seconds": max(0.0, candidate_deadlines.get(direction_id, 0.0) - time.monotonic()),
-                "technical_limitations": list(
-                    checkpoint.limitations_by_candidate.get(direction_id, [])
-                ),
+                "technical_limitations": [
+                    *checkpoint.limitations_by_candidate.get(direction_id, []),
+                    *([checkpoint.planning_errors[direction_id]]
+                      if direction_id in checkpoint.planning_errors else []),
+                ],
                 "unexecuted_task_ids": [
                     task_id for task_id in checkpoint.unexecuted_task_ids
                     if any(t.task_id == task_id and t.direction_id == direction_id for t in checkpoint.tasks)
@@ -1259,8 +1276,8 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
             "plan_hash": checkpoint.plan_hash,
             "candidates": packet_candidates,
             # The first PI review receives every identity and retained link, but
-            # no duplicate abstract bodies. Full records are supplied only after
-            # the PI names PMIDs in requested_detail_pmids.
+            # no duplicate abstract bodies, except sources whose returned
+            # quotation did not verify and needs direct PI inspection.
             "article_index": [
                 {
                     "pmid": article.pmid,
@@ -1276,8 +1293,12 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
             "requested_article_details": [
                 article.model_dump(mode="json")
                 for article in checkpoint.article_inventory
-                if article.pmid in requested_detail_pmids
-                and included_task_ids.intersection(article.task_ids)
+                if (article.pmid in requested_detail_pmids or any(
+                    extraction.pmid == article.pmid
+                    and extraction.source_passage_status == "unverified"
+                    and included_task_ids.intersection(extraction.task_ids)
+                    for extraction in checkpoint.extractions
+                )) and included_task_ids.intersection(article.task_ids)
             ],
             "remaining_unexecuted_task_ids": list(checkpoint.unexecuted_task_ids),
         }
@@ -1352,6 +1373,7 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
         batch: str,
         query_timeout_seconds: float,
         plan_hash: str,
+        pause_deadlines_fn: Optional[Callable[[float], None]] = None,
     ) -> None:
         existing = next(
             (e for e in checkpoint.task_executions if e.task_id == task.task_id and e.batch == batch),
@@ -1452,33 +1474,26 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                 execution.retrieved_pmids = raw_pmids[:20]
             execution.status = "zero_result" if not articles else "partial"
             if articles:
-                extraction_remaining = deadline - time.monotonic()
-                extraction_timeout = extraction_remaining
-                if extraction_timeout <= 0:
-                    if task.task_id not in checkpoint.unexecuted_task_ids:
-                        checkpoint.unexecuted_task_ids.append(task.task_id)
+                extractions, limits = await self._direction_llm_call_with_intervention(
+                    self._extract_direction_search_articles,
+                    (candidate, task, articles), {},
+                    state=state, phase=checkpoint.phase,
+                    intervention_fn=None,
+                    pause_deadlines_fn=pause_deadlines_fn,
+                    agent_name="literature",
+                )
+                checkpoint.extractions = [
+                    item for item in checkpoint.extractions
+                    if task.task_id not in item.task_ids
+                ]
+                checkpoint.extractions.extend(extractions)
+                for limitation in limits:
                     self._add_direction_limitation(
-                        checkpoint,
-                        task.direction_id,
-                        f"Extraction for task {task.task_id} was left unexecuted to reserve PI review time; raw inventory retained."
+                        checkpoint, task.direction_id, limitation
                     )
-                else:
-                    extractions, limits = await asyncio.wait_for(
-                        self._extract_direction_search_articles(candidate, task, articles),
-                        timeout=extraction_timeout,
-                    )
-                    checkpoint.extractions = [
-                        item for item in checkpoint.extractions
-                        if task.task_id not in item.task_ids
-                    ]
-                    checkpoint.extractions.extend(extractions)
-                    for limitation in limits:
-                        self._add_direction_limitation(
-                            checkpoint, task.direction_id, limitation
-                        )
-                    execution.status = "partial" if limits else "completed"
-                    if not limits and task.task_id in checkpoint.unexecuted_task_ids:
-                        checkpoint.unexecuted_task_ids.remove(task.task_id)
+                execution.status = "partial" if limits else "completed"
+                if not limits and task.task_id in checkpoint.unexecuted_task_ids:
+                    checkpoint.unexecuted_task_ids.remove(task.task_id)
         except asyncio.TimeoutError:
             execution.status = "timeout"
             execution.budget_limitation = "task retrieval or extraction timed out within shared candidate deadline"
@@ -1622,19 +1637,6 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
             if direction_id in checkpoint.candidate_deadline_epoch:
                 checkpoint.candidate_deadline_epoch[direction_id] += excluded_seconds
 
-        def earliest_deadline(
-            *,
-            reserve_review: bool = False,
-            direction_ids: Optional[Set[str]] = None,
-        ) -> float:
-            eligible = [
-                work_deadline(direction_id) if reserve_review else deadline
-                for direction_id, deadline in candidate_deadlines.items()
-                if direction_ids is None or direction_id in direction_ids
-            ]
-            deadline = min(eligible) if eligible else time.monotonic()
-            return deadline
-
         async def intervene_after_settled(error: UpstreamExhaustedError) -> str:
             if intervention_fn is None:
                 raise error
@@ -1656,10 +1658,18 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
 
         # Plan once per stable gate. A retry resumes from the persisted plan and
         # never silently replaces it with a template query.
-        if not checkpoint.tasks and not checkpoint.plan_status == "failed":
+        planning_skipped = False
+        if not checkpoint.tasks:
             plan_result: Any = None
             if pi_plan_fn is not None:
                 plan_started = time.monotonic()
+
+                def record_planning_failure(error: UpstreamExhaustedError) -> None:
+                    checkpoint.plan_status = "failed"
+                    for direction_id in candidate_ids:
+                        checkpoint.planning_errors[direction_id] = str(error)[:300]
+                    self._save_direction_checkpoint(state, checkpoint)
+
                 try:
                     plan_result = await self._direction_llm_call_with_intervention(
                         pi_plan_fn,
@@ -1671,15 +1681,10 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                         state=state,
                         phase=phase,
                         intervention_fn=intervention_fn,
-                        timeout_seconds=NOVELTY_QUERY_TIMEOUT_SECONDS,
-                        deadline_fn=lambda: earliest_deadline(reserve_review=True),
+                        timeout_seconds=PI_DIRECTION_LLM_TIMEOUT_SECONDS,
                         pause_deadlines_fn=shift_deadlines,
+                        failure_fn=record_planning_failure,
                     )
-                except asyncio.TimeoutError:
-                    checkpoint.plan_status = "failed"
-                    checkpoint.spent_seconds += max(0.0, time.monotonic() - plan_started)
-                    self._save_direction_checkpoint(state, checkpoint)
-                    plan_result = None
                 except (asyncio.CancelledError, UpstreamExhaustedError):
                     raise
                 except Exception as exc:
@@ -1699,12 +1704,15 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                 else:
                     checkpoint.spent_seconds += max(0.0, time.monotonic() - plan_started)
             if plan_result is None:
-                checkpoint.plan_status = "unavailable"
+                planning_skipped = True
+                if checkpoint.plan_status != "failed":
+                    checkpoint.plan_status = "unavailable"
                 for direction_id in candidate_ids:
                     checkpoint.planning_errors.setdefault(
                         direction_id, "PI direction-search plan was unavailable"
                     )
             else:
+                checkpoint.planning_errors.clear()
                 raw_tasks = plan_result.get("tasks", []) if isinstance(plan_result, dict) else plan_result
                 if not isinstance(raw_tasks, list):
                     raw_tasks = []
@@ -1834,11 +1842,14 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                                 )
                             ),
                             plan_hash=checkpoint.plan_hash,
+                            pause_deadlines_fn=lambda elapsed, direction_id=direction_id: shift_candidate_deadline(
+                                direction_id, elapsed
+                            ),
                         )
                 finally:
                     candidate_ready_at[direction_id] = time.monotonic()
 
-        retrieval_skipped = False
+        retrieval_skipped = planning_skipped
         while True:
             queued_now = time.monotonic()
             candidate_queued_at = {
@@ -1907,15 +1918,7 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
             direction_id
             for direction_id in candidate_ids
             if direction_id not in reviews
-            and candidate_deadlines.get(direction_id, 0.0) > time.monotonic()
         }
-        for direction_id in set(candidate_ids) - active_review_ids - set(reviews):
-            review_errors[direction_id] = (
-                "PI review was unavailable because this candidate's shared deadline expired"
-            )
-            self._add_direction_limitation(
-                checkpoint, direction_id, review_errors[direction_id]
-            )
         if pi_review_fn is not None and not retrieval_skipped and active_review_ids:
             pending_cohorts = review_cohorts(active_review_ids)
             for cohort_index, cohort_ids in enumerate(pending_cohorts):
@@ -1934,18 +1937,9 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                         state=state,
                         phase=phase,
                         intervention_fn=intervention_fn,
-                        timeout_seconds=NOVELTY_QUERY_TIMEOUT_SECONDS,
-                        deadline_fn=lambda cohort_ids=cohort_ids: earliest_deadline(
-                            direction_ids=cohort_ids
-                        ),
+                        timeout_seconds=PI_DIRECTION_LLM_TIMEOUT_SECONDS,
                         pause_deadlines_fn=shift_deadlines,
                     )
-                except asyncio.TimeoutError:
-                    review_result = None
-                    review_errors.update({
-                        direction_id: "PI review exceeded the shared candidate deadline"
-                        for direction_id in cohort_ids
-                    })
                 except (asyncio.CancelledError, UpstreamExhaustedError):
                     raise
                 except Exception as exc:
@@ -1961,9 +1955,7 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                 finally:
                     cohort_elapsed = max(0.0, time.monotonic() - cohort_started)
                     checkpoint.spent_seconds += cohort_elapsed
-                    for later_cohort in pending_cohorts[cohort_index + 1:]:
-                        for direction_id in later_cohort:
-                            shift_candidate_deadline(direction_id, cohort_elapsed)
+
                 if review_result is not None:
                     parsed_reviews, parsed_review_errors = self._direction_review_map(
                         review_result,
@@ -2011,17 +2003,6 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                 detail_direction_ids = {
                     direction_id for direction_id in pending_by_candidate
                 }
-                detail_direction_ids = {
-                    direction_id
-                    for direction_id in detail_direction_ids
-                    if candidate_deadlines.get(direction_id, 0.0) > time.monotonic()
-                }
-                if not detail_direction_ids:
-                    for direction_id in pending_by_candidate:
-                        review_errors[direction_id] = (
-                            "PI source-detail review exceeded the shared candidate deadline"
-                        )
-                    return
                 detail_cohorts = review_cohorts(detail_direction_ids)
                 for cohort_index, cohort_ids in enumerate(detail_cohorts):
                     requested_detail_pmids = set().union(*(
@@ -2048,18 +2029,9 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                             state=state,
                             phase=phase,
                             intervention_fn=intervention_fn,
-                            timeout_seconds=NOVELTY_QUERY_TIMEOUT_SECONDS,
-                            deadline_fn=lambda cohort_ids=cohort_ids: earliest_deadline(
-                                direction_ids=cohort_ids
-                            ),
+                            timeout_seconds=PI_DIRECTION_LLM_TIMEOUT_SECONDS,
                             pause_deadlines_fn=shift_deadlines,
                         )
-                    except asyncio.TimeoutError:
-                        detail_result = None
-                        for direction_id in cohort_ids:
-                            review_errors[direction_id] = (
-                                "PI source-detail review exceeded the shared candidate deadline"
-                            )
                     except (asyncio.CancelledError, UpstreamExhaustedError):
                         raise
                     except Exception as exc:
@@ -2075,9 +2047,7 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                     finally:
                         detail_elapsed = max(0.0, time.monotonic() - detail_started)
                         checkpoint.spent_seconds += detail_elapsed
-                        for later_cohort in detail_cohorts[cohort_index + 1:]:
-                            for direction_id in later_cohort:
-                                shift_candidate_deadline(direction_id, detail_elapsed)
+
                     if detail_result is None:
                         continue
                     detail_reviews, detail_errors = self._direction_review_map(
@@ -2096,8 +2066,8 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                     self._save_direction_checkpoint(state, checkpoint)
 
         # A PI may inspect retained abstracts by PMID before its action is
-        # accepted. Each round must name a previously unseen PMID, is charged
-        # to the same deadline, and supplies no unrelated abstract bodies.
+        # accepted. Each round must name a previously unseen PMID and receives
+        # a separate model-call budget without extending retrieval work.
         await resolve_requested_details()
 
         # One and only one follow-up batch per candidate. Review requests after
@@ -2181,6 +2151,9 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                             batch="followup",
                             query_timeout_seconds=query_timeout_seconds,
                             plan_hash=checkpoint.plan_hash,
+                            pause_deadlines_fn=lambda elapsed, direction_id=direction_id: shift_candidate_deadline(
+                                direction_id, elapsed
+                            ),
                         )
                         break
                     except UpstreamExhaustedError as error:
@@ -2218,14 +2191,7 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
             final_review_ids = {
                 review.direction_id
                 for review in followup_requests
-                if candidate_deadlines.get(review.direction_id, 0.0) > time.monotonic()
             }
-            for direction_id in {
-                review.direction_id for review in followup_requests
-            } - final_review_ids:
-                review_errors[direction_id] = (
-                    "Final PI review exceeded the shared candidate deadline"
-                )
             if pi_review_fn is not None and final_review_ids:
                 final_cohorts = review_cohorts(final_review_ids)
                 final_reviews: List[DirectionPIReview] = []
@@ -2245,19 +2211,9 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                             state=state,
                             phase=phase,
                             intervention_fn=intervention_fn,
-                            timeout_seconds=NOVELTY_QUERY_TIMEOUT_SECONDS,
-                            deadline_fn=lambda cohort_ids=cohort_ids: earliest_deadline(
-                                direction_ids=cohort_ids
-                            ),
+                            timeout_seconds=PI_DIRECTION_LLM_TIMEOUT_SECONDS,
                             pause_deadlines_fn=shift_deadlines,
                         )
-                    except asyncio.TimeoutError:
-                        final_result = None
-                        for direction_id in cohort_ids:
-                            review_errors.setdefault(
-                                direction_id,
-                                "Final PI review exceeded the shared candidate deadline",
-                            )
                     except (asyncio.CancelledError, UpstreamExhaustedError):
                         raise
                     except Exception as exc:
@@ -2273,9 +2229,7 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                     finally:
                         final_elapsed = max(0.0, time.monotonic() - final_started)
                         checkpoint.spent_seconds += final_elapsed
-                        for later_cohort in final_cohorts[cohort_index + 1:]:
-                            for direction_id in later_cohort:
-                                shift_candidate_deadline(direction_id, final_elapsed)
+
                     if final_result is None:
                         continue
                     cohort_reviews, final_errors = self._direction_review_map(
@@ -2441,7 +2395,9 @@ Keep every PMID you can assess. Literature labels are provisional and never dele
                     {"pmid": pmid} for pmid in final_review.cited_article_ids[:5]
                 ]
             results.append(result)
-        checkpoint.status = "completed" if all(not r.get("unexecuted_task_ids") for r in results) else "partial"
+        checkpoint.status = "completed" if not planning_skipped and all(
+            not r.get("unexecuted_task_ids") for r in results
+        ) else "partial"
         self._save_direction_checkpoint(state, checkpoint)
         return results
 

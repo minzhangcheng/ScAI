@@ -118,7 +118,7 @@ async def test_the_per_query_path_is_not_handed_the_cache_again(monkeypatch):
         lambda state: [{"pmid": "1", "title": "t", "abstract": "a"}],
     )
 
-    async def fake_cache_triage(candidate, matching_cache, query_timeout_seconds, deadline):
+    async def fake_cache_triage(candidate, matching_cache, query_timeout_seconds, deadline, **kwargs):
         return [], {}, False, []
 
     monkeypatch.setattr(agent, "_triage_cached_articles_once", fake_cache_triage)

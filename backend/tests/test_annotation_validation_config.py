@@ -44,4 +44,4 @@ def test_validation_limits_clamps_bad_values():
     host = AnnotationMixin()
     host.config = SimpleNamespace(annotation_validation_max_iterations=99,
                                   annotation_validation_timeout_seconds=0)
-    assert host._validation_limits() == (8, 1)
+    assert host._validation_limits() == (8, 600)

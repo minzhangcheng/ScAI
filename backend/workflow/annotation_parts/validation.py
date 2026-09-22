@@ -18,7 +18,7 @@ def _validation_enabled(self) -> bool:
 
 def _validation_limits(self):
     """(max_iterations, timeout_seconds) from config; defaults 5 / 600.
-    Clamped defensively (iter in [1,8], timeout >= 1) so a stray config can't
+    Clamped defensively (iter in [1,8], timeout >= 600) so a stray config can't
     make validation time out instantly or loop unboundedly."""
     try:
         from ...config import default_config
@@ -27,7 +27,8 @@ def _validation_limits(self):
         to = int(getattr(cfg, "annotation_validation_timeout_seconds", 600))
     except Exception:
         return (5, 600)
-    return (max(1, min(it, 8)), max(1, to))
+    from backend.utils.llm_client_parts.retry import llm_timeout_seconds
+    return (max(1, min(it, 8)), llm_timeout_seconds(to))
 
 async def _run_annotation_validation_round(
     self,
@@ -41,6 +42,7 @@ async def _run_annotation_validation_round(
     focused_evidence: Optional[Dict[str, Any]] = None,
     literature_report: str = "",
     force: bool = False,
+    annotation_source: Optional[Dict[str, Any]] = None,
 ):
     """Run the gated annotation validation round.
 
@@ -56,7 +58,8 @@ async def _run_annotation_validation_round(
 
     # 1) Metadata introspection (also yields cluster_key for the attempt id).
     try:
-        context = await self.bioinformatics_agent.introspect_validation_metadata(None)
+        context = (await self.bioinformatics_agent.resolve_analysis_source_metadata(annotation_source)
+                   if annotation_source else await self.bioinformatics_agent.introspect_validation_metadata(None))
     except Exception as e:
         logger.warning(f"[{self.session_id}] validation introspection failed: {e}")
         context = {}
@@ -64,7 +67,8 @@ async def _run_annotation_validation_round(
 
     # 2) Idempotency guard (reads PREVIOUS pending state, e.g. after snapshot restore).
     attempt_id = compute_validation_attempt_id(
-        getattr(state, "current_round", 0), tissue, organism, cluster_key, cluster_markers)
+        getattr(state, "current_round", 0), tissue, organism, cluster_key, cluster_markers,
+        source_identity={key: context[key] for key in ("partition_digest", "preparation_id") if context.get(key)})
     prev = state.annotation_state
     if (not force and prev is not None and getattr(prev, "validation_attempt_id", None) == attempt_id
             and getattr(prev, "validation_status", None) in ("completed", "failed", "skipped", "partial")):

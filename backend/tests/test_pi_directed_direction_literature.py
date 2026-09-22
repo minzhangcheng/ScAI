@@ -486,7 +486,7 @@ async def test_concurrent_upstream_failure_settles_sibling_before_skip(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_followup_and_final_review_share_original_deadline(monkeypatch):
+async def test_followup_retrieval_budget_does_not_cancel_final_pi_review(monkeypatch):
     agent = _agent()
     review_calls = 0
 
@@ -520,8 +520,8 @@ async def test_followup_and_final_review_share_original_deadline(monkeypatch):
 
     assert review_calls == 2
     assert {item["task_id"] for item in result[0]["task_executions"]} == {"t1", "t2"}
-    assert result[0]["assessment_status"] == "unavailable"
-    assert any("shared candidate deadline" in item for item in result[0]["assessment_limitations"])
+    assert result[0]["assessment_status"] == "assessed"
+    assert not result[0]["assessment_limitations"]
 
 
 @pytest.mark.parametrize(
@@ -884,3 +884,147 @@ async def test_serialized_pending_detail_review_resumes_named_sources_once(monke
     )
     assert len(packets) == 3
     assert again[0]["assessment_status"] == "assessed"
+
+
+@pytest.mark.asyncio
+async def test_slow_models_have_independent_budgets_and_preserve_retrieval_time(monkeypatch):
+    agent = _agent()
+    observed_timeouts = {}
+    original_wait_for = asyncio.wait_for
+
+    async def record_wait(awaitable, timeout):
+        observed_timeouts.setdefault(awaitable.cr_code.co_name, []).append(timeout)
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    async def plan(*args, **kwargs):
+        await asyncio.sleep(0.04)
+        return {"tasks": [_task()]}
+
+    async def search(query, max_results=20):
+        return [{"pmid": "1", "title": "Source", "abstract": "Exact passage."}]
+
+    async def extract(candidate, task, articles):
+        await asyncio.sleep(0.04)
+        return [DirectionLiteratureExtraction(pmid="1", task_ids=[task.task_id])], []
+
+    async def review(state, packet, phase="exploration"):
+        await asyncio.sleep(0.04)
+        return {"reviews": [{"direction_id": "d1", "action": "finish", "assessment_status": "assessed"}]}
+
+    monkeypatch.setattr(asyncio, "wait_for", record_wait)
+    monkeypatch.setattr(agent, "_pubmed_search", search)
+    monkeypatch.setattr(agent, "_extract_direction_search_articles", extract)
+    result = await agent.evaluate_direction_literature_search(
+        [{"direction_id": "d1", "direction": "Direction"}], AnalysisState(user_id="u"),
+        pi_plan_fn=plan, pi_review_fn=review,
+        direction_timeout_seconds=0.03, query_timeout_seconds=0.01,
+    )
+    assert result[0]["assessment_status"] == "assessed"
+    assert result[0]["task_executions"][0]["status"] == "completed"
+    assert all(value >= 600 for name in ("plan", "extract", "review") for value in observed_timeouts[name])
+    assert observed_timeouts["search"][0] <= 0.01
+
+
+@pytest.mark.parametrize("action", ["retry", "skip"])
+@pytest.mark.asyncio
+async def test_planning_timeout_retains_diagnostic_without_consuming_followup(monkeypatch, action):
+    agent = _agent()
+    state = AnalysisState(user_id="u")
+    planning_calls = 0
+    search_calls = 0
+    review_calls = 0
+
+    async def plan(*args, **kwargs):
+        nonlocal planning_calls
+        planning_calls += 1
+        if planning_calls == 1:
+            raise asyncio.TimeoutError
+        return {"tasks": [_task()]}
+
+    async def intervene(error, node, current_state):
+        assert isinstance(error, UpstreamExhaustedError)
+        assert error.failure_kind == "timeout"
+        assert "600s" in str(error)
+        checkpoint = next(iter(current_state.direction_literature_in_progress.values()))
+        assert checkpoint["plan_status"] == "failed"
+        assert "timed out" in checkpoint["planning_errors"]["d1"]
+        return action
+
+    async def search(query, max_results=20):
+        nonlocal search_calls
+        search_calls += 1
+        return []
+
+    async def review(*args, **kwargs):
+        nonlocal review_calls
+        review_calls += 1
+        return {"reviews": [{"direction_id": "d1", "action": "finish", "assessment_status": "uncertain"}]}
+
+    monkeypatch.setattr(agent, "_pubmed_search", search)
+    result = await agent.evaluate_direction_literature_search(
+        [{"direction_id": "d1", "direction": "Direction"}], state,
+        pi_plan_fn=plan, pi_review_fn=review, intervention_fn=intervene,
+    )
+    checkpoint = next(iter(state.direction_literature_in_progress.values()))
+    assert checkpoint["followup_used_by_candidate"] == {}
+    if action == "retry":
+        assert planning_calls == 2 and search_calls == 1 and review_calls == 1
+        assert checkpoint["planning_errors"] == {}
+        assert checkpoint["task_batches"] == {"t1": "initial"}
+        assert result[0]["assessment_status"] == "uncertain"
+    else:
+        assert planning_calls == 1 and search_calls == 0 and review_calls == 0
+        assert result[0]["plan_status"] == "failed"
+        assert any("timed out" in text for text in result[0]["limitations"])
+        assert checkpoint["status"] == "partial"
+
+
+@pytest.mark.parametrize(
+    "passage,expected_status",
+    [
+        ("Activity (p less than 0.01) decreased", "verified"),
+        ("Activity decreased", "unverified"),
+        ("Activity (p less than 0.01) decreased.", "unverified"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_quote_mismatch_keeps_finding_and_shows_source_to_pi(monkeypatch, passage, expected_status):
+    import json
+
+    agent = _agent()
+    abstract = "Activity (p less than 0.01) decreased, with further context."
+    packets = []
+
+    async def search(query, max_results=20):
+        return [{"pmid": "1", "title": "Study", "abstract": abstract}]
+
+    async def chat(*args, **kwargs):
+        return json.dumps({"items": [
+            {"pmid": "1", "source_passage": passage, "finding": "Reported activity change", "provisional_classification": "linked"},
+            {"pmid": "999", "source_passage": abstract, "finding": "Unknown article must not enter evidence"},
+        ]})
+
+    async def review(state, packet, phase="exploration"):
+        packets.append(packet)
+        return {"reviews": [{"direction_id": "d1", "action": "finish", "assessment_status": "assessed"}]}
+
+    monkeypatch.setattr(agent, "_pubmed_search", search)
+    monkeypatch.setattr(agent, "chat_without_history", chat)
+    result = await agent.evaluate_direction_literature_search(
+        [{"direction_id": "d1", "direction": "Direction"}], AnalysisState(user_id="u"),
+        pi_plan_fn=lambda *args, **kwargs: {"tasks": [_task()]}, pi_review_fn=review,
+    )
+    extracted = result[0]["extractions"]
+    assert len(extracted) == 1
+    assert extracted[0]["pmid"] == "1"
+    assert extracted[0]["finding"] == "Reported activity change"
+    assert extracted[0]["source_passage"] == passage
+    assert extracted[0]["source_passage_status"] == expected_status
+    assert packets[0]["candidates"][0]["extractions"] == extracted
+    if expected_status == "unverified":
+        assert "not found" in extracted[0]["limitation"]
+        assert packets[0]["requested_article_details"][0]["abstract"] == abstract
+    else:
+        assert packets[0]["requested_article_details"] == []
+    assert any("999" in text for text in result[0]["limitations"])
+    assert result[0]["assessment_status"] == "assessed"

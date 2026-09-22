@@ -138,7 +138,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "report_findings",
-            "description": "Report key findings and conclusions. Call this ONLY when you have completed ALL assigned tasks. In the exploration phase, you MUST complete the full pipeline including annotate_clusters BEFORE calling this tool.",
+            "description": "Submit the complete final findings and end this analysis pass. This is not a validation or test call. findings and summary must be separate top-level fields; after a format error, resubmit all intended findings and evidence links without reducing the report to a diagnostic example. Call this ONLY when you have completed ALL assigned tasks. In the exploration phase, you MUST complete the full pipeline including annotate_clusters BEFORE calling this tool.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -325,6 +325,10 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "adata_var": {
+                        "type": "string",
+                        "description": "Exact AnnData variable whose cluster partition and markers are being annotated. Supply this when multiple objects exist; a prepared execution source remains authoritative."
+                    },
                     "cluster_markers": {
                         "type": "object",
                         "description": "Optional. Dict mapping each cluster ID to its observed top marker genes. Example: {\"0\": [\"MarkerA\", \"MarkerB\"], \"1\": [\"MarkerC\", \"MarkerD\"]}. If omitted, markers will be auto-extracted from adata.uns['rank_genes_groups'].",

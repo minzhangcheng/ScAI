@@ -26,3 +26,10 @@ def test_attempt_id_changes_with_inputs():
     assert compute_validation_attempt_id(1, "liver", "human", "leiden", _markers()) != base
     assert compute_validation_attempt_id(1, "liver", "mouse", "louvain", _markers()) != base
     assert compute_validation_attempt_id(1, "liver", "mouse", "leiden", {"0": ["Alb"]}) != base
+
+
+def test_attempt_id_includes_source_partition():
+    args = (1, "tissue", "species", "leiden", _markers())
+    assert compute_validation_attempt_id(*args, source_identity={"partition_digest": "old"}) != compute_validation_attempt_id(
+        *args, source_identity={"partition_digest": "final"},
+    )

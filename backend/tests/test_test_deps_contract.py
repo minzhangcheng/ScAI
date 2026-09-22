@@ -1042,3 +1042,43 @@ def test_test_strategy_documents_the_active_evidence_contract():
     )
     for marker in required:
         assert marker in text, f"test strategy is missing required contract: {marker}"
+
+
+def test_preserving_lock_update_keeps_all_existing_versions(tmp_path):
+    source = (ROOT / "scripts/lock-test-deps.sh").read_text(encoding="utf-8")
+    block = source.split("preserve_existing = os.environ.get", 1)[1].split("\n\ndef run(", 1)[0]
+    block = "preserve_existing = os.environ.get" + block
+    repo = tmp_path / "repo"
+    out = tmp_path / "output"
+    (repo / "docker/test-deps").mkdir(parents=True)
+    out.mkdir()
+    main = repo / "docker/test-deps/requirements-test.lock"
+    nodeps = repo / "docker/test-deps/requirements-test-nodeps.lock"
+    main.write_text("# lock\nnumpy==1.26.4 --hash=sha256:" + "a" * 64 + "\n")
+    nodeps.write_text("decoupler==1.8.0 --hash=sha256:" + "b" * 64 + "\n")
+    namespace = {
+        "os": type("Environment", (), {"environ": {"SCAI_LOCK_PRESERVE_EXISTING": "1"}}),
+        "repo": repo, "out": out, "hashlib": hashlib, "re": re,
+    }
+    exec(compile(block, "lock-preservation", "exec"), namespace)
+    assert (out / "existing-versions.txt").read_text().splitlines() == [
+        "numpy==1.26.4", "decoupler==1.8.0",
+    ]
+    assert namespace["preserved_lock_hashes"] == {
+        "docker/test-deps/requirements-test.lock": hashlib.sha256(main.read_bytes()).hexdigest(),
+        "docker/test-deps/requirements-test-nodeps.lock": hashlib.sha256(nodeps.read_bytes()).hexdigest(),
+    }
+    assert "args += ['-c', str(existing_constraints)]" in source
+    assert "download_args += ['-c', str(existing_constraints)]" in source
+
+
+def test_default_lock_update_does_not_constrain_existing_versions(tmp_path):
+    source = (ROOT / "scripts/lock-test-deps.sh").read_text(encoding="utf-8")
+    block = source.split("preserve_existing = os.environ.get", 1)[1].split("\n\ndef run(", 1)[0]
+    namespace = {
+        "os": type("Environment", (), {"environ": {}}),
+        "repo": tmp_path / "missing-repo", "out": tmp_path,
+    }
+    exec(compile("preserve_existing = os.environ.get" + block, "lock-preservation", "exec"), namespace)
+    assert namespace["preserve_existing"] is False
+    assert not (tmp_path / "existing-versions.txt").exists()

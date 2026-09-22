@@ -89,9 +89,20 @@ async def prepare_report_attempt(context, tool_call) -> ReportAttempt | None:
             "role": "tool",
             "tool_call_id": tool_call.id,
             "content": (
-                "[REJECTED] findings must contain at least one non-empty finding "
-                "object. A single object is accepted for compatibility, but it "
-                "must contain text."
+                "[REJECTED: invalid report arguments] Nothing was recorded and "
+                "analysis is not complete. Received top-level keys: "
+                f"{', '.join(sorted(str(key) for key in args)) or '(none)'}. "
+                "The top-level findings field must contain a non-empty finding "
+                "with text. findings and summary must be sibling JSON fields; "
+                "putting findings inside the summary string does not submit them. "
+                'Correct shape: {"summary": "Full analysis summary", "findings": '
+                '[{"text": "Finding", "evidence_execution_ids": ["actual-id"]}], '
+                '"suggestions": []}. Use actual execution IDs only. '
+                "Retry with ALL findings, suggestions and evidence links from your "
+                "previous intended report, preserving its content while correcting "
+                "the field structure. Do not replace it with a diagnostic or minimal "
+                "test submission: a valid report_findings call ends this analysis "
+                "pass. A genuinely single-finding report remains valid."
             ),
         })
         analysis_log.append(AnalysisStep(

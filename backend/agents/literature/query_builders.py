@@ -589,6 +589,8 @@ Current findings: {ctx["current_round_findings"][:300] or "Not available."}"""
         current_round_findings: Optional[List[str]] = None,
         enable_semantic_revision: bool = False,
         attempt_log: Optional[List[Dict[str, Any]]] = None,
+        llm_elapsed_fn=None,
+        retrieval_timeout_fn=None,
     ) -> Tuple[str, List[Dict[str, str]]]:
         """Try a query and perform at most one bounded second attempt.
 
@@ -608,7 +610,11 @@ Current findings: {ctx["current_round_findings"][:300] or "Not available."}"""
         while attempt < max_attempts:
             kind = next_attempt_kind
             try:
-                articles = await self._pubmed_search(query, max_results=max_results)
+                search = self._pubmed_search(query, max_results=max_results)
+                articles = await (
+                    asyncio.wait_for(search, timeout=max(0.001, retrieval_timeout_fn()))
+                    if retrieval_timeout_fn is not None else search
+                )
                 last_search_failed = False
                 attempts.append({
                     "kind": kind,
@@ -637,11 +643,12 @@ Current findings: {ctx["current_round_findings"][:300] or "Not available."}"""
             if attempt == 0:
                 if enable_semantic_revision and not last_search_failed:
                     try:
-                        degraded = await self._revise_zero_hit_query(
-                            topic,
-                            query,
-                            state=state,
-                            current_round_findings=current_round_findings,
+                        degraded = await self._await_literature_llm(
+                            self._revise_zero_hit_query(
+                                topic, query, state=state,
+                                current_round_findings=current_round_findings,
+                            ),
+                            on_elapsed=llm_elapsed_fn,
                         )
                     except UpstreamExhaustedError:
                         raise

@@ -128,6 +128,7 @@ def build_annotation_record(
                 n_cells_source=ca.n_cells_source,
             ))
     return AnnotationRecord(
+        annotation_source=ann.annotation_source if ann else None,
         organism=ann.organism if ann else "",
         tissue=ann.tissue if ann else "",
         tissue_summary=ann.tissue_summary if ann else "",
