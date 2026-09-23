@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.9 · **Last updated**: 2026-09-22
+**Version**: 0.60.10 · **Last updated**: 2026-09-23
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,11 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.10` — Removes the 48,000-character cap from execution records passed
+  into PI chat synthesis, preserving longer code and output histories in the
+  handoff. Adds a regression test to check that execution details after the
+  previous cutoff remain available to PI synthesis.
 
 - `0.60.9` — Repairs Chat delegation method provenance. PI synthesis now receives
   executor report summaries, code execution records, execution status, and

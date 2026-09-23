@@ -82,19 +82,25 @@ def test_synthesis_keeps_failed_attempt_visible_even_after_delegate_error(termin
         assert text in prompt
 
 
-def test_synthesis_discloses_truncation_and_still_delivers_other_agents():
+def test_synthesis_preserves_long_executions_and_discloses_summary_truncation():
+    long_code = "c" * 49000
+    final_output = "GeneA log2FC=-0.28, padj=0.60"
     prompt = _build_synthesis_prompt("Review", {}, {
         "bioinformatics": {
             "analysis_log": [{"findings_summary": "s" * 17000}],
-            "code_history": [{"id": "long-execution", "code": "c" * 49000}],
+            "code_history": [
+                {"id": "long-execution", "code": long_code},
+                {"id": "final-result", "code": "print(results)", "output": final_output},
+            ],
         },
         "literature": {"report": "Independent literature result."},
     })
-    assert prompt.count("[Evidence truncated:") == 2
+    assert prompt.count("[Evidence truncated:") == 1
     assert "Missing details cannot be verified" in prompt
-    assert "1 report summaries; 1 execution records; 0 score definitions; 0 scoring plans" in prompt
+    assert long_code in prompt
+    assert final_output in prompt
+    assert "1 report summaries; 2 execution records; 0 score definitions; 0 scoring plans" in prompt
     assert "Independent literature result." in prompt
-    assert len(prompt) < 68000
 
 
 def test_findings_without_execution_records_do_not_imply_verified_methods():

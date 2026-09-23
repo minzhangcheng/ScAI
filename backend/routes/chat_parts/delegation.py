@@ -237,7 +237,7 @@ def _build_execution_context(result: Dict[str, Any]) -> str:
         parts.append(
             "Execution records returned by the delegate (including any restored "
             "history; match execution IDs to the reported results):\n"
-            + _synthesis_evidence_text(executions, limit=48000)
+            + json.dumps(executions, ensure_ascii=False, indent=2)
         )
     if score_definitions:
         parts.append(
