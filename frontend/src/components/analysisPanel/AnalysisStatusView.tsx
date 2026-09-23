@@ -1,5 +1,5 @@
 import { AlertCircle, CheckCircle2, Loader2, Pause } from 'lucide-react'
-import ReactMarkdown from 'react-markdown'
+import { MarkdownContent } from '../MarkdownContent'
 
 import { RoundSummaries } from '../analysis/RoundSummaries'
 import type { AnalysisPanelController } from './useAnalysisPanelController'
@@ -128,8 +128,8 @@ export function AnalysisStatusView({ controller }: AnalysisStatusViewProps) {
               </div>
               <h3 className="font-display font-semibold text-accent-900 dark:text-accent-200">{t('finalReport')}</h3>
             </div>
-            <div className="prose prose-slate prose-sm max-w-none">
-              <ReactMarkdown>{currentSession.finalSummary}</ReactMarkdown>
+            <div className="text-slate-700 dark:text-slate-200">
+              <MarkdownContent content={currentSession.finalSummary} />
             </div>
           </div>
         )}

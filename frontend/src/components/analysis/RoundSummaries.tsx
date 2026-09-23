@@ -11,6 +11,7 @@ import {
 import type { Session } from '../../stores/appStore'
 import type { RoundSummary } from '../../types'
 import { resultIdentityKey } from '../../utils/roundKey'
+import { MarkdownContent } from '../MarkdownContent'
 
 interface RoundSummariesProps {
   roundSummaries: RoundSummary[]
@@ -111,9 +112,9 @@ export function RoundSummaries({
                       <h4 className="text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">
                         {language === 'zh' ? '本轮总结' : 'Round Summary'}
                       </h4>
-                      <p className="text-sm text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 p-3 rounded-lg">
-                        {round.summary || ''}
-                      </p>
+                      <div className="text-sm text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 p-3 rounded-lg">
+                        <MarkdownContent content={round.summary || ''} />
+                      </div>
                     </div>
 
                     {/* Findings */}
@@ -126,7 +127,9 @@ export function RoundSummaries({
                           {round.findings.slice(0, 5).map((finding, idx) => (
                             <li key={idx} className="flex items-start gap-2">
                               <span className="text-green-500 mt-0.5">•</span>
-                              <span>{finding}</span>
+                              <div className="min-w-0 flex-1">
+                                <MarkdownContent content={finding} />
+                              </div>
                             </li>
                           ))}
                           {round.findings.length > 5 && (
@@ -144,9 +147,9 @@ export function RoundSummaries({
                         <h4 className="text-sm font-medium text-purple-800 dark:text-purple-200 mb-1">
                           {language === 'zh' ? '整合分析摘要' : 'Integration Summary'}
                         </h4>
-                        <p className="text-sm text-purple-700 dark:text-purple-300 whitespace-pre-line">
-                          {round.integrationReportSummary}
-                        </p>
+                        <div className="text-sm text-purple-700 dark:text-purple-300">
+                          <MarkdownContent content={round.integrationReportSummary} />
+                        </div>
                       </div>
                     )}
 
@@ -184,9 +187,9 @@ export function RoundSummaries({
                               <Microscope className="w-3 h-3" />
                               {language === 'zh' ? '病理染色:' : 'Pathology:'}
                             </span>
-                            <ul className="text-sm text-slate-700 dark:text-slate-200 ml-4">
+                            <ul className="text-sm text-slate-700 dark:text-slate-200 ml-4 list-disc">
                               {round.dataRequests.pathology.map((item, idx) => (
-                                <li key={idx}>• {item}</li>
+                                <li key={idx}><MarkdownContent content={item} /></li>
                               ))}
                             </ul>
                           </div>
@@ -198,9 +201,9 @@ export function RoundSummaries({
                               <FlaskConical className="w-3 h-3" />
                               {language === 'zh' ? '生化指标:' : 'Biochemistry:'}
                             </span>
-                            <ul className="text-sm text-slate-700 dark:text-slate-200 ml-4">
+                            <ul className="text-sm text-slate-700 dark:text-slate-200 ml-4 list-disc">
                               {round.dataRequests.biochemistry.map((item, idx) => (
-                                <li key={idx}>• {item}</li>
+                                <li key={idx}><MarkdownContent content={item} /></li>
                               ))}
                             </ul>
                           </div>
@@ -211,9 +214,9 @@ export function RoundSummaries({
                             <span className="text-xs font-medium text-slate-700 dark:text-slate-200">
                               {language === 'zh' ? '其他:' : 'Other:'}
                             </span>
-                            <ul className="text-sm text-slate-700 dark:text-slate-200 ml-4">
+                            <ul className="text-sm text-slate-700 dark:text-slate-200 ml-4 list-disc">
                               {round.dataRequests.other.map((item, idx) => (
-                                <li key={idx}>• {item}</li>
+                                <li key={idx}><MarkdownContent content={item} /></li>
                               ))}
                             </ul>
                           </div>
