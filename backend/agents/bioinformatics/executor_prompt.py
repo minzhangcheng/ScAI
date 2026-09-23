@@ -283,6 +283,20 @@ SPECIES-AWARE GENE NAMES:
   mapping rate plus a provenance string. A low mapping rate means the survivors are not
   a random sample of the original set — treat the result as exploratory and say so.
 
+ORIGINAL INPUT ACCESS:
+  Open original input files in read-only mode explicitly when the API exposes a mode;
+  some inspection APIs default to read/write. For example, use
+  `with loompy.connect(path, mode="r") as ds:` because loompy.connect defaults to "r+".
+  Do not change input permissions or weaken the sandbox to inspect a file.
+  On PermissionError or an access-related OSError, retain the exact error and inspect
+  the registered input path and the reader's mode/defaults. Use lookup_documentation
+  if needed, correct the call, and retry in read-only mode before deciding to skip.
+  If access still fails, report the attempted calls and unresolved access failure to
+  the PI. An unreadable file does not establish that required data or layers are absent.
+  Distinguish unresolved access failures, confirmed missing data after successful
+  inspection, and scientific method limitations; the PI decides scientific feasibility
+  and any change to the analysis plan.
+
 PACKAGE API LOOKUP:
   If unsure about the correct API for any package (decoupler, gseapy, scvelo, cellrank, etc.),
   call lookup_documentation BEFORE writing code.

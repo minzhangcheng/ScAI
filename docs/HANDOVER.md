@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.14 · **Last updated**: 2026-09-23
+**Version**: 0.60.15 · **Last updated**: 2026-09-23
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,11 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.15` — Guides the Bioinformatics Agent to open original input files
+  explicitly in read-only mode, diagnose access errors before deciding to skip,
+  and distinguish unresolved access failures from confirmed missing data or
+  scientific method limitations. Adds focused prompt regression coverage.
 
 - `0.60.14` — Makes model-output JSON parsing tolerant of literal newlines and
   tabs inside string values while retaining strict structural validation. Chat

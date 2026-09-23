@@ -64,6 +64,18 @@ def test_prompt_forbids_swallow_and_skip():
     assert "DPT/PAGA" in prompt
 
 
+def test_prompt_requires_readonly_input_diagnosis_before_skip():
+    """The rendered agent prompt must separate access failures from missing data."""
+    prompt = _render_static_prompt()
+
+    assert 'with loompy.connect(path, mode="r") as ds:' in prompt
+    assert "retry in read-only mode before deciding to skip" in prompt
+    assert "An unreadable file does not establish" in prompt
+    assert "confirmed missing data after successful" in prompt
+    assert "the PI decides scientific feasibility" in prompt
+    assert "Do not change input permissions or weaken the sandbox" in prompt
+
+
 def test_prompt_requires_collision_safe_cross_file_barcode_helper():
     prompt = _render_static_prompt()
 
