@@ -161,37 +161,79 @@ class ContextMixin:
         Shows last 5 cells to keep dynamic context compact.
         Older cells get shorter output truncation to save tokens.
         """
-        if not self.code_history:
-            return "Notebook is empty. This is the first code cell."
-
         # Prevent unbounded memory growth across rounds
         MAX_CODE_HISTORY = 100
         if len(self.code_history) > MAX_CODE_HISTORY:
             self.code_history = self.code_history[-MAX_CODE_HISTORY:]
 
         context_parts = ["=== Notebook History (last 5 cells) ===\n"]
-
-        recent_history = self.code_history[-5:]
+        recent_history = [
+            {
+                "code": execution.code,
+                "output": execution.output,
+                "error": execution.error,
+                "figure_count": len(execution.figures),
+            }
+            for execution in self.code_history[-5:]
+        ]
         start_idx = len(self.code_history) - len(recent_history)
+        if not recent_history:
+            # Chat starts the sandbox before entering the executor. Its new
+            # agent has no receipts yet, even when the notebook was restored.
+            # Use a context-only view; never count old cells as new executions.
+            cells = self.sandbox.get_code_history()
+            start_idx = max(0, len(cells) - 5)
+            for cell in cells[-5:]:
+                outputs = cell.get("outputs", [])
+                recent_history.append({
+                    "code": cell.get("code", ""),
+                    "output": "\n".join(
+                        output.get("text", "") for output in outputs
+                        if output.get("type") == "stream"
+                    ),
+                    "error": "\n".join(
+                        output.get("evalue", "") for output in outputs
+                        if output.get("type") == "error"
+                    ),
+                    "figure_count": sum(
+                        output.get("type") == "display_data"
+                        and "image/png" in output.get("data", {})
+                        for output in outputs
+                    ),
+                })
+            if not recent_history:
+                return (
+                    "No notebook execution history is available. This does not "
+                    "establish whether analysis objects exist in the kernel. "
+                    "Inspect the current namespace before loading data or "
+                    "recomputing prior work."
+                )
+            context_parts.append(
+                "These are historical notebook cells, not executions from this "
+                "request. Inspect existing kernel objects, annotations, and "
+                "embeddings before loading raw inputs or repeating preprocessing. "
+                "Reuse matching results for follow-up work; consult the PI when "
+                "the available sources conflict.\n"
+            )
 
         for i, execution in enumerate(recent_history):
             context_parts.append(f"--- Cell {start_idx + i + 1} ---")
-            context_parts.append(f"```python\n{execution.code}\n```")
+            context_parts.append(f"```python\n{execution['code']}\n```")
 
-            if execution.output:
+            if execution["output"]:
                 # Recent 2 cells get full output (2000 chars), older cells get 500
                 max_output = 2000 if i >= len(recent_history) - 2 else 500
-                if len(execution.output) > max_output:
-                    output = f"[... truncated to last {max_output} chars]\n{execution.output[-max_output:]}"
+                if len(execution["output"]) > max_output:
+                    output = f"[... truncated to last {max_output} chars]\n{execution['output'][-max_output:]}"
                 else:
-                    output = execution.output
+                    output = execution["output"]
                 context_parts.append(f"Output:\n{output}")
 
-            if execution.error:
-                context_parts.append(f"Error: {execution.error}")
+            if execution["error"]:
+                context_parts.append(f"Error: {execution['error']}")
 
-            if execution.figures:
-                context_parts.append(f"[Generated {len(execution.figures)} figure(s)]")
+            if execution["figure_count"]:
+                context_parts.append(f"[Generated {execution['figure_count']} figure(s)]")
 
             context_parts.append("")
 

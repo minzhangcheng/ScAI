@@ -588,7 +588,9 @@ async def _execute_chat_agent_inner(
             await sandbox.start()
             started = True
             result = await bio_agent.run_autonomous_analysis(
-                state, instruction, max_steps=30
+                state, instruction, max_steps=30,
+                run_kind="chat", run_scope_id=f"chat_{uuid.uuid4().hex}",
+                resume_from_checkpoint=False,
             )
             # These records live on AnalysisState. Include them in the PI
             # handoff so Methods are grounded in registered panels and

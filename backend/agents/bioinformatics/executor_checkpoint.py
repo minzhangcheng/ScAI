@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable, Optional
 _EXECUTOR_CHECKPOINT_SUFFIX_RE = re.compile(
     r"(?:"
     r"bioinfo"
-    r"|bioinfo_(?:ordinary|supplementary|figure_followup)_[0-9a-f]{24}"
+    r"|bioinfo_(?:ordinary|supplementary|figure_followup|chat)_[0-9a-f]{24}"
     r")_checkpoint\.json(?:\.quarantine(?:\.\d+)?)?$"
 )
 
@@ -144,7 +144,7 @@ def build_executor_checkpoint_identity(
     figure_followup: bool = False,
 ) -> ExecutorCheckpointIdentity:
     """Build the sole checkpoint identity from durable Host-owned facts."""
-    plan = None if run_kind == "supplementary" else getattr(state, "current_plan", None)
+    plan = None if run_kind in {"supplementary", "chat"} else getattr(state, "current_plan", None)
     if hasattr(source_selection, "model_dump"):
         source_payload = source_selection.model_dump(mode="json")
     elif isinstance(source_selection, dict):

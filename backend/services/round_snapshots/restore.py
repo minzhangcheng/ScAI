@@ -234,7 +234,7 @@ def _destination(
             return states / f"{session_id}_bioinfo_checkpoint.json"
         run_kind = str(payload.get("run_kind") or "")
         if (
-            run_kind not in {"ordinary", "supplementary", "figure_followup"}
+            run_kind not in {"ordinary", "supplementary", "figure_followup", "chat"}
             or not re.fullmatch(r"[0-9a-f]{24}", scope_digest)
             or bool(payload.get("figure_followup"))
             != (run_kind == "figure_followup")

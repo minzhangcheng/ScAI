@@ -113,7 +113,10 @@ async def prepare_report_attempt(context, tool_call) -> ReportAttempt | None:
             findings_summary="REJECTED: empty findings payload",
         ))
         return None
-    active_plan_id = str(getattr(state.current_plan, "id", "") or "") or None
+    chat_run = getattr(context, "executor_run_kind", "ordinary") == "chat"
+    active_plan_id = (
+        None if chat_run else str(getattr(state.current_plan, "id", "") or "") or None
+    )
     active_lineage = getattr(state, "restore_branch_id", None) or "main"
     cohort_identity = active_cohort_identity(state)
     active_cohort_digest = (
@@ -126,6 +129,8 @@ async def prepare_report_attempt(context, tool_call) -> ReportAttempt | None:
         getattr(getattr(state, "current_plan", None), "adata_source_preparation_id", "")
         or ""
     ) or None
+    if chat_run:
+        active_preparation_id = (context.resolved_adata_source_context or {}).get("preparation_id")
     evidence_executions = successful_evidence_executions(
         self.code_history,
         round_number=state.current_round,

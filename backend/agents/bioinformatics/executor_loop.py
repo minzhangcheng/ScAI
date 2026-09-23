@@ -902,7 +902,7 @@ async def prepare_loop_context(
         _run_kind = "figure_followup"
     else:
         _run_kind = str(run_kind or "ordinary")
-    if _run_kind not in {"ordinary", "supplementary", "figure_followup"}:
+    if _run_kind not in {"ordinary", "supplementary", "figure_followup", "chat"}:
         raise ValueError(f"Unsupported executor run_kind: {_run_kind}")
     _source_owner_plan = None
     _request_record = {}
@@ -974,6 +974,14 @@ async def prepare_loop_context(
         _scope_state = dict(getattr(state, "sandbox_state", None) or {})
         _scope_state["supplementary_requests_v1"] = _request_map
         state.sandbox_state = _scope_state
+    elif _run_kind == "chat":
+        # Each delegation owns a new transcript while reusing the session kernel.
+        # It must neither resume nor overwrite the ordinary plan's checkpoint.
+        _resolved_run_scope = str(run_scope_id or "").strip()
+        if not _resolved_run_scope:
+            raise ValueError("Chat execution requires a request run scope")
+        _resolved_settlement_scope = _resolved_run_scope
+        resume_from_checkpoint = False
     elif _run_kind == "figure_followup":
         _source_owner_plan = getattr(state, "current_plan", None)
         _resolved_run_scope = str(run_scope_id or "").strip()
@@ -1205,7 +1213,8 @@ async def prepare_loop_context(
             checkpoint_mgr.checkpoint_path.name
         )
     _legacy_allowed = bool(
-        getattr(_source_selection, "mode", "current") == "current"
+        _run_kind != "chat"
+        and getattr(_source_selection, "mode", "current") == "current"
         and not getattr(state, "adata_source_preparations", None)
         and not getattr(state, "adata_live_bindings", None)
         and not getattr(state, "adata_checkpoints", None)
@@ -1248,6 +1257,7 @@ async def prepare_loop_context(
         initial_instruction=initial_instruction,
         max_steps=max_steps,
         bindings=sys.modules[__name__],
+        include_approved_plan=_run_kind != "chat",
     )
     messages = restored.messages
     all_findings = restored.findings
@@ -1263,7 +1273,7 @@ async def prepare_loop_context(
 
 
     def _active_plan_id() -> Optional[str]:
-        return executor_support.active_plan_id(state)
+        return None if _run_kind == "chat" else executor_support.active_plan_id(state)
 
     # A PI-approved replacement plan starts a new bounded analysis attempt.
     # Keep absolute step numbers monotonic for evidence identity, but reset

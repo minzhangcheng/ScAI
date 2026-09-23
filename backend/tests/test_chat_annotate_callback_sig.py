@@ -27,7 +27,7 @@ async def test_chat_annotation_callback_accepts_executor_context(
     observed = []
 
     def make_bio_agent(**kwargs):
-        async def run(actual_state, instruction, max_steps):
+        async def run(actual_state, instruction, max_steps, **execution_options):
             assert actual_state is state
             assert max_steps == 30
             observed.append(await kwargs["annotate_clusters_callback"](

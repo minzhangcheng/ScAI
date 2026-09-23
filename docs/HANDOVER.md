@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.12 · **Last updated**: 2026-09-23
+**Version**: 0.60.13 · **Last updated**: 2026-09-23
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,19 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.13` — Isolates each PI Chat delegation in its own executor scope and
+  checkpoint so a follow-up instruction cannot resume or overwrite the ordinary
+  analysis transcript or inherit its approved plan. Restored notebook cells are
+  supplied as bounded read-only context instead of new execution receipts, and
+  standalone Chat figure generation inventories the live kernel before asking for
+  plotting code and refuses to replace an unavailable runtime with an empty
+  session. Adds Chat provenance coverage for execution receipts, reports,
+  figures, and table/plan identity, plus cold-restore and runtime-unavailable
+  regressions. Focused affected tests passed `38/38` and direct-consumer
+  regressions passed `207/207` via `scripts/scai-test fast`; both runs were
+  focused edit-loop evidence only. No application image build, registry push,
+  deployment, or historical-session mutation was performed.
 
 - `0.60.12` — Preserves the caller's Python frame when instrumenting ordinary
   callable expressions, so namespace builtins and aliases such as `dir`,

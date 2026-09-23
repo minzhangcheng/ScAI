@@ -768,3 +768,139 @@ async def test_plan_revision_forces_immediate_executor_and_sandbox_checkpoint(
     assert revision_saves[0]["active_plan_id"] == "old-plan"
     assert any(msg.get("tool_call_id") == "consult-1" for msg in revision_saves[0]["messages"])
     agent.sandbox.save_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_chat_requests_reuse_runtime_without_resuming_or_rebinding_ordinary_plan(monkeypatch, tmp_path):
+    from backend.agents.bioinformatics import executor_checkpoint, executor_runtime
+    from backend.services import session_store
+
+    agent = _bare_agent(monkeypatch, tmp_path)
+    state = AnalysisState(id="test-session", user_id="owner")
+    state.current_plan = _plan(plan_id="ordinary-plan")
+    state.current_plan.bioinformatics_run_scope_id = "ordinary-run"
+    state.current_plan.bioinformatics_settlement_scope_id = "ordinary-settlement"
+    state.current_plan.adata_source = AdataSourceSelection(mode="checkpoint_copy", checkpoint_id="old-source")
+    plan_before = state.current_plan.model_dump()
+    monkeypatch.setattr(executor_runtime, "prepare_sandbox", AsyncMock())
+    monkeypatch.setattr(session_store, "async_save_session", AsyncMock())
+    prepare_source = AsyncMock(side_effect=AssertionError("Chat must not reapply the old plan source"))
+    monkeypatch.setattr("backend.services.adata_checkpoints.ensure_adata_source_prepared", prepare_source)
+    executor_loop.bind_facade(bioinformatics_facade)
+    managers = []
+
+    class Checkpoint:
+        def __init__(self, *, session_id, state_dir, prefix):
+            self.checkpoint_path = tmp_path / f"{session_id}_{prefix}_checkpoint.json"
+            self.load = AsyncMock(side_effect=AssertionError("New Chat must not load old instructions"))
+            self.save = AsyncMock()
+            managers.append(self)
+
+    setattr_facade(monkeypatch, "backend.agents.bioinformatics_agent", "CheckpointManager", Checkpoint)
+    contexts = []
+    for scope, instruction in (("chat-first", "First new task"), ("chat-second", "Second new task")):
+        context = await executor_loop.prepare_loop_context(
+            agent, state, instruction, max_steps=30, run_kind="chat", run_scope_id=scope,
+        )
+        contexts.append(context)
+        assert context.step_count == 0
+        assert context.findings == []
+        assert context.resolved_adata_source_context["mode"] == "current"
+        assert context.messages[-1]["content"] == f"Analysis instruction: {instruction}"
+        assert not any("APPROVED ANALYSIS PLAN" in str(m.get("content")) for m in context.messages)
+        await context.save_checkpoint("new-chat", completed=True)
+        payload = managers[-1].save.await_args.args[0]
+        assert payload["run_kind"] == "chat"
+        assert not payload["active_plan_id"]
+        assert payload["run_scope_id"] == scope
+        managers[-1].load.assert_not_awaited()
+        assert executor_checkpoint.is_executor_checkpoint_name(managers[-1].checkpoint_path.name, session_id=state.id)
+    assert len(managers) == 2
+    assert managers[0].checkpoint_path != managers[1].checkpoint_path
+    assert state.current_plan.model_dump() == plan_before
+    assert contexts[0].executor_run_scope_id != contexts[1].executor_run_scope_id
+    prepare_source.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_execution_and_report_preserve_links_without_old_plan_credit(monkeypatch, tmp_path):
+    from backend.agents.bioinformatics import executor_execute, executor_report, executor_report_gates
+    from backend.agents.bioinformatics.executor_dispatch import ToolAction
+
+    for module in (executor_execute, executor_report, executor_report_gates):
+        module.bind_facade(bioinformatics_facade)
+    agent = _bare_agent(monkeypatch, tmp_path)
+    state = AnalysisState(user_id="chat-receipt", current_round=1)
+    state.current_plan = _plan(plan_id="historical-plan")
+    state.current_plan.adata_source = AdataSourceSelection(mode="checkpoint_copy", checkpoint_id="old-source")
+    state.current_plan.adata_source_preparation_id = "historical-preparation"
+    context = SimpleNamespace(
+        agent=agent, state=state, executor_run_kind="chat", executor_run_scope_id="chat-request",
+        executor_settlement_scope_id="chat-request", resolved_adata_source_context={},
+        messages=[], analysis_log=[], step_count=1, agent_reasoning="Submit new findings",
+        annotation_completed=True, planning_stage="full", completed=False,
+        evidence_gate_degraded=False, evidence_gate_findings=[], all_findings=[],
+        accepted_finding_records=[], reported_evidence_ids=[], mechanism_programs_registered=True,
+    )
+    receipt = executor_execute.build_code_execution_receipt(
+        state, "print('new result')", SimpleNamespace(output="new result", error=None, figures=[]),
+        0.1, "planned", [1], {}, [], "candidate", None, [], executor_context=context,
+    )
+    assert receipt.executor_run_kind == "chat"
+    assert receipt.executor_run_scope_id == "chat-request"
+    assert receipt.plan_id is None
+    assert receipt.plan_step_ids == []
+    assert receipt.adata_requested_checkpoint_id is None
+    assert receipt.adata_source_preparation_id is None
+    agent.code_history = [receipt]
+    call = ToolCall(id="chat-report", name="report_findings", arguments={
+        "summary": "New result", "findings": [
+            {"text": "New result", "evidence_execution_ids": [receipt.id]},
+        ],
+    })
+    assert await executor_report.handle_report_findings(context, call) == ToolAction.BREAK
+    assert context.reported_evidence_ids == [receipt.id]
+    finding = context.accepted_finding_records[0]
+    assert finding["plan_id"] is None
+    assert finding["candidate_evidence_execution_ids"] == [receipt.id]
+
+    # Figure dispatch and preflight must retain the Chat source and must not
+    # claim completion of an unrelated ordinary-plan figure requirement.
+    from backend.agents.bioinformatics import executor_collaboration
+    from backend.agents.bioinformatics.figure_preflight import FigureRequestContext, prepare_figure_request
+    from backend.agents.bioinformatics.shared import current_execution_identity_error
+    from backend.models.schemas import PublicationFigure
+
+    assert current_execution_identity_error(state, receipt, executor_context=context) is None
+    foreign = receipt.model_copy(update={"executor_run_scope_id": "another-chat"})
+    assert "another Chat request" in current_execution_identity_error(state, foreign, executor_context=context)
+    executor_collaboration.bind_facade(bioinformatics_facade)
+    agent._handle_generate_publication_figure = AsyncMock(return_value="render requested")
+    agent.figure_plan_binding_callback = AsyncMock(side_effect=AssertionError("Old plan must not bind Chat figures"))
+    context.review_callback = None
+    figure_call = ToolCall(id="chat-figure", name="generate_publication_figure", arguments={
+        "code": "plot_result()", "figure_name": "new-result", "figure_type": "other",
+        "description": "New result", "evidence_execution_id": receipt.id, "plan_step_id": 1,
+    })
+    await executor_collaboration.handle_publication_figure(context, figure_call)
+    kwargs = agent._handle_generate_publication_figure.await_args.kwargs
+    assert kwargs["source_execution_id"] == receipt.id
+    assert kwargs["producer_run_kind"] == "chat"
+    assert kwargs["plan_step_id"] is None
+    assert kwargs["purpose"] == "supplementary"
+    agent.figure_plan_binding_callback.assert_not_awaited()
+    agent._validate_code = MagicMock(return_value=(True, ""))
+    attempt, error = await prepare_figure_request(FigureRequestContext(
+        agent=agent, diagnostic=False,
+        dependencies={"logger": MagicMock(), "eligible_artifacts": lambda *a, **kw: []},
+        **kwargs,
+    ))
+    assert error is None
+    assert attempt.current_plan_id is None
+    figure = PublicationFigure(
+        name="chat-result", description="New result", figure_type="other",
+        png_path="chat-result.jpg", pdf_path="chat-result.pdf",
+        producer_run_kind=kwargs["producer_run_kind"], plan_id=attempt.current_plan_id,
+    )
+    assert figure.producer_run_kind == "chat"
+    assert figure.plan_id is None

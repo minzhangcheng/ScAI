@@ -97,7 +97,7 @@ async def run_autonomous_analysis(
             else str(run_kind or "ordinary")
         )
         request_record = {}
-        plan = None if effective_kind == "supplementary" else getattr(
+        plan = None if effective_kind in {"supplementary", "chat"} else getattr(
             state, "current_plan", None
         )
         if effective_kind == "supplementary":

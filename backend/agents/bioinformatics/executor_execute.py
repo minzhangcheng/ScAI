@@ -269,7 +269,10 @@ def execution_input_binding(state, args):
 
 def _adata_source_provenance(state, executor_context=None):
     """Return Host-stamped source pointers for one execution receipt."""
-    plan = getattr(state, "current_plan", None)
+    plan = (
+        None if getattr(executor_context, "executor_run_kind", None) == "chat"
+        else getattr(state, "current_plan", None)
+    )
     resolved = dict(
         getattr(executor_context, "resolved_adata_source_context", None) or {}
     )
@@ -387,7 +390,7 @@ def build_code_execution_receipt(
     """Build the schema-v2 receipt from host-observed execution facts."""
     source = _adata_source_provenance(state, executor_context)
     run_kind = getattr(executor_context, "executor_run_kind", None)
-    supplementary = run_kind == "supplementary"
+    supplementary = run_kind in {"supplementary", "chat"}
     code_execution = CodeExecution(
         code=code,
         output=result.output,
@@ -406,7 +409,8 @@ def build_code_execution_receipt(
         execution_purpose="supplementary" if supplementary else purpose,
         plan_binding_status="supplementary" if supplementary else binding_status,
         plan_binding_reason=(
-            "Owned by the durable supplementary request."
+            ("Owned by the Chat request scope." if run_kind == "chat"
+             else "Owned by the durable supplementary request.")
             if supplementary
             else binding_reason
         ),

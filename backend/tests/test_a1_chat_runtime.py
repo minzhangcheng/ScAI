@@ -161,7 +161,13 @@ async def test_per_turn_clients_close_on_success_and_failure(monkeypatch, tmp_pa
         km = None
 
         def __init__(self, **_kwargs):
-            pass
+            self._exec_lock = asyncio.Lock()
+
+        async def inspect_checkpoint_adata_locked(self):
+            assert self._exec_lock.locked()
+            return {"canonical_present": False, "candidates": [
+                {"name": "atlas", "obs_columns": ["cell_type"], "obsm": ["X_umap"]},
+            ]}
 
         async def start(self):
             return {"session_restored": True}
@@ -191,7 +197,12 @@ async def test_per_turn_clients_close_on_success_and_failure(monkeypatch, tmp_pa
     monkeypatch.setattr(
         figures,
         "AgentSettingsProvider",
-        lambda *_args, **_kwargs: SimpleNamespace(get_model=lambda _name: "model"),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            get_model=lambda _name: "model",
+            budget_text_dispatch=AsyncMock(side_effect=lambda _name, messages, **kw:
+                SimpleNamespace(messages=messages, max_tokens=kw.get("max_tokens"))),
+            acknowledge_text_dispatch=AsyncMock(),
+        ),
     )
     monkeypatch.setattr("backend.utils.agent_llm.get_agent_llm_client", make_client)
 
@@ -200,4 +211,30 @@ async def test_per_turn_clients_close_on_success_and_failure(monkeypatch, tmp_pa
 
     assert len(clients) == 2
     for client in clients:
+        client.chat.assert_awaited_once()
+        prompt = client.chat.await_args.kwargs["messages"][0]["content"]
+        assert '"name": "atlas"' in prompt
+        assert '"canonical_present": false' in prompt
+        assert "is already loaded" not in prompt
+        assert "do not reload" in prompt
         client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restore_failed", [False, True])
+async def test_unavailable_figure_runtime_does_not_generate_or_save(monkeypatch, restore_failed):
+    sandbox = SimpleNamespace(
+        km=None,
+        start=AsyncMock(return_value={"restore_failed": restore_failed}),
+        stop=AsyncMock(), inspect_checkpoint_adata_locked=AsyncMock(),
+    )
+    client_factory = MagicMock()
+    monkeypatch.setattr("backend.utils.sandbox.LocalJupyterSandbox", lambda **_: sandbox)
+    monkeypatch.setattr(figures, "resolve_config_for_user", AsyncMock(return_value=SimpleNamespace()))
+    monkeypatch.setattr("backend.utils.agent_llm.get_agent_llm_client", client_factory)
+    state = SimpleNamespace(user_id="owner", runtime_restore_status="complete" if restore_failed else "unavailable")
+    result = await figures._generate_figures_in_chat("missing-figure-runtime", state, ["plot"])
+    assert result == []
+    client_factory.assert_not_called()
+    sandbox.inspect_checkpoint_adata_locked.assert_not_awaited()
+    sandbox.stop.assert_awaited_once_with(save=False)

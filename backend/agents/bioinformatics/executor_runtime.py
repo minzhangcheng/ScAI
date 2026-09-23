@@ -32,7 +32,6 @@ def _runtime_marked_unavailable(state, session_id: str) -> bool:
 
 async def prepare_sandbox(agent, state, *, bindings) -> None:
     logger = getattr(bindings, "logger")
-    CodeExecution = getattr(bindings, "CodeExecution")
     # Start sandbox if needed
     if agent.sandbox.km is None:
         start_result = await start_sandbox(agent)
@@ -40,31 +39,6 @@ async def prepare_sandbox(agent, state, *, bindings) -> None:
         if start_result.get("restore_failed"):
             logger.warning("[Bioinformatics] Previous session restore failed, starting with fresh environment")
             await agent._notify("status", "Note: Previous session could not be restored, starting fresh...")
-        elif start_result.get("session_restored") and not agent.code_history:
-            # Populate code_history from restored notebook cells so _build_notebook_context()
-            # shows previous analysis, preventing the agent from restarting from scratch
-            restored_cells = agent.sandbox.get_code_history()
-            for cell in restored_cells:
-                outputs = cell.get('outputs', [])
-                output_text = '\n'.join(
-                    o.get('text', '') for o in outputs if o.get('type') == 'stream'
-                )
-                error_text = '\n'.join(
-                    o.get('evalue', '') for o in outputs if o.get('type') == 'error'
-                )
-                figures = [
-                    o.get('data', {}).get('image/png', '')
-                    for o in outputs
-                    if o.get('type') == 'display_data' and 'image/png' in o.get('data', {})
-                ]
-                agent.code_history.append(CodeExecution(
-                    code=cell.get('code', ''),
-                    output=output_text if output_text else None,
-                    error=error_text if error_text else None,
-                    figures=figures,
-                    execution_time=None,
-                ))
-            logger.info(f"[Bioinformatics] Restored {len(agent.code_history)} cells into code_history from notebook state")
 
     # No committed generation at all is the one condition that still stops
     # forward execution, and it is answered by an explicit re-run rather than a

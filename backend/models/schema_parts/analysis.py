@@ -101,7 +101,7 @@ class CodeExecution(BaseModel):
     adata_input_cohort_digest: Optional[str] = None
     adata_input_cohort_binding_id: Optional[str] = None
     executor_run_kind: Optional[Literal[
-        "ordinary", "supplementary", "figure_followup",
+        "ordinary", "supplementary", "figure_followup", "chat",
     ]] = None
     executor_run_scope_id: Optional[str] = None
     executor_settlement_scope_id: Optional[str] = None

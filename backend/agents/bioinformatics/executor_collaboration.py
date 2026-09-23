@@ -702,13 +702,16 @@ async def handle_publication_figure(context, tool_call) -> ToolAction:
         execution for execution in source_receipts
         if str(getattr(execution, "id", "") or "") == source_execution_id
     ), None)
-    source_error = current_execution_identity_error(state, source_execution)
+    source_error = current_execution_identity_error(state, source_execution, executor_context=context)
 
     binding_decision = "supplementary"
     binding_reason = nomination_note or None
     requirement_key = None
     purpose = "supplementary"
-    plan = getattr(state, "current_plan", None)
+    plan = (
+        None if getattr(context, "executor_run_kind", None) == "chat"
+        else getattr(state, "current_plan", None)
+    )
     requirements = collect_plan_figure_requirements(plan)
     figure_task_id = str(args.get("figure_task_id") or "").strip()
     figure_task = None

@@ -280,7 +280,10 @@ async def prepare_figure_request(
         for char in request.figure_name
     )
     sandbox_state = request.state.sandbox_state or {}
-    current_plan = getattr(request.state, "current_plan", None)
+    current_plan = (
+        None if request.producer_run_kind == "chat"
+        else getattr(request.state, "current_plan", None)
+    )
     current_plan_id = str(getattr(current_plan, "id", "") or "").strip() or None
     active_lineage = getattr(request.state, "restore_branch_id", None) or "main"
     logical_id = str(request.logical_figure_id or "").strip()[:240]

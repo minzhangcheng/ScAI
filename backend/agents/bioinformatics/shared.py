@@ -405,7 +405,9 @@ def successful_evidence_executions(
     ]
 
 
-def current_execution_identity_error(state: Any, execution: Any) -> Optional[str]:
+def current_execution_identity_error(
+    state: Any, execution: Any, *, executor_context: Any = None,
+) -> Optional[str]:
     """Return why a receipt cannot source a current derived record.
 
     This checks only Host-owned identity and lifecycle fields. It deliberately
@@ -421,11 +423,20 @@ def current_execution_identity_error(state: Any, execution: Any) -> Optional[str
         getattr(state, "current_round", 0) or 0
     ):
         return "execution_id belongs to another round"
-    active_plan_id = str(
-        getattr(getattr(state, "current_plan", None), "id", "") or ""
+    chat_receipt = (
+        getattr(executor_context, "executor_run_kind", None) == "chat"
+        and getattr(execution, "executor_run_kind", None) == "chat"
     )
-    if not active_plan_id or str(getattr(execution, "plan_id", "") or "") != active_plan_id:
-        return "execution_id belongs to another approved plan"
+    if chat_receipt:
+        expected_scope = getattr(executor_context, "executor_run_scope_id", None)
+        if not expected_scope or getattr(execution, "executor_run_scope_id", None) != expected_scope:
+            return "execution_id belongs to another Chat request"
+    else:
+        active_plan_id = str(
+            getattr(getattr(state, "current_plan", None), "id", "") or ""
+        )
+        if not active_plan_id or str(getattr(execution, "plan_id", "") or "") != active_plan_id:
+            return "execution_id belongs to another approved plan"
     active_lineage = getattr(state, "restore_branch_id", None) or "main"
     if (getattr(execution, "lineage_id", None) or "main") != active_lineage:
         return "execution_id belongs to another lineage"
@@ -437,6 +448,10 @@ def current_execution_identity_error(state: Any, execution: Any) -> Optional[str
         getattr(getattr(state, "current_plan", None), "adata_source_preparation_id", "")
         or ""
     )
+    if chat_receipt:
+        active_preparation_id = (
+            getattr(executor_context, "resolved_adata_source_context", None) or {}
+        ).get("preparation_id")
     if active_preparation_id:
         execution_preparation_id = str(
             getattr(execution, "adata_source_preparation_id", "") or ""

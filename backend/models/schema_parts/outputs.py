@@ -227,7 +227,7 @@ class PublicationFigure(BaseModel):
     # Optional defaults preserve historical artifacts without inventing lineage.
     provenance_schema_version: Optional[int] = None
     producer_run_kind: Optional[Literal[
-        "ordinary", "supplementary", "figure_followup", "platform",
+        "ordinary", "supplementary", "figure_followup", "platform", "chat",
     ]] = None
     producer_run_scope_id: Optional[str] = None
     source_execution_run_kind: Optional[str] = None

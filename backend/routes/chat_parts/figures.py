@@ -195,15 +195,32 @@ async def _generate_figures_in_chat(
     try:
         start_info = await sandbox.start()
         started = True
-        if not start_info.get("session_restored"):
-            logger.warning("Chat sandbox: session not restored, figure generation may fail")
+        from backend.agents.bioinformatics.executor_runtime import (
+            _runtime_marked_unavailable,
+        )
+
+        if start_info.get("restore_failed") or _runtime_marked_unavailable(state, session_id):
+            # Never save an empty replacement over the unavailable prior runtime.
+            started = False
+            raise RuntimeError("The previous kernel runtime is unavailable for Chat figures")
 
         for desc_idx, desc in enumerate(descriptions):
-            # Ask LLM to write figure code
+            # Reuse the existing read-only inspector, under its required lock.
+            # Inventory is context, not a scientific source-selection decision.
+            async with sandbox._exec_lock:
+                inventory = await sandbox.inspect_checkpoint_adata_locked()
+            inventory_text = json.dumps(inventory, ensure_ascii=False)[:12000]
             code_prompt = (
                 "You are a bioinformatics expert. Write Python code using scanpy and matplotlib "
-                "to generate the following figure. The variable `adata` is already loaded in the "
-                "environment with all prior analysis results.\n"
+                "to generate the following figure from existing results.\n"
+                "Current kernel AnnData inventory (bounded metadata; not an assurance of "
+                "result completeness):\n" + inventory_text + "\n"
+                "Use the matching existing objects, annotations, and embeddings. Do not "
+                "assume a variable named adata or any requested result exists. Inspect "
+                "other required objects before using them. If the requested source or "
+                "result is missing or ambiguous, report that limitation; do not reload "
+                "raw data or recompute QC, clustering, embeddings, or annotations to "
+                "satisfy a plotting request. Additional analysis requires PI planning.\n"
                 "IMPORTANT: End your code with plt.show() to display the figure. "
                 "Do NOT call plt.close(). Do NOT use plt.savefig().\n"
                 "Output ONLY a single ```python code block, no explanations.\n\n"

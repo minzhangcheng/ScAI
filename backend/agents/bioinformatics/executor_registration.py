@@ -51,7 +51,7 @@ async def handle_register_method_decision(context, tool_call) -> ToolAction:
     execution = next((
         item for item in context.agent.code_history if item.id == execution_id
     ), None)
-    error = current_execution_identity_error(state, execution)
+    error = current_execution_identity_error(state, execution, executor_context=context)
     if profile is None:
         error = "input_profile_id does not identify a current host profile"
     elif error is None and profile.id not in (execution.input_profile_ids or []):
@@ -168,7 +168,7 @@ async def handle_register_publication_table(context, tool_call) -> ToolAction:
         source_id,
         current_receipts=getattr(context.agent, "code_history", None) or [],
     )
-    source_error = current_execution_identity_error(state, source)
+    source_error = current_execution_identity_error(state, source, executor_context=context)
     source_current = source_error is None
     approved_steps = {
         int(step.id) for step in (getattr(state.current_plan, "steps", None) or [])
@@ -179,7 +179,7 @@ async def handle_register_publication_table(context, tool_call) -> ToolAction:
         and not isinstance(value, bool)
         and value in approved_steps
     })
-    if not source_current:
+    if not source_current or getattr(context, "executor_run_kind", None) == "chat":
         candidate_steps = []
     _provenance, _provenance_error = artifact_provenance(
         state,

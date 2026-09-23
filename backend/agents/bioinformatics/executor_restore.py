@@ -34,6 +34,7 @@ def restore_executor_state(
     initial_instruction: str,
     max_steps: int,
     bindings,
+    include_approved_plan: bool = True,
 ) -> RestoredExecutorState:
     logger = getattr(bindings, "logger")
     tool_calls_are_paired = getattr(bindings, "tool_calls_are_paired")
@@ -87,14 +88,13 @@ def restore_executor_state(
             AnalysisStep(**item) for item in checkpoint.get("analysis_log", [])
         ]
         restored_code_history = checkpoint.get("code_history", [])
-        if restored_code_history:
-            agent.code_history = [
-                CodeExecution(**item) for item in restored_code_history
-            ]
-            logger.info(
-                "[Bioinformatics] Restored %s code_history entries from checkpoint",
-                len(agent.code_history),
-            )
+        agent.code_history = [
+            CodeExecution(**item) for item in restored_code_history
+        ]
+        logger.info(
+            "[Bioinformatics] Restored %s code_history entries from checkpoint",
+            len(agent.code_history),
+        )
         logger.info(
             "[Bioinformatics] Restored state: step=%s, findings=%s, figures=%s, "
             "new max_steps=%s",
@@ -109,7 +109,7 @@ def restore_executor_state(
             dynamic_context_message,
             initial_instruction,
         )
-        if state.current_plan and state.current_plan.status == "approved":
+        if include_approved_plan and state.current_plan and state.current_plan.status == "approved":
             _source_context = dict(
                 (getattr(state, "sandbox_state", None) or {}).get(
                     "resolved_adata_source_context_v1"
