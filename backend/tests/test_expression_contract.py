@@ -35,10 +35,10 @@ from backend.utils.expression_contract import (
 def test_generated_expression_contract_source_is_byte_stable():
     specs = [{"name": "adata", "layer": None}]
     assert sha256(build_expression_preflight_code(specs).encode()).hexdigest() == (
-        "b4ad69f679eb6caa18848f439f4b44738e829902569c479bc3c7580d924c1f35"
+        "67ffbbe6833c9983858e4398020174402476bc7b811f3d03af7d9d7ee2fb7f7f"
     )
     assert sha256(build_expression_runtime_code().encode()).hexdigest() == (
-        "7150ce9ec7c90361fd04ef83096ee646de9df2ce013f943d438e29c3847a94b3"
+        "2a3d965880094a6fdf265d9ba2b3fc6ffc98e127274c34e7f5ca1bcf051c994f"
     )
 
 
@@ -86,6 +86,118 @@ def _execute_instrumented(code, namespace):
     exec(build_expression_runtime_code(), namespace)
     exec(instrumented, namespace)
     return instrumented, count
+
+
+@pytest.mark.parametrize("lookup", [
+    "dir", "names", "builtins.dir", "getattr(builtins, 'dir')", "lookups['dir']",
+])
+def test_namespace_lookup_reuses_existing_adata(lookup):
+    adata = SimpleNamespace(shape=(3, 2))
+    namespace = {"adata": adata}
+    _execute_instrumented(
+        "import builtins\n"
+        "names = dir\n"
+        "lookups = {'dir': dir}\n"
+        f"found = 'adata' in {lookup}()\n"
+        "if not found:\n"
+        "    raise RuntimeError('Would reload raw data and discard the existing atlas')\n"
+        "result = adata.shape\n",
+        namespace,
+    )
+    assert namespace["found"] is True
+    assert namespace["adata"] is adata
+    assert namespace["result"] == (3, 2)
+
+
+def test_namespace_builtins_preserve_function_scope_and_missing_names():
+    namespace = {"global_marker": object()}
+    _execute_instrumented(
+        "def inspect_scope(adata):\n"
+        "    local_marker = 7\n"
+        "    names = dir\n"
+        "    local_values = locals\n"
+        "    return (\n"
+        "        'adata' in names(),\n"
+        "        local_values()['adata'] is adata,\n"
+        "        vars()['local_marker'],\n"
+        "        globals()['global_marker'] is global_marker,\n"
+        "    )\n"
+        "result = inspect_scope(object())\n"
+        "missing_at_module_scope = 'adata' not in dir()\n",
+        namespace,
+    )
+    assert namespace["result"] == (True, True, 7, True)
+    assert namespace["missing_at_module_scope"] is True
+
+
+def test_zero_argument_super_retains_the_method_frame():
+    namespace = {}
+    _execute_instrumented(
+        "class Parent:\n"
+        "    def value(self):\n"
+        "        return 10\n"
+        "class Child(Parent):\n"
+        "    def value(self):\n"
+        "        parent = super()\n"
+        "        return parent.value() + 1\n"
+        "result = Child().value()\n",
+        namespace,
+    )
+    assert namespace["result"] == 11
+
+
+def test_builtin_name_rebound_to_sensitive_callable_still_validates_input():
+    calls = []
+    raw = SimpleNamespace(X=np.array([[0, 4]]), shape=(1, 2), layers={})
+    namespace = {
+        "adata": raw,
+        "sc": SimpleNamespace(tl=SimpleNamespace(score_genes=lambda obj: calls.append(obj))),
+    }
+    with pytest.raises(ValueError, match="raw integer counts"):
+        _execute_instrumented("dir = sc.tl.score_genes\ndir(adata)", namespace)
+    assert calls == []
+
+
+def test_instrumentation_does_not_wrap_resolved_calls_again():
+    code = "result = max(value for value in values)\nnames = dir()"
+    once, count = instrument_expression_contract_calls(code)
+    twice, second_count = instrument_expression_contract_calls(once)
+    assert count == 2
+    assert second_count == 0
+    assert twice == once
+
+
+@pytest.mark.parametrize("preinstall_runtime", [False, True])
+def test_shared_execute_wrapper_reuses_data_and_saves_plot(tmp_path, preinstall_runtime):
+    from backend.agents.bioinformatics.kernel_templates import _build_exec_autosave_wrapper
+    import matplotlib.pyplot as plt
+
+    adata = SimpleNamespace(shape=(3, 2))
+    namespace = {
+        "adata": adata,
+        "_original_plt_close": plt.close,
+        "_original_plt_show": plt.show,
+    }
+    source, _ = instrument_expression_contract_calls(
+        "if 'adata' not in dir():\n"
+        "    raise RuntimeError('Existing atlas incorrectly reported missing')\n"
+        "result = adata.shape\n"
+        "plt.figure()\n"
+        "plt.plot([0, 1], [0, 1])\n"
+    )
+    if preinstall_runtime:
+        exec(build_expression_runtime_code(), namespace)
+    else:
+        source = build_expression_runtime_code() + "\n" + source
+    wrapper = _build_exec_autosave_wrapper(source, str(tmp_path), "namespace_regression")
+    try:
+        exec(wrapper, namespace)
+        assert namespace["adata"] is adata
+        assert namespace["result"] == (3, 2)
+        assert list(tmp_path.glob("*.jpg"))
+        assert list(tmp_path.glob("*.pdf"))
+    finally:
+        plt.close("all")
 
 
 def test_runtime_contract_checks_new_same_cell_copy_not_stale_global():
@@ -208,7 +320,7 @@ def test_runtime_contract_handles_nested_sensitive_calls_without_overlapping_edi
     )
 
     assert count == 2
-    assert instrumented.count("_scai_expression_contract_call(") == 2
+    assert instrumented.count("_scai_expression_contract_target(") == 2
     assert calls == [(obj, ("inner",)), (obj, ("outer",))]
     assert namespace["result"] is obj
 
@@ -325,7 +437,7 @@ def test_runtime_contract_guards_sensitive_call_inside_method_chain():
     )
 
     assert count == 2
-    assert instrumented.count("_scai_expression_contract_call(") == 2
+    assert instrumented.count("_scai_expression_contract_target(") == 2
     exec(build_expression_runtime_code(), namespace)
     with pytest.raises(ValueError, match="raw integer counts"):
         exec(instrumented, namespace)

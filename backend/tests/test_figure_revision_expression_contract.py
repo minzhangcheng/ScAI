@@ -78,7 +78,7 @@ async def test_revision_candidate_is_guarded_and_warns_old_generation(tmp_path):
     assert "approved" in result
     assert len(sandbox.executed_code) == 2
     revised_wrapper = sandbox.executed_code[1]
-    assert revised_wrapper.count("_scai_expression_contract_call(") >= 2
+    assert revised_wrapper.count("_scai_expression_contract_target(") >= 2
     assert "NMF().fit_transform(raw).sum()" not in revised_wrapper
     assert prior.is_current is True
     assert "representation_change_warning" in prior.expression_provenance

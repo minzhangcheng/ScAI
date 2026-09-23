@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.11 · **Last updated**: 2026-09-23
+**Version**: 0.60.12 · **Last updated**: 2026-09-23
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,14 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.12` — Preserves the caller's Python frame when instrumenting ordinary
+  callable expressions, so namespace builtins and aliases such as `dir`,
+  `locals`, `globals`, `vars`, and zero-argument `super` keep their normal
+  behavior. Sensitive expression operations continue through the existing
+  validation wrapper. This prevents existing kernel objects from appearing
+  missing to Chat code and triggering an unnecessary reload or reanalysis, and
+  adds regression coverage for the shared execution and figure autosave path.
 
 - `0.60.11` — Fixes Chat cluster annotation delegation by accepting the executor's
   annotation source metadata and passing tissue and organism to Literature with

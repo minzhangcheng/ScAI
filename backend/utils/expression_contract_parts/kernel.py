@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .constants import _MARKER, _RUNTIME_CALL_HELPER
+from .constants import _MARKER, _RUNTIME_CALL_HELPER, _RUNTIME_CALL_RESOLVER
 
 
 def build_expression_preflight_code(specs: list[dict[str, str | None]]) -> str:
@@ -440,6 +440,18 @@ def {_RUNTIME_CALL_HELPER}(
         _scai_obj, _scai_call_name, kwargs.get("layer"), emit=True
     )
     return _scai_callable(*args, **kwargs)
+
+def {_RUNTIME_CALL_RESOLVER}(_scai_callable):
+    # Ordinary callables must run in the user's frame, especially namespace
+    # builtins reached through aliases. Keep the existing dispatcher for
+    # sensitive operations and for previously instrumented runtime functions.
+    if _scai_expression_callable_kind(_scai_callable) is None:
+        return _scai_callable
+
+    def _scai_checked_call(*args, **kwargs):
+        return {_RUNTIME_CALL_HELPER}(_scai_callable, None, *args, **kwargs)
+
+    return _scai_checked_call
 """
 
 

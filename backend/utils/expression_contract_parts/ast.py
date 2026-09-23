@@ -10,6 +10,7 @@ from .constants import (
     _NON_EXPRESSION_CALL_ROOTS,
     _REPRESENTATION_MUTATORS,
     _RUNTIME_CALL_HELPER,
+    _RUNTIME_CALL_RESOLVER,
     _SENSITIVE_CALLS,
 )
 
@@ -90,12 +91,12 @@ def extract_sensitive_expression_inputs(code: str) -> list[dict[str, str | None]
 
 
 def instrument_expression_contract_calls(code: str) -> tuple[str, int]:
-    """Route calls through runtime callable classification exactly once.
+    """Resolve guarded callables without relocating ordinary calls.
 
     Alias syntax is intentionally irrelevant: every invocation expression is
-    routed through the same lightweight dispatcher, which recognizes sensitive
-    functions and bound NMF methods from the runtime object. Surgical source
-    edits preserve comments and line numbers, and the original callable plus
+    classified using the runtime object. Only sensitive functions and bound NMF
+    methods receive a wrapper; other calls retain their caller's frame. Surgical
+    source edits preserve comments and line numbers, and the original callable plus
     every argument are evaluated once and forwarded unchanged.
     """
     try:
@@ -141,7 +142,14 @@ def instrument_expression_contract_calls(code: str) -> tuple[str, int]:
             and raw_name != "fit_transform"
         ):
             continue
-        if raw_name == _RUNTIME_CALL_HELPER:
+        if raw_name in {_RUNTIME_CALL_HELPER, _RUNTIME_CALL_RESOLVER}:
+            continue
+        if (
+            isinstance(node.func, ast.Call)
+            and isinstance(node.func.func, ast.Name)
+            and node.func.func.id == _RUNTIME_CALL_RESOLVER
+        ):
+            # Already-resolved calls keep their original invocation site.
             continue
         start = absolute(node.func.lineno, node.func.col_offset)
         func_end = absolute(node.func.end_lineno, node.func.end_col_offset)
@@ -149,19 +157,11 @@ def instrument_expression_contract_calls(code: str) -> tuple[str, int]:
         opening = source.find(b"(", func_end, call_end)
         if opening < 0:
             continue
-        edits.append((start, start, _RUNTIME_CALL_HELPER.encode("ascii") + b"("))
-        generator = node.args[0] if len(node.args) == 1 else None
-        sole_unparenthesized_generator = (
-            isinstance(generator, ast.GeneratorExp)
-            and absolute(generator.lineno, generator.col_offset) == opening
-            and absolute(generator.end_lineno, generator.end_col_offset)
-            == call_end
-        )
-        if sole_unparenthesized_generator:
-            edits.append((opening, opening + 1, b", None, ("))
-            edits.append((call_end, call_end, b")"))
-        else:
-            edits.append((opening, opening + 1, b", None, "))
+        # Resolve the callable, then invoke it in the original frame. Moving
+        # dir()/locals()/globals()/vars()/super() into a dispatcher changes
+        # their semantics, even when it forwards every argument unchanged.
+        edits.append((start, start, _RUNTIME_CALL_RESOLVER.encode("ascii") + b"("))
+        edits.append((func_end, func_end, b")"))
         instrumented_call_count += 1
 
     for start, end, replacement in sorted(edits, reverse=True):

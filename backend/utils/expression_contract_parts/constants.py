@@ -25,6 +25,7 @@ _NON_EXPRESSION_CALL_ROOTS = frozenset({
 })
 _MARKER = "__SCAI_EXPRESSION_CONTRACT__:"
 _RUNTIME_CALL_HELPER = "_scai_expression_contract_call"
+_RUNTIME_CALL_RESOLVER = "_scai_expression_contract_target"
 
 
 # Names whose call produces a brand-new AnnData object. Mutating such an object
