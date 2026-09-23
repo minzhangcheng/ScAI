@@ -9,6 +9,7 @@ import logging
 import re
 
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from ...utils.formatting import loads_llm_json
 from ...services.report.round_chapters import (
     assemble_round_chapter, chapter_prompt, round_artifact_catalog,
 )
@@ -52,7 +53,7 @@ def _synthesis_report_chapter(data, response, catalog, round_number):
             response, re.MULTILINE | re.DOTALL | re.IGNORECASE,
         ):
             try:
-                candidate = json.loads(match.group(1))
+                candidate = loads_llm_json(match.group(1))
             except json.JSONDecodeError:
                 continue
             if (isinstance(candidate, dict) and "summary" not in candidate

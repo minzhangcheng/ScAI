@@ -33,6 +33,7 @@ from backend.state import (
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.auth import require_session_ownership
 from backend.utils.files import safe_filename, validate_session_id
+from backend.utils.formatting import loads_llm_json
 from backend.utils.upload import stream_save_file
 from backend.utils.settings_provider import AgentSettingsProvider
 from backend.utils.sandbox import _TPL_NOOP_INSTALL
@@ -156,7 +157,7 @@ def _try_parse_delegation(content: str) -> Optional[Dict[str, Any]]:
     content = content.strip()
     # Direct JSON
     try:
-        parsed = json.loads(content)
+        parsed = loads_llm_json(content)
         if isinstance(parsed, dict) and parsed.get("delegation") is True:
             delegates = parsed.get("delegates", [])
             if isinstance(delegates, list) and len(delegates) > 0:
@@ -167,7 +168,7 @@ def _try_parse_delegation(content: str) -> Optional[Dict[str, Any]]:
     match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
     if match:
         try:
-            parsed = json.loads(match.group(1))
+            parsed = loads_llm_json(match.group(1))
             if isinstance(parsed, dict) and parsed.get("delegation") is True:
                 delegates = parsed.get("delegates", [])
                 if isinstance(delegates, list) and len(delegates) > 0:

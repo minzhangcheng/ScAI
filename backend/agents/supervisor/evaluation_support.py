@@ -8,6 +8,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from ...models.schemas import AnalysisStep
+from ...utils.formatting import loads_llm_json
 from ...utils.error_parsing import (
     CODE_GEN_ERROR_TYPES, TECHNICAL_ERROR_TYPES, compact_traceback, extract_error_type,
 )
@@ -565,7 +566,7 @@ def _parse_supervisor_response(
     """
     # Try direct parse
     try:
-        parsed = json.loads(text)
+        parsed = loads_llm_json(text)
         validated, error = _validate_supervisor_result(parsed)
         if validated is not None:
             return validated
@@ -582,7 +583,7 @@ def _parse_supervisor_response(
     match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
     if match:
         try:
-            parsed = json.loads(match.group(1))
+            parsed = loads_llm_json(match.group(1))
             validated, error = _validate_supervisor_result(parsed)
             if validated is not None:
                 return validated
@@ -595,7 +596,7 @@ def _parse_supervisor_response(
     match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
     if match:
         try:
-            parsed = json.loads(match.group(0))
+            parsed = loads_llm_json(match.group(0))
             validated, error = _validate_supervisor_result(parsed)
             if validated is not None:
                 return validated

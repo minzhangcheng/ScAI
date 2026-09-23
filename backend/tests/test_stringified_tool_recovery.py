@@ -7,6 +7,7 @@ recognizes and parses those stringified payloads so downstream agent
 loops do not mistake them for plain-text responses.
 """
 import asyncio
+import json
 import pytest
 from unittest.mock import MagicMock
 from backend.utils.llm_client import OpenAICompatibleClient, _recover_stringified_tool_call
@@ -176,12 +177,13 @@ def test_chat_with_tools_keeps_plain_text_when_not_a_tool_call(monkeypatch, clie
     assert result.content == plain
 
 
-def test_chat_with_tools_native_tool_calls_unaffected(monkeypatch, client):
+@pytest.mark.parametrize("code", ["print(1)", "for i in range(2):\n\tprint(i)"])
+def test_chat_with_tools_native_tool_calls_unaffected(monkeypatch, client, code):
     """When upstream returns proper tool_calls, recovery path must not run."""
     native_tc = MagicMock()
     native_tc.id = "call_native_1"
     native_tc.function.name = "execute_code"
-    native_tc.function.arguments = '{"code":"print(1)"}'
+    native_tc.function.arguments = json.dumps({"code": code}).replace(r"\n", "\n").replace(r"\t", "\t")
 
     fake_response = _make_fake_response(content=None, tool_calls=[native_tc])
 
@@ -199,6 +201,8 @@ def test_chat_with_tools_native_tool_calls_unaffected(monkeypatch, client):
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0].id == "call_native_1"
     assert not result.tool_calls[0].id.startswith("recovered_")
+    assert result.tool_calls[0].arguments == {"code": code}
+    assert result.tool_calls[0].parse_error is None
 
 
 def test_stringified_unknown_tool_remains_text(monkeypatch, client):

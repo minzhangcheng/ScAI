@@ -81,6 +81,26 @@ async def _run_simple_chat(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fenced", [False, True])
+async def test_multiline_delegation_starts_execution_instead_of_text_reply(monkeypatch, fenced):
+    state = AnalysisState(id="chat-multiline-delegation", user_id="owner")
+    publish = AsyncMock()
+    monkeypatch.setattr(chat_endpoints, "_publish_chat_delegation", publish)
+    content = '''{"delegation": true, "plan": "Inspect data and plot", "delegates": [
+        {"agent": "bioinformatics", "instruction": "Review existing results.
+Generate publication figures."}]}'''
+    if fenced:
+        content = "```json\n" + content + "\n```"
+    result = await _run_simple_chat(monkeypatch, state, client_content=content)
+    assert result["status"] == "processing"
+    publish.assert_awaited_once()
+    assert publish.call_args.args[2]["delegates"][0]["instruction"] == (
+        "Review existing results.\nGenerate publication figures."
+    )
+    assert all(message["role"] == "user" for message in state.chat_messages)
+
+
+@pytest.mark.asyncio
 async def test_client_user_id_and_assistant_reply_identity_are_persisted(monkeypatch):
     state = AnalysisState(id="chat-identity", user_id="owner")
     client_message_id = "3f435a33-bf5d-474f-b037-b51de804ba9a"

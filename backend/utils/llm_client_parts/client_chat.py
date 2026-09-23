@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError, BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError
 
 from ..llm_logger import get_llm_logger, LLMInteraction
+from ..formatting import loads_llm_json
 
 logger = logging.getLogger(__name__)
 
@@ -820,7 +821,7 @@ class ClientChatMixin:
                     parse_error: Optional[str] = None
                     raw_args: Optional[str] = None
                     try:
-                        arguments = json.loads(tc.function.arguments)
+                        arguments = loads_llm_json(tc.function.arguments)
                     except json.JSONDecodeError as e:
                         logger.warning(
                             f"[{self.agent_name}] Tool call arguments JSON parse failed: {e}; "

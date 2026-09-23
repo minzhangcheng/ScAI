@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError, BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError
 
 from ..llm_logger import get_llm_logger, LLMInteraction
+from ..formatting import loads_llm_json
 
 
 # Implementations live in ./llm_client_parts/; re-exported here so existing
@@ -182,7 +183,7 @@ def _recover_stringified_tool_call(
         return None
 
     try:
-        obj = json.loads(s)
+        obj = loads_llm_json(s)
     except json.JSONDecodeError:
         return None
     if not isinstance(obj, dict):

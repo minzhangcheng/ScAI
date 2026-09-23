@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError, BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError
 
 from ..llm_logger import get_llm_logger, LLMInteraction
+from ..formatting import loads_llm_json
 
 logger = logging.getLogger(__name__)
 
@@ -390,7 +391,7 @@ def _anthropic_messages_translate(
             for tc in msg["tool_calls"]:
                 fn = tc.get("function", {})
                 try:
-                    args = json.loads(fn.get("arguments") or "{}")
+                    args = loads_llm_json(fn.get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
                 blocks.append({"type": "tool_use", "id": tc.get("id"),
@@ -530,7 +531,7 @@ def _parse_responses_dump(dump: Dict[str, Any]):
             raw_args = item.get("arguments") or "{}"
             parse_error = None
             try:
-                args = json.loads(raw_args)
+                args = loads_llm_json(raw_args)
             except json.JSONDecodeError as e:
                 args = {}
                 parse_error = str(e)

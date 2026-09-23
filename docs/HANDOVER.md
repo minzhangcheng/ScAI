@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.13 · **Last updated**: 2026-09-23
+**Version**: 0.60.14 · **Last updated**: 2026-09-23
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,14 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.14` — Makes model-output JSON parsing tolerant of literal newlines and
+  tabs inside string values while retaining strict structural validation. Chat
+  delegation plans, ordinary workflow plans and report chapters, Supervisor
+  responses, and tool arguments now preserve multiline instructions and code
+  instead of being treated as plain text or falling back after a parser error.
+  Adds focused regression coverage for Chat dispatch, workflow parsing, report
+  chapters, and the OpenAI/Anthropic tool adapters.
 
 - `0.60.13` — Isolates each PI Chat delegation in its own executor scope and
   checkpoint so a follow-up instruction cannot resume or overwrite the ordinary

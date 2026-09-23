@@ -94,6 +94,16 @@ def fmt_server(url: str) -> str:
         return url
 
 
+def loads_llm_json(response: str) -> Any:
+    """Decode model JSON, preserving literal control characters inside strings.
+
+    Models sometimes emit raw newlines or tabs in instructions and code. This
+    only relaxes string escaping; broken JSON structure still raises. Keep
+    persisted files and external request validation on the strict decoder.
+    """
+    return json.loads(response, strict=False)
+
+
 def safe_parse_json(response: str, default: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Parse JSON from LLM response using balanced bracket matching.
 
@@ -142,7 +152,7 @@ def safe_parse_json(response: str, default: Optional[Dict[str, Any]] = None) -> 
 
     if depth == 0 and end > start:
         try:
-            return json.loads(response[start:end])
+            return loads_llm_json(response[start:end])
         except json.JSONDecodeError:
             # Try to repair malformed JSON from LLM responses
             if _JSON_REPAIR_AVAILABLE:
@@ -219,7 +229,7 @@ def safe_parse_json_array(response: str, default: Optional[List[Any]] = None) ->
 
     if depth == 0 and end > start:
         try:
-            result = json.loads(response[start:end])
+            result = loads_llm_json(response[start:end])
             if isinstance(result, list):
                 return result
         except json.JSONDecodeError:

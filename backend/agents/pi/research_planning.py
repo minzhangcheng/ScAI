@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 from ...models.schemas import AnalysisState, RoundResult, DATA_TYPE_SCRNASEQ
 from ...constants import PI_REVIEW_FALLBACK_DECISION
 from ...services.sample_design import sequencing_design_instruction
-from ...utils.formatting import as_list, coerce_json_text, render_plan_steps
+from ...utils.formatting import as_list, coerce_json_text, loads_llm_json, render_plan_steps
 from ...utils.llm_client import UpstreamExhaustedError
 
 from .shared import (  # noqa: F401
@@ -1154,7 +1154,7 @@ Return only the JSON array, no other content.
         try:
             json_match = re.search(r'\[[\s\S]*\]', response)
             if json_match:
-                steps = json.loads(json_match.group())
+                steps = loads_llm_json(json_match.group())
                 if isinstance(steps, list):
                     return steps
         except json.JSONDecodeError:
