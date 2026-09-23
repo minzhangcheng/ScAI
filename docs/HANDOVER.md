@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.16 · **Last updated**: 2026-09-24
+**Version**: 0.60.17 · **Last updated**: 2026-09-24
 
 ## 1. Runtime Architecture
 
@@ -363,6 +363,11 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.60.x — (2026-09-20 onward)**
+
+- `0.60.17` — Extends Chat-directed Bioinformatics Agent executions from 30 to
+  60 steps so input integration, diagnostic analysis, and publication-figure
+  generation can complete within one delegated task. Updates the callback
+  contract regression to cover the expanded execution budget.
 
 - `0.60.16` — Uses one shared Markdown renderer across the Analysis page's final
   summary, expanded round summaries, findings, integration summaries, and data
