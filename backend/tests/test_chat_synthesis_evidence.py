@@ -111,3 +111,62 @@ def test_findings_without_execution_records_do_not_imply_verified_methods():
     assert "library default" in prompt
     assert "cannot be verified" in prompt
     assert "Executor report summaries" not in prompt
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+@pytest.mark.parametrize("status", ["max_steps_reached", "completed"])
+def test_synthesis_preserves_stop_status_and_tool_errors_with_historical_scores(serialized, status):
+    error = "annotate_callback() got an unexpected keyword argument 'annotation_source'"
+    step = AnalysisStep(step_number=8, step_type="tool_error", text_content=error)
+    validation = AnalysisStep(
+        step_number=9, step_type="execute_code", code_error="Code validation failed",
+    )
+    steps = [step, validation]
+    if serialized:
+        steps = [item.model_dump(mode="json") for item in steps]
+    result = {
+        "status": status,
+        # The executor uses this flag for non-LLM-error exits, including exhaustion.
+        "success": True,
+        "steps_executed": 30,
+        "findings": [] if status == "max_steps_reached" else ["A usable partial observation."],
+        "summary": "The analyst claims the requested analysis is complete.",
+        "figures": [],
+        "analysis_log": steps,
+        "code_history": [{"id": "preprocessing", "code": "prepare_data()"}],
+        "attempt_execution_ids": ["preprocessing"],
+        "score_definitions": [{"score_name": "historical_score", "execution_id": "old-execution"}],
+        "scoring_plans": [{"id": "old-plan"}],
+    }
+
+    prompt = _build_synthesis_prompt("Analyze and plot", {}, {"bioinformatics": result})
+
+    assert f'"status": "{status}"' in prompt
+    assert '"success": true' in prompt
+    assert '"steps_executed": 30' in prompt
+    assert '"attempt_execution_ids": [\n    "preprocessing"' in prompt
+    assert error in prompt
+    assert "Code validation failed" in prompt
+    if result["findings"]:
+        assert "A usable partial observation." in prompt
+    assert "prepare_data()" in prompt
+    assert "Figure artifacts returned for this delegation:\n[]" in prompt
+    assert "historical_score" in prompt and "old-plan" in prompt
+    assert "may predate this delegation" in prompt
+    assert "later recovery is possible" in prompt
+    assert result["status"] == status
+
+
+def test_synthesis_exposes_real_figure_references_without_image_payloads():
+    prompt = _build_synthesis_prompt("Explain the figure", {}, {
+        "bioinformatics": {
+            "status": "completed", "figures": [{
+                "name": "observed_result", "path": "/workspace/figures/observed_result.jpg",
+                "pdfPath": "/workspace/figures/observed_result.pdf",
+                "image_base64": "IMAGE_PAYLOAD_MUST_NOT_ENTER_PROMPT",
+            }],
+        },
+    })
+    assert '"name": "observed_result"' in prompt
+    assert "/workspace/figures/observed_result.pdf" in prompt
+    assert "IMAGE_PAYLOAD_MUST_NOT_ENTER_PROMPT" not in prompt

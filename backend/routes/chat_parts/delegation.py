@@ -190,9 +190,18 @@ def _synthesis_evidence_text(value: Any, *, limit: int) -> str:
 def _build_execution_context(result: Dict[str, Any]) -> str:
     """Expose executor records that are not part of the top-level findings."""
     summaries = []
+    errors = []
     for step in result.get("analysis_log") or []:
         if not isinstance(step, dict):
             step = step.model_dump(mode="json")
+        if step.get("step_type") == "tool_error" or step.get("code_error"):
+            errors.append({
+                key: step.get(key)
+                for key in (
+                    "step_number", "step_type", "execution_id", "text_content",
+                    "code_error",
+                )
+            })
         if step.get("findings_summary"):
             summaries.append({
                 key: step.get(key)
@@ -228,6 +237,34 @@ def _build_execution_context(result: Dict[str, Any]) -> str:
         scoring_plans.append(plan)
 
     parts = []
+    outcome = {
+        key: result[key]
+        for key in (
+            "status", "success", "steps_executed", "error", "forced_stop",
+            "plan_revision_needed", "attempt_execution_ids",
+        )
+        if key in result
+    }
+    if outcome:
+        parts.append(
+            "Delegate execution outcome (reported by the executor):\n"
+            + json.dumps(outcome, ensure_ascii=False, indent=2)
+        )
+    if errors:
+        parts.append(
+            "Executor tool/code errors (attempt records; later recovery is possible):\n"
+            + _synthesis_evidence_text(errors, limit=16000)
+        )
+    if "figures" in result:
+        figures = [
+            {key: figure[key] for key in ("name", "path", "pdfPath") if key in figure}
+            for figure in (result["figures"] or [])
+            if isinstance(figure, dict)
+        ]
+        parts.append(
+            "Figure artifacts returned for this delegation:\n"
+            + json.dumps(figures, ensure_ascii=False, indent=2)
+        )
     if summaries:
         parts.append(
             "Executor report summaries (agent-authored):\n"
@@ -241,12 +278,14 @@ def _build_execution_context(result: Dict[str, Any]) -> str:
         )
     if score_definitions:
         parts.append(
-            "Registered score definitions (structured method records):\n"
+            "Registered score definitions (session-wide structured method records; "
+            "may predate this delegation):\n"
             + _synthesis_evidence_text(score_definitions, limit=16000)
         )
     if scoring_plans:
         parts.append(
-            "Frozen scoring plans (structured pre-specified method records):\n"
+            "Frozen scoring plans (session-wide structured pre-specified method records; "
+            "may predate this delegation):\n"
             + _synthesis_evidence_text(scoring_plans, limit=16000)
         )
     if (
@@ -314,6 +353,14 @@ def _build_synthesis_prompt(
         "\n## Instructions\n"
         "- Synthesize these results into a comprehensive response\n"
         "- Reference specific findings from each agent\n"
+        "- Report the delegate's actual stopping status and unresolved execution errors. "
+        "A success flag alone does not establish completion: max_steps_reached means "
+        "execution did not reach completion. Preserve usable partial results, but "
+        "do not describe unexecuted work as completed.\n"
+        "- Distinguish session-wide historical results and plans from work executed "
+        "in this delegation, using execution IDs where available. Registration alone "
+        "does not establish a new computation. A proposed figure layout or legend "
+        "is not a generated figure; ground figure claims in the returned artifacts.\n"
         "- Before writing Methods or figure legends, reconcile agent summaries and "
         "findings with the supplied execution records. Describe what actually ran, "
         "distinguishing successful computations from failed attempts and proposed work.\n"
@@ -504,7 +551,8 @@ async def _execute_chat_agent_inner(
             return answer
 
         async def annotate_callback(cluster_markers, tissue, organism,
-                                    analysis_log=None, database_priors=None):
+                                    analysis_log=None, database_priors=None,
+                                    annotation_source=None):
             if not cluster_markers:
                 return {
                     "status": "error",
@@ -512,7 +560,14 @@ async def _execute_chat_agent_inner(
                     "error": "cluster_markers is empty. Run rank_genes_groups and extract markers first."
                 }
             await _send_agent_msg("status", f"Annotating {len(cluster_markers)} clusters via literature...", AgentType.LITERATURE)
-            return await literature_agent.annotate_clusters(cluster_markers, tissue, organism, state)
+            # The executor owns source validation and applies the returned labels
+            # to annotation_source; the literature lookup needs biological context.
+            return await literature_agent.annotate_clusters(
+                cluster_markers=cluster_markers,
+                tissue=tissue,
+                organism=organism,
+                state=state,
+            )
 
         async def agent_msg_callback(msg_type: str, content: str):
             await _send_agent_msg(msg_type, content, AgentType.BIOINFORMATICS)
