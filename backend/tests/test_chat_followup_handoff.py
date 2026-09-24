@@ -107,6 +107,8 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         if agent_name == "bioinformatics":
             return {
                 "findings": ["Delegate completed a score."],
+                "chat_review": {"status": "accept"},
+                "figures": [{"name": "reviewed", "path": "/tmp/reviewed.jpg"}],
                 "analysis_log": [AnalysisStep(
                     step_number=2, step_type="report_findings",
                     findings_summary="Executed panel: GeneA, GeneB.",
@@ -139,7 +141,11 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
     class Client:
         async def chat(self, **kwargs):
             self.last_kwargs = kwargs
-            return SimpleNamespace(content="SYNTHESIS_RESPONSE")
+            return SimpleNamespace(content=(
+                "SYNTHESIS_RESPONSE [[FIGURE:raw_debug]] "
+                "[[GENERATE_FIGURE:draw another plot]]"
+                if agent_name == "bioinformatics" else "SYNTHESIS_RESPONSE"
+            ))
 
     client = Client()
     manager = SimpleNamespace(openrouter=client)
@@ -150,6 +156,11 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
     monkeypatch.setattr(delegation_flow, "_execute_chat_agent", fake_execute_agent)
     monkeypatch.setattr(delegation_flow, "AgentSettingsProvider", Provider)
     monkeypatch.setattr(delegation_flow, "_send_chat_ws", send_ws)
+    generate = AsyncMock(side_effect=AssertionError("post-review execution bypass"))
+    monkeypatch.setattr(delegation_flow, "_generate_figures_in_chat", generate)
+    monkeypatch.setattr(delegation_flow, "_build_chat_context", lambda *_: (
+        "", [{"name": "raw_debug", "path": "/tmp/raw_debug.jpg"}],
+    ))
     monkeypatch.setattr(
         delegation_flow,
         "_persist_chat_terminal",
@@ -185,6 +196,7 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
 
     assert result is not delegation_flow._DELEGATION_STOP
     assert source_context in delegate_instructions[0]
+    assert "Original user request" in delegate_instructions[0]
     assert source_context in client.last_kwargs["messages"][0]["content"]
     if agent_name == "bioinformatics":
         synthesis_input = client.last_kwargs["messages"][0]["content"]
@@ -193,6 +205,10 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         assert "delegated-execution" in synthesis_input
         assert "Input is log-normalized." in synthesis_input
     terminal = state.chat_messages[-1]
+    if agent_name == "bioinformatics":
+        assert [figure["name"] for figure in terminal["figures"]] == ["reviewed"]
+        assert "remain unfinished" in terminal["content"]
+        generate.assert_not_awaited()
     assert terminal["id"] == "placeholder-id"
     assert terminal["reply_to"] == "user-id"
     assert terminal["followup_id"] == "fu-delegation"

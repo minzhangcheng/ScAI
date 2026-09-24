@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.60.17 · **Last updated**: 2026-09-24
+**Version**: 0.61.1 · **Last updated**: 2026-09-24
 
 ## 1. Runtime Architecture
 
@@ -361,6 +361,17 @@ gate settings.
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.61.x — (2026-09-24 onward)**
+
+- `0.61.1` — Adds execution supervision and a bounded PI review-and-correction
+  cycle to Chat-directed Bioinformatics analyses. PI figure review follows the
+  workflow fallback order (PI, Bioinformatics self-review, Supervisor), with an
+  explicit unavailable status when no visual reviewer can assess the image.
+  Corrections share the Chat execution-step budget and retain prior execution
+  records and review decisions. Final Chat figures are selected from verified,
+  current artifacts produced by this delegation, so raw autosaves and debug
+  images are not presented as reviewed results.
 
 **0.60.x — (2026-09-20 onward)**
 

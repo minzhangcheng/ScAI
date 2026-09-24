@@ -24,6 +24,7 @@ async def _execute_delegation_success(
 
     def _delegation_instruction(raw: Any) -> str:
         instruction = str(raw or "")
+        instruction += "\n\nOriginal user request (scope for final review):\n" + user_message
         if source_context and source_context.strip():
             instruction += (
                 "\n\n## Server-resolved selected-direction context\n"
@@ -184,6 +185,11 @@ async def _execute_delegation_success(
 
     # 7. Post-process: FIGURE and GENERATE_FIGURE markers (reuse existing patterns)
     context, figure_inventory = _build_chat_context(state)
+    reviewed_chat = any("chat_review" in result for result in agent_results.values())
+    if reviewed_chat:
+        # Final synthesis cannot reintroduce a rejected/raw file through the
+        # session-wide inventory after the producer review has selected artifacts.
+        figure_inventory = all_figures
     figure_pattern = re.compile(r'\[\[FIGURE:([\w.-]+)\]\]')
     referenced_names = figure_pattern.findall(final_content)
     synthesis_figures: List[Dict[str, str]] = []
@@ -201,7 +207,12 @@ async def _execute_delegation_success(
 
     generate_pattern = re.compile(r'\[\[GENERATE_FIGURE:(.*?)\]\]', re.DOTALL)
     generate_requests = generate_pattern.findall(final_content)
-    if generate_requests:
+    if generate_requests and reviewed_chat:
+        final_content += (
+            "\n\nAdditional figure requests were not executed after the completed "
+            "review cycle; those figures remain unfinished."
+        )
+    elif generate_requests:
         try:
             generated = await _generate_figures_in_chat(session_id, state, generate_requests)
             synthesis_figures.extend(generated)

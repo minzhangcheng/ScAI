@@ -448,6 +448,8 @@ class AnalysisState(BaseModel):
     
     # Chat messages (PI Agent free-form chat, separate from workflow)
     chat_messages: List[Dict[str, Any]] = Field(default_factory=list)
+    # Chat-owned execution/review cycles, separate from round review identities.
+    chat_analysis_reviews: List[Dict[str, Any]] = Field(default_factory=list)
 
     # Sandbox state (for potential restoration)
     sandbox_state: Optional[Dict[str, Any]] = Field(

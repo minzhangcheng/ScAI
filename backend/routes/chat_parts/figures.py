@@ -329,13 +329,37 @@ async def _generate_figures_in_chat(
 
 def _collect_session_figures(
     session_id: str,
-    since_time: Optional[float] = None
+    since_time: Optional[float] = None,
+    *, state=None, run_scope_ids=None,
 ) -> List[Dict[str, str]]:
     """Collect figures from workspace, optionally filtering by creation time.
 
     Scans both the figures/ subdirectory (generate_publication_figure output)
     and the workspace root (execute_code explicit savefig output, e.g. UMAP plots).
     """
+    if run_scope_ids is not None:
+        from backend.services.report.artifacts import (
+            eligible_artifacts, verified_artifact_bytes,
+        )
+
+        # A reviewed Chat run has producer identities. Never promote its raw
+        # autosaves/debug files to final figures through an mtime-only scan.
+        scopes = set(run_scope_ids)
+        artifacts = [figure for figure in getattr(state, "publication_figures", [])
+                     if figure.producer_run_scope_id in scopes]
+        figures = []
+        for figure in eligible_artifacts(artifacts, state=state):
+            if verified_artifact_bytes(figure.png_path, figure, kind="image") is None:
+                continue
+            entry = {"name": figure.name, "path": figure.png_path,
+                     "artifact_id": figure.id,
+                     "review_status": figure.review_status.value,
+                     "review_unavailable": figure.review_unavailable}
+            if verified_artifact_bytes(figure.pdf_path, figure, kind="pdf") is not None:
+                entry["pdfPath"] = figure.pdf_path
+            figures.append(entry)
+        return figures
+
     figures: List[Dict[str, str]] = []
     seen_stems: set = set()
 

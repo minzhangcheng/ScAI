@@ -192,6 +192,7 @@ def _build_execution_context(result: Dict[str, Any]) -> str:
     """Expose executor records that are not part of the top-level findings."""
     summaries = []
     errors = []
+    figure_attempts = []
     for step in result.get("analysis_log") or []:
         if not isinstance(step, dict):
             step = step.model_dump(mode="json")
@@ -210,6 +211,11 @@ def _build_execution_context(result: Dict[str, Any]) -> str:
                     "step_number", "findings_summary", "evidence_execution_ids",
                 )
             })
+        if step.get("pub_figure_name") or step.get("pub_figure_result"):
+            figure_attempts.append({key: step.get(key) for key in (
+                "id", "step_number", "pub_figure_name", "pub_figure_code",
+                "pub_figure_result",
+            )})
 
     executions = []
     for execution in result.get("code_history") or []:
@@ -251,10 +257,21 @@ def _build_execution_context(result: Dict[str, Any]) -> str:
             "Delegate execution outcome (reported by the executor):\n"
             + json.dumps(outcome, ensure_ascii=False, indent=2)
         )
+    for key, title in (
+        ("figure_review_records", "Figure attempts, including rejected/unreviewed renders"),
+        ("chat_review", "PI Chat review and correction history (not a technical execution status)"),
+    ):
+        if key in result:
+            parts.append(title + ":\n" + json.dumps(result[key], ensure_ascii=False, indent=2))
     if errors:
         parts.append(
             "Executor tool/code errors (attempt records; later recovery is possible):\n"
             + _synthesis_evidence_text(errors, limit=16000)
+        )
+    if figure_attempts:
+        parts.append(
+            "Publication figure tool attempts (including failed renders):\n"
+            + json.dumps(figure_attempts, ensure_ascii=False, indent=2)
         )
     if "figures" in result:
         figures = [
@@ -353,6 +370,13 @@ def _build_synthesis_prompt(
     parts.append(
         "\n## Instructions\n"
         "- Synthesize these results into a comprehensive response\n"
+        "- Honor the recorded PI Chat review, including unresolved issues, corrections, "
+        "and unexecuted revision requests. Explicitly disclose unavailable review or "
+        "exhausted correction budget. Do not present superseded findings as current "
+        "or unreviewed figures as visually approved.\n"
+        "- For reviewed Chat analyses, reference only figures returned by that "
+        "delegation. Do not emit GENERATE_FIGURE requests after the review; disclose "
+        "missing figures as unfinished work.\n"
         "- Reference specific findings from each agent\n"
         "- Report the delegate's actual stopping status and unresolved execution errors. "
         "A success flag alone does not establish completion: max_steps_reached means "
@@ -512,7 +536,15 @@ async def _execute_chat_agent_inner(
             proxy_url=config.api.proxy_url if config.api else None,
         )
         from backend.agents.pi_agent import PIAgent
-        literature_pi_agent = PIAgent(settings_provider=provider)
+        from .reviews import ChatReviewCallbacks, run_reviewed_analysis
+        # Reviewers must resolve their own endpoints, not inherit the executor's
+        # per-agent endpoint as though it were the installation default.
+        review_client = get_agent_llm_client(state, config, "workflow", session_id)
+        review_provider = AgentSettingsProvider(
+            state, config, global_client=review_client, session_id=session_id,
+        )
+        literature_pi_agent = PIAgent(settings_provider=review_provider)
+        literature_pi_agent.set_session(session_id)
 
         async def lit_callback(topic: str) -> str:
             result = await literature_agent.process(
@@ -529,25 +561,12 @@ async def _execute_chat_agent_inner(
 
         async def pi_callback(question: str, context: str) -> str:
             await _send_agent_msg("pi_question", f"Question: {question}\nContext: {context}", AgentType.BIOINFORMATICS)
-            pi_model = provider.get_model(PI_AGENT_NAME)
             prompt = (
                 f"The bioinformatics analyst is asking for your guidance:\n\n"
                 f"QUESTION: {question}\n\nCONTEXT: {context}\n\n"
                 f"Please provide clear, actionable guidance."
             )
-            dispatch = await provider.budget_text_dispatch(
-                PI_AGENT_NAME,
-                [{"role": "user", "content": prompt}],
-            )
-            resp = await llm_client.chat(
-                model=pi_model,
-                messages=dispatch.messages,
-                temperature=provider.get_temperature(PI_AGENT_NAME),
-                max_tokens=dispatch.max_tokens,
-                prefer_stream=True,
-            )
-            await provider.acknowledge_text_dispatch(PI_AGENT_NAME, dispatch)
-            answer = resp.content or "Proceed with standard bioinformatics practices."
+            answer = await literature_pi_agent.chat_without_history(prompt)
             await _send_agent_msg("pi_response", answer, AgentType.PI)
             return answer
 
@@ -573,6 +592,10 @@ async def _execute_chat_agent_inner(
         async def agent_msg_callback(msg_type: str, content: str):
             await _send_agent_msg(msg_type, content, AgentType.BIOINFORMATICS)
 
+        reviews = ChatReviewCallbacks(
+            state, review_provider, literature_pi_agent, _send_agent_msg,
+            pi_callback, sandbox,
+        )
         bio_agent = BioinformaticsAgent(
             settings_provider=provider,
             sandbox=sandbox,
@@ -580,18 +603,28 @@ async def _execute_chat_agent_inner(
             pi_callback=pi_callback,
             annotate_clusters_callback=annotate_callback,
             message_callback=agent_msg_callback,
+            supervisor_callback=reviews.supervise,
+            figure_review_callback=reviews._figure_review_callback,
         )
+        bio_agent.set_session(session_id)
+        reviews.bioinformatics_agent = bio_agent
 
         chat_sandboxes[session_id] = sandbox
         started = False
         try:
-            analysis_start_time = time.time()
             await sandbox.start()
             started = True
-            result = await bio_agent.run_autonomous_analysis(
-                state, instruction, max_steps=60,
-                run_kind="chat", run_scope_id=f"chat_{uuid.uuid4().hex}",
-                resume_from_checkpoint=False,
+            async def persist_review():
+                if not await _persist_chat_terminal(session_id, state):
+                    raise RuntimeError("Chat review state could not be persisted for its owner")
+
+            result = await run_reviewed_analysis(
+                state=state, instruction=instruction, bio_agent=bio_agent,
+                reviews=reviews, persist=persist_review,
+                collect_figures=lambda scopes: _collect_session_figures(
+                    session_id, state=state, run_scope_ids=scopes,
+                ),
+                execution_context=_build_execution_context,
             )
             # These records live on AnalysisState. Include them in the PI
             # handoff so Methods are grounded in registered panels and
@@ -606,8 +639,6 @@ async def _execute_chat_agent_inner(
                 if hasattr(plan, "model_dump") else plan
                 for plan in (getattr(state, "scoring_plans", None) or [])
             ]
-            # Collect only figures generated during THIS analysis (not historical ones)
-            result["figures"] = _collect_session_figures(session_id, since_time=analysis_start_time)
             return result, extra_clients
         finally:
             try:
@@ -624,6 +655,10 @@ async def _execute_chat_agent_inner(
                 if getattr(sandbox, "km", None) is None:
                     if chat_sandboxes.get(session_id) is sandbox:
                         chat_sandboxes.pop(session_id, None)
+                try:
+                    await review_provider.cleanup()
+                finally:
+                    await review_client.close()
 
     elif agent_name == "pathology":
         from backend.agents.pathology_agent import PathologyAgent

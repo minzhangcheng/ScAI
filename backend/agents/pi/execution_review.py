@@ -37,6 +37,73 @@ _MAX_NAME_LEN = 80
 class ExecutionReviewMixin:
     """Post-execution plan review and supplementary-result assessment."""
 
+    async def review_chat_execution(
+        self, request: str, evidence: str, remaining_steps: int,
+        remaining_revisions: int,
+    ) -> Dict[str, Any]:
+        """Review a Chat request against executed evidence, not round plans."""
+        prompt = f"""Review the completed Chat analysis before its final answer.
+
+User request and delegated scope:
+{request}
+
+Execution evidence and review history:
+{evidence}
+
+Assess whether the original question was answered, whether code and outputs
+support the claims, and whether figures represent the computed results. Check
+numerical logic, method assumptions, circular reasoning, uncertainty, and any
+disagreement between records and narrative. Treat Supervisor feedback as advice.
+Distinguish failed, unattempted, unsupported, and completed analyses. Do not
+assume that successful execution or a visually acceptable figure establishes
+scientific validity. Unreviewed figures are not visually approved. Earlier
+findings may have been superseded; cite the relevant execution/figure identities.
+
+You own the scientific decision. Choose accept, limited, or revise. Negative or
+ambiguous results are valid outcomes; do not request work to obtain a preferred
+conclusion. For revise, provide one actionable instruction restricted to this
+request and existing inputs. Preserve prior evidence; correct or supplement only
+what is needed. Do not restart the whole analysis or expand the research scope.
+Remaining shared execution steps: {remaining_steps}.
+Remaining correction cycles: {remaining_revisions}.
+If no correction budget remains, disclose unresolved issues; do not imply repair.
+
+Return JSON:
+{{"decision": "accept|limited|revise", "rationale": "reason",
+  "issues": ["issue with evidence reference"],
+  "revision_instruction": "instruction, only for revise",
+  "limitations": ["limitation to disclose in the final answer"]}}
+"""
+        unavailable = {
+            "decision": "unavailable", "review_unavailable": True,
+            "rationale": "PI execution review was unavailable or unparseable.",
+        }
+        try:
+            response = await self.chat_without_history(prompt)
+            data = self._safe_parse_json(response, default={})
+            if not isinstance(data, dict) or data.get("decision") not in {
+                "accept", "limited", "revise",
+            }:
+                return unavailable
+            if not isinstance(data.get("rationale"), str):
+                return unavailable
+            for key in ("issues", "limitations"):
+                if not isinstance(data.get(key, []), list) or any(
+                    not isinstance(item, str) for item in data.get(key, [])
+                ):
+                    return unavailable
+            if data["decision"] == "revise" and (
+                not isinstance(data.get("revision_instruction"), str)
+                or not data["revision_instruction"].strip()
+            ):
+                return unavailable
+            return {key: data[key] for key in (
+                "decision", "rationale", "issues", "limitations", "revision_instruction",
+            ) if key in data}
+        except Exception:
+            logger.warning("Chat PI execution review failed", exc_info=True)
+            return unavailable
+
     async def review_round_execution(
         self,
         state: AnalysisState,

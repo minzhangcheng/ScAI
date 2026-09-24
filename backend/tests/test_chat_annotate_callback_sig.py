@@ -37,15 +37,25 @@ async def test_chat_annotation_callback_accepts_executor_context(
             ))
             return {"status": "completed", "findings": [], "figures": []}
 
-        return SimpleNamespace(run_autonomous_analysis=run)
+        assert callable(kwargs["supervisor_callback"])
+        assert callable(kwargs["figure_review_callback"])
+        return SimpleNamespace(run_autonomous_analysis=run, set_session=MagicMock())
 
     monkeypatch.setattr(delegation, "resolve_config_for_user", AsyncMock(return_value=SystemConfig()))
     monkeypatch.setattr(delegation, "get_session_states", lambda _: tmp_path / "states")
     monkeypatch.setattr(delegation, "get_session_workspace", lambda _: tmp_path / "workspace")
     monkeypatch.setattr(delegation, "_collect_session_figures", lambda *a, **kw: [])
+    monkeypatch.setattr(delegation, "_persist_chat_terminal", AsyncMock(return_value=True))
+    from backend.utils import agent_llm
+    monkeypatch.setattr(agent_llm, "get_agent_llm_client", MagicMock(
+        return_value=SimpleNamespace(close=AsyncMock()),
+    ))
     monkeypatch.setattr(sandbox_module, "LocalJupyterSandbox", MagicMock(return_value=sandbox))
     monkeypatch.setattr(literature_agent, "LiteratureAgent", MagicMock(return_value=literature))
-    monkeypatch.setattr(pi_agent, "PIAgent", MagicMock())
+    pi = SimpleNamespace(set_session=MagicMock(), review_chat_execution=AsyncMock(
+        return_value={"decision": "accept", "rationale": "checked"},
+    ))
+    monkeypatch.setattr(pi_agent, "PIAgent", MagicMock(return_value=pi))
     monkeypatch.setattr(bioinformatics_agent, "BioinformaticsAgent", make_bio_agent)
 
     result, _ = await delegation._execute_chat_agent_inner(
