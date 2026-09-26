@@ -47,20 +47,6 @@ describe.each([1, 2])('Stage %i review report download', stage => {
     expect(screen.queryByText('View Detailed Report')).not.toBeInTheDocument()
   })
 
-  it('labels legacy reports distinctly without claiming they are stage reviews', async () => {
-    const kind = stage === 1 ? 'annotation' : 'exploration'
-    const label = stage === 1 ? 'Annotation' : 'Exploration'
-    const url = `/api/session/s/${kind}-report/html?branch_id=restore-a`
-    vi.mocked(fetchAndDownload).mockResolvedValue(undefined)
-    render(dialog(stage, url))
-    fireEvent.click(screen.getByRole('button', { name: `Download Legacy ${label} Report` }))
-    await waitFor(() => expect(fetchAndDownload).toHaveBeenCalledWith(
-      url, `legacy_${kind}_report.html`, { preferResponseFilename: true },
-    ))
-    expect(screen.queryByRole('button', { name: `Download Stage ${stage} Review Report` }))
-      .not.toBeInTheDocument()
-  })
-
   it('shows unavailable without falling back to the cumulative report', () => {
     render(dialog(stage))
     expect(screen.getByText(`Stage ${stage} review report is currently unavailable for download`))

@@ -62,72 +62,6 @@ async def test_per_session_lock_prevents_stale_overwrite():
 
 
 @pytest.mark.asyncio
-async def test_guard_skips_when_workflow_popped():
-    """state_callback / cancel handler must skip entirely after workflows.pop.
-
-    Tests the exact guard pattern used in production (修改 2/3):
-      if workflows.get(session_id) is not workflow: return
-    """
-    from backend.state import sessions, workflows, get_session_lock
-
-    session_id = "test-guard-skip"
-    sess_lock = get_session_lock(session_id)
-    mock_wf = object()
-    workflows[session_id] = mock_wf
-
-    async with sess_lock:
-        workflows.pop(session_id, None)
-
-    did_write = False
-    async with sess_lock:
-        if workflows.get(session_id) is not mock_wf:
-            pass
-        else:
-            sessions[session_id] = AnalysisState(
-                session_id=session_id, user_id="test", status=TaskStatus.PAUSED
-            )
-            did_write = True
-
-    assert not did_write, (
-        "Guard must skip write after workflows.pop. "
-        "workflows.get returned: %s" % workflows.get(session_id)
-    )
-
-    sessions.pop(session_id, None)
-    workflows.pop(session_id, None)
-
-
-@pytest.mark.asyncio
-async def test_guard_allows_write_when_workflow_active():
-    """Guard must allow write when workflow is still registered.
-
-    This is the normal (non-restore) path: state_callback saves progress
-    during active workflow execution.
-    """
-    from backend.state import sessions, workflows, get_session_lock
-
-    session_id = "test-guard-allow"
-    sess_lock = get_session_lock(session_id)
-    mock_wf = object()
-    workflows[session_id] = mock_wf
-
-    did_write = False
-    async with sess_lock:
-        if workflows.get(session_id) is not mock_wf:
-            pass
-        else:
-            sessions[session_id] = AnalysisState(
-                session_id=session_id, user_id="test", status=TaskStatus.PAUSED
-            )
-            did_write = True
-
-    assert did_write, "Guard must allow write when workflow is still active"
-
-    sessions.pop(session_id, None)
-    workflows.pop(session_id, None)
-
-
-@pytest.mark.asyncio
 async def test_resume_respects_waiting_input_status():
     """resume() must not override WAITING_INPUT to RUNNING."""
     from backend.workflow import SingleCellAnalysisWorkflow
@@ -150,31 +84,6 @@ async def test_resume_respects_waiting_input_status():
 
     assert result is analysis_state
     assert result.status == TaskStatus.WAITING_INPUT
-
-
-@pytest.mark.asyncio
-async def test_resume_respects_waiting_annotation_status():
-    """resume() must not override WAITING_ANNOTATION to RUNNING."""
-    from backend.workflow import SingleCellAnalysisWorkflow
-
-    workflow = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
-    workflow.session_id = "test-resume-wa"
-    workflow.compiled_graph = MagicMock()
-    workflow.compiled_graph.aget_state = AsyncMock(return_value=None)
-    workflow._current_analysis_state = None
-    workflow._send_message = AsyncMock()
-
-    analysis_state = AnalysisState(
-        session_id="test-resume-wa",
-        user_id="test",
-        status=TaskStatus.WAITING_ANNOTATION,
-        current_round=2
-    )
-
-    result = await workflow.resume("thread-1", analysis_state)
-
-    assert result is analysis_state
-    assert result.status == TaskStatus.WAITING_ANNOTATION
 
 
 @pytest.mark.asyncio

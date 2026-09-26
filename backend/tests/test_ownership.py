@@ -2,15 +2,19 @@
 
 P0 security: these prove the auth/ownership fixes work automatically.
 """
-import os
 
 import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 from backend.utils.auth import (
-    hash_password, verify_password, create_access_token, decode_access_token,
-    generate_api_key, hash_api_key, require_auth, JWT_SECRET, JWT_ALGORITHM,
+    hash_password,
+    verify_password,
+    create_access_token,
+    decode_access_token,
+    generate_api_key,
+    hash_api_key,
+    JWT_SECRET,
+    JWT_ALGORITHM,
 )
 from backend.utils.files import safe_filename, validate_session_id
 
@@ -102,89 +106,30 @@ class TestOwnership:
         resp = client.get("/api/auth/login")
         assert resp.status_code == 200
 
-    def test_middleware_passes_through_auth_optional_with_token(self):
-        """Middleware passes through auth-optional paths even if DB user missing.
-
-        Ownership is enforced by route-layer require_session_ownership,
-        not by the middleware itself.
-        """
+    @pytest.mark.parametrize("path, user_id", [
+        ("/api/session/sess1/report/html", "unknown_user"),
+        ("/api/session/sess1/report/html", "user_a"),
+        ("/api/file/sess2/data/test.h5ad", "user_b"),
+    ])
+    def test_middleware_delegates_optional_path_ownership_to_routes(self, path, user_id):
+        """Optional paths reach route ownership checks even for an unknown DB user."""
         from backend.middleware.auth import AuthMiddleware
         from starlette.testclient import TestClient
         from starlette.applications import Starlette
         from starlette.responses import PlainTextResponse
         from starlette.routing import Route
 
-        async def session_route(request):
-            return PlainTextResponse("ok")
-
-        # /report/html is an auth-optional session suffix (HTML-embedded content
-        # browsers fetch without auth headers) — middleware delegates ownership
-        # to the route layer rather than rejecting.
-        app = Starlette(
-            routes=[Route("/api/session/sess1/report/html", session_route)],
-            middleware=[(AuthMiddleware, [], {})],
-        )
-        client = TestClient(app)
-
-        # Token for a user that doesn't exist in DB
-        token = create_access_token("unknown_user", "unknown_user")
-        resp = client.get(
-            "/api/session/sess1/report/html",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        # Middleware passes through; route would check ownership
-        assert resp.status_code == 200
-
-    def test_middleware_passes_through_auth_optional_with_valid_token(self):
-        """Middleware passes through auth-optional paths with a valid token."""
-        from backend.middleware.auth import AuthMiddleware
-        from starlette.testclient import TestClient
-        from starlette.applications import Starlette
-        from starlette.responses import PlainTextResponse
-        from starlette.routing import Route
-
-        async def session_route(request):
+        async def route(request):
             return PlainTextResponse("ok")
 
         app = Starlette(
-            routes=[Route("/api/session/sess1/report/html", session_route)],
+            routes=[Route(path, route)],
             middleware=[(AuthMiddleware, [], {})],
         )
         client = TestClient(app)
-
-        token = create_access_token("user_a", "user_a")
-        resp = client.get(
-            "/api/session/sess1/report/html",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert resp.status_code == 200
-
-    def test_middleware_passes_through_file_path_with_token(self):
-        """Middleware passes through /api/file/ paths with a valid token.
-
-        Ownership is enforced by route-layer require_session_ownership.
-        """
-        from backend.middleware.auth import AuthMiddleware
-        from starlette.testclient import TestClient
-        from starlette.applications import Starlette
-        from starlette.responses import PlainTextResponse
-        from starlette.routing import Route
-
-        async def file_route(request):
-            return PlainTextResponse("ok")
-
-        app = Starlette(
-            routes=[Route("/api/file/sess2/data/test.h5ad", file_route)],
-            middleware=[(AuthMiddleware, [], {})],
-        )
-        client = TestClient(app)
-
-        token = create_access_token("user_b", "user_b")
-        resp = client.get(
-            "/api/file/sess2/data/test.h5ad",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert resp.status_code == 200
+        token = create_access_token(user_id, user_id)
+        response = client.get(path, headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 200
 
     def test_middleware_passes_through_session_with_empty_owner(self):
         """Middleware passes through auth-optional path even when session has empty user_id.

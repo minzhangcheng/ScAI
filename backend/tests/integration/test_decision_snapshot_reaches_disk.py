@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sqlite3
 
 import pytest
 import pytest_asyncio
@@ -32,7 +31,7 @@ pytestmark = [
 
 
 @pytest_asyncio.fixture
-async def sandbox(session_id):
+async def sandbox(session_id, monkeypatch):
     """A sandbox whose directories are the ones ``get_session_*`` resolves to.
 
     The capture copies ``session.json`` from the session directory and the
@@ -51,14 +50,11 @@ async def sandbox(session_id):
     workspace.mkdir(parents=True, exist_ok=True)
     (session_dir / "uploads").mkdir(parents=True, exist_ok=True)
 
-    # The graph's checkpoint database is one of the three files the commit
-    # captures beside the dump, and it is copied through SQLite's backup API
-    # rather than as bytes -- so it has to be a real database, not a placeholder.
-    with sqlite3.connect(states / "checkpoints.sqlite") as connection:
-        connection.execute("CREATE TABLE checkpoints (thread_id TEXT, checkpoint BLOB)")
-        connection.execute(
-            "INSERT INTO checkpoints VALUES (?, ?)", (session_id, b"a graph position"),
-        )
+    from backend.state import sessions
+    from backend.tests.test_round_snapshot_capture import _write_checkpoint_db
+
+    monkeypatch.setitem(sessions, session_id, _state(session_id))
+    _write_checkpoint_db(states / "checkpoints.sqlite", session_id, round_number=2)
 
     sb = LocalJupyterSandbox(
         session_id=session_id, state_dir=str(states), working_dir=str(workspace),

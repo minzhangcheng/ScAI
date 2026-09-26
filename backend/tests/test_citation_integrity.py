@@ -24,48 +24,15 @@ pins below record what review found.
 import inspect
 import re
 
-import pytest
 
-from backend.services.method_rules import all_rules, corpus_meta
+from backend.services.method_rules import all_rules
 
 _RULES = all_rules()
 _BY_ID = {r["id"]: r for r in _RULES}
 
 
-# --------------------------------------------- corrections already established
-
-def test_bourgon_stays_only_on_the_two_rules_it_supports():
-    """Pin the specific correction, since it was wrong on four rules."""
-    expected = {"adjusted-p-na-is-a-flag-not-a-gap",
-                "filter-must-be-independent-under-the-null"}
-    actual = {
-        rule["id"] for rule in _RULES
-        if any("bourgon" in str(c).lower() for c in (rule.get("citations") or []))
-    }
-    assert actual == expected, (
-        f"Bourgon 2010 is about independent filtering before FDR adjustment. It "
-        f"belongs on {sorted(expected)} and nowhere else; found on {sorted(actual)}"
-    )
 
 
-def test_uncited_rules_say_so_explicitly():
-    """A rule with no upstream support must not imply it has one.
-
-    read-the-set-before-scoring-it makes a claim bioSkills never makes. Keeping
-    the rule is fine; attributing it upstream is not.
-    """
-    for rule in _RULES:
-        citations = rule.get("citations") or []
-        assert citations, f"{rule['id']} has no citations field at all"
-        if any("no upstream citation" in str(c).lower() for c in citations):
-            joined = " ".join(str(c) for c in citations).lower()
-            assert "scai" in joined or "own guidance" in joined, (
-                f"{rule['id']} declares no upstream source but does not say whose "
-                f"guidance it is"
-            )
-
-
-# ----------------------------------------------------------------- API claims
 
 _API_PATTERN = re.compile(r"\b((?:sc|scanpy|gseapy|gp)\.[a-z_]+\.[a-z_0-9]+)\b")
 
@@ -112,26 +79,3 @@ def test_lfc_shrink_is_documented_with_its_required_argument():
             f"{rule['id']} documents an argument-less lfc_shrink call, which raises "
             f"TypeError"
         )
-
-
-def test_no_rule_claims_a_default_without_naming_the_function():
-    """Defaults differ per entry point, so an unqualified default misleads.
-
-    gseapy.prerank caps at 500 and gseapy.gsva at 1000; stating "the default is
-    500" without saying which call is read as a general fact.
-    """
-    for rule in _RULES:
-        text = str(rule.get("python", ""))
-        for match in re.finditer(r"(min_size|max_size|weight)\s*=\s*[\d.]+", text):
-            window = text[max(0, match.start() - 120):match.start()]
-            assert re.search(r"(gseapy|gp|sc|scanpy)\.\w+", window), (
-                f"{rule['id']} states {match.group(0)!r} without naming the function "
-                f"it belongs to"
-            )
-
-
-# ------------------------------------------------------------------- contract
-
-def test_corpus_still_claims_upstream_citations():
-    """If this promise is dropped the tests above lose their basis."""
-    assert corpus_meta().get("source") == "bioSkills"

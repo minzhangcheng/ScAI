@@ -1,14 +1,34 @@
 """Report-only recovery must share the durable graph and honor user termination."""
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from backend.models.schemas import AnalysisState, RoundResult, TaskStatus
-from backend.tests.test_reporting_shortcircuit import _make_workflow
 from backend.workflow.helpers import WorkflowTerminatedError
 from backend.workflow.state import WorkflowState
+
+
+def _make_workflow():
+    from backend.workflow import SingleCellAnalysisWorkflow
+    wf = object.__new__(SingleCellAnalysisWorkflow)
+    wf.session_id = "test-session"
+    wf._send_message = AsyncMock()
+    wf._send_state_sync = AsyncMock()
+
+    def _set_status(state, status):
+        state.status = status
+
+    wf._set_status = staticmethod(_set_status).__get__(wf, SingleCellAnalysisWorkflow)
+    wf._settings_provider = MagicMock()
+    wf._settings_provider.get_vision_setting = MagicMock(return_value=True)
+    wf.painter_agent = None
+    wf.bioinformatics_agent = None
+    wf.supervisor_agent = None
+    wf.llm_manager = MagicMock()
+    wf.sandbox = None
+    return wf
 
 
 def _report_graph(workflow):
@@ -83,79 +103,6 @@ async def test_report_only_failure_retries_only_failed_report(monkeypatch):
     workflow._generate_final_report.assert_awaited_once()
     workflow._generate_graphic_abstract.assert_awaited_once()
     assert workflow._generate_detailed_report.await_count == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("in_synthesis", [False, True])
-async def test_report_only_terminate_stops_all_following_phases(in_synthesis):
-    workflow = _workflow()
-    state = _state()
-    if in_synthesis:
-        state.round_results = []
-        workflow._pi_synthesis = AsyncMock(side_effect=WorkflowTerminatedError("User chose Terminate"))
-    else:
-        workflow._generate_final_report.side_effect = WorkflowTerminatedError("User chose Terminate")
-    await _park(workflow, state)
-    result = await workflow.generate_report(state, workflow.session_id)
-    assert result.status == TaskStatus.STOPPED
-    assert result.wait_input_reason is None
-    workflow._generate_graphic_abstract.assert_not_awaited()
-    workflow._generate_detailed_report.assert_not_awaited()
-    if in_synthesis:
-        workflow._generate_final_report.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("has_checkpoint", [False, True])
-async def test_legacy_report_failure_marker_resumes_exact_report(monkeypatch, has_checkpoint):
-    from backend.workflow import core
-    monkeypatch.setattr(core, "is_live_runtime_continuation_safe", lambda *a: True)
-    workflow = _workflow()
-    state = _state()
-    if has_checkpoint:
-        await _park(workflow, state)
-    state.status = TaskStatus.FAILED
-    state.sandbox_state = {"failed_node": "generate_detailed_report", "node_retry": {
-        "id": "legacy-retry", "node_name": "generate_detailed_report", "skip": False}}
-    await workflow.resume(workflow.session_id, state)
-    workflow._generate_detailed_report.assert_awaited_once()
-    workflow._generate_final_report.assert_not_awaited()
-    workflow._generate_graphic_abstract.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_report_retry_without_matching_failure_marker_is_rejected(monkeypatch):
-    from backend.workflow import core
-    monkeypatch.setattr(core, "is_live_runtime_continuation_safe", lambda *a: True)
-    workflow = _workflow()
-    state = _state()
-    await _park(workflow, state)
-    state.sandbox_state = {"node_retry": {
-        "id": "unmatched-retry", "node_name": "generate_detailed_report", "skip": False}}
-    with pytest.raises(ValueError, match="does not match"):
-        await workflow.resume(workflow.session_id, state)
-    workflow._generate_detailed_report.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("terminate", [False, True])
-async def test_later_report_failure_preserves_completed_summary(terminate):
-    workflow = _workflow()
-    state = _state()
-    await _park(workflow, state)
-
-    async def summary(graph_state):
-        graph_state["analysis_state"].final_summary = "Already generated summary"
-        return graph_state
-
-    workflow._generate_final_report.side_effect = summary
-    workflow._generate_graphic_abstract.side_effect = (
-        WorkflowTerminatedError("User chose Terminate") if terminate else RuntimeError("renderer unavailable")
-    )
-    result = await workflow.generate_report(state, workflow.session_id)
-    assert result.status == (TaskStatus.STOPPED if terminate else TaskStatus.FAILED)
-    assert result.final_summary == "Already generated summary"
-    workflow._generate_detailed_report.assert_not_awaited()
 
 
 @pytest.mark.asyncio

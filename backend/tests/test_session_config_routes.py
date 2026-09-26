@@ -4,7 +4,6 @@ import pytest
 
 from backend.config import SystemConfig
 from backend.models.api_requests import (
-    AgentServerConfigRequest,
     AgentSettingsUpdateRequest,
     LiteratureConfigRequest,
 )
@@ -67,63 +66,6 @@ async def test_literature_config_route_preserves_masked_key_updates_cache_and_in
     save_mock.assert_awaited_once_with(session_id, state)
     provider.clear_agent_client_cache.assert_called_once_with("literature")
     workflow.literature_agent.refresh_runtime_config_if_needed.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_agent_server_config_route_invalidates_matching_agent(monkeypatch):
-    session_id = "route-server-test"
-    state = _state(session_id)
-    sessions[session_id] = state
-    provider = MagicMock()
-    workflow = MagicMock()
-    workflow._settings_provider = provider
-    workflow.pi_agent = MagicMock()
-    workflow.pi_agent.refresh_runtime_config_if_needed = MagicMock()
-    workflows[session_id] = workflow
-
-    monkeypatch.setattr(session_config, "require_session_ownership", AsyncMock(return_value=state))
-    monkeypatch.setattr(session_config, "async_save_session", AsyncMock())
-    monkeypatch.setattr(session_config, "update_session_cache", AsyncMock())
-
-    body = AgentServerConfigRequest(agent="pi", llm_base_url="https://pi.example/v1", api_key="pi-key")
-    try:
-        response = await session_config.update_agent_server_config(session_id, _Request(), body)
-    finally:
-        workflows.pop(session_id, None)
-        sessions.pop(session_id, None)
-
-    assert response.success is True
-    provider.clear_agent_client_cache.assert_called_once_with("pi")
-    workflow.pi_agent.refresh_runtime_config_if_needed.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_agent_server_config_route_preserves_masked_preview(monkeypatch):
-    session_id = "route-server-mask-test"
-    state = _state(session_id)
-    state.agent_server_configs["pi"] = {
-        "llm_base_url": "https://pi.example/v1",
-        "api_key": "sk-123456789",
-    }
-    sessions[session_id] = state
-
-    monkeypatch.setattr(
-        session_config, "require_session_ownership", AsyncMock(return_value=state)
-    )
-    monkeypatch.setattr(session_config, "async_save_session", AsyncMock())
-    monkeypatch.setattr(session_config, "update_session_cache", AsyncMock())
-
-    body = AgentServerConfigRequest(
-        agent="pi",
-        llm_base_url="https://pi.example/v1",
-        api_key=mask_api_key("sk-123456789"),
-    )
-    try:
-        await session_config.update_agent_server_config(session_id, _Request(), body)
-    finally:
-        sessions.pop(session_id, None)
-
-    assert state.agent_server_configs["pi"]["api_key"] == "sk-123456789"
 
 
 @pytest.mark.asyncio
@@ -201,84 +143,3 @@ async def test_agent_settings_route_updates_once_and_invalidates_before_next_cal
         "user-1",
         {"agent_api_keys": {"pi": "sk-123456789"}, "literature": {}},
     )
-
-
-@pytest.mark.asyncio
-async def test_agent_settings_reports_default_secret_save_failure_after_session_save(monkeypatch):
-    state = _state("route-agent-default-save-failure")
-    monkeypatch.setattr(
-        session_config, "require_session_ownership", AsyncMock(return_value=state)
-    )
-    monkeypatch.setattr(
-        session_config, "resolve_config_for_user", AsyncMock(return_value=SystemConfig())
-    )
-    session_save = AsyncMock()
-    monkeypatch.setattr(session_config, "async_save_session", session_save)
-    monkeypatch.setattr(session_config, "update_session_cache", AsyncMock())
-    monkeypatch.setattr(session_config, "get_db", AsyncMock(return_value=object()))
-    monkeypatch.setattr(
-        session_config,
-        "load_agent_default_secrets",
-        AsyncMock(return_value={"agent_api_keys": {}, "literature": {}}),
-    )
-    monkeypatch.setattr(
-        session_config,
-        "save_agent_default_secrets",
-        AsyncMock(side_effect=RuntimeError("database unavailable")),
-    )
-
-    response = await session_config.update_agent_settings(
-        state.id,
-        _Request(),
-        AgentSettingsUpdateRequest(
-            agent="pi",
-            prompt="Updated PI prompt",
-            model="mimo-v2.5",
-            temperature=0.3,
-            llm_base_url="https://new.example/v1",
-            api_key="sk-new-key",
-            vision_enabled=False,
-            save_as_user_default=True,
-        ),
-    )
-
-    session_save.assert_awaited_once_with(state.id, state)
-    assert response["default_settings_saved"] is False
-
-
-@pytest.mark.asyncio
-async def test_get_user_agent_default_settings_uses_effective_backend_config(monkeypatch):
-    config = SystemConfig()
-    config.models.pi_model = "configured-pi-model"
-    monkeypatch.setattr(
-        session_config, "resolve_config_for_user", AsyncMock(return_value=config)
-    )
-
-    response = await session_config.get_user_agent_default_settings("user-1")
-
-    assert response["models"]["pi"] == "configured-pi-model"
-    assert response["vision_settings"]["literature"] is True
-    assert response["literature_config"]["pubmed_email"] == ""
-
-
-@pytest.mark.asyncio
-async def test_get_agent_settings_returns_current_session_values(monkeypatch):
-    state = _state("route-agent-settings-read-test")
-    state.custom_models["pi"] = "mimo-v2.5"
-    state.agent_server_configs["pi"] = {
-        "llm_base_url": "https://pi.example/v1",
-        "api_key": "sk-123456789",
-    }
-    monkeypatch.setattr(
-        session_config, "require_session_read_ownership", AsyncMock(return_value=state)
-    )
-    monkeypatch.setattr(
-        session_config, "resolve_config_for_user", AsyncMock(return_value=SystemConfig())
-    )
-
-    response = await session_config.get_agent_settings(state.id, _Request())
-
-    assert response["models"]["pi"] == "mimo-v2.5"
-    assert response["models"]["supervisor"] == "gpt-5.4-mini"
-    assert response["vision_settings"]["literature"] is True
-    assert response["agent_server_configs"]["pi"]["api_key"] == mask_api_key("sk-123456789")

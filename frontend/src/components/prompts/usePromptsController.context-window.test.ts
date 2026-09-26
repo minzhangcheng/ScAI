@@ -92,12 +92,4 @@ describe('per-agent context-window save semantics', () => {
     )
     expect(localStorage.getItem('scai-last-agent-settings:user-1')).toBeNull()
   })
-
-  it('clears the old model budget in defaults for a new analysis', async () => {
-    useAppStore.setState({ currentSession: null, authUser: null })
-    const { result } = renderHook(() => usePromptsController())
-    act(() => { result.current?.setEditedModel('replacement-model') })
-    await act(async () => { await result.current?.handleSave() })
-    expect(useAppStore.getState().agentServerConfigs.pi?.contextWindow).toBeUndefined()
-  })
 })

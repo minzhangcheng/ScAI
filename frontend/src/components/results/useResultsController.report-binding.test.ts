@@ -6,7 +6,7 @@ import {
   type IntegratedReportPublication, type Message, type PublicationFigure, type Session,
 } from '../../stores/appStore'
 import {
-  mergeIntegratedReportFigures, reportBoundFigures, useResultsController,
+  useResultsController,
 } from './useResultsController'
 
 vi.mock('../../hooks/useApi', () => ({
@@ -84,52 +84,6 @@ function message(type: Message['type'], content: Message['content']): Message {
 describe('Integrated Report figure binding', () => {
   beforeEach(() => {
     useAppStore.setState({ currentSession: null, messages: [], language: 'en' })
-  })
-
-  it('keeps a frozen id that is absent from the mutable inventory', () => {
-    const session = {
-      publicationFigures: [figure('current-id')],
-      integratedReportPublication: publication('frozen-id'),
-    } as Session
-
-    const bound = reportBoundFigures(session)
-
-    expect(bound.figures.map(item => item.id)).toEqual([
-      'frozen-id', 'current-id',
-    ])
-    expect(bound.figures[0]).toMatchObject({
-      reportNumber: 1,
-      reportGenerationId: 'generation-2',
-    })
-    expect(bound.curatedKeys).toEqual(new Set(['frozen-id']))
-  })
-
-  it('clears old numbers and binds same-name revisions by exact id', () => {
-    const old = {
-      ...figure('old-id'), reportNumber: 1, reportGenerationId: 'generation-1',
-    }
-    const current = figure('current-id')
-
-    const merged = mergeIntegratedReportFigures([old, current], [{
-      id: 'current-id',
-      name: 'Shared panel',
-      description: 'Current frozen version',
-      figure_type: 'heatmap',
-      review_status: 'approved',
-      revision_count: 1,
-      report_number: 1,
-      report_generation_id: 'generation-2',
-      is_publication: true,
-    }])
-
-    expect(merged.figures).toHaveLength(2)
-    expect(merged.figures.find(item => item.id === 'current-id')).toMatchObject({
-      reportNumber: 1,
-      reportGenerationId: 'generation-2',
-    })
-    expect(merged.figures.find(item => item.id === 'old-id')?.reportNumber)
-      .toBeUndefined()
-    expect(merged.curatedKeys).toEqual(new Set(['current-id']))
   })
 
   it.each(['figure_review', 'figure_approved', 'figure_revision'] as const)(

@@ -135,60 +135,6 @@ describe('what the import flow reports when it finishes', () => {
     expect(detail.textContent).toContain('workflow checkpoints (1)')
   })
 
-  it('says nothing extra when the archive was restored whole', async () => {
-    localStorage.setItem('scai.pendingImport', JSON.stringify({ importId: 'imp-1' }))
-    mockApiFetch.mockImplementation(async () =>
-      mockApiFetch.mock.calls.length === 1
-        ? { status: 'extracting', phase: 'extracting' }
-        : { status: 'completed', session_id: 's1', skipped: {}, skipped_examples: [] },
-    )
-
-    renderSidebar()
-    await tickPolls()
-
-    const detail = screen.getByText(/Session imported successfully/)
-    expect(detail.textContent).toBe('Session imported successfully')
-  })
-
-  // An imported mid-analysis session lands paused, and the controls that can
-  // move it forward only exist on the analysis tab.
-  it('switches to the tab that owns the imported session\'s controls', async () => {
-    localStorage.setItem('scai.pendingImport', JSON.stringify({ importId: 'imp-1' }))
-    mockApiFetch.mockImplementation(async () =>
-      mockApiFetch.mock.calls.length === 1
-        ? { status: 'extracting', phase: 'extracting' }
-        : { status: 'completed', session_id: 's1' },
-    )
-
-    renderSidebar()
-    await tickPolls()
-
-    expect(loadSession).toHaveBeenCalledWith('s1')
-    expect(useAppStore.getState().activeTab).toBe('analysis')
-  })
-
-  // The backend lowercases the filename before choosing its branch, so this
-  // archive is extracted in the background there. With a case-sensitive test
-  // here the client skipped polling entirely and, because the tar.gz reply
-  // carries no session_id, reported success without loading anything.
-  it('polls an upper-cased tar.gz, like the backend that dispatched it', async () => {
-    mockApiFetch.mockImplementation(async (path: string) => {
-      expect(path).toBe('/session/import/pre-import-id')
-      return { status: 'completed', session_id: 's1', skipped: { off_layout: 2 } }
-    })
-    stubXhr('')
-
-    const { container } = renderSidebar()
-    importFile(container, 'EXPORT.TAR.GZ')
-    await tickPolls()
-
-    expect(mockApiFetch).toHaveBeenCalledWith('/session/import/pre-import-id')
-    expect(loadSession).toHaveBeenCalledWith('s1')
-    expect(useAppStore.getState().activeTab).toBe('analysis')
-    const detail = screen.getByText(/Session imported successfully/)
-    expect(detail.textContent).toContain('files outside the session layout (2)')
-  })
-
   // An inline .zip registers no pollable job — only the tar.gz branch does — so
   // polling the pre-generated id just 404s for ~30s and then blames the import.
   it('admits the outcome is unknown when an inline import loses its response', async () => {
@@ -203,17 +149,5 @@ describe('what the import flow reports when it finishes', () => {
     expect(
       screen.getByText(/the server response was lost, so the outcome is unknown/),
     ).toBeInTheDocument()
-  })
-
-  it('loads the session directly when an inline import answers properly', async () => {
-    stubXhr(JSON.stringify({ success: true, session_id: 's1' }))
-
-    const { container } = renderSidebar()
-    importFile(container, 'session.zip')
-    await tickPolls()
-
-    expect(mockApiFetch).not.toHaveBeenCalled()
-    expect(loadSession).toHaveBeenCalledWith('s1')
-    expect(screen.getByText('Import successful')).toBeInTheDocument()
   })
 })

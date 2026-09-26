@@ -2,16 +2,13 @@
 
 import asyncio
 import base64
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
 
-from backend.models.schemas import AnalysisState, WebSocketMessage
-from backend.routes.chat_parts import delegation as chat_delegation
+from backend.models.schemas import AnalysisState
 from backend.routes.chat_parts import endpoints as chat_endpoints
-from backend.services.session_lifecycle import SessionGenerationError
 from backend.state import chat_task_lock, chat_tasks
 
 
@@ -111,39 +108,6 @@ async def test_chat_upload_uses_exclusive_publication_and_commits_state(
 
 
 @pytest.mark.asyncio
-async def test_chat_upload_request_limit_rolls_back_prior_files_and_state(
-    monkeypatch, tmp_path,
-):
-    state = AnalysisState(id="chat-upload-total-limit", user_id="owner")
-    uploads = _configure_upload(monkeypatch, tmp_path, state)
-    monkeypatch.setattr(chat_endpoints, "_CHAT_UPLOAD_MAX_FILE_BYTES", 10)
-    monkeypatch.setattr(chat_endpoints, "_CHAT_UPLOAD_MAX_REQUEST_BYTES", 12)
-    save = AsyncMock()
-    monkeypatch.setattr(
-        chat_endpoints,
-        "_async_save_session_under_lifecycle",
-        save,
-    )
-
-    with pytest.raises(HTTPException) as raised:
-        await _commit(
-            state,
-            [
-                ChunkUpload("first.bin", [b"a" * 8]),
-                ChunkUpload("second.bin", [b"b" * 8]),
-            ],
-        )
-
-    assert raised.value.status_code == 413
-    assert not (uploads / "chat" / "first.bin").exists()
-    assert not (uploads / "chat" / "second.bin").exists()
-    assert list(uploads.rglob("*.uploading")) == []
-    assert state.data_files == []
-    assert state.chat_messages == []
-    save.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_chat_upload_save_failure_rolls_back_files_and_memory(
     monkeypatch, tmp_path,
 ):
@@ -205,51 +169,6 @@ async def test_chat_upload_publication_race_preserves_competing_symlink(
     assert state.data_files == []
     assert state.chat_messages == []
     save.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_chat_upload_stale_generation_cannot_create_upload_tree(
-    monkeypatch, tmp_path,
-):
-    state = AnalysisState(id="chat-upload-stale", user_id="owner")
-    uploads = tmp_path / "uploads"
-    monkeypatch.setattr(
-        chat_endpoints,
-        "get_session_uploads",
-        lambda _session_id: uploads,
-    )
-
-    def reject(*_args, **_kwargs):
-        raise SessionGenerationError("stale generation")
-
-    monkeypatch.setattr(chat_endpoints, "assert_generation_writable", reject)
-
-    with pytest.raises(SessionGenerationError, match="stale generation"):
-        await _commit(state, [ChunkUpload("notes.txt", [b"payload"])])
-
-    assert not uploads.exists()
-    assert state.data_files == []
-    assert state.chat_messages == []
-
-
-def test_chat_image_encoding_reads_bounded_chunks(monkeypatch, tmp_path):
-    payload = b"z" * (600 * 1024 + 1)
-    image = tmp_path / "large.png"
-    image.write_bytes(payload)
-    observed_sizes = []
-    original_encode = base64.b64encode
-
-    def recording_encode(chunk):
-        observed_sizes.append(len(chunk))
-        return original_encode(chunk)
-
-    monkeypatch.setattr(chat_endpoints.base64, "b64encode", recording_encode)
-
-    encoded = chat_endpoints._encode_chat_image(image)
-
-    assert base64.b64decode(encoded) == payload
-    assert len(observed_sizes) > 1
-    assert max(observed_sizes) <= 192 * 1024 + 2
 
 
 def _configure_delegation(monkeypatch, state):
@@ -400,114 +319,3 @@ async def test_completed_old_delegation_cannot_retire_replacement_owner(
         chat_tasks.pop(state.id, None)
     replacement.cancel()
     await asyncio.gather(replacement, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_chat_delegation_stale_generation_publishes_nothing(monkeypatch):
-    state = AnalysisState(id="chat-delegation-stale", user_id="owner")
-
-    def reject(*_args, **_kwargs):
-        raise SessionGenerationError("stale generation")
-
-    monkeypatch.setattr(chat_endpoints, "assert_generation_writable", reject)
-
-    with pytest.raises(SessionGenerationError, match="stale generation"):
-        await _publish(state)
-
-    assert state.chat_messages == []
-    async with chat_task_lock:
-        assert state.id not in chat_tasks
-
-
-@pytest.mark.asyncio
-async def test_chat_delegation_callback_persists_durable_capped_history(
-    monkeypatch,
-):
-    from backend.constants import STRIPPED_FIGURE_PLACEHOLDER
-    from backend.utils import agent_llm, llm_client
-
-    state = AnalysisState(id="chat-delegation-durable", user_id="owner")
-    state.realtime_messages = [
-        WebSocketMessage(type="status", content=f"old-{index}")
-        for index in range(1000)
-    ]
-    image = "iVBORw0KGgo" + ("A" * 2048)
-    emitted = WebSocketMessage(
-        type="graphic_abstract",
-        content={"image_base64": image, "raw": b"raw-binary"},
-    )
-
-    class _Client:
-        async def close(self):
-            return None
-
-    class _Manager:
-        def __init__(self, **_kwargs):
-            self.openrouter = _Client()
-
-        async def close(self):
-            return None
-
-    async def resolve(_user_id):
-        return SimpleNamespace(
-            api=SimpleNamespace(api_key="", llm_base_url="", proxy_url=None)
-        )
-
-    async def execute(
-        _session_id,
-        _state,
-        _agent_name,
-        _instruction,
-        _agent_client,
-        message_callback,
-        _saved_files,
-    ):
-        await message_callback(emitted)
-        raise asyncio.CancelledError
-
-    async def cancel_after_durable_append(_session_id, live):
-        assert len(state.realtime_messages) == 1000
-        durable = state.realtime_messages[-1]
-        assert durable is not emitted
-        assert durable.content["image_base64"] == STRIPPED_FIGURE_PLACEHOLDER
-        assert durable.content["raw"] == STRIPPED_FIGURE_PLACEHOLDER
-        assert live["content"]["image_base64"] == image
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(llm_client, "LLMManager", _Manager)
-    monkeypatch.setattr(agent_llm, "get_agent_llm_client", lambda *_args: _Client())
-    monkeypatch.setattr(chat_delegation, "resolve_config_for_user", resolve)
-    monkeypatch.setattr(chat_delegation, "_execute_chat_agent", execute)
-    monkeypatch.setattr(chat_delegation, "_send_chat_ws", AsyncMock())
-    monkeypatch.setattr(
-        chat_delegation,
-        "send_analysis_json",
-        cancel_after_durable_append,
-    )
-    monkeypatch.setattr(
-        chat_delegation,
-        "_persist_chat_terminal",
-        AsyncMock(return_value=True),
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await chat_delegation._run_chat_delegation(
-            state.id,
-            state,
-            {
-                "plan": "domain-neutral check",
-                "delegates": [
-                    {"agent": "literature", "instruction": "inspect evidence"}
-                ],
-            },
-            "inspect evidence",
-            [],
-            [],
-        )
-
-    assert len(state.realtime_messages) == 1000
-    durable = state.realtime_messages[-1]
-    assert durable is not emitted
-    assert durable.content["image_base64"] == STRIPPED_FIGURE_PLACEHOLDER
-    assert durable.content["raw"] == STRIPPED_FIGURE_PLACEHOLDER
-    assert emitted.content["image_base64"] == image

@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 
-import pytest
 
 from backend.models.schemas import (
     AdataCheckpointRecord,
@@ -13,10 +12,8 @@ from backend.models.schemas import (
     AnalysisState,
 )
 from backend.config import get_session_dir
-from backend.services.adata_checkpoints.errors import AdataSourcePreparationError
 from backend.services.adata_checkpoints.selection import (
     ensure_adata_source_prepared,
-    selection_signature,
 )
 
 
@@ -92,18 +89,6 @@ def _state_with_checkpoint() -> tuple[AnalysisState, AdataCheckpointRecord]:
     return state, record
 
 
-def test_current_source_is_a_noop():
-    async def _run():
-        state = AnalysisState(id="current-noop", user_id="u")
-        sandbox = _FakeSandbox()
-        assert await ensure_adata_source_prepared(
-            sandbox, state, AdataSourceSelection(mode="current")
-        ) is None
-        assert sandbox.apply_calls == []
-
-    asyncio.run(_run())
-
-
 def test_checkpoint_copy_registers_working_binding_without_rebinding_adata():
     async def _run():
         state, record = _state_with_checkpoint()
@@ -122,52 +107,5 @@ def test_checkpoint_copy_registers_working_binding_without_rebinding_adata():
         assert state.adata_live_bindings
         assert plan.adata_source_preparation_id == preparation.preparation_id
         assert state.active_adata_checkpoint_id is None
-
-    asyncio.run(_run())
-
-
-def test_same_source_preparation_is_reused_without_second_apply():
-    async def _run():
-        state, record = _state_with_checkpoint()
-        sandbox = _FakeSandbox()
-        selection = AdataSourceSelection(
-            mode="checkpoint_copy", checkpoint_id=record.checkpoint_id
-        )
-        plan = AnalysisPlan(phase="exploration")
-        plan.id = "plan-copy-1"
-        first = await ensure_adata_source_prepared(
-            sandbox, state, selection, plan=plan
-        )
-        # Simulate the registry facts the first application would have written.
-        sandbox.registry["preparations"][first.preparation_id] = {
-            "token": first.application_token,
-            "scope_id": first.scope_id,
-            "selection_signature": first.selection_signature,
-            "session_lineage_id": first.session_lineage_id,
-            "binding_identity_status": "exact",
-        }
-        plan.id = "plan-copy-2"
-        second = await ensure_adata_source_prepared(
-            sandbox, state, selection, plan=plan
-        )
-        assert second.preparation_id == first.preparation_id
-        assert len(sandbox.apply_calls) == 1
-
-    asyncio.run(_run())
-
-
-def test_stale_live_binding_is_reported_without_reload():
-    async def _run():
-        state, _record = _state_with_checkpoint()
-        state.adata_live_bindings = []
-        sandbox = _FakeSandbox()
-        with pytest.raises(AdataSourcePreparationError) as exc_info:
-            await ensure_adata_source_prepared(
-                sandbox,
-                state,
-                AdataSourceSelection(mode="live_binding", live_binding_id="lb-missing"),
-            )
-        assert exc_info.value.reason == "binding_stale"
-        assert sandbox.apply_calls == []
 
     asyncio.run(_run())

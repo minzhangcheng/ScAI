@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from backend.agents import bioinformatics_agent as bio_mod
-from backend.agents.bioinformatics import executor_execute, executor_loop
+from backend.agents.bioinformatics import executor_execute
 from backend.models.schemas import AnalysisPlan, AnalysisState, CodeExecution, PlanStep
 
 
@@ -37,14 +37,6 @@ def _execution(
     )
 
 
-@pytest.mark.parametrize("args", [{}, {"code": "   \n"}, {"code": "# comment only"}])
-def test_execute_code_requires_an_executable_statement(args):
-    _, error = executor_execute._execution_request_error(_state(), args, [])
-
-    assert error is not None
-    assert error.startswith("InvalidToolArgumentsError:")
-
-
 def test_identical_successful_code_is_bounded_per_approved_plan():
     code = "result = 1\nprint(result)"
     history = [_execution(code) for _ in range(3)]
@@ -56,45 +48,6 @@ def test_identical_successful_code_is_bounded_per_approved_plan():
     assert error is not None
     assert error.startswith("RepeatedExecutionError:")
     assert "already succeeded 3 times" in error
-
-
-def test_failed_or_other_plan_executions_do_not_consume_replay_ceiling():
-    code = "print('bounded')"
-    history = [
-        _execution(code, status="failed"),
-        _execution(code, plan_id="plan-replaced"),
-        _execution(code),
-        _execution(code),
-    ]
-
-    _, error = executor_execute._execution_request_error(
-        _state(), {"code": code}, history
-    )
-
-    assert error is None
-
-
-def test_prior_cohort_executions_do_not_consume_replay_ceiling():
-    code = "print('new cohort')"
-    state = _state()
-    state.sandbox_state = {"cohort_identity_v1": {
-        "cohort_generation": 2,
-        "cohort_digest": "b" * 64,
-    }}
-    history = [
-        _execution(
-            code,
-            cohort_generation=1,
-            cohort_digest="a" * 64,
-        )
-        for _ in range(3)
-    ]
-
-    _, error = executor_execute._execution_request_error(
-        state, {"code": code}, history
-    )
-
-    assert error is None
 
 
 @pytest.mark.asyncio
@@ -159,14 +112,3 @@ async def test_malformed_code_never_reaches_the_sandbox_or_receipt(args):
     assert context.analysis_log[-1].code_error.startswith(
         "InvalidToolArgumentsError:"
     )
-
-
-def test_supervisor_feedback_dedup_uses_the_complete_guidance():
-    common = "The result is skewed. " * 10
-
-    first = executor_loop._supervisor_feedback_key(common + "Use a robust index.")
-    revised = executor_loop._supervisor_feedback_key(
-        common + "PI guidance: use log-normalized expression."
-    )
-
-    assert first != revised

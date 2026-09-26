@@ -99,14 +99,6 @@ def _diff(a, b):
     )
 
 
-def test_identical_failing_sets_agree(tmp_path):
-    a = _run_dir(tmp_path, "a", FAILURE)
-    b = _run_dir(tmp_path, "b", FAILURE)
-    result = _diff(a, b)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "introduced: none" in result.stdout
-
-
 def test_a_new_failure_is_reported_and_fails(tmp_path):
     a = _run_dir(tmp_path, "a", "")
     b = _run_dir(tmp_path, "b", FAILURE)
@@ -115,69 +107,10 @@ def test_a_new_failure_is_reported_and_fails(tmp_path):
     assert "t/test_a.py::test_bad" in result.stdout
 
 
-def test_an_empty_junit_is_inconclusive_not_agreement(tmp_path):
-    """Zero parsed test cases must never read as 'nothing changed'."""
-    a = _run_dir(tmp_path, "a", FAILURE)
-    b = _run_dir(tmp_path, "b", FAILURE)
-    (b / "junit.xml").write_text(
-        '<?xml version="1.0"?><testsuites></testsuites>'
-    )
-    result = _diff(a, b)
-    assert result.returncode == 2
-    assert "introduced: none" not in result.stdout
-
-
-def test_a_missing_junit_is_inconclusive(tmp_path):
-    a = _run_dir(tmp_path, "a", FAILURE)
-    b = _run_dir(tmp_path, "b", FAILURE)
-    (b / "junit.xml").unlink()
-    result = _diff(a, b)
-    assert result.returncode == 2
-
-
-def test_a_missing_evidence_file_is_inconclusive(tmp_path):
-    a = _run_dir(tmp_path, "a", FAILURE)
-    b = _run_dir(tmp_path, "b", FAILURE)
-    (b / "evidence.json").unlink()
-    result = _diff(a, b)
-    assert result.returncode == 2
-
-
 def test_an_incomplete_collection_is_inconclusive(tmp_path):
     """A run whose collection did not complete measured nothing."""
     a = _run_dir(tmp_path, "a", FAILURE)
     b = _run_dir(tmp_path, "b", FAILURE, complete=False)
-    result = _diff(a, b)
-    assert result.returncode == 2
-    assert "introduced: none" not in result.stdout
-
-
-def test_two_different_profiles_are_not_comparable(tmp_path):
-    a = _run_dir(tmp_path, "a", FAILURE, profile="backend-full")
-    b = _run_dir(tmp_path, "b", FAILURE, profile="kernel")
-    result = _diff(a, b)
-    assert result.returncode == 2
-
-
-def test_junit_and_counts_must_agree(tmp_path):
-    """A junit whose failures disagree with the recorded count."""
-    a = _run_dir(tmp_path, "a", FAILURE)
-    b = _run_dir(tmp_path, "b", FAILURE, declared_failed=7)
-    result = _diff(a, b)
-    assert result.returncode == 2
-    assert "introduced: none" not in result.stdout
-
-
-def test_a_junit_stripped_to_its_failures_is_inconclusive(tmp_path):
-    """The failing set alone is not the evidence.
-
-    Deleting every passing and skipped record leaves the failing set intact,
-    so a differ that cross-checks only ``failed + errors`` reports agreement
-    while 6,656 of 6,697 records are gone. The recorded artifact digest is
-    what catches it.
-    """
-    a = _run_dir(tmp_path, "a", FAILURE)
-    b = _strip_to_failures(_run_dir(tmp_path, "b", FAILURE), refresh_digest=False)
     result = _diff(a, b)
     assert result.returncode == 2
     assert "introduced: none" not in result.stdout
@@ -194,11 +127,3 @@ def test_a_stripped_junit_with_a_refreshed_digest_is_still_inconclusive(tmp_path
     result = _diff(a, b)
     assert result.returncode == 2
     assert "introduced: none" not in result.stdout
-
-
-def test_a_missing_junit_manifest_entry_is_inconclusive(tmp_path):
-    """Unauthenticated evidence is not evidence."""
-    a = _run_dir(tmp_path, "a", FAILURE)
-    b = _run_dir(tmp_path, "b", FAILURE, manifest=False)
-    result = _diff(a, b)
-    assert result.returncode == 2

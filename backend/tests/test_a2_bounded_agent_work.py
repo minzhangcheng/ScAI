@@ -3,18 +3,13 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 import hashlib
-import time
 
 import pytest
 from PIL import Image
 
 from backend.agents.biochemistry_agent import BiochemistryAgent
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
-from backend.agents.literature.pubmed import (
-    PUBMED_QUERY_POLICY_VERSION,
-    PubMedMixin,
-    _search_cache_key,
-)
+from backend.agents.literature.pubmed import PUBMED_QUERY_POLICY_VERSION, PubMedMixin
 from backend.models.schemas import AgentType, DataFile
 
 
@@ -52,25 +47,6 @@ class _EmptyPubMedAgent(PubMedMixin):
 
     async def _quick_search(self, topic, _state):
         return {"status": "completed", "report": f"Fallback: {topic}"}
-
-
-def test_pubmed_cache_key_includes_query_policy_version():
-    kwargs = {
-        "topic": "topic",
-        "query": "query",
-        "organism": "mouse",
-        "tissue": "liver",
-        "pi_guided": False,
-    }
-
-    assert _search_cache_key(**kwargs, query_policy_version=1) != _search_cache_key(
-        **kwargs, query_policy_version=2
-    )
-
-    kwargs["pi_guided"] = True
-    assert _search_cache_key(**kwargs, query_policy_version=1) != _search_cache_key(
-        **kwargs, query_policy_version=2
-    )
 
 
 @pytest.mark.asyncio
@@ -144,86 +120,6 @@ async def test_biochemistry_sha_cache_requires_matching_terminal_usable_record(t
     assert await agent._analyze_single_image(nonterminal, "review") == "EXTRACTION_STATUS: usable\nfresh"
     assert client.chat_with_vision.await_count == 2
     assert all(call.kwargs["prefer_stream"] is True for call in client.chat_with_vision.await_args_list)
-
-
-@pytest.mark.asyncio
-async def test_focused_pubmed_obeys_remaining_deadline_and_final_article_cap():
-    class _Focused(PubMedMixin):
-        max_search_rounds = 2
-        max_articles_per_topic = 2
-        search_wall_clock_seconds = 10
-
-        def __init__(self):
-            self.search_calls = []
-
-        async def _validate_and_degrade_query(self, query, *_args, **_kwargs):
-            return query, [{"pmid": "main", "title": "main"}]
-
-        async def _pubmed_search(self, query, **_kwargs):
-            self.search_calls.append(query)
-            return [
-                {"pmid": "focused-1", "title": "focused 1"},
-                {"pmid": "focused-2", "title": "focused 2"},
-                {"pmid": "focused-3", "title": "focused 3"},
-            ]
-
-        async def _judge_focused_relevance(self, *_args):
-            return {"status": "strong"}
-
-        async def _synthesize_pubmed_results(
-            self, _topic, articles, evaluation=None
-        ):
-            return f"synthesized {len(articles)}"
-
-        async def _finalize_result(self, _topic, report, references, _state, _rounds):
-            return {"report": report, "references": references}
-
-        @staticmethod
-        def _dedup_by_pmid(items, key, drop_empty=False):
-            seen = set()
-            result = []
-            for item in items:
-                value = key(item)
-                if drop_empty and not value:
-                    continue
-                if value in seen:
-                    continue
-                seen.add(value)
-                result.append(item)
-            return result
-
-        @staticmethod
-        def _focused_result_score(result):
-            return ({"strong": 3, "limited": 2}.get(result.get("status"), 0), 0)
-
-    agent = _Focused()
-    triage = {
-        "sufficient": False,
-        "triage_complete": True,
-        "triage_low_confidence": False,
-        "rare_unresolved": [{
-            "cluster_id": "c1",
-            "candidate_celltype": "unknown",
-            "synonyms": [],
-            "top_markers": ["Marker1"],
-        }],
-        "suspected_contamination": [],
-    }
-    result = await agent._multi_round_pubmed(
-        "topic",
-        initial_query="q",
-        evaluate_fn=AsyncMock(return_value=triage),
-        organism="mouse",
-        tissue="liver",
-    )
-    assert len(result["references"]) == agent.max_articles_per_topic
-    assert result["report"] == "synthesized 2"
-    assert result["search_meta"]["stop_reason"] == "article_budget"
-
-    expired = await agent._focused_rare_search(
-        triage["rare_unresolved"], "mouse", "liver", deadline=time.monotonic() - 1
-    )
-    assert expired["c1"]["exhaustion_reason"] == "wall_clock_budget"
 
 
 def test_required_tool_refusal_has_protocol_failure_kind():

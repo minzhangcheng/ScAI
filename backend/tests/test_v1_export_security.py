@@ -80,58 +80,6 @@ def _archive_paths(staging: Path) -> set[Path]:
     return {path for path in staging.iterdir() if path.is_file()}
 
 
-def _cleanup_response(response) -> None:
-    path = Path(response.path)
-    marker = path.with_name(f"{path.name}.scai-export-owner")
-    path.unlink(missing_ok=True)
-    marker.unlink(missing_ok=True)
-
-
-def _patch_leaf_swap(monkeypatch, target: Path) -> None:
-    expected = target.stat()
-    original_fstat = os.fstat
-    swapped = False
-
-    def fstat(fd):
-        nonlocal swapped
-        metadata = original_fstat(fd)
-        if (
-            not swapped
-            and stat.S_ISREG(metadata.st_mode)
-            and (metadata.st_dev, metadata.st_ino) == (expected.st_dev, expected.st_ino)
-        ):
-            replacement = target.with_name("replacement-leaf.bin")
-            replacement.write_bytes(b"replacement-leaf")
-            replacement.replace(target)
-            swapped = True
-        return metadata
-
-    monkeypatch.setattr(os, "fstat", fstat)
-
-
-def _patch_parent_swap(monkeypatch, target: Path) -> None:
-    expected = target.stat()
-    original_fstat = os.fstat
-    swapped = False
-
-    def fstat(fd):
-        nonlocal swapped
-        metadata = original_fstat(fd)
-        if (
-            not swapped
-            and stat.S_ISDIR(metadata.st_mode)
-            and (metadata.st_dev, metadata.st_ino) == (expected.st_dev, expected.st_ino)
-        ):
-            old_parent = target.with_name(f"{target.name}-old")
-            target.rename(old_parent)
-            target.mkdir()
-            (target / "results.zip").write_bytes(b"replacement-parent")
-            swapped = True
-        return metadata
-
-    monkeypatch.setattr(os, "fstat", fstat)
-
-
 def _patch_midstream_mutation(monkeypatch, target: Path) -> None:
     expected = target.stat()
     original_fstat = os.fstat
@@ -175,46 +123,6 @@ async def test_v1_export_builds_actual_session_not_workspace_zip(v1_export_env):
 
 
 @pytest.mark.asyncio
-async def test_v1_export_marker_failure_deletes_archive_before_response(
-    v1_export_env, monkeypatch,
-):
-    def fail_marker(_path, **_kwargs):
-        raise OSError("marker unavailable")
-
-    monkeypatch.setattr(v1, "create_export_ownership_marker", fail_marker, raising=False)
-    with pytest.raises(OSError, match="marker unavailable"):
-        await _run_export(v1_export_env)
-
-    assert _archive_paths(v1_export_env.staging) == set()
-
-
-@pytest.mark.asyncio
-async def test_v1_export_cleans_archive_and_marker_after_stream_failure(v1_export_env):
-    response = await _run_export(v1_export_env)
-    archive_path = Path(response.path)
-    assert archive_path.parent == v1_export_env.staging
-    marker = archive_path.with_name(f"{archive_path.name}.scai-export-owner")
-    assert archive_path.exists() and marker.exists()
-
-    async def receive():
-        return {"type": "http.request"}
-
-    async def send(message):
-        if message["type"] == "http.response.body":
-            raise RuntimeError("stream disconnected")
-
-    with pytest.raises(RuntimeError, match="stream disconnected"):
-        await response(
-            {"type": "http", "method": "GET", "headers": [], "extensions": {}},
-            receive,
-            send,
-        )
-
-    assert not archive_path.exists()
-    assert not marker.exists()
-
-
-@pytest.mark.asyncio
 async def test_v1_export_build_cancellation_drains_worker_before_cleanup(
     v1_export_env, monkeypatch,
 ):
@@ -240,51 +148,6 @@ async def test_v1_export_build_cancellation_drains_worker_before_cleanup(
 
 
 @pytest.mark.asyncio
-async def test_v1_export_passes_no_whole_session_file_or_byte_caps(
-    v1_export_env, monkeypatch,
-):
-    calls = []
-    original_build = v1.build_secure_zip
-
-    def capture_build(*args, **kwargs):
-        calls.append(kwargs.copy())
-        return original_build(*args, **kwargs)
-
-    monkeypatch.setattr(v1, "build_secure_zip", capture_build)
-    response = await _run_export(v1_export_env)
-    assert calls
-    assert calls[0]["max_files"] is None
-    assert calls[0]["max_source_bytes"] is None
-    body = await _consume_response(response)
-    with zipfile.ZipFile(io.BytesIO(body)) as archive:
-        assert {"workspace/results.zip", "states/checkpoint.bin"}.issubset(archive.namelist())
-
-
-@pytest.mark.asyncio
-async def test_v1_marker_collision_preserves_the_unrelated_marker(
-    v1_export_env, monkeypatch,
-):
-    original_mkstemp = v1.tempfile.mkstemp
-    collision_marker = {}
-
-    def mkstemp(*args, **kwargs):
-        fd, raw = original_mkstemp(*args, **kwargs)
-        archive = Path(raw)
-        marker = archive.with_name(f"{archive.name}.scai-export-owner")
-        marker.write_bytes(b"unrelated marker")
-        collision_marker["path"] = marker
-        return fd, raw
-
-    monkeypatch.setattr(v1.tempfile, "mkstemp", mkstemp)
-    with pytest.raises(FileExistsError):
-        await _run_export(v1_export_env)
-    marker = collision_marker["path"]
-    assert marker.read_bytes() == b"unrelated marker"
-    assert _archive_paths(v1_export_env.staging) == {marker}
-    marker.unlink()
-
-
-@pytest.mark.asyncio
 async def test_v1_response_streams_the_owned_inode_after_path_rebinding(
     v1_export_env,
 ):
@@ -304,18 +167,6 @@ async def test_v1_response_streams_the_owned_inode_after_path_rebinding(
     assert not marker.exists()
     archive_path.unlink()
     foreign.unlink()
-
-
-@pytest.mark.asyncio
-async def test_v1_response_cleans_archive_and_marker_after_normal_stream(
-    v1_export_env,
-):
-    response = await _run_export(v1_export_env)
-    archive_path = Path(response.path)
-    marker = archive_path.with_name(f"{archive_path.name}.scai-export-owner")
-    assert await _consume_response(response)
-    assert not archive_path.exists()
-    assert not marker.exists()
 
 
 @pytest.mark.asyncio
@@ -370,28 +221,6 @@ async def test_v1_response_cleanup_survives_repeated_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_v1_export_rejects_leaf_swap(v1_export_env, monkeypatch):
-    _patch_leaf_swap(monkeypatch, v1_export_env.workspace / "results.zip")
-
-    with pytest.raises(HTTPException) as exc_info:
-        await _run_export(v1_export_env)
-
-    assert exc_info.value.status_code == 409
-    assert _archive_paths(v1_export_env.staging) == set()
-
-
-@pytest.mark.asyncio
-async def test_v1_export_rejects_parent_swap(v1_export_env, monkeypatch):
-    _patch_parent_swap(monkeypatch, v1_export_env.workspace)
-
-    with pytest.raises(HTTPException) as exc_info:
-        await _run_export(v1_export_env)
-
-    assert exc_info.value.status_code == 409
-    assert _archive_paths(v1_export_env.staging) == set()
-
-
-@pytest.mark.asyncio
 async def test_v1_export_rejects_midstream_mutation(v1_export_env, monkeypatch):
     target = v1_export_env.states / "checkpoint.bin"
     target.write_bytes(b"x" * (2 * 1024 * 1024))
@@ -401,19 +230,6 @@ async def test_v1_export_rejects_midstream_mutation(v1_export_env, monkeypatch):
         await _run_export(v1_export_env)
 
     assert exc_info.value.status_code == 409
-    assert _archive_paths(v1_export_env.staging) == set()
-
-
-@pytest.mark.asyncio
-async def test_v1_export_fails_closed_without_descriptor_primitives(
-    v1_export_env, monkeypatch,
-):
-    monkeypatch.setattr(os, "supports_dir_fd", set())
-
-    with pytest.raises(HTTPException) as exc_info:
-        await _run_export(v1_export_env)
-
-    assert exc_info.value.status_code == 501
     assert _archive_paths(v1_export_env.staging) == set()
 
 

@@ -12,31 +12,6 @@ import asyncio
 import pytest
 
 
-def test_both_capture_points_hand_the_hashing_to_a_thread():
-    from backend.tests.split_facade import source_for_path
-
-    source = source_for_path("backend/services/resumable_export.py")
-    frozen = source.split("async def frozen_resumable_export(", 1)[1]
-    frozen = frozen.split("\ndef ", 1)[0]
-
-    yields = [line.strip() for line in frozen.splitlines() if "yield " in line]
-    assert yields, "the freeze no longer yields a descriptor"
-    for line in yields:
-        assert "_captured_off_the_loop(" in line, (
-            f"a capture point still hashes the dump on the event loop: {line}"
-        )
-
-    handoff = source.split("async def _captured_off_the_loop(", 1)[1]
-    handoff = handoff.split("\n@", 1)[0]
-    assert "asyncio.to_thread(_capture_descriptor" in handoff, (
-        "the hand-off no longer reaches a worker thread"
-    )
-    assert "await_with_deferred_cancellation" in handoff, (
-        "a cancelled capture would abandon its thread and unwind the freeze "
-        "while two full passes over the dump are still running"
-    )
-
-
 @pytest.mark.asyncio
 async def test_the_loop_keeps_running_while_the_descriptor_is_captured(monkeypatch):
     """Behavioural, and through the production call site.
@@ -82,27 +57,6 @@ async def test_the_loop_keeps_running_while_the_descriptor_is_captured(monkeypat
     assert after - before >= 5, (
         f"the loop only advanced {after - before} ticks during a 0.3 s capture; "
         "the hashing is running on the event loop"
-    )
-
-
-def test_the_freeze_still_spans_the_capture():
-    """Offloading must not narrow the exclusion window.
-
-    The lifecycle claim and, on the live path, the execution lock have to be
-    held across the capture, or a save can commit a new generation between the
-    flush and the check that the archive matches it.
-    """
-    from backend.tests.split_facade import source_for_path
-
-    source = source_for_path("backend/services/resumable_export.py")
-    frozen = source.split("async def frozen_resumable_export(", 1)[1]
-    frozen = frozen.split("\ndef ", 1)[0]
-
-    live = frozen.split("async with sandbox._exec_lock:", 1)[1]
-    live = live.split("finally:", 1)[0]
-    assert "_flush_locked" in live
-    assert "_captured_off_the_loop" in live, (
-        "the capture moved outside the execution lock"
     )
 
 

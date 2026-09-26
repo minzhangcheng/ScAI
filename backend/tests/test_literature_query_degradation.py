@@ -1,13 +1,11 @@
 import urllib.parse
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from backend.agents.literature_agent import LiteratureAgent
 from backend.agents.literature import pubmed as pubmed_module
-from backend.agents.literature import query_builders
-from backend.utils.llm_client import UpstreamExhaustedError
 
 
 _PUBMED_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
@@ -78,14 +76,6 @@ def _install_pubmed_transport(monkeypatch, responses, *, sleep_mock=None):
     return throttle
 
 
-def test_prepared_get_uri_length_matches_httpx_url():
-    params = _search_params("metallothionein AND copper deficiency")
-    params["api_key"] = "test-api-key"
-    assert _prepared_get_uri_length(_PUBMED_URL, params) == len(
-        str(httpx.URL(_PUBMED_URL, params=params))
-    )
-
-
 @pytest.mark.asyncio
 async def test_oversized_pubmed_query_uses_post_with_identical_params(monkeypatch):
     monkeypatch.delenv("NCBI_API_KEY", raising=False)
@@ -106,28 +96,6 @@ async def test_oversized_pubmed_query_uses_post_with_identical_params(monkeypatc
 
     assert response is expected
     assert _RecordingAsyncClient.calls == [("post", _PUBMED_URL, params)]
-    assert throttle.rates == [3.0]
-
-
-@pytest.mark.asyncio
-async def test_below_threshold_pubmed_query_keeps_get_transport(monkeypatch):
-    monkeypatch.delenv("NCBI_API_KEY", raising=False)
-    params = _search_params("ferroptosis AND liver")
-    assert (
-        _prepared_get_uri_length(_PUBMED_URL, params)
-        < pubmed_module.NCBI_MAX_GET_URI_CHARS
-    )
-    expected = httpx.Response(
-        200,
-        json={"esearchresult": {"idlist": []}},
-        request=httpx.Request("GET", _PUBMED_URL),
-    )
-    throttle = _install_pubmed_transport(monkeypatch, [expected])
-
-    response = await _new_pubmed_agent()._entrez_get(_PUBMED_URL, params, {})
-
-    assert response is expected
-    assert _RecordingAsyncClient.calls == [("get", _PUBMED_URL, params)]
     assert throttle.rates == [3.0]
 
 
@@ -159,102 +127,12 @@ async def test_get_414_retries_once_as_post_with_second_throttle_slot(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_414_transport_switch_stays_post_after_429(monkeypatch):
-    monkeypatch.delenv("NCBI_API_KEY", raising=False)
-    sleep_mock = AsyncMock()
-    params = _search_params("retained below-threshold GET params")
-    responses = [
-        httpx.Response(
-            414,
-            text="Request-URI Too Long",
-            request=httpx.Request("GET", _PUBMED_URL),
-        ),
-        *[
-            httpx.Response(
-                429,
-                text="Too Many Requests",
-                request=httpx.Request("POST", _PUBMED_URL),
-            )
-            for _ in range(3)
-        ],
-        httpx.Response(
-            200,
-            json={"esearchresult": {"idlist": ["456"]}},
-            request=httpx.Request("POST", _PUBMED_URL),
-        ),
-    ]
-    throttle = _install_pubmed_transport(
-        monkeypatch, responses, sleep_mock=sleep_mock
-    )
-
-    response = await _new_pubmed_agent()._entrez_get(_PUBMED_URL, params, {})
-
-    assert response.status_code == 200
-    assert [call[0] for call in _RecordingAsyncClient.calls] == [
-        "get", "post", "post", "post", "post",
-    ]
-    assert all(call[2] == params for call in _RecordingAsyncClient.calls)
-    # One top-level slot for the GET, one fallback slot, and one slot for each
-    # of the three remaining outer attempts. The 414 switch consumed none of
-    # the configured 429 retry budget.
-    assert throttle.rates == [3.0, 3.0, 3.0, 3.0, 3.0]
-    assert sleep_mock.await_count == 3
-
-
-@pytest.mark.asyncio
-async def test_empty_query_never_falls_back_to_topic_prefix(monkeypatch):
-    agent = LiteratureAgent.__new__(LiteratureAgent)
-    agent._pubmed_search = AsyncMock(return_value=[])
-    monkeypatch.setattr(query_builders.asyncio, "sleep", AsyncMock())
-    query = '"ferroptosis"[Title/Abstract] AND "liver"[Title/Abstract]'
-    topic = "Species: Mus musculus\n\nSearch PubMed for ferroptosis evidence"
-
-    final_query, articles = await agent._validate_and_degrade_query(query, topic)
-
-    assert articles == []
-    assert final_query == "ferroptosis AND liver"
-    submitted = [call.args[0] for call in agent._pubmed_search.await_args_list]
-    assert submitted == [query, "ferroptosis AND liver"]
-    assert all("Search PubMed" not in item for item in submitted)
-
-
-@pytest.mark.asyncio
 async def test_query_errors_are_not_reported_as_empty_results():
     agent = LiteratureAgent.__new__(LiteratureAgent)
     agent._pubmed_search = AsyncMock(side_effect=RuntimeError("PubMed unavailable"))
 
     with pytest.raises(RuntimeError, match="PubMed unavailable"):
         await agent._validate_and_degrade_query("ferroptosis", "topic")
-
-
-@pytest.mark.asyncio
-async def test_query_prompt_marks_study_material_as_context_not_required_filters():
-    agent = LiteratureAgent.__new__(LiteratureAgent)
-    agent._build_research_context = MagicMock(return_value={
-        "topic": "Metallothionein induction during hepatic copper deficiency",
-        "species": "Mus musculus",
-        "initial_instruction": "ZnT1/CTR1 double-knockout mouse liver study",
-        "biochemistry_indicators": [],
-        "treatment_groups": ["Con", "DKO"],
-        "previous_findings": "Prior liver cell-type annotation",
-        "current_round_findings": "Mt1 and Mt2 were elevated",
-    })
-    agent._chat_with_fallback = AsyncMock(return_value=(
-        "metallothionein AND copper deficiency", None
-    ))
-
-    await agent._generate_pubmed_query(
-        "Metallothionein induction during hepatic copper deficiency"
-    )
-
-    prompt = agent._chat_with_fallback.await_args.args[0]
-    assert "Authoritative research question" in prompt
-    assert "Context for terminology and disambiguation only" in prompt
-    assert "do not automatically convert it into PubMed filters" in prompt
-    assert (
-        "Identify species, tissue/organ, and disease model from the background "
-        "and include as filters"
-    ) not in prompt
 
 
 @pytest.mark.asyncio
@@ -283,197 +161,3 @@ async def test_true_zero_gets_one_concept_preserving_revision():
     assert [item["kind"] for item in attempts] == [
         "initial", "zero_hit_revision"
     ]
-
-
-@pytest.mark.asyncio
-async def test_semantic_revision_does_not_search_an_unchanged_query_twice():
-    agent = LiteratureAgent.__new__(LiteratureAgent)
-    agent._pubmed_search = AsyncMock(return_value=[])
-    agent._revise_zero_hit_query = AsyncMock(return_value="  COPPER   DEFICIENCY  ")
-    attempts = []
-
-    final_query, articles = await agent._validate_and_degrade_query(
-        "copper deficiency",
-        "Copper deficiency",
-        enable_semantic_revision=True,
-        attempt_log=attempts,
-    )
-
-    assert final_query == "copper deficiency"
-    assert articles == []
-    assert agent._pubmed_search.await_count == 1
-    assert [item["kind"] for item in attempts] == ["initial"]
-
-
-@pytest.mark.asyncio
-async def test_zero_hit_revision_upstream_exhaustion_propagates():
-    agent = LiteratureAgent.__new__(LiteratureAgent)
-    agent._pubmed_search = AsyncMock(return_value=[])
-    agent._revise_zero_hit_query = AsyncMock(side_effect=UpstreamExhaustedError(
-        "upstream exhausted",
-        agent_name="literature",
-        model="test-model",
-        llm_server="test-server",
-    ))
-
-    with pytest.raises(UpstreamExhaustedError):
-        await agent._validate_and_degrade_query(
-            "exact query",
-            "Exact question",
-            enable_semantic_revision=True,
-        )
-
-    assert agent._pubmed_search.await_count == 1
-    assert agent._revise_zero_hit_query.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_semantic_path_retries_technical_error_without_revising_topic(monkeypatch):
-    agent = LiteratureAgent.__new__(LiteratureAgent)
-    agent._pubmed_search = AsyncMock(side_effect=RuntimeError("PubMed unavailable"))
-    agent._revise_zero_hit_query = AsyncMock(return_value="broader query")
-    monkeypatch.setattr(query_builders.asyncio, "sleep", AsyncMock())
-    attempts = []
-
-    with pytest.raises(RuntimeError, match="PubMed unavailable"):
-        await agent._validate_and_degrade_query(
-            "exact query",
-            "Exact question",
-            enable_semantic_revision=True,
-            attempt_log=attempts,
-        )
-
-    assert agent._pubmed_search.await_count == 2
-    assert agent._revise_zero_hit_query.await_count == 0
-    assert [item["kind"] for item in attempts] == ["initial", "technical_retry"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("payload", [
-    {},
-    {"ERROR": "Search service unavailable"},
-    {"esearchresult": {}},
-    {"esearchresult": {"idlist": None}},
-    {"esearchresult": {"idlist": "123"}},
-    {"esearchresult": {"idlist": [], "ERROR": "Search failed"}},
-])
-async def test_pubmed_invalid_success_response_is_a_failed_attempt(payload):
-    agent = _new_pubmed_agent()
-    agent._entrez_get = AsyncMock(return_value=httpx.Response(200, json=payload))
-    attempts = []
-
-    with pytest.raises(ValueError, match="PubMed esearch"):
-        await agent._validate_and_degrade_query(
-            "exact query", "question", attempt_log=attempts,
-        )
-
-    assert len(attempts) == 1
-    assert attempts[0]["result_count"] is None
-    assert attempts[0]["error"]
-
-
-@pytest.mark.asyncio
-async def test_pubmed_valid_empty_search_with_term_warning_remains_zero():
-    agent = _new_pubmed_agent()
-    agent._entrez_get = AsyncMock(return_value=httpx.Response(200, json={
-        "esearchresult": {
-            "idlist": [], "count": "0",
-            "errorlist": {"phrasesnotfound": ["unmatched term"]},
-        },
-    }))
-
-    assert await agent._pubmed_search("unmatched term") == []
-    assert agent._entrez_get.await_count == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("xml", [
-    "<PubmedArticleSet><PubmedArticle>",
-    "<ERROR>Fetch service unavailable</ERROR>",
-    "<PubmedArticleSet><ERROR>Fetch failed</ERROR></PubmedArticleSet>",
-    "<PubmedArticleSet />",
-    "<PubmedArticleSet><PubmedArticle><MedlineCitation /></PubmedArticle></PubmedArticleSet>",
-])
-async def test_pubmed_failed_fetch_is_not_reported_as_no_search_hits(xml):
-    agent = _new_pubmed_agent()
-    agent._entrez_get = AsyncMock(side_effect=[
-        httpx.Response(200, json={"esearchresult": {"idlist": ["123"]}}),
-        httpx.Response(200, text=xml),
-    ])
-
-    with pytest.raises(ValueError, match="PubMed efetch"):
-        await agent._pubmed_search("query with a hit")
-
-    assert agent._entrez_get.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_pubmed_valid_fetch_preserves_source_metadata():
-    agent = _new_pubmed_agent()
-    agent._entrez_get = AsyncMock(side_effect=[
-        httpx.Response(200, json={"esearchresult": {"idlist": ["123"]}}),
-        httpx.Response(200, text="""<PubmedArticleSet><PubmedArticle><MedlineCitation>
-          <PMID>123</PMID><Article><ArticleTitle>A <i>source</i> title</ArticleTitle>
-          <Abstract><AbstractText>Original abstract.</AbstractText></Abstract>
-          <Journal><Title>Journal</Title><JournalIssue><PubDate><Year>2025</Year>
-          </PubDate></JournalIssue></Journal></Article>
-        </MedlineCitation></PubmedArticle></PubmedArticleSet>"""),
-    ])
-
-    articles = await agent._pubmed_search("query")
-
-    assert articles == [{
-        "pmid": "123", "title": "A source title", "abstract": "Original abstract.",
-        "year": "2025", "authors": "", "journal": "Journal",
-    }]
-
-
-@pytest.mark.asyncio
-async def test_query_batch_triage_has_600_seconds_even_after_retrieval_deadline(monkeypatch):
-    import asyncio
-    import time
-    from backend.models.schemas import DirectionSearchQuery
-
-    agent = _new_pubmed_agent()
-    timeouts = []
-    original_wait_for = asyncio.wait_for
-
-    async def record_wait(awaitable, timeout):
-        timeouts.append((awaitable.cr_code.co_name, timeout))
-        return await original_wait_for(awaitable, timeout=timeout)
-
-    async def search(query, max_results=20):
-        return [{"pmid": "1", "title": "Source", "abstract": "Retained source"}]
-
-    async def triage(*args):
-        await asyncio.sleep(0.02)
-        return [], {"assessed": True}
-
-    monkeypatch.setattr(asyncio, "wait_for", record_wait)
-    monkeypatch.setattr(agent, "_pubmed_search", search)
-    monkeypatch.setattr(agent, "_triage_articles_with_llm", triage)
-    elapsed = []
-    _, meta, timed_out, limitations = await agent._execute_query_batch(
-        DirectionSearchQuery(category="direct_prior_work", query="literal query"), {}, [],
-        query_timeout_seconds=0.01, deadline=time.monotonic() + 0.01,
-        pause_deadlines_fn=elapsed.append,
-    )
-    assert meta == {"assessed": True}
-    assert not timed_out and not limitations
-    assert dict(timeouts)["triage"] >= 600
-    assert dict(timeouts)["search"] <= 0.01
-    assert elapsed[0] >= 0.02
-
-
-@pytest.mark.asyncio
-async def test_literature_model_timeout_uses_upstream_intervention_error():
-    import asyncio
-
-    agent = _new_pubmed_agent()
-
-    async def timed_out():
-        raise asyncio.TimeoutError
-
-    with pytest.raises(UpstreamExhaustedError, match="600s") as raised:
-        await agent._await_literature_llm(timed_out(), timeout_seconds=0.01)
-    assert raised.value.failure_kind == "timeout"

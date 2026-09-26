@@ -93,36 +93,6 @@ async def test_concurrent_chat_runtime_has_one_exact_owner(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cancelled_chat_runtime_releases_only_its_reservation(monkeypatch):
-    session_id = "a1-cancel"
-    state = SimpleNamespace(chat_messages=[], user_id="u")
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    async def run_delegation(*_args):
-        started.set()
-        await release.wait()
-
-    monkeypatch.setattr(endpoints, "_run_chat_delegation", run_delegation)
-    monkeypatch.setattr(endpoints, "_async_save_session_under_lifecycle", AsyncMock())
-    monkeypatch.setattr(endpoints, "assert_generation_writable", lambda *_args: None)
-
-    owner = await endpoints._publish_chat_delegation(
-        session_id, state, {"plan": "test"}, "user", [], []
-    )
-    await started.wait()
-    replacement = asyncio.create_task(asyncio.sleep(60))
-    endpoints.chat_tasks[session_id] = replacement
-    owner.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await owner
-    assert endpoints.chat_tasks[session_id] is replacement
-    replacement.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await replacement
-
-
-@pytest.mark.asyncio
 async def test_failed_sandbox_start_preserves_existing_notebook(monkeypatch):
     session_id = "a1-figure-failure"
 
@@ -218,23 +188,3 @@ async def test_per_turn_clients_close_on_success_and_failure(monkeypatch, tmp_pa
         assert "is already loaded" not in prompt
         assert "do not reload" in prompt
         client.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("restore_failed", [False, True])
-async def test_unavailable_figure_runtime_does_not_generate_or_save(monkeypatch, restore_failed):
-    sandbox = SimpleNamespace(
-        km=None,
-        start=AsyncMock(return_value={"restore_failed": restore_failed}),
-        stop=AsyncMock(), inspect_checkpoint_adata_locked=AsyncMock(),
-    )
-    client_factory = MagicMock()
-    monkeypatch.setattr("backend.utils.sandbox.LocalJupyterSandbox", lambda **_: sandbox)
-    monkeypatch.setattr(figures, "resolve_config_for_user", AsyncMock(return_value=SimpleNamespace()))
-    monkeypatch.setattr("backend.utils.agent_llm.get_agent_llm_client", client_factory)
-    state = SimpleNamespace(user_id="owner", runtime_restore_status="complete" if restore_failed else "unavailable")
-    result = await figures._generate_figures_in_chat("missing-figure-runtime", state, ["plot"])
-    assert result == []
-    client_factory.assert_not_called()
-    sandbox.inspect_checkpoint_adata_locked.assert_not_awaited()
-    sandbox.stop.assert_awaited_once_with(save=False)

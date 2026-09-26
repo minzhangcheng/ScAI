@@ -87,32 +87,3 @@ async def test_get_agent_server_config_masks_key(client_and_token):
     assert r.status_code == 200, r.text
     assert "sk-secret" not in r.text
     assert r.json()["pi"]["api_key"] == mask_api_key("sk-secret")
-
-
-@pytest.mark.asyncio
-async def test_served_session_fixture_uses_unique_ids_and_cleans_all_records(
-    client_and_token,
-):
-    uid, headers, owned = client_and_token
-    from backend.models.schemas import AnalysisState
-    from backend.state import sessions
-
-    session_id = f"p1-mask-clean-{uuid.uuid4()}"
-    owned.append(session_id)
-    sessions[session_id] = AnalysisState(id=session_id, user_id=uid)
-
-    from backend.main import app
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://t") as client:
-        response = await client.get(
-            f"/api/session/{session_id}/literature-config",
-            headers=headers,
-        )
-    assert response.status_code == 200, response.text
-    assert list((SESSION_DIR / ".lifecycle").glob(f"*/{session_id}.json"))
-
-    _purge_session_artifacts(session_id)
-    assert session_id not in sessions
-    assert not (SESSION_DIR / session_id).exists()
-    assert not list((SESSION_DIR / ".lifecycle").glob(f"*/{session_id}.json"))

@@ -16,6 +16,7 @@ container, continue a round — is not a unit test and is recorded by hand in
 from __future__ import annotations
 
 import os
+import sqlite3
 import tarfile
 import uuid
 
@@ -56,6 +57,8 @@ async def sandbox(session_id):
     session_dir = get_session_dir(session_id)
     states = get_session_states(session_id)
     states.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(states / "checkpoints.sqlite") as connection:
+        connection.execute("CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, checkpoint_id TEXT)")
     workspace = session_dir / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -164,14 +167,12 @@ async def test_a_resumable_archive_carries_the_flushed_generation(
     from backend.services.export_lifecycle import reserve_export_record, abandon_export_record
     from backend.routes.export_import_parts.export_routes import _pack_session_archive
     from backend.config import get_session_states
-    import sqlite3
 
     state = sessions[sandbox.session_id]
     workflows[sandbox.session_id] = SimpleNamespace(sandbox=sandbox)
     states_dir = get_session_states(sandbox.session_id)
     checkpoint = states_dir / "checkpoints.sqlite"
     with sqlite3.connect(checkpoint) as conn:
-        conn.execute("CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, checkpoint_id TEXT)")
         conn.execute("INSERT INTO checkpoints VALUES (?, '', 'node-1')", (sandbox.session_id,))
     info = await reserve_export_record(uuid.uuid4().hex, session_id=state.id,
                                        user_id=state.user_id, state=state, kind="prepared")

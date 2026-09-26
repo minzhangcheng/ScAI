@@ -47,6 +47,24 @@ scope, `client` is the affected client-surface scope, `kernel` is integration
 scope, and `backend-full` is full-suite/release-gate scope. A complete result
 within one scope does not imply any of the other scopes.
 
+## Test-suite size and coverage baseline
+
+Release `0.62.1` measures test code with `scripts/test_code_size.py`. The
+measurement includes retained tests, fixtures, helpers, frontend test setup,
+and test infrastructure, while the application denominator is `backend`,
+`frontend/src`, and `clients/python/scai_client` with test paths excluded.
+The release baseline is 193,529 application lines and 58,047 test and
+infrastructure lines, or 29.994%. Run the counter after test edits and keep the
+result at or below 30%.
+
+The size ceiling is subordinate to load-bearing coverage. Persistence and crash
+recovery, authentication and ownership, execution identity, cleanup leases,
+report and artifact transactions, protocol failure handling, Chat request
+ownership, and the distinction between search completion and verified evidence
+remain independently tested. The [test suite review](test-suite-review.md)
+records removed coverage, restored regressions, the associated tradeoffs, and
+the evidence for the release profiles.
+
 There was a fifth, `backend-full-gate-off`, which ran the same suite with the
 snapshot subsystem disabled — the configuration production actually shipped.
 The subsystem is gone, so the build has one configuration and presenting one

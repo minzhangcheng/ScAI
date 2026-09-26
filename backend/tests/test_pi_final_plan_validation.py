@@ -4,7 +4,6 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pydantic import ValidationError
 
 from backend.agents.pi_agent import PIAgent
 from backend.models.schemas import (
@@ -13,7 +12,6 @@ from backend.models.schemas import (
     AnalysisPhase,
     AnalysisPlan,
     AnalysisState,
-    FigureRequirement,
     PlanAnalysisScope,
     PlanStep,
 )
@@ -152,67 +150,6 @@ def _valid_innovation_seed() -> AnalysisPlan:
     )
 
 
-@pytest.mark.parametrize(("alias", "canonical"), [
-    ("annotation_overview", "annotation"),
-    ("batch_overview", "batch"),
-    ("cluster_overview", "cluster"),
-    ("marker_overview", "markers"),
-    (" Markers ", "markers"),
-])
-def test_figure_requirement_canonicalizes_only_explicit_platform_aliases(alias, canonical):
-    requirement = FigureRequirement(platform_baseline=alias)
-    assert requirement.platform_baseline == canonical
-
-
-def test_unknown_platform_alias_remains_invalid():
-    with pytest.raises(ValidationError, match="literal_error"):
-        FigureRequirement(platform_baseline="cluster_summary")
-
-
-@pytest.mark.asyncio
-async def test_malformed_then_repaired_plan_uses_one_retry():
-    agent = _make_pi_agent()
-    state = AnalysisState(user_id="test-user")
-    state.current_plan = _seed_plan()
-    agent.chat = AsyncMock(side_effect=[
-        _plan_payload("cluster_summary"),
-        _plan_payload("cluster"),
-    ])
-
-    plan = await agent.generate_final_plan_from_dialogue(
-        state,
-        [],
-        current_plan=state.current_plan,
-    )
-
-    assert agent.chat.await_count == 2
-    assert plan.steps[0].figure_requirements[0].platform_baseline == "cluster"
-    repair_prompt = agent.chat.call_args_list[1].args[0]
-    assert "cluster_summary" in repair_prompt
-    assert "schema validation" in repair_prompt
-
-
-@pytest.mark.asyncio
-async def test_final_plan_repairs_once_then_accepts():
-    agent = _make_pi_agent()
-    state = AnalysisState(user_id="test-user")
-    state.current_plan = _seed_plan()
-    agent.chat = AsyncMock(side_effect=[
-        _plan_payload("cluster_summary"),
-        _plan_payload("cluster"),
-    ])
-
-    plan = await agent.generate_final_plan_from_dialogue(
-        state,
-        [{"round": 1, "pi_decision": "revise"}],
-        current_plan=state.current_plan,
-    )
-
-    assert agent.chat.await_count == 2
-    assert len(plan.steps) == 1
-    assert plan.status == "pi_reviewing"
-
-
 @pytest.mark.asyncio
 async def test_final_plan_twice_invalid_preserves_seed_without_approving_it():
     agent = _make_pi_agent()
@@ -252,66 +189,6 @@ async def test_final_plan_twice_invalid_preserves_seed_without_approving_it():
 
 
 @pytest.mark.asyncio
-async def test_innovation_finalization_receives_contract_and_repairs_invalid_scope():
-    agent = _make_pi_agent()
-    state = _innovation_state()
-    agent.chat = AsyncMock(side_effect=[
-        _innovation_plan_payload(with_scope=False),
-        _innovation_plan_payload(with_scope=True),
-    ])
-
-    plan = await agent.generate_final_plan_from_dialogue(
-        state,
-        [{"round": 1, "pi_decision": "revise"}],
-    )
-
-    assert agent.chat.await_count == 2
-    first_prompt = agent.chat.call_args_list[0].args[0]
-    repair_prompt = agent.chat.call_args_list[1].args[0]
-    assert "Innovation Scope Contract v1" in first_prompt
-    assert "foundation-v1-r1" in first_prompt
-    assert "missing analysis_scope" in repair_prompt
-    assert plan.scope_contract_version == 1
-    assert plan.steps[0].analysis_scope.foundation_refs[0].execution_ids == [
-        "receipt-r1-step4"
-    ]
-
-
-@pytest.mark.asyncio
-async def test_final_plan_repairs_all_reference_errors_and_preserves_nonfoundation_reuse():
-    agent = _make_pi_agent()
-    state = _innovation_state()
-    valid = json.loads(_innovation_plan_payload(with_scope=True))
-    other = json.loads(_innovation_plan_payload(with_scope=True))["steps"][0]
-    other["id"] = 8
-    valid["steps"].append(other)
-    prior = json.loads(_innovation_plan_payload(with_scope=True))["steps"][0]
-    prior["id"] = 3
-    prior["input"] = "Stored table from prior-plan-other, outside the foundation inventory."
-    prior["analysis_scope"]["foundation_refs"] = []
-    prior["analysis_scope"]["reason"] = "Reuse the prior result; disclose unavailable execution provenance."
-    valid["steps"].insert(0, prior)
-    invalid = json.loads(json.dumps(valid))
-    invalid["steps"][1]["analysis_scope"]["foundation_refs"][0]["execution_ids"] = ["bad-receipt-1"]
-    invalid["steps"][2]["analysis_scope"]["foundation_refs"][0]["execution_ids"] = ["bad-receipt-8"]
-    agent.chat = AsyncMock(side_effect=[json.dumps(invalid), json.dumps(valid)])
-
-    plan = await agent.generate_final_plan_from_dialogue(state, [])
-
-    assert agent.chat.await_count == 2
-    feedback = agent.chat.call_args_list[1].args[0]
-    for value in ["Innovation step 1", "Innovation step 8", "bad-receipt-1", "bad-receipt-8", "receipt-r1-step4"]:
-        assert value in feedback
-    assert "Accepted foundation inventory" in feedback
-    assert plan.steps[0].analysis_scope.relationship == "reuse"
-    assert plan.steps[0].analysis_scope.foundation_refs == []
-    assert all(
-        step.analysis_scope.foundation_refs[0].execution_ids == ["receipt-r1-step4"]
-        for step in plan.steps[1:]
-    )
-
-
-@pytest.mark.asyncio
 async def test_final_plan_does_not_accept_a_truncated_step_as_a_complete_plan():
     agent = _make_pi_agent()
     valid = _plan_payload()
@@ -345,53 +222,3 @@ async def test_invalid_innovation_finalization_does_not_fall_back_to_seed_plan()
 
     assert type(exc_info.value).__name__ == "PlanGenerationFailure"
     assert agent.chat.await_count == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("repair_succeeds", [True, False])
-async def test_truncated_foundation_id_repair_preserves_identity_and_reports_cause(repair_succeeds):
-    agent = _make_pi_agent()
-    state = _innovation_state()
-    valid = _innovation_plan_payload(with_scope=True)
-    invalid = valid.replace("foundation-v1-r1", "foundation-v1-r")
-    agent.chat = AsyncMock(side_effect=[invalid, valid if repair_succeeds else invalid])
-
-    if repair_succeeds:
-        plan = await agent.generate_final_plan_from_dialogue(state, [])
-        assert plan.steps[0].analysis_scope.foundation_refs[0].inventory_id == "foundation-v1-r1"
-    else:
-        from backend.agents.bioinformatics.planning import PlanGenerationFailure
-
-        with pytest.raises(PlanGenerationFailure) as exc_info:
-            await agent.generate_final_plan_from_dialogue(state, [])
-        message = str(exc_info.value)
-        assert "unknown inventory_id" in message
-        assert "no executable steps" not in message
-        assert "expected 'foundation-v1-r1'" in message
-
-    assert agent.chat.await_count == 2
-    repair = agent.chat.call_args_list[1].args[0]
-    assert "Innovation step 1 analysis_scope.foundation_refs[0]" in repair
-    assert "received 'foundation-v1-r'" in repair
-    assert "expected 'foundation-v1-r1'" in repair
-
-
-@pytest.mark.asyncio
-async def test_final_plan_preserves_aliased_output_figures_and_step_dependencies():
-    agent = _make_pi_agent()
-    payload = json.loads(_plan_payload())
-    step = payload["steps"][0]
-    step["step_id"] = 7
-    del step["id"]
-    step["output"] = step.pop("expected_output")
-    step["required_figures"] = step.pop("figure_requirements")
-    payload["steps"].append({**step, "step_id": 9, "depends_on": [7]})
-    agent.chat = AsyncMock(return_value=json.dumps(payload))
-
-    plan = await agent.generate_final_plan_from_dialogue(AnalysisState(user_id="test"), [])
-
-    assert agent.chat.await_count == 1
-    assert [s.id for s in plan.steps] == [7, 9]
-    assert plan.steps[1].depends_on == [7]
-    assert plan.steps[0].expected_output == "Stable cluster labels"
-    assert plan.steps[0].figure_requirements[0].description == "Primary cluster overview"

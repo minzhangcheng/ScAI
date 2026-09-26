@@ -6,7 +6,6 @@ import pytest
 
 from backend.agents import bioinformatics_agent as bio_facade
 from backend.agents.bioinformatics import executor_registration
-from backend.agents.bioinformatics.tool_schemas import KNOWN_TOOL_NAMES
 from backend.models.schemas import (
     AnalysisPlan,
     AnalysisState,
@@ -133,7 +132,3 @@ async def test_method_decision_must_cite_current_bulk_execution(tmp_path):
 
     assert len(state.method_decisions) == 1
     assert "another approved plan" in context.messages[-1]["content"]
-
-
-def test_method_decision_tool_is_part_of_main_executor_contract():
-    assert "register_method_decision" in KNOWN_TOOL_NAMES

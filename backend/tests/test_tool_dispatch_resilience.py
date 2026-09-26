@@ -14,7 +14,6 @@ from backend.agents.bioinformatics.executor_dispatch import (
 )
 from backend.models.schemas import AgentType, AnalysisState
 from backend.tests.split_facade import setattr_facade
-from backend.utils.llm_client import UpstreamExhaustedError
 
 
 @pytest.mark.asyncio

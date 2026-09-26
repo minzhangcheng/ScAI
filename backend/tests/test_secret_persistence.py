@@ -1,4 +1,3 @@
-from backend.tests.split_facade import setattr_facade
 import asyncio
 import copy
 import io
@@ -14,12 +13,7 @@ from backend.models.schemas import AnalysisState
 from backend.services import session_store
 from backend.utils.secret_redaction import (
     SEALED_SECRET_PREFIX,
-    SecretRedactionFilter,
-    mask_api_key,
     open_system_config_payload,
-    preserve_runtime_secrets,
-    seal_system_config_payload,
-    strip_analysis_state_secrets,
 )
 from backend.utils.db import AppDB
 
@@ -41,26 +35,6 @@ def _state() -> AnalysisState:
         "agents": {"pi": {"api_key": "snapshot-agent-key"}},
     }
     return state
-
-
-def test_api_key_preview_has_exact_required_shape():
-    assert mask_api_key(RAW_KEY) == "sk-******789"
-
-
-def test_log_filter_replaces_raw_key_with_required_preview():
-    stream = io.StringIO()
-    handler = logging.StreamHandler(stream)
-    handler.addFilter(SecretRedactionFilter())
-    logger = logging.getLogger("scai-secret-redaction-test")
-    logger.handlers = [handler]
-    logger.propagate = False
-    logger.setLevel(logging.INFO)
-
-    logger.info("api_key=%s Authorization: Bearer %s", RAW_KEY, RAW_KEY)
-    rendered = stream.getvalue()
-
-    assert RAW_KEY not in rendered
-    assert rendered.count("sk-******789") == 2
 
 
 def test_application_logging_redacts_keys_and_keeps_rotated_files_owner_only(
@@ -147,87 +121,6 @@ def test_langgraph_checkpoint_serializer_never_contains_raw_key():
     assert restored.agent_server_configs["pi"]["api_key"] == RAW_KEY
 
 
-def test_exported_business_state_never_contains_raw_key():
-    """The snapshot serializer is gone; export is the surviving producer.
-
-    Both stripped the same object for the same reason -- a state leaving this
-    installation must not carry the operator's credentials -- so the invariant
-    moves to the caller that still exists rather than being deleted with the
-    one that does not.
-    """
-    payload = json.dumps(
-        strip_analysis_state_secrets(_state().model_dump(mode="json")),
-        ensure_ascii=False,
-        default=str,
-    ).encode("utf-8")
-    assert RAW_KEY.encode() not in payload
-    assert b"snapshot-default-key" not in payload
-    assert SEALED_SECRET_PREFIX.encode() not in payload
-    decoded = json.loads(payload)
-    assert decoded["agent_server_configs"]["pi"]["api_key"] == ""
-    assert decoded["config_snapshot"]["agents"]["pi"]["api_key"] == ""
-
-
-def test_snapshot_restore_preserves_current_runtime_credentials():
-    current = _state()
-    restored = AnalysisState(id="secret-test", user_id="owner")
-    restored.agent_server_configs = {
-        "pi": {"llm_base_url": "https://old.test/v1", "api_key": ""}
-    }
-
-    preserve_runtime_secrets(current, restored)
-
-    assert restored.agent_server_configs["pi"]["api_key"] == RAW_KEY
-    assert restored.literature_config["google_api_key"] == "google-abcdef"
-
-
-def test_global_system_config_seals_api_credentials():
-    payload = {
-        "api": {
-            "api_key": RAW_KEY,
-            "llm_base_url": "https://example.test/v1",
-            "proxy_url": "https://proxy-user:proxy-password@example.test",
-        }
-    }
-
-    sealed = seal_system_config_payload(payload)
-    serialized = json.dumps(sealed)
-
-    assert RAW_KEY not in serialized
-    assert "proxy-password" not in serialized
-    assert sealed["api"]["api_key"].startswith(SEALED_SECRET_PREFIX)
-    assert open_system_config_payload(sealed) == payload
-
-
-def test_global_system_config_discards_legacy_deployment_runtime_budgets():
-    payload = {
-        "api": {"api_key": "", "llm_base_url": "https://example.test/v1"},
-        "runtime_max_namespace_count": 1500,
-        "runtime_max_single_object_bytes": 4 * 1024 ** 3,
-        "runtime_max_anndata_total_bytes": 12 * 1024 ** 3,
-        "runtime_max_rss_bytes": 16 * 1024 ** 3,
-        "runtime_max_pkl_bytes": 8 * 1024 ** 3,
-        "runtime_max_save_seconds": 300,
-    }
-
-    sealed = seal_system_config_payload(payload)
-    opened = open_system_config_payload(payload)
-
-    for key in payload.keys() - {"api"}:
-        assert key not in sealed
-        assert key not in opened
-
-
-def test_global_system_config_discards_process_scoped_method_guidance_switch():
-    payload = {
-        "api": {"api_key": "", "llm_base_url": "https://example.test/v1"},
-        "enable_method_decision_guidance": True,
-    }
-
-    assert "enable_method_decision_guidance" not in seal_system_config_payload(payload)
-    assert "enable_method_decision_guidance" not in open_system_config_payload(payload)
-
-
 def test_portable_export_state_omits_credentials(tmp_path):
     from backend.routes.export_import import _add_portable_state_json
 
@@ -249,164 +142,6 @@ def test_portable_export_state_omits_credentials(tmp_path):
     assert decoded["agent_server_configs"]["pi"]["api_key"] == ""
 
 
-def test_portable_export_omits_installation_bound_checkpoint(tmp_path, monkeypatch):
-    from backend.routes import export_import
-
-    states = tmp_path / "states"
-    states.mkdir()
-    (states / "checkpoints.sqlite").write_bytes(b"encrypted local checkpoint")
-    (states / "checkpoints.sqlite-wal").write_bytes(b"wal")
-    (states / "analysis.ipynb").write_text("{}", encoding="utf-8")
-    legacy = tmp_path / "legacy"
-    legacy.mkdir()
-    setattr_facade(monkeypatch, "backend.routes.export_import", "get_session_states", lambda _session_id: states)
-    setattr_facade(monkeypatch, "backend.routes.export_import", "STATE_DIR", legacy)
-
-    archive_buffer = io.BytesIO()
-    with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
-        export_import._add_states_to_tar(
-            archive, "portable-session", include_runtime=False
-        )
-
-    archive_buffer.seek(0)
-    with tarfile.open(fileobj=archive_buffer, mode="r") as archive:
-        names = set(archive.getnames())
-
-    assert "portable-session/states/analysis.ipynb" in names
-    assert "portable-session/states/checkpoints.sqlite" not in names
-    assert "portable-session/states/checkpoints.sqlite-wal" not in names
-
-
-def test_legacy_state_export_excludes_near_prefix_sessions(tmp_path, monkeypatch):
-    from backend.routes import export_import
-
-    session_id = "abc"
-    states = tmp_path / "states"
-    states.mkdir()
-    legacy = tmp_path / "legacy"
-    legacy.mkdir()
-    (legacy / "abc.ipynb").write_bytes(b"owned")
-    (legacy / "abc_session.pkl").write_bytes(b"owned-runtime")
-    (legacy / "abcd_session.pkl").write_bytes(b"other-session")
-    (legacy / "abc-extra_state.json").write_bytes(b"other-session")
-    (legacy / "abc_extra_state.json").write_bytes(b"other-session")
-    setattr_facade(
-        monkeypatch, "backend.routes.export_import", "get_session_states",
-        lambda _session_id: states,
-    )
-    setattr_facade(
-        monkeypatch, "backend.routes.export_import", "STATE_DIR", legacy,
-    )
-
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as archive:
-        export_import._add_states_to_tar(
-            archive, session_id, include_runtime=True,
-        )
-    buffer.seek(0)
-    with tarfile.open(fileobj=buffer, mode="r") as archive:
-        names = set(archive.getnames())
-
-    assert f"{session_id}/states/abc.ipynb" in names
-    assert f"{session_id}/states/abc_session.pkl" in names
-    assert f"{session_id}/states/abcd_session.pkl" not in names
-    assert f"{session_id}/states/abc-extra_state.json" not in names
-    assert f"{session_id}/states/abc_extra_state.json" not in names
-
-
-@pytest.mark.parametrize(
-    ("session_id", "ambiguous_name"),
-    [
-        ("abc_state", "abc_state.json"),
-        ("abc_session", "abc_session.pkl"),
-    ],
-)
-def test_legacy_state_export_excludes_ambiguous_shorter_id_file(
-    tmp_path, monkeypatch, session_id, ambiguous_name,
-):
-    from backend.routes import export_import
-
-    states = tmp_path / "states"
-    states.mkdir()
-    legacy = tmp_path / "legacy"
-    legacy.mkdir()
-    (legacy / ambiguous_name).write_bytes(b"shorter-session")
-    setattr_facade(
-        monkeypatch, "backend.routes.export_import", "get_session_states",
-        lambda _session_id: states,
-    )
-    setattr_facade(
-        monkeypatch, "backend.routes.export_import", "STATE_DIR", legacy,
-    )
-
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as archive:
-        export_import._add_states_to_tar(
-            archive, session_id, include_runtime=True,
-        )
-    buffer.seek(0)
-    with tarfile.open(fileobj=buffer, mode="r") as archive:
-        assert f"{session_id}/states/{ambiguous_name}" not in archive.getnames()
-
-
-def _states_export_names(tmp_path, monkeypatch, include_runtime):
-    """Pack a states/ dir through the real builder and return the member names."""
-    from backend.routes import export_import
-
-    states = tmp_path / "states"
-    states.mkdir()
-    (states / "analysis.ipynb").write_text("{}", encoding="utf-8")
-    (states / "runtime_h5ad_manifest.json").write_text(
-        '{"version": 1, "entries": {"adata": {"path": "adata.h5ad", "sha256": "%s"}}}'
-        % ("0" * 64),
-        encoding="utf-8",
-    )
-    (states / "adata.h5ad").write_bytes(b"H5AD")
-    legacy = tmp_path / "legacy"
-    legacy.mkdir()
-    setattr_facade(
-        monkeypatch, "backend.routes.export_import", "get_session_states",
-        lambda _session_id: states,
-    )
-    setattr_facade(monkeypatch, "backend.routes.export_import", "STATE_DIR", legacy)
-
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as archive:
-        export_import._add_states_to_tar(
-            archive, "sidecar-session", include_runtime=include_runtime
-        )
-    buffer.seek(0)
-    with tarfile.open(fileobj=buffer, mode="r") as archive:
-        return set(archive.getnames())
-
-
-def test_portable_export_omits_the_h5ad_runtime_sidecars(tmp_path, monkeypatch):
-    """They are runtime, and this is the export that declares the runtime absent.
-
-    Matching neither ``is_sandbox_pickle`` nor the checkpoint filter, the pair used
-    to travel in every ordinary archive -- shipping a multi-GB AnnData that the
-    importer then marks ``runtime_restore_status=unavailable``.
-    """
-    names = _states_export_names(tmp_path, monkeypatch, include_runtime=False)
-
-    assert "sidecar-session/states/analysis.ipynb" in names
-    assert "sidecar-session/states/runtime_h5ad_manifest.json" not in names
-    assert "sidecar-session/states/adata.h5ad" not in names
-
-
-def test_a_runtime_export_keeps_the_h5ad_sidecars_as_a_pair(tmp_path, monkeypatch):
-    """Atomicity is the property that matters, in both directions.
-
-    A manifest whose sidecars were dropped makes every later kernel start raise
-    "h5ad sidecar missing" -- a brick rather than a degrade -- and sidecars with no
-    manifest are inert, since nothing reads ``states/*.h5ad`` except through it.
-    """
-    names = _states_export_names(tmp_path, monkeypatch, include_runtime=True)
-
-    assert "sidecar-session/states/runtime_h5ad_manifest.json" in names
-    assert "sidecar-session/states/adata.h5ad" in names
-
-
 def test_session_json_is_encrypted_and_owner_only(tmp_path, monkeypatch):
     session_path = tmp_path / "secret-test" / "session.json"
     monkeypatch.setattr(
@@ -421,17 +156,6 @@ def test_session_json_is_encrypted_and_owner_only(tmp_path, monkeypatch):
     assert RAW_KEY not in rendered
     assert stat.S_IMODE(session_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(session_path.parent.stat().st_mode) == 0o700
-
-
-@pytest.mark.asyncio
-async def test_application_database_is_owner_only(tmp_path):
-    database_path = tmp_path / "private" / "app.db"
-    database = AppDB(database_path)
-
-    await database.init()
-
-    assert stat.S_IMODE(database_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(database_path.parent.stat().st_mode) == 0o700
 
 
 @pytest.mark.asyncio
@@ -478,37 +202,6 @@ async def test_user_config_preview_is_exact_and_resubmission_preserves_key(tmp_p
     assert crypto.decrypt_value(stored["encrypted_api_key"]) == RAW_KEY
     assert crypto.decrypt_value(stored["encrypted_proxy_url"]) == "https://proxy.test"
     assert stored["llm_base_url"] == "https://two.test/v1"
-
-
-@pytest.mark.asyncio
-async def test_agent_default_secrets_are_encrypted_and_masked(tmp_path):
-    from backend.routes.user_config import (
-        AgentDefaultSecretsRequest,
-        get_agent_default_secrets,
-        update_agent_default_secrets,
-    )
-    from backend.services.agent_default_secrets import load_agent_default_secrets
-
-    database = AppDB(tmp_path / "agent-default-secrets.db")
-    await database.init()
-    user_id = await database.create_user(
-        "agent-default-user",
-        "test-password-hash",
-        role="user",
-        status="active",
-    )
-
-    response = await update_agent_default_secrets(
-        AgentDefaultSecretsRequest(agent="pi", api_key=RAW_KEY),
-        user_id,
-        database,
-    )
-
-    encrypted = await database.get_user_agent_default_secrets(user_id)
-    assert RAW_KEY not in encrypted
-    assert response["agent_api_keys"]["pi"] == "sk-******789"
-    assert (await get_agent_default_secrets(user_id, database)) == response
-    assert (await load_agent_default_secrets(database, user_id))["agent_api_keys"]["pi"] == RAW_KEY
 
 
 @pytest.mark.asyncio

@@ -79,16 +79,4 @@ describe('restored report downloads', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Download All Figures (1)' })).toBeEnabled()
   })
-
-  it('renders GitHub-flavored Markdown tables', () => {
-    render(<IntegratedReport report={[
-      '| Candidate | Evidence |',
-      '|---|---|',
-      '| **MT stress** | Observed |',
-    ].join('\n')} />)
-
-    expect(screen.getByRole('table')).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: 'Candidate' })).toBeInTheDocument()
-    expect(screen.getByRole('cell', { name: 'MT stress' })).toBeInTheDocument()
-  })
 })

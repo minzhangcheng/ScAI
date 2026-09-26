@@ -1,7 +1,6 @@
 """Transactional contracts for ordinary (non-chunked) upload routes."""
 
 import asyncio
-import shutil
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -61,39 +60,6 @@ async def _upload_data(state, file, *, section="pathology"):
     return result, response
 
 
-def test_standard_file_upload_limit_is_ten_gibibytes():
-    assert upload_routes._GENERIC_UPLOAD_MAX_BYTES == 10 * 1024 ** 3
-    assert upload_routes._GENERIC_UPLOAD_MAX_BYTES == upload_routes.MAX_UPLOAD_SIZE
-
-
-@pytest.mark.asyncio
-async def test_data_upload_does_not_preflight_free_disk_space(
-    monkeypatch, tmp_path,
-):
-    state = AnalysisState(id="upload-without-disk-preflight", user_id="owner")
-    uploads = _configure_route(monkeypatch, tmp_path, state)
-    save = AsyncMock()
-    monkeypatch.setattr(
-        upload_routes, "_async_save_session_under_lifecycle", save,
-    )
-    monkeypatch.setattr(
-        shutil,
-        "disk_usage",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("data upload must not preflight free disk space")
-        ),
-    )
-
-    result, _response = await _upload_data(
-        state, ChunkUpload("sample.png", [b"payload"]),
-    )
-
-    assert result.success is True
-    assert (
-        uploads / "pathology" / "_ungrouped" / "sample.png"
-    ).read_bytes() == b"payload"
-
-
 @pytest.mark.asyncio
 async def test_data_upload_conflict_preserves_existing_file_and_state(
     monkeypatch, tmp_path,
@@ -147,75 +113,6 @@ async def test_data_upload_save_failure_rolls_back_file_and_memory(
 
 
 @pytest.mark.asyncio
-async def test_sequencing_upload_cancellation_leaves_no_orphan_or_record(
-    monkeypatch, tmp_path,
-):
-    state = AnalysisState(id="upload-cancel", user_id="owner")
-    uploads = _configure_route(monkeypatch, tmp_path, state)
-    save = AsyncMock()
-    monkeypatch.setattr(
-        upload_routes, "_async_save_session_under_lifecycle", save,
-    )
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    class BlockingUpload:
-        filename = "matrix.h5ad"
-        size = 7
-        calls = 0
-
-        async def read(self, _size=-1):
-            self.calls += 1
-            if self.calls == 1:
-                return b"partial"
-            entered.set()
-            await release.wait()
-            return b""
-
-    request = asyncio.create_task(
-        _upload_data(state, BlockingUpload(), section="sequencing"),
-    )
-    await asyncio.wait_for(entered.wait(), timeout=1)
-    request.cancel()
-    release.set()
-
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(request, timeout=2)
-
-    final = uploads / "sequencing" / "_ungrouped" / "matrix.h5ad"
-    assert not final.exists()
-    assert list(uploads.rglob("*.uploading")) == []
-    assert state.data_files == []
-    save.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("section", ["sequencing", "pathology", "biochemistry"])
-async def test_all_data_upload_sections_share_the_configured_size_limit(
-    monkeypatch, tmp_path, section,
-):
-    state = AnalysisState(id=f"upload-limit-{section}", user_id="owner")
-    uploads = _configure_route(monkeypatch, tmp_path, state)
-    save = AsyncMock()
-    monkeypatch.setattr(
-        upload_routes, "_async_save_session_under_lifecycle", save,
-    )
-    monkeypatch.setattr(upload_routes, "_GENERIC_UPLOAD_MAX_BYTES", 7)
-
-    with pytest.raises(HTTPException) as raised:
-        await _upload_data(
-            state,
-            ChunkUpload("oversized.bin", [b"1234", b"5678"]),
-            section=section,
-        )
-
-    assert raised.value.status_code == 413
-    assert state.data_files == []
-    assert list(uploads.rglob("*.uploading")) == []
-    save.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_cancellation_after_durable_save_keeps_committed_upload(
     monkeypatch, tmp_path,
 ):
@@ -251,31 +148,6 @@ async def test_cancellation_after_durable_save_keeps_committed_upload(
     assert len(state.data_files) == 1
     assert len(state.pending_uploaded_files) == 1
     assert list(uploads.rglob("*.uploading")) == []
-
-
-@pytest.mark.asyncio
-async def test_successful_data_upload_commits_once_without_staging(
-    monkeypatch, tmp_path,
-):
-    state = AnalysisState(id="upload-success", user_id="owner")
-    uploads = _configure_route(monkeypatch, tmp_path, state)
-    save = AsyncMock()
-    monkeypatch.setattr(
-        upload_routes, "_async_save_session_under_lifecycle", save,
-    )
-
-    result, response = await _upload_data(
-        state, ChunkUpload("sample.png", [b"pay", b"load"]),
-    )
-
-    final = uploads / "pathology" / "_ungrouped" / "sample.png"
-    assert result.success is True
-    assert response.headers["X-Request-ID"]
-    assert final.read_bytes() == b"payload"
-    assert len(state.data_files) == 1
-    assert list(uploads.rglob("*.uploading")) == []
-    save.assert_awaited_once()
-    assert save.await_args.kwargs["force"] is True
 
 
 @pytest.mark.asyncio

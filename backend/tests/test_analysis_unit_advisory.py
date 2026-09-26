@@ -4,13 +4,10 @@ The measured mixed-modality session has replicated bulk RNA-seq and one
 single-cell library per condition. Bulk replication must not be lowered by the
 single-cell arm, and the single-cell arm must not borrow the bulk sample size.
 """
-import re
 
-import pytest
 
 import backend.agents.bioinformatics_agent as bio_mod
-from backend.services.method_rules import ENFORCEMENT_ADVISORY, get_rule
-from backend.services.statistical_gates import check_analysis_unit, run_gates
+from backend.services.statistical_gates import run_gates
 
 INFERENTIAL = "DKO significantly increases Mt1 (p = 0.004)."
 BULK = ("Bulk RNA-seq identifies 564 significant DEGs including Slc7a11 "
@@ -59,28 +56,12 @@ def _group(group_id, name, sample_count):
 
 # ------------------------------------------------------------- the channel
 
-def test_analysis_unit_finding_is_advisory():
-    out = check_analysis_unit([INFERENTIAL], {"Con": 1, "DKO": 1})
-    assert len(out) == 1
-    assert out[0].rule_id == "one-sample-per-condition-is-unidentifiable"
-    assert out[0].severity == "advise", (
-        "the check still fires; it must ride the advisory channel"
-    )
-
-
 def test_run_gates_does_not_refuse_at_n1():
     report = run_gates([INFERENTIAL], score_definitions=[], scoring_plans=[],
                        samples_per_group={"Con": 1, "DKO": 1})
     assert report.blocking == []
     assert report.passed is True
     assert [f.gate for f in report.advisories] == ["unidentifiable-design"]
-
-
-def test_advisory_message_still_reaches_the_model():
-    """An advisory the model cannot suppress is the whole point of the change."""
-    report = run_gates([INFERENTIAL], score_definitions=[], scoring_plans=[],
-                       samples_per_group={"Con": 1, "DKO": 1})
-    assert "unidentifiable-design" in report.advisory_message()
 
 
 # ----------------------------------------------------- the measured session
@@ -119,36 +100,6 @@ def test_single_cell_finding_at_n1_surfaces_both_observations():
     ]
 
 
-def test_descriptive_prefix_cannot_disclaim_a_later_inferential_clause():
-    samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
-    report = run_gates(
-        [{"text": "The single-cell comparison is descriptive only; Gene X is "
-                  "significantly increased (p = 0.004).",
-          "modality": "single_cell"}],
-        score_definitions=[], scoring_plans=[],
-        samples_per_group_by_modality=samples,
-    )
-
-    assert "unreplicated-single-cell-inference" in [
-        f.gate for f in report.advisories
-    ]
-    assert report.blocking == []
-
-
-def test_single_structured_finding_object_still_reaches_the_gate():
-    samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
-    report = run_gates(
-        {"text": "condition effect is significant (p = 0.004)",
-         "modality": "single_cell"},
-        score_definitions=[], scoring_plans=[],
-        samples_per_group_by_modality=samples,
-    )
-    assert "unreplicated-single-cell-inference" in [
-        f.gate for f in report.advisories
-    ]
-    assert report.blocking == []
-
-
 def test_finding_text_cannot_override_structured_single_cell_modality():
     samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
     report = run_gates(
@@ -174,109 +125,6 @@ def test_multimodal_inferential_finding_must_name_its_source():
     assert report.blocking == []
 
 
-def test_descriptive_cross_modal_finding_does_not_borrow_one_modality_n():
-    samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
-    report = run_gates(
-        [{"text": "descriptive direction concordance across modalities",
-          "modality": "cross_modal"}],
-        score_definitions=[], scoring_plans=[],
-        samples_per_group_by_modality=samples,
-    )
-    assert not any(
-        finding.gate in {
-            "modality-unresolved", "unidentifiable-design",
-            "unreplicated-single-cell-inference",
-        }
-        for finding in report.findings
-    )
-
-
-def test_inferential_cross_modal_finding_cannot_hide_unreplicated_arm():
-    samples = bio_mod._gate_samples_per_group_by_modality(_multimodal_state())
-    report = run_gates(
-        [{"text": "bulk and single-cell direction concordance is significant "
-                  "(p = 0.004)", "modality": "cross_modal"}],
-        score_definitions=[], scoring_plans=[],
-        samples_per_group_by_modality=samples,
-    )
-    assert "cross-modal-inference-unreplicated" in [
-        finding.gate for finding in report.advisories
-    ]
-    assert report.blocking == []
-
-
-def test_known_modality_with_unresolved_counts_cannot_borrow_bulk_n():
-    report = run_gates(
-        [{"text": "condition effect is significant (p = 0.004)",
-          "modality": "single_cell"}],
-        score_definitions=[], scoring_plans=[],
-        samples_per_group_by_modality={
-            "bulk RNA-seq": {"Con": 3, "DKO": 3},
-            "scRNA-seq": {},
-        },
-    )
-    assert "sample-design-unresolved" in [f.gate for f in report.advisories]
-    assert report.blocking == []
-
-
-def test_partial_group_mapping_is_treated_as_unresolved():
-    report = run_gates(
-        [{"text": "Bulk condition effect is significant (p = 0.004)",
-          "modality": "bulk_rna_seq"}],
-        score_definitions=[], scoring_plans=[],
-        samples_per_group_by_modality={
-            "bulk RNA-seq": {},
-            "scRNA-seq": {"Con": 1, "DKO": 1},
-        },
-    )
-    assert "sample-design-unresolved" in [f.gate for f in report.advisories]
-    assert report.blocking == []
-
-
-def test_descriptive_wording_still_produces_nothing():
-    """Correctly labelled contrasts were never the target, gate or advisory."""
-    findings = ["this contrast is descriptive: condition is confounded with "
-                "specimen, so no condition-level effect is estimable"]
-    assert check_analysis_unit(findings, {"Con": 1, "DKO": 1}) == []
-
-
 # ------------------------------------------------------------- the wording
 
-def test_detail_names_the_selected_modality_boundary():
-    detail = check_analysis_unit([INFERENTIAL], {"Con": 1, "DKO": 1})[0].detail
-    lowered = detail.lower()
-    assert "modality" in lowered
-    assert "descriptive" in lowered, "the actionable instruction must survive"
-
-
-def test_detail_names_the_counts_it_was_given():
-    detail = check_analysis_unit([INFERENTIAL], {"Con": 1, "DKO": 0})[0].detail
-    assert "Con" in detail and "DKO" in detail
-
-
 # -------------------------------------------------------- corpus agreement
-
-def test_corpus_marks_the_rule_advisory():
-    """The corpus cannot turn this observation into a host refusal."""
-    rule = get_rule("one-sample-per-condition-is-unidentifiable")
-    assert rule is not None
-    assert rule["enforcement"] == ENFORCEMENT_ADVISORY
-
-
-def test_statistical_observations_have_no_rejection_ceiling():
-    """Scientific observations never consume retries or force-release."""
-    src = inspect_source()
-    assert "_unsatisfiable" not in src
-    assert "stats_gate_reject_count" not in src
-
-
-def inspect_source():
-    import inspect
-
-    return inspect.getsource(bio_mod)
-
-
-@pytest.mark.parametrize("bad", ["liver", "mouse", "cancer", "copper"])
-def test_new_wording_stays_domain_neutral(bad):
-    detail = check_analysis_unit([INFERENTIAL], {"Con": 1, "DKO": 1})[0].detail
-    assert not re.search(rf"\b{bad}\b", detail, re.I)

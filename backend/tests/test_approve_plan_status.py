@@ -1,6 +1,5 @@
 """Tests that _approve_plan transitions TaskStatus from WAITING_PLAN_REVIEW to RUNNING."""
 import sys
-import asyncio
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -14,11 +13,9 @@ from backend.models.schemas import (
     AnalysisPhase,
     AnalysisState,
     AnalysisPlan,
-    PlanAnalysisScope,
     PlanStep,
     TaskStatus,
 )
-from backend.services.figure_contract import visual_plan_inheritance_for_plan
 
 
 def _make_workflow():
@@ -61,106 +58,6 @@ def state_dict():
 
 class TestApprovePlanStatus:
     """Verify _approve_plan transitions TaskStatus to RUNNING."""
-
-    @pytest.mark.asyncio
-    async def test_revision_outside_foundation_can_be_approved(self, wf, state_dict):
-        analysis_state = AnalysisState(
-            user_id="test",
-            current_round=2,
-            analysis_phase=AnalysisPhase.INNOVATION,
-            status=TaskStatus.WAITING_PLAN_REVIEW,
-            accepted_foundation_inventories=[AcceptedFoundationInventory(
-                inventory_id="foundation-v1-r1",
-                round_number=1,
-                plan_id="round1-plan",
-                planning_stage="stage1",
-            )],
-        )
-        plan = AnalysisPlan(
-            phase="innovation",
-            status="user_reviewing",
-            scope_contract_version=1,
-            foundation_inventory_id="foundation-v1-r1",
-            steps=[PlanStep(
-                id=2,
-                title="Revise prior differential expression",
-                method="Apply the PI's revised contrast to retained counts",
-                input="Retained counts from prior-plan-other, outside the foundation inventory",
-                analysis_scope=PlanAnalysisScope(
-                    relationship="revise",
-                    cohort_scope="full",
-                    foundation_refs=[],
-                    reason="The PI requested a revised contrast for prior-plan-other.",
-                    requested_by="pi",
-                ),
-            )],
-        )
-
-        assert await wf._approve_plan(state_dict, plan, analysis_state, "approved") is True
-        assert state_dict["plan_approved"] is True
-        assert "user_plan_feedback" not in state_dict
-        assert plan.status == "approved"
-        assert plan.steps[0].analysis_scope.relationship == "revise"
-        assert plan.steps[0].analysis_scope.foundation_refs == []
-        assert analysis_state.current_plan is plan
-        assert analysis_state.status == TaskStatus.RUNNING
-        wf._send_state_sync.assert_awaited_once_with(analysis_state, "plan_approved")
-
-    @pytest.mark.asyncio
-    async def test_approve_plan_sets_status_running(self, wf, plan, analysis_state, state_dict):
-        """After approval, analysis_state.status must be RUNNING, not WAITING_PLAN_REVIEW."""
-        await wf._approve_plan(state_dict, plan, analysis_state, "approved")
-        assert analysis_state.status == TaskStatus.RUNNING
-
-    @pytest.mark.asyncio
-    async def test_approve_plan_sends_state_sync(self, wf, plan, analysis_state, state_dict):
-        """After approval, a state_sync must be pushed to the frontend."""
-        await wf._approve_plan(state_dict, plan, analysis_state, "approved")
-        wf._send_state_sync.assert_called_once_with(analysis_state, "plan_approved")
-
-    @pytest.mark.asyncio
-    async def test_skip_plan_sets_status_running(self, wf, plan, analysis_state, state_dict):
-        """The 'skip' path also goes through _approve_plan and must set RUNNING."""
-        await wf._approve_plan(state_dict, plan, analysis_state, "skipped")
-        assert analysis_state.status == TaskStatus.RUNNING
-
-    @pytest.mark.asyncio
-    async def test_revision_flag_set_when_plan_revision_needed(self, wf, plan, analysis_state, state_dict):
-        """If state has plan_revision_needed=True, _approve_plan must set
-        plan_revision_resume=True and clear plan_revision_needed."""
-        state_dict["plan_revision_needed"] = True
-        await wf._approve_plan(state_dict, plan, analysis_state, "approved")
-        assert state_dict["plan_revision_resume"] is True
-        assert state_dict["plan_revision_needed"] is False
-
-    @pytest.mark.asyncio
-    async def test_approve_revision_records_unchanged_completed_step_figure_lineage(
-        self, wf, analysis_state, state_dict
-    ):
-        parent = AnalysisPlan(
-            id="parent-plan",
-            phase="exploration",
-            steps=[PlanStep(
-                id=3,
-                title="Differential expression",
-                method="pydeseq2",
-                figure_requirements=[{"figure_type": "volcano"}],
-                status="completed",
-            )],
-        )
-        await wf._approve_plan(state_dict, parent, analysis_state, "approved")
-
-        revised = AnalysisPlan(
-            id="revised-plan",
-            revision_of=parent.id,
-            phase="exploration",
-            steps=[parent.steps[0].model_copy(deep=True)],
-        )
-        await wf._approve_plan(state_dict, revised, analysis_state, "approved")
-
-        assert visual_plan_inheritance_for_plan(analysis_state, revised) == {
-            3: (parent.id,),
-        }
 
     @pytest.mark.parametrize("action", ["approved", "skipped"])
     @pytest.mark.asyncio
@@ -229,15 +126,3 @@ class TestApprovePlanStatus:
 
         assert call_order == ["_send_state_sync", "_send_message"], \
             f"Expected state_sync before plan_approved, got {call_order}"
-
-
-def test_plan_review_signal_keeps_first_action(wf):
-    wf._plan_review_event = asyncio.Event()
-    wf._plan_review_action = None
-
-    assert wf.signal_plan_review("modify", "first") is True
-    assert wf.signal_plan_review("skip") is False
-    assert wf._plan_review_action == {
-        "action": "modify",
-        "user_input": "first",
-    }

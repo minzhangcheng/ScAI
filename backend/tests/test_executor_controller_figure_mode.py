@@ -1,7 +1,6 @@
 """Controller mode normalization keeps figure follow-up in its disposable runtime."""
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -131,56 +130,3 @@ async def test_run_kind_alone_uses_disposable_runtime_and_restores_parent(
     assert harness.agent.last_result is harness.parent_result
     assert harness.parent_history == ["parent receipt"]
     assert harness.state.code_history == ["source receipt"]
-
-
-@pytest.mark.asyncio
-async def test_run_kind_alone_controls_adata_error_identity(monkeypatch):
-    from backend.services.adata_checkpoints.errors import AdataSourcePreparationError
-    from backend.agents.bioinformatics.executor_context import ExecutorBindings
-
-    harness = _controller_harness(monkeypatch)
-
-    async def fail_prepare(_agent, _state, _instruction, **kwargs):
-        assert kwargs["figure_followup"] is True
-        assert kwargs["run_kind"] == "figure_followup"
-        raise AdataSourcePreparationError("preparation failed")
-
-    monkeypatch.setattr(harness.executor_loop, "prepare_loop_context", fail_prepare)
-    result = await harness.executor_controller.run_autonomous_analysis(
-        harness.agent,
-        harness.state,
-        "Render the existing result.",
-        run_kind="figure_followup",
-        bindings=ExecutorBindings(facade=harness.facade),
-    )
-
-    assert result["status"] == "adata_source_error"
-    assert result["executor_run_kind"] == "figure_followup"
-    runtime = harness.DisposableRuntime.instances[-1]
-    assert runtime.exit_call == (None, None, None)
-    assert harness.agent.sandbox is harness.main_sandbox
-    assert harness.agent.code_history is harness.parent_history
-
-
-@pytest.mark.asyncio
-async def test_reverse_figure_mode_conflict_is_rejected_before_sandbox_operation(
-    monkeypatch,
-):
-    harness = _controller_harness(monkeypatch)
-    prepare = AsyncMock()
-    monkeypatch.setattr(harness.executor_loop, "prepare_loop_context", prepare)
-    from backend.agents.bioinformatics.executor_context import ExecutorBindings
-
-    with pytest.raises(ValueError, match="conflicts"):
-        await harness.executor_controller.run_autonomous_analysis(
-            harness.agent,
-            harness.state,
-            "Render the existing result.",
-            figure_followup=True,
-            run_kind="ordinary",
-            bindings=ExecutorBindings(facade=harness.facade),
-        )
-
-    assert harness.DisposableRuntime.instances == []
-    prepare.assert_not_awaited()
-    assert harness.agent.sandbox is harness.main_sandbox

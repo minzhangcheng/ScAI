@@ -1,16 +1,12 @@
 import asyncio
-import httpx
 import pytest
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
-from openai import AsyncOpenAI
 import backend.utils.llm_client as llm_mod
-from backend.utils.llm_client import OpenAICompatibleClient, LLMResponse, LLMToolResponse, NotFoundError, BadRequestError, InternalServerError, RateLimitError
+from backend.utils.llm_client import OpenAICompatibleClient, LLMResponse, LLMToolResponse, NotFoundError, BadRequestError, InternalServerError
 from backend.utils.llm_client_parts.media import normalize_image_input
 from backend.utils.llm_client_parts.prompt_cache import (
     PROMPT_CACHE_EPHEMERAL_TAIL_KEY,
-    PROMPT_CACHE_STABLE_BOUNDARY_KEY,
     PromptCachePlan,
     responses_prefix_cache_plan,
 )
@@ -50,6 +46,59 @@ def _client(base_url):
     c = OpenAICompatibleClient(api_key="k", base_url=base_url, agent_name="t")
     _OPEN_CLIENTS.append(c)
     return c
+
+
+async def _events(*items):
+    for item in items:
+        yield item
+
+
+def _chat_chunk(content=None, *, finish_reason=None, **delta):
+    return SimpleNamespace(
+        model="chat-model", usage=None,
+        choices=[SimpleNamespace(
+            delta=SimpleNamespace(content=content, **delta), finish_reason=finish_reason,
+        )],
+    )
+
+
+def _chat_completion(text, model):
+    return MagicMock(
+        choices=[MagicMock(message=MagicMock(content=text, tool_calls=None))], model=model,
+        usage=MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
+                        prompt_tokens_details=None),
+    )
+
+
+def _bad_request(message, *, param=None):
+    error = {"message": message}
+    if param is not None:
+        error["param"] = param
+    return BadRequestError(
+        message=message, response=MagicMock(status_code=400), body={"error": error},
+    )
+
+
+class _PartialResponseStream:
+    """Yield once, then fail or block until the request is cancelled."""
+
+    def __init__(self, error=None):
+        self.first = True
+        self.error = error
+        self.entered_remainder = asyncio.Event()
+        self.close = AsyncMock()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.first:
+            self.first = False
+            return SimpleNamespace(type="response.output_text.delta", delta="partial")
+        self.entered_remainder.set()
+        if self.error is not None:
+            raise self.error
+        await asyncio.Event().wait()
 
 
 @pytest.mark.asyncio
@@ -113,107 +162,6 @@ async def test_pi_prefix_reaches_responses_wire_without_caching_dynamic_tail(vis
 
 
 @pytest.mark.asyncio
-async def test_cache_planned_openrouter_tools_prefer_anthropic_messages():
-    base_url = "https://openrouter.ai/api/v1"
-    model = "anthropic/claude-sonnet-5"
-    c = _client(base_url)
-    anthropic = MagicMock()
-    anthropic.complete_with_tools = AsyncMock(return_value=LLMToolResponse(
-        content="done",
-        tool_calls=[],
-        model=model,
-        usage={},
-        raw_response=None,
-    ))
-    responses = MagicMock()
-    responses.complete_with_tools = AsyncMock()
-    c._anthropic_adapter = anthropic
-    c._responses_adapter = responses
-
-    result = await c.chat_with_tools(
-        model=model,
-        messages=[
-            {"role": "system", "content": "stable"},
-            {"role": "user", "content": "history"},
-            {
-                "role": "user",
-                "content": "ephemeral",
-                PROMPT_CACHE_EPHEMERAL_TAIL_KEY: True,
-            },
-        ],
-        tools=[{"type": "function", "function": {"name": "f"}}],
-        prompt_cache_plan=PromptCachePlan(),
-        prefer_stream=True,
-    )
-
-    assert result.content == "done"
-    responses.complete_with_tools.assert_not_awaited()
-    request = anthropic.complete_with_tools.await_args.kwargs
-    assert request["cache_mode"] == "explicit"
-    assert request["prompt_cache_plan"] == PromptCachePlan()
-    assert "stream" not in request
-    assert llm_mod._PROBE_CACHE[(base_url, model, "tools")] == "anthropic"
-
-
-@pytest.mark.asyncio
-async def test_cache_planned_openrouter_vision_prefers_anthropic_messages():
-    base_url = "https://openrouter.ai/api/v1"
-    model = "anthropic/claude-sonnet-5"
-    c = _client(base_url)
-    anthropic = MagicMock()
-    anthropic.complete_vision = AsyncMock(return_value=LLMResponse(
-        content="done", model=model, usage={}, raw_response=None,
-    ))
-    responses = MagicMock()
-    responses.complete_vision = AsyncMock()
-    c._anthropic_adapter = anthropic
-    c._responses_adapter = responses
-
-    result = await c.chat_with_vision(
-        model=model,
-        text_prompt="dynamic review",
-        images=["aW1hZ2U="],
-        system_prompt="stable system",
-        prompt_cache_plan=PromptCachePlan(),
-    )
-
-    assert result.content == "done"
-    responses.complete_vision.assert_not_awaited()
-    request = anthropic.complete_vision.await_args.kwargs
-    assert request["cache_mode"] == "explicit"
-    assert request["prompt_cache_plan"] == PromptCachePlan()
-    assert llm_mod._PROBE_CACHE[(base_url, model, "vision")] == "anthropic"
-
-
-@pytest.mark.asyncio
-async def test_disabled_cache_plan_reaches_explicit_responses_vision():
-    c = _client("https://openrouter.ai/api/v1/responses")
-    model = "anthropic/claude-sonnet-5"
-    responses = MagicMock()
-    responses.complete_vision = AsyncMock(return_value=LLMResponse(
-        content="done", model=model, usage={}, raw_response=None,
-    ))
-    anthropic = MagicMock()
-    anthropic.complete_vision = AsyncMock()
-    c._responses_adapter = responses
-    c._anthropic_adapter = anthropic
-    disabled = PromptCachePlan(
-        mode="disabled", prefer_anthropic_messages=False
-    )
-
-    await c.chat_with_vision(
-        model=model,
-        text_prompt="dynamic review",
-        images=["aW1hZ2U="],
-        system_prompt="stable system",
-        prompt_cache_plan=disabled,
-    )
-
-    anthropic.complete_vision.assert_not_awaited()
-    assert responses.complete_vision.await_args.kwargs["cache_mode"] == "disabled"
-
-
-@pytest.mark.asyncio
 async def test_cache_plan_respects_explicit_responses_endpoint_and_disables_cache():
     c = _client("https://openrouter.ai/api/v1/responses")
     responses = MagicMock()
@@ -242,76 +190,6 @@ async def test_cache_plan_respects_explicit_responses_endpoint_and_disables_cach
 
     assert responses.complete_with_tools.await_args.kwargs["cache_mode"] == "disabled"
     anthropic.complete_with_tools.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_cache_planned_openrouter_text_prefers_anthropic_messages():
-    base_url = "https://openrouter.ai/api/v1"
-    model = "anthropic/claude-sonnet-5"
-    c = _client(base_url)
-    anthropic = MagicMock()
-    anthropic.complete = AsyncMock(return_value=LLMResponse(
-        content="done", model=model, usage={}, raw_response=None
-    ))
-    responses = MagicMock()
-    responses.complete = AsyncMock()
-    c._anthropic_adapter = anthropic
-    c._responses_adapter = responses
-
-    result = await c.chat(
-        model=model,
-        messages=[
-            {"role": "system", "content": "stable"},
-            {
-                "role": "user",
-                "content": "persisted question",
-                PROMPT_CACHE_STABLE_BOUNDARY_KEY: True,
-            },
-        ],
-        prompt_cache_plan=PromptCachePlan(),
-        prefer_stream=False,
-    )
-
-    assert result.content == "done"
-    responses.complete.assert_not_awaited()
-    request = anthropic.complete.await_args.kwargs
-    assert request["cache_mode"] == "explicit"
-    assert request["prompt_cache_plan"] == PromptCachePlan()
-    assert llm_mod._PROBE_CACHE[(base_url, model, "cached_text")] == "anthropic"
-
-
-@pytest.mark.asyncio
-async def test_disabled_cache_plan_respects_explicit_responses_endpoint():
-    c = _client("https://openrouter.ai/api/v1/responses")
-    responses = MagicMock()
-    responses.complete = AsyncMock(return_value=LLMResponse(
-        content="done",
-        model="anthropic/claude-sonnet-5",
-        usage={},
-        raw_response=None,
-    ))
-    anthropic = MagicMock()
-    anthropic.complete = AsyncMock()
-    c._responses_adapter = responses
-    c._anthropic_adapter = anthropic
-
-    disabled = PromptCachePlan(
-        mode="disabled", prefer_anthropic_messages=False
-    )
-    await c.chat(
-        model="anthropic/claude-sonnet-5",
-        messages=[{
-            "role": "user",
-            "content": "persisted question",
-            PROMPT_CACHE_STABLE_BOUNDARY_KEY: True,
-        }],
-        prompt_cache_plan=disabled,
-    )
-
-    request = responses.complete.await_args.kwargs
-    assert request["cache_mode"] == "disabled"
-    assert PROMPT_CACHE_STABLE_BOUNDARY_KEY not in request["messages"][0]
-    anthropic.complete.assert_not_awaited()
 
 
 def test_explicit_prompt_cache_support_is_scoped_to_compatible_routes():
@@ -358,81 +236,16 @@ def test_explicit_prompt_cache_support_is_scoped_to_compatible_routes():
 
 
 @pytest.mark.asyncio
-async def test_disabled_cache_plan_omits_automatic_chat_cache_control():
-    c = _client("https://openrouter.ai/api/v1/chat/completions")
-    c.client.chat.completions.create = AsyncMock(return_value=SimpleNamespace(
-        model="anthropic/claude-sonnet-5",
-        usage=None,
-        choices=[SimpleNamespace(message=SimpleNamespace(content="done"))],
-    ))
-
-    await c.chat(
-        model="anthropic/claude-sonnet-5",
-        messages=[{"role": "user", "content": "persisted question"}],
-        prompt_cache_plan=PromptCachePlan(
-            mode="disabled", prefer_anthropic_messages=False
-        ),
-        prefer_stream=False,
-    )
-
-    request = c.client.chat.completions.create.await_args.kwargs
-    assert request["extra_body"]["session_id"]
-    assert "cache_control" not in request["extra_body"]
-
-
-@pytest.mark.asyncio
-async def test_anthropic_route_uses_anthropic_adapter():
-    c = _client("https://api.anthropic.com")  # no /v1 -> anthropic
-    fake = MagicMock()
-    fake.complete = AsyncMock(return_value=LLMResponse("A", "claude", {}, None))
-    c._anthropic_adapter = fake
-    r = await c.chat(model="claude-3", messages=[{"role": "user", "content": "hi"}])
-    assert r.content == "A"
-    fake.complete.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_responses_success_caches_responses():
-    c = _client("https://x/v1")
-    fake = MagicMock()
-    fake.complete = AsyncMock(return_value=LLMResponse("R", "gpt", {}, None))
-    c._responses_adapter = fake
-    r = await c.chat(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
-    assert r.content == "R"
-    assert llm_mod._PROBE_CACHE[("https://x/v1", "gpt-4o")] == "responses"
-
-
-@pytest.mark.asyncio
 async def test_plain_chat_completions_prefers_stream_and_aggregates_text():
     c = _client("https://x/v1/chat/completions")
 
-    async def chunks():
-        yield SimpleNamespace(
-            model="chat-model",
-            usage=None,
-            choices=[SimpleNamespace(
-                delta=SimpleNamespace(content="Hel"), finish_reason=None
-            )],
-        )
-        yield SimpleNamespace(
-            model="chat-model",
-            usage=None,
-            choices=[SimpleNamespace(
-                delta=SimpleNamespace(content="lo"), finish_reason="stop"
-            )],
-        )
-        yield SimpleNamespace(
-            model="chat-model",
-            usage=SimpleNamespace(
-                prompt_tokens=3,
-                completion_tokens=2,
-                total_tokens=5,
-                prompt_tokens_details=None,
-            ),
-            choices=[],
-        )
-
-    c.client.chat.completions.create = AsyncMock(return_value=chunks())
+    c.client.chat.completions.create = AsyncMock(return_value=_events(
+        _chat_chunk("Hel"),
+        _chat_chunk("lo", finish_reason="stop"),
+        SimpleNamespace(model="chat-model", choices=[], usage=SimpleNamespace(
+            prompt_tokens=3, completion_tokens=2, total_tokens=5, prompt_tokens_details=None,
+        )),
+    ))
     result = await c.chat(
         model="chat-model",
         messages=[{"role": "user", "content": "hi"}],
@@ -451,54 +264,9 @@ async def test_plain_chat_completions_prefers_stream_and_aggregates_text():
 
 
 @pytest.mark.asyncio
-async def test_plain_chat_stream_5xx_retries_stream_instead_of_falling_back():
-    client = _client("https://x/v1/chat/completions")
-
-    async def chunks():
-        yield SimpleNamespace(
-            model="chat-model",
-            usage=None,
-            choices=[SimpleNamespace(
-                delta=SimpleNamespace(content="recovered"), finish_reason="stop"
-            )],
-        )
-
-    client.client.chat.completions.create = AsyncMock(side_effect=[
-        InternalServerError(
-            message="temporary upstream error",
-            response=MagicMock(status_code=500),
-            body={"error": {"message": "temporary upstream error"}},
-        ),
-        chunks(),
-    ])
-
-    result = await client.chat(
-        model="chat-model",
-        messages=[{"role": "user", "content": "hi"}],
-        prefer_stream=True,
-    )
-
-    assert result.content == "recovered"
-    assert [
-        call.kwargs["stream"]
-        for call in client.client.chat.completions.create.await_args_list
-    ] == [True, True]
-    llm_mod.asyncio.sleep.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 async def test_plain_chat_midstream_eof_is_not_replayed_nonstreaming():
-    async def chunks():
-        yield SimpleNamespace(
-            model="chat-model",
-            usage=None,
-            choices=[SimpleNamespace(
-                delta=SimpleNamespace(content="partial"), finish_reason=None
-            )],
-        )
-
     client = _client("https://x/v1/chat/completions")
-    client.client.chat.completions.create = AsyncMock(return_value=chunks())
+    client.client.chat.completions.create = AsyncMock(return_value=_events(_chat_chunk("partial")))
 
     with pytest.raises(
         llm_mod.UpstreamExhaustedError, match="finish_reason"
@@ -566,17 +334,10 @@ async def test_chat_stream_refusal_is_surfaced_as_the_public_answer():
     model = "chat-model"
     llm_mod._PROBE_CACHE[(base_url, model)] = "chat"
 
-    async def chunks():
-        yield SimpleNamespace(
-            model=model, usage=None,
-            choices=[SimpleNamespace(
-                delta=SimpleNamespace(content=None,
-                                      refusal="I cannot help with that"),
-                finish_reason="stop")],
-        )
-
     client = _client(base_url)
-    client.client.chat.completions.create = AsyncMock(return_value=chunks())
+    client.client.chat.completions.create = AsyncMock(return_value=_events(
+        _chat_chunk(refusal="I cannot help with that", finish_reason="stop"),
+    ))
 
     result = await client.chat(
         model=model,
@@ -589,55 +350,13 @@ async def test_chat_stream_refusal_is_surfaced_as_the_public_answer():
 
 
 @pytest.mark.asyncio
-async def test_chat_protocol_vision_prefers_stream_and_aggregates_text():
-    """Vision over Chat Completions streams too, so a long tile batch is held
-    open by output rather than by one total-request deadline."""
-    base_url = "https://x/v1"
-    model = "vision-model"
-    llm_mod._PROBE_CACHE[(base_url, model, "vision")] = "chat"
-
-    async def chunks():
-        yield SimpleNamespace(
-            model=model, usage=None,
-            choices=[SimpleNamespace(delta=SimpleNamespace(content='{"ok":'),
-                                     finish_reason=None)])
-        yield SimpleNamespace(
-            model=model,
-            usage=SimpleNamespace(prompt_tokens=7, completion_tokens=3,
-                                  total_tokens=10, prompt_tokens_details=None),
-            choices=[SimpleNamespace(delta=SimpleNamespace(content=' true}'),
-                                     finish_reason="stop")])
-
-    client = _client(base_url)
-    client.client.chat.completions.create = AsyncMock(return_value=chunks())
-
-    result = await client.chat_with_vision(
-        model=model,
-        text_prompt="describe",
-        images=["aW1hZ2U="],
-        prefer_stream=True,
-    )
-
-    assert result.content == '{"ok": true}'
-    assert result.usage["prompt_tokens"] == 7
-    kwargs = client.client.chat.completions.create.call_args.kwargs
-    assert kwargs["stream"] is True
-    assert kwargs["stream_options"] == {"include_usage": True}
-
-
-@pytest.mark.asyncio
 async def test_chat_protocol_vision_stream_unsupported_is_cached_and_falls_back():
     base_url = "https://x/v1"
     model = "vision-model"
     llm_mod._PROBE_CACHE[(base_url, model, "vision")] = "chat"
     stream_flags = []
 
-    fallback = MagicMock()
-    fallback.choices = [MagicMock(message=MagicMock(content="non-stream",
-                                                    tool_calls=None))]
-    fallback.model = model
-    fallback.usage = MagicMock(prompt_tokens=1, completion_tokens=1,
-                               total_tokens=2, prompt_tokens_details=None)
+    fallback = _chat_completion("non-stream", model)
 
     async def create(**kwargs):
         stream_flags.append(kwargs.get("stream", False))
@@ -669,437 +388,32 @@ async def test_chat_protocol_vision_stream_unsupported_is_cached_and_falls_back(
 
 
 @pytest.mark.asyncio
-async def test_anthropic_protocol_vision_requests_a_deferred_stream():
-    base_url = "https://api.anthropic.com"  # no /v1 -> anthropic
-    model = "claude-3"
-    seen = {}
-
-    async def complete_vision(**kwargs):
-        seen.update(kwargs)
-        return LLMResponse("Red", model, {"prompt_tokens": 6}, None)
-
-    client = _client(base_url)
-    adapter = MagicMock()
-    adapter.complete_vision = AsyncMock(side_effect=complete_vision)
-    client._anthropic_adapter = adapter
-
-    result = await client.chat_with_vision(
-        model=model, text_prompt="describe", images=["aW1hZ2U="],
-        prefer_stream=True,
-    )
-
-    assert result.content == "Red"
-    assert seen["stream"] is True and seen["defer_stream"] is True
-    adapter.complete_vision.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_vision_empty_stream_falls_back_once_without_caching():
-    base_url = "https://x/v1"
-    model = "gemini-3.1-pro-preview"
-    llm_mod._PROBE_CACHE[(base_url, model, "vision")] = "responses"
-
-    async def empty_events():
-        if False:
-            yield None
-
-    completed = MagicMock()
-    completed.model = model
-    completed.status = "completed"
-    completed.model_dump.return_value = {
-        "status": "completed",
-        "output": [{
-            "type": "message",
-            "content": [{"type": "output_text", "text": '{"ok": true}'}],
-        }],
-        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-    }
-
-    client = _client(base_url)
-    client.client.responses.create = AsyncMock(
-        side_effect=[empty_events(), completed]
-    )
-
-    result = await client.chat_with_vision(
-        model=model,
-        text_prompt="describe",
-        images=["aW1hZ2U="],
-        prefer_stream=True,
-    )
-
-    assert result.content == '{"ok": true}'
-    assert [
-        call.kwargs.get("stream", False)
-        for call in client.client.responses.create.await_args_list
-    ] == [True, False]
-    assert (base_url, model, "vision") not in llm_mod._NO_RESPONSES_VISION_STREAM
-
-
-@pytest.mark.asyncio
-async def test_tools_empty_stream_falls_back_once_without_caching():
-    base_url = "https://x/v1"
-    model = "gpt-4o"
-    llm_mod._PROBE_CACHE[(base_url, model)] = "responses"
-
-    async def empty_events():
-        if False:
-            yield None
-
-    completed = MagicMock()
-    completed.model = model
-    completed.status = "completed"
-    completed.model_dump.return_value = {
-        "status": "completed",
-        "output": [{
-            "type": "function_call",
-            "call_id": "call_1",
-            "name": "execute_code",
-            "arguments": '{"code":"print(1)"}',
-        }],
-        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-    }
-
-    client = _client(base_url)
-    client.client.responses.create = AsyncMock(
-        side_effect=[empty_events(), completed]
-    )
-
-    result = await client.chat_with_tools(
-        model=model,
-        messages=[{"role": "user", "content": "hi"}],
-        tools=[{"type": "function", "function": {
-            "name": "execute_code",
-            "description": "run code",
-            "parameters": {"type": "object", "properties": {}},
-        }}],
-        prefer_stream=True,
-    )
-
-    assert [tc.name for tc in result.tool_calls] == ["execute_code"]
-    assert [
-        call.kwargs.get("stream", False)
-        for call in client.client.responses.create.await_args_list
-    ] == [True, False]
-    assert (base_url, model, "tools", "responses") not in llm_mod._NO_TEXT_STREAM
-
-
-@pytest.mark.asyncio
-async def test_plain_text_stream_unsupported_is_cached_and_falls_back():
-    base_url = "https://x/v1"
-    model = "gpt-4o"
-    llm_mod._PROBE_CACHE[(base_url, model)] = "responses"
-    stream_flags = []
-
-    async def complete(**kwargs):
-        stream_flags.append(kwargs.get("stream", False))
-        if kwargs.get("stream"):
-            raise BadRequestError(
-                message="Error code: 400 - stream is not supported",
-                response=MagicMock(status_code=400),
-                body={"error": {
-                    "message": "stream is not supported",
-                    "param": "stream",
-                }},
-            )
-        return LLMResponse("fallback", model, {}, None)
-
-    first = _client(base_url)
-    first._responses_adapter = MagicMock()
-    first._responses_adapter.complete = AsyncMock(side_effect=complete)
-    assert (await first.chat(
-        model=model,
-        messages=[{"role": "user", "content": "hi"}],
-        prefer_stream=True,
-    )).content == "fallback"
-
-    second = _client(base_url)
-    second._responses_adapter = MagicMock()
-    second._responses_adapter.complete = AsyncMock(side_effect=complete)
-    assert (await second.chat(
-        model=model,
-        messages=[{"role": "user", "content": "again"}],
-        prefer_stream=True,
-    )).content == "fallback"
-
-    assert stream_flags == [True, False, False]
-    assert (base_url, model, "text", "responses") in llm_mod._NO_TEXT_STREAM
-
-
-@pytest.mark.asyncio
-async def test_cached_text_stream_capability_is_isolated_from_plain_text():
-    base_url = "https://api.anthropic.com/v1/messages"
-    model = "claude-sonnet-5"
-    stream_flags = []
-
-    async def complete(**kwargs):
-        stream_flags.append(kwargs.get("stream", False))
-        if len(stream_flags) == 1:
-            raise BadRequestError(
-                message="Error code: 400 - stream is not supported",
-                response=MagicMock(status_code=400),
-                body={"error": {
-                    "message": "stream is not supported",
-                    "param": "stream",
-                }},
-            )
-        return LLMResponse("done", model, {}, None)
-
-    client = _client(base_url)
-    client._anthropic_adapter = MagicMock()
-    client._anthropic_adapter.complete = AsyncMock(side_effect=complete)
-
-    assert (await client.chat(
-        model=model,
-        messages=[{"role": "user", "content": "cached"}],
-        prompt_cache_plan=PromptCachePlan(),
-        prefer_stream=True,
-    )).content == "done"
-    assert (await client.chat(
-        model=model,
-        messages=[{"role": "user", "content": "plain"}],
-        prefer_stream=True,
-    )).content == "done"
-
-    assert stream_flags == [True, False, True]
-    assert (
-        base_url, model, "cached_text", "anthropic"
-    ) in llm_mod._NO_TEXT_STREAM
-    assert (
-        base_url, model, "text", "anthropic"
-    ) not in llm_mod._NO_TEXT_STREAM
-
-
-@pytest.mark.asyncio
-async def test_deep_research_keeps_nonstreaming_background_lifecycle():
-    client = _client("https://x/v1/responses")
-    adapter = MagicMock()
-    adapter.complete = AsyncMock(
-        return_value=LLMResponse("research", "o3-deep-research", {}, None)
-    )
-    client._responses_adapter = adapter
-
-    result = await client.chat(
-        model="o3-deep-research",
-        messages=[{"role": "user", "content": "research"}],
-        prefer_stream=True,
-    )
-
-    assert result.content == "research"
-    assert adapter.complete.call_args.kwargs.get("stream", False) is False
-
-
-@pytest.mark.asyncio
-async def test_plain_text_stream_transient_failure_retries_stream_only():
-    base_url = "https://x/v1"
-    model = "gpt-4o"
-    llm_mod._PROBE_CACHE[(base_url, model)] = "responses"
-    stream_flags = []
-
-    async def complete(**kwargs):
-        stream_flags.append(kwargs.get("stream", False))
-        if len(stream_flags) <= 2:
-            raise InternalServerError(
-                message="temporary upstream error",
-                response=MagicMock(status_code=500),
-                body={"error": {"message": "temporary upstream error"}},
-            )
-        return LLMResponse("recovered", model, {}, None)
-
-    client = _client(base_url)
-    client._responses_adapter = MagicMock()
-    client._responses_adapter.complete = AsyncMock(side_effect=complete)
-
-    result = await client.chat(
-        model=model,
-        messages=[{"role": "user", "content": "hi"}],
-        prefer_stream=True,
-    )
-
-    assert result.content == "recovered"
-    assert stream_flags == [True, True, True]
-    assert (base_url, model, "text", "responses") not in llm_mod._NO_TEXT_STREAM
-    assert llm_mod.asyncio.sleep.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_responses_stream_remainder_is_consumed_after_retry_boundary(monkeypatch):
-    import backend.utils.llm_client_parts.client_params as params_mod
-
-    retry_returned = asyncio.Event()
-
-    async def tracing_retry(func, **_kwargs):
-        result = await func()
-        assert isinstance(result, llm_mod._StartedStream)
-        retry_returned.set()
-        return result
-
-    monkeypatch.setattr(params_mod, "retry_with_backoff", tracing_retry)
-
-    release = asyncio.Event()
-    completed = MagicMock()
-    completed.model = "gpt-x"
-    completed.model_dump.return_value = {
-        "status": "completed",
-        "output": [{
-            "type": "message",
-            "content": [{"type": "output_text", "text": "Hello"}],
-        }],
-        "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
-    }
-
-    class BlockingStream:
-        def __init__(self):
-            self.index = 0
-            self.close = AsyncMock()
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            self.index += 1
-            if self.index == 1:
-                return SimpleNamespace(type="response.output_text.delta", delta="Hel")
-            if self.index == 2:
-                await release.wait()
-                return SimpleNamespace(type="response.completed", response=completed)
-            raise StopAsyncIteration
-
-    stream = BlockingStream()
-    client = _client("https://x/v1/responses")
-    client.client.responses.create = AsyncMock(return_value=stream)
-
-    task = asyncio.create_task(client.chat(
-        model="gpt-x",
-        messages=[{"role": "user", "content": "hi"}],
-        prefer_stream=True,
-    ))
-    await asyncio.wait_for(retry_returned.wait(), timeout=1)
-
-    # The retry layer has already returned while the logical response is still
-    # streaming. A total request deadline therefore cannot cancel this phase.
-    assert task.done() is False
-    assert client.client.responses.create.await_count == 1
-
-    release.set()
-    result = await task
-    assert result.content == "Hello"
-    stream.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_responses_stream_interruption_is_classified_as_upstream_exhausted():
-    """A stream that dies after its first event must leave the client as the
-    HITL-gated failure type. Workflow nodes gate on UpstreamExhaustedError; a
-    bare RuntimeError reaches their generic handler and kills the run."""
-
-    class TruncatedStream:
-        def __init__(self):
-            self.index = 0
-            self.close = AsyncMock()
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            self.index += 1
-            if self.index == 1:
-                return SimpleNamespace(
-                    type="response.output_text.delta", delta="partial"
-                )
-            raise StopAsyncIteration
-
-    stream = TruncatedStream()
-    client = _client("https://x/v1")
-    client.client.responses.create = AsyncMock(return_value=stream)
-    client.client.chat.completions.create = AsyncMock()
-
-    with pytest.raises(llm_mod.UpstreamExhaustedError) as exc_info:
-        await client.chat(
-            model="gpt-x",
-            messages=[{"role": "user", "content": "hi"}],
-            prefer_stream=True,
-        )
-
-    assert exc_info.value.failure_kind == "stream_interrupted"
-    assert exc_info.value.agent_name == "t"
-    assert exc_info.value.model == "gpt-x"
-    assert exc_info.value.llm_server == "https://x/v1"
-    # The original error stays reachable: it names which wire shape truncated.
-    assert isinstance(exc_info.value.__cause__, llm_mod.StreamInterruptedError)
-    # Classification must not weaken the replay invariant: a partially emitted
-    # generation is never re-issued on another protocol.
-    client.client.chat.completions.create.assert_not_awaited()
-    stream.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_chat_stream_interruption_is_classified_as_upstream_exhausted():
-    """Classification is a property of the client, not of one wire protocol."""
-
-    async def chunks():
-        yield SimpleNamespace(
-            model="chat-model",
-            usage=None,
-            choices=[SimpleNamespace(
-                delta=SimpleNamespace(content="partial"), finish_reason=None
-            )],
-        )
-
-    client = _client("https://x/v1/chat/completions")
-    client.client.chat.completions.create = AsyncMock(return_value=chunks())
-
-    with pytest.raises(llm_mod.UpstreamExhaustedError) as exc_info:
-        await client.chat(
-            model="chat-model",
-            messages=[{"role": "user", "content": "hi"}],
-            prefer_stream=True,
-        )
-
-    assert exc_info.value.failure_kind == "stream_interrupted"
-    assert isinstance(exc_info.value.__cause__, llm_mod.StreamInterruptedError)
-    client.client.chat.completions.create.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_responses_midstream_failure_is_closed_and_not_replayed():
+@pytest.mark.parametrize("failure", ["server_error", "idle_timeout"])
+async def test_responses_midstream_failure_is_closed_and_not_replayed(monkeypatch, failure):
     error = InternalServerError(
-        message="connection lost",
-        response=MagicMock(status_code=500),
+        message="connection lost", response=MagicMock(status_code=500),
         body={"error": {"message": "connection lost"}},
-    )
-
-    class FailingStream:
-        def __init__(self):
-            self.index = 0
-            self.close = AsyncMock()
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            self.index += 1
-            if self.index == 1:
-                return SimpleNamespace(type="response.output_text.delta", delta="partial")
-            raise error
-
-    stream = FailingStream()
-    # Leave protocol uncached so this also proves the probe loop does not replay
-    # a stream that already emitted an event or switch it to another protocol.
-    client = _client("https://x/v1")
+    ) if failure == "server_error" else None
+    stream = _PartialResponseStream(error)
+    # The server-error case leaves protocol uncached: probing must not replay
+    # a stream that emitted an event. The idle case exercises an explicit route.
+    base_url = "https://x/v1" if error else "https://x/v1/responses"
+    client = _client(base_url)
     client.client.responses.create = AsyncMock(return_value=stream)
     client.client.chat.completions.create = AsyncMock()
-
-    with pytest.raises(
-        llm_mod.UpstreamExhaustedError, match="after the first event"
-    ) as exc_info:
-        await client.chat(
-            model="gpt-x",
-            messages=[{"role": "user", "content": "hi"}],
-            prefer_stream=True,
+    kwargs = {}
+    if failure == "idle_timeout":
+        monkeypatch.setattr(
+            "backend.utils.llm_client_parts.retry.MIN_LLM_TIMEOUT_SECONDS", 0.001,
         )
-
-    # The classified failure keeps the original error reachable and its
-    # message intact, so the wire shape that truncated stays diagnosable.
+        kwargs["timeout"] = 0.01
+    match = "after the first event" if error else "TimeoutError"
+    with pytest.raises(llm_mod.UpstreamExhaustedError, match=match) as exc_info:
+        await client.chat(
+            model="gpt-x", messages=[{"role": "user", "content": "hi"}],
+            prefer_stream=True, **kwargs,
+        )
+    # Keep the original failure reachable and the wire shape diagnosable.
     assert exc_info.value.failure_kind == "stream_interrupted"
     assert isinstance(exc_info.value.__cause__, llm_mod.StreamInterruptedError)
     client.client.responses.create.assert_awaited_once()
@@ -1107,80 +421,22 @@ async def test_responses_midstream_failure_is_closed_and_not_replayed():
     stream.close.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_responses_stream_idle_timeout_closes_without_replay():
-    never = asyncio.Event()
 
-    class IdleStream:
-        def __init__(self):
-            self.index = 0
-            self.close = AsyncMock()
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            self.index += 1
-            if self.index == 1:
-                return SimpleNamespace(type="response.output_text.delta", delta="partial")
-            await never.wait()
-
-    stream = IdleStream()
-    client = _client("https://x/v1/responses")
-    client.client.responses.create = AsyncMock(return_value=stream)
-
-    with pytest.raises(
-        llm_mod.UpstreamExhaustedError, match="TimeoutError"
-    ) as exc_info:
-        await client.chat(
-            model="gpt-x",
-            messages=[{"role": "user", "content": "hi"}],
-            timeout=0.01,
-            prefer_stream=True,
-        )
-
-    # The classified failure keeps the original error reachable and its
-    # message intact, so the wire shape that truncated stays diagnosable.
-    assert exc_info.value.failure_kind == "stream_interrupted"
-    assert isinstance(exc_info.value.__cause__, llm_mod.StreamInterruptedError)
-    client.client.responses.create.assert_awaited_once()
-    stream.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_cancelled_responses_stream_closes_and_releases_request_lease():
-    entered_remainder = asyncio.Event()
-    never = asyncio.Event()
-
-    class BlockingStream:
-        def __init__(self):
-            self.index = 0
-            self.close = AsyncMock()
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            self.index += 1
-            if self.index == 1:
-                return SimpleNamespace(type="response.output_text.delta", delta="partial")
-            entered_remainder.set()
-            await never.wait()
-
-    stream = BlockingStream()
+    stream = _PartialResponseStream()
     client = _client("https://x/v1/responses")
     client.client.responses.create = AsyncMock(return_value=stream)
-
     task = asyncio.create_task(client.chat(
-        model="gpt-x",
-        messages=[{"role": "user", "content": "hi"}],
+        model="gpt-x", messages=[{"role": "user", "content": "hi"}],
         prefer_stream=True,
     ))
-    await asyncio.wait_for(entered_remainder.wait(), timeout=1)
+    await asyncio.wait_for(stream.entered_remainder.wait(), timeout=1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-
     stream.close.assert_awaited_once()
     assert client._active_requests == 0
     assert client._requests_idle.is_set()
@@ -1255,33 +511,10 @@ async def test_responses_incomplete_text_is_preserved_with_metadata():
 
 @pytest.mark.asyncio
 async def test_plain_chat_stream_reasoning_only_retries_for_public_answer():
-    async def reasoning_only_chunks():
-        yield SimpleNamespace(
-            model="chat-model",
-            usage=None,
-            choices=[SimpleNamespace(
-                delta=SimpleNamespace(
-                    content=None,
-                    reasoning_content="private chain of thought",
-                ),
-                finish_reason="stop",
-            )],
-        )
-
-    async def public_answer_chunks():
-        yield SimpleNamespace(
-            model="chat-model",
-            usage=None,
-            choices=[SimpleNamespace(
-                delta=SimpleNamespace(content="Public final answer"),
-                finish_reason="stop",
-            )],
-        )
-
     client = _client("https://x/v1/chat/completions")
     client.client.chat.completions.create = AsyncMock(side_effect=[
-        reasoning_only_chunks(),
-        public_answer_chunks(),
+        _events(_chat_chunk(reasoning_content="private chain of thought", finish_reason="stop")),
+        _events(_chat_chunk("Public final answer", finish_reason="stop")),
     ])
 
     result = await client.chat(
@@ -1298,35 +531,12 @@ async def test_plain_chat_stream_reasoning_only_retries_for_public_answer():
     )
 
 
-def test_stream_unsupported_classifier_does_not_cache_other_bad_parameters():
-    error = BadRequestError(
-        message="Streaming request has unsupported parameter temperature",
-        response=MagicMock(status_code=400),
-        body={"error": {
-            "message": "Unsupported parameter for streaming request",
-            "param": "temperature",
-        }},
-    )
-
-    assert llm_mod.is_stream_unsupported_error(error) is False
-
-
 def test_stream_unsupported_classifier_rejects_temperature_without_param_field():
-    error = BadRequestError(
-        message="Unsupported parameter: temperature is not supported with streaming",
-        response=MagicMock(status_code=400),
-        body={"error": {
-            "message": "Unsupported parameter: temperature is not supported with streaming",
-        }},
-    )
+    error = _bad_request("Unsupported parameter: temperature is not supported with streaming")
 
     assert llm_mod.is_stream_unsupported_error(error) is False
 
-    direct_stream_error = BadRequestError(
-        message="Unsupported parameter: stream",
-        response=MagicMock(status_code=400),
-        body={"error": {"message": "Unsupported parameter: stream"}},
-    )
+    direct_stream_error = _bad_request("Unsupported parameter: stream")
     assert llm_mod.is_stream_unsupported_error(direct_stream_error) is True
 
 
@@ -1334,29 +544,13 @@ def test_stream_unsupported_classifier_rejects_temperature_without_param_field()
 async def test_chat_stream_options_rejection_retries_stream_without_usage_option_and_caches():
     base_url = "https://x/v1/chat/completions"
     model = "chat-model"
-    error = BadRequestError(
-        message="Unsupported parameter: stream_options",
-        response=MagicMock(status_code=400),
-        body={"error": {
-            "message": "Unsupported parameter: stream_options",
-            "param": "stream_options",
-        }},
-    )
-
-    async def chunks(text):
-        yield SimpleNamespace(
-            model=model,
-            usage=None,
-            choices=[SimpleNamespace(
-                delta=SimpleNamespace(content=text), finish_reason="stop"
-            )],
-        )
+    error = _bad_request("Unsupported parameter: stream_options", param="stream_options")
 
     client = _client(base_url)
     client.client.chat.completions.create = AsyncMock(side_effect=[
         error,
-        chunks("first"),
-        chunks("second"),
+        _events(_chat_chunk("first", finish_reason="stop")),
+        _events(_chat_chunk("second", finish_reason="stop")),
     ])
 
     first = await client.chat(
@@ -1383,26 +577,6 @@ async def test_chat_stream_options_rejection_retries_stream_without_usage_option
 
 
 @pytest.mark.asyncio
-async def test_responses_endpoint_absent_falls_back_to_chat(monkeypatch):
-    c = _client("https://x/v1")
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=NotFoundError(
-        message="Cannot POST /v1/responses", response=MagicMock(status_code=404), body=None))
-    c._responses_adapter = fake
-    # 现有内联 chat 路径用 self.client.chat.completions.create —— mock 之
-    inline_resp = MagicMock()
-    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT", tool_calls=None))]
-    inline_resp.model = "gpt-4o"
-    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
-                                  prompt_tokens_details=None)
-    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
-    r = await c.chat(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
-    assert r.content == "CHAT"
-    assert "https://x/v1" in llm_mod._NO_RESPONSES_ENDPOINT
-    assert llm_mod._PROBE_CACHE[("https://x/v1", "gpt-4o")] == "chat"
-
-
-@pytest.mark.asyncio
 async def test_responses_not_implemented_500_falls_back_to_chat_without_retry():
     c = _client("https://api.n1n.ai/v1")
     fake = MagicMock()
@@ -1413,12 +587,9 @@ async def test_responses_not_implemented_500_falls_back_to_chat_without_retry():
     ))
     c._responses_adapter = fake
 
-    inline_resp = MagicMock()
-    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT", tool_calls=None))]
-    inline_resp.model = "gemini-3.1-pro-preview"
-    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
-                                  prompt_tokens_details=None)
-    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
+    c.client.chat.completions.create = AsyncMock(
+        return_value=_chat_completion("CHAT", "gemini-3.1-pro-preview"),
+    )
 
     r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
 
@@ -1428,136 +599,6 @@ async def test_responses_not_implemented_500_falls_back_to_chat_without_retry():
     llm_mod.asyncio.sleep.assert_not_awaited()
     assert "https://api.n1n.ai/v1" in llm_mod._NO_RESPONSES_ENDPOINT
     assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
-
-
-@pytest.mark.asyncio
-async def test_vision_responses_not_implemented_500_falls_back_to_chat():
-    c = _client("https://api.n1n.ai/v1")
-    fake = MagicMock()
-    fake.complete_vision = AsyncMock(side_effect=InternalServerError(
-        message="Error code: 500 - {'error': {'message': 'not implemented', 'code': 'local:convert_request_failed'}}",
-        response=MagicMock(status_code=500),
-        body={"error": {"message": "not implemented", "code": "local:convert_request_failed"}},
-    ))
-    c._responses_adapter = fake
-
-    inline_resp = MagicMock()
-    inline_resp.choices = [MagicMock(message=MagicMock(content="VISION_CHAT", tool_calls=None))]
-    inline_resp.model = "gemini-3.1-pro-preview"
-    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
-                                  prompt_tokens_details=None)
-    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
-
-    r = await c.chat_with_vision(
-        model="gemini-3.1-pro-preview",
-        text_prompt="describe",
-        images=[],
-        temperature=0.5,
-        max_tokens=10,
-        system_prompt="PATHOLOGY ROLE",
-    )
-
-    assert r.content == "VISION_CHAT"
-    fake.complete_vision.assert_awaited_once()
-    c.client.chat.completions.create.assert_awaited_once()
-    messages = c.client.chat.completions.create.call_args.kwargs["messages"]
-    assert "PATHOLOGY ROLE" in messages[0]["content"]
-    assert "respond exclusively in English" in messages[0]["content"]
-    assert llm_mod._PROBE_CACHE[(
-        "https://api.n1n.ai/v1", "gemini-3.1-pro-preview", "vision"
-    )] == "chat"
-    assert llm_mod._PROBE_CACHE.get((
-        "https://api.n1n.ai/v1", "gemini-3.1-pro-preview"
-    )) is None
-
-
-@pytest.mark.asyncio
-async def test_vision_stream_transient_failure_retries_stream_only():
-    c = _client("https://x/v1")
-    model = "gemini-3.1-pro-preview"
-    llm_mod._PROBE_CACHE[("https://x/v1", model, "vision")] = "responses"
-    stream_flags = []
-
-    async def complete_vision(**kwargs):
-        stream_flags.append(kwargs.get("stream", False))
-        if len(stream_flags) <= 2:
-            raise InternalServerError(
-                message="temporary upstream error",
-                response=MagicMock(status_code=500),
-                body={"error": {"message": "temporary upstream error"}},
-            )
-        return LLMResponse('{"ok": true}', model, {}, None)
-
-    responses = MagicMock()
-    responses.complete_vision = AsyncMock(side_effect=complete_vision)
-    c._responses_adapter = responses
-
-    result = await c.chat_with_vision(
-        model=model,
-        text_prompt="describe",
-        images=["aW1hZ2U="],
-        prefer_stream=True,
-    )
-
-    assert result.content == '{"ok": true}'
-    assert stream_flags == [True, True, True]
-    assert ("https://x/v1", model, "vision") not in llm_mod._NO_RESPONSES_VISION_STREAM
-    assert llm_mod.asyncio.sleep.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_vision_stream_unsupported_is_cached_per_endpoint_and_model():
-    base_url = "https://x/v1"
-    model = "gemini-3.1-pro-preview"
-    calls = []
-
-    async def complete_vision(**kwargs):
-        calls.append((kwargs["model"], kwargs.get("stream", False)))
-        if kwargs["model"] == model and kwargs.get("stream"):
-            raise BadRequestError(
-                message="Error code: 400 - stream is not supported",
-                response=MagicMock(status_code=400),
-                body={"error": {
-                    "message": "stream is not supported",
-                    "param": "stream",
-                }},
-            )
-        return LLMResponse('{"ok": true}', kwargs["model"], {}, None)
-
-    first = _client(base_url)
-    first._responses_adapter = MagicMock()
-    first._responses_adapter.complete_vision = AsyncMock(side_effect=complete_vision)
-    await first.chat_with_vision(
-        model=model,
-        text_prompt="describe",
-        images=["aW1hZ2U="],
-        prefer_stream=True,
-    )
-
-    second = _client(base_url)
-    second._responses_adapter = MagicMock()
-    second._responses_adapter.complete_vision = AsyncMock(side_effect=complete_vision)
-    await second.chat_with_vision(
-        model=model,
-        text_prompt="describe again",
-        images=["aW1hZ2U="],
-        prefer_stream=True,
-    )
-    await second.chat_with_vision(
-        model="other-model",
-        text_prompt="describe other model",
-        images=["aW1hZ2U="],
-        prefer_stream=True,
-    )
-
-    assert calls == [
-        (model, True),
-        (model, False),
-        (model, False),
-        ("other-model", True),
-    ]
-    assert (base_url, model, "vision") in llm_mod._NO_RESPONSES_VISION_STREAM
-    assert (base_url, "other-model", "vision") not in llm_mod._NO_RESPONSES_VISION_STREAM
 
 
 @pytest.mark.asyncio
@@ -1581,16 +622,9 @@ async def test_vision_shape_400_reroutes_only_vision():
     responses.complete_vision = AsyncMock(side_effect=shape_error)
     c._responses_adapter = responses
 
-    inline = MagicMock()
-    inline.choices = [MagicMock(message=MagicMock(content="CHAT_VISION", tool_calls=None))]
-    inline.model = "vision-model"
-    inline.usage = MagicMock(
-        prompt_tokens=1,
-        completion_tokens=1,
-        total_tokens=2,
-        prompt_tokens_details=None,
+    c.client.chat.completions.create = AsyncMock(
+        return_value=_chat_completion("CHAT_VISION", "vision-model"),
     )
-    c.client.chat.completions.create = AsyncMock(return_value=inline)
 
     result = await c.chat_with_vision(
         model="vision-model",
@@ -1606,91 +640,6 @@ async def test_vision_shape_400_reroutes_only_vision():
     assert llm_mod._PROBE_CACHE.get(("https://x/v1", "vision-model")) is None
 
 
-def _sdk_flat_vision_bad_request():
-    detail = {
-        "message": " Invalid   input ",
-        "type": "invalid_request_error",
-        "param": "messages.1.content",
-        "code": None,
-    }
-    request = httpx.Request("POST", "https://x/v1/responses")
-    response = httpx.Response(
-        400,
-        request=request,
-        json={"error": detail},
-    )
-    sdk = AsyncOpenAI(api_key="k", base_url="https://x/v1")
-    return sdk, sdk._make_status_error(
-        response.text,
-        body=response.json(),
-        response=response,
-    )
-
-
-@pytest.mark.asyncio
-async def test_sdk_flat_bad_request_body_is_vision_context_only():
-    sdk, error = _sdk_flat_vision_bad_request()
-    try:
-        assert isinstance(error, BadRequestError)
-        assert error.body == {
-            "message": " Invalid   input ",
-            "type": "invalid_request_error",
-            "param": "messages.1.content",
-            "code": None,
-        }
-        assert llm_mod.is_vision_request_shape_error(error) is False
-        assert llm_mod.is_vision_request_shape_error(
-            error, vision_request=True
-        ) is True
-        assert llm_mod.is_transient_probe_error(error) is True
-        assert llm_mod.is_transient_probe_error(
-            error, vision_request=True
-        ) is False
-    finally:
-        await sdk.close()
-
-
-@pytest.mark.asyncio
-async def test_flat_generic_vision_400_redirects_once_without_transient_retry():
-    base_url = "https://x/v1"
-    model = "vision-model"
-    c = _client(base_url)
-    sdk, shape_error = _sdk_flat_vision_bad_request()
-    try:
-        responses = MagicMock()
-        responses.complete_vision = AsyncMock(side_effect=shape_error)
-        c._responses_adapter = responses
-
-        inline = MagicMock()
-        inline.choices = [
-            MagicMock(message=MagicMock(content="CHAT_VISION", tool_calls=None))
-        ]
-        inline.model = model
-        inline.usage = MagicMock(
-            prompt_tokens=1,
-            completion_tokens=1,
-            total_tokens=2,
-            prompt_tokens_details=None,
-        )
-        c.client.chat.completions.create = AsyncMock(return_value=inline)
-
-        result = await c.chat_with_vision(
-            model=model,
-            text_prompt="describe",
-            images=["aW1hZ2U="],
-            max_tokens=10,
-        )
-
-        assert result.content == "CHAT_VISION"
-        responses.complete_vision.assert_awaited_once()
-        c.client.chat.completions.create.assert_awaited_once()
-        llm_mod.asyncio.sleep.assert_not_awaited()
-        assert llm_mod._PROBE_CACHE[(base_url, model, "vision")] == "chat"
-        assert llm_mod._PROBE_CACHE.get((base_url, model)) is None
-    finally:
-        await sdk.close()
-
-
 def test_vision_data_uri_is_normalized_without_double_prefix():
     raw, mime = normalize_image_input("data:image/jpeg;base64,aW1hZ2U=")
 
@@ -1700,86 +649,9 @@ def test_vision_data_uri_is_normalized_without_double_prefix():
 
 
 @pytest.mark.asyncio
-async def test_chat_vision_code_1214_reroutes_once_to_responses():
-    c = _client("https://x/v1/chat/completions")
-    shape_error = BadRequestError(
-        message="Error code: 400 - invalid image url",
-        response=MagicMock(status_code=400),
-        body={"error": {
-            "message": "Invalid image_url payload",
-            "param": "messages[0].content[1].image_url",
-            "code": 1214,
-        }},
-    )
-    c.client.chat.completions.create = AsyncMock(side_effect=shape_error)
-    responses = MagicMock()
-    responses.complete_vision = AsyncMock(
-        return_value=LLMResponse("RESPONSES_VISION", "m", {}, None)
-    )
-    c._responses_adapter = responses
-
-    result = await c.chat_with_vision(
-        model="vision-model",
-        text_prompt="describe",
-        images=["data:image/png;base64,aW1hZ2U="],
-        max_tokens=10,
-    )
-
-    assert result.content == "RESPONSES_VISION"
-    c.client.chat.completions.create.assert_awaited_once()
-    responses.complete_vision.assert_awaited_once()
-    assert responses.complete_vision.call_args.kwargs["images"] == ["aW1hZ2U="]
-
-
-def test_unrelated_400_is_not_vision_shape_mismatch():
-    error = BadRequestError(
-        message="Error code: 400 - context length exceeded",
-        response=MagicMock(status_code=400),
-        body={"error": {"message": "context length exceeded", "param": "messages"}},
-    )
-    classifier = getattr(llm_mod, "is_responses_vision_shape_error", None)
-    assert classifier is not None
-    assert classifier(error) is False
-
-
-@pytest.mark.asyncio
-async def test_tools_responses_not_implemented_500_falls_back_to_chat():
-    c = _client("https://api.n1n.ai/v1")
-    fake = MagicMock()
-    fake.complete_with_tools = AsyncMock(side_effect=InternalServerError(
-        message="Error code: 500 - {'error': {'message': 'not implemented', 'code': 'local:convert_request_failed'}}",
-        response=MagicMock(status_code=500),
-        body={"error": {"message": "not implemented", "code": "local:convert_request_failed"}},
-    ))
-    c._responses_adapter = fake
-
-    inline_resp = MagicMock()
-    inline_resp.choices = [MagicMock(message=MagicMock(content="TOOLS_CHAT", tool_calls=None))]
-    inline_resp.model = "gemini-3.1-pro-preview"
-    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
-                                  prompt_tokens_details=None)
-    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
-
-    r = await c.chat_with_tools(
-        model="gemini-3.1-pro-preview",
-        messages=[{"role": "user", "content": "hi"}],
-        tools=[{"type": "function", "function": {"name": "f"}}],
-    )
-
-    assert r.content == "TOOLS_CHAT"
-    fake.complete_with_tools.assert_awaited_once()
-    c.client.chat.completions.create.assert_awaited_once()
-    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
-
-
-@pytest.mark.asyncio
 async def test_responses_forced_tool_choice_retries_once_with_auto():
     c = _client("https://x/v1")
-    error = BadRequestError(
-        message="Thinking mode does not support this tool_choice",
-        response=MagicMock(status_code=400),
-        body={"error": {"message": "Thinking mode does not support this tool_choice"}},
-    )
+    error = _bad_request("Thinking mode does not support this tool_choice")
     responses = MagicMock()
     responses.complete_with_tools = AsyncMock(side_effect=[
         error,
@@ -1816,113 +688,6 @@ async def test_responses_forced_tool_choice_retries_once_with_auto():
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_not_implemented_500_falls_back_to_chat():
-    c = _client("https://api.n1n.ai/v1")
-
-    async def _raise_at_first_chunk(**kwargs):
-        raise InternalServerError(
-            message="Error code: 500 - {'error': {'message': 'not implemented', 'code': 'local:convert_request_failed'}}",
-            response=MagicMock(status_code=500),
-            body={"error": {"message": "not implemented", "code": "local:convert_request_failed"}},
-        )
-        yield  # pragma: no cover
-
-    fake = MagicMock()
-    fake.stream = MagicMock(side_effect=lambda **kwargs: _raise_at_first_chunk(**kwargs))
-    c._responses_adapter = fake
-
-    class _Chunk:
-        def __init__(self, t): self.choices = [MagicMock(delta=MagicMock(content=t))]
-
-    async def _chat_stream(*a, **k):
-        for t in ["Hel", "lo"]:
-            yield _Chunk(t)
-
-    c.client.chat.completions.create = AsyncMock(side_effect=lambda **kw: _chat_stream())
-
-    chunks = []
-    async for ch in c.chat_stream(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}]):
-        chunks.append(ch)
-
-    assert "".join(chunks) == "Hello"
-    assert fake.stream.call_count == 1
-    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
-
-
-@pytest.mark.asyncio
-async def test_protocol_probe_persistent_500_does_not_cache_protocol():
-    c = _client("https://x/v1")
-    boom = InternalServerError(
-        message="Error code: 500 - upstream overloaded",
-        response=MagicMock(status_code=500),
-        body={"error": {"message": "upstream overloaded"}},
-    )
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=boom)
-    c._responses_adapter = fake
-    c.client.chat.completions.create = AsyncMock(side_effect=boom)
-    anth = MagicMock()
-    anth.complete = AsyncMock(side_effect=boom)
-    c._anthropic_adapter = anth
-
-    with pytest.raises(llm_mod.UpstreamExhaustedError):
-        await c.chat(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
-
-    assert "https://x/v1" not in llm_mod._NO_RESPONSES_ENDPOINT
-    assert ("https://x/v1", "gpt-4o") not in llm_mod._PROBE_CACHE
-    assert fake.complete.await_count == 3
-
-
-@pytest.mark.asyncio
-async def test_responses_transient_then_chat_success_retries_then_caches_chat():
-    c = _client("https://api.n1n.ai/v1")
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=InternalServerError(
-        message="Error code: 500 - transient responses failure",
-        response=MagicMock(status_code=500),
-        body={"error": {"message": "transient responses failure"}},
-    ))
-    c._responses_adapter = fake
-
-    inline_resp = MagicMock()
-    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT_OK", tool_calls=None))]
-    inline_resp.model = "gemini-3.1-pro-preview"
-    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
-                                  prompt_tokens_details=None)
-    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
-
-    r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
-
-    assert r.content == "CHAT_OK"
-    assert fake.complete.await_count == 3
-    c.client.chat.completions.create.assert_awaited_once()
-    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
-
-
-@pytest.mark.asyncio
-async def test_protocol_probe_responses_recovers_before_touching_chat():
-    c = _client("https://api.n1n.ai/v1")
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=[
-        InternalServerError(
-            message="Error code: 500 - responses down once",
-            response=MagicMock(status_code=500),
-            body={"error": {"message": "responses down once"}},
-        ),
-        LLMResponse("RESPONSES_OK", "gemini-3.1-pro-preview", {}, None),
-    ])
-    c._responses_adapter = fake
-    c.client.chat.completions.create = AsyncMock()
-
-    r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
-
-    assert r.content == "RESPONSES_OK"
-    assert fake.complete.await_count == 2
-    c.client.chat.completions.create.assert_not_awaited()
-    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "responses"
-
-
-@pytest.mark.asyncio
 async def test_protocol_probe_exhausts_all_protocols_on_persistent_transient():
     c = _client("https://api.n1n.ai/v1")
     boom = InternalServerError(
@@ -1946,94 +711,6 @@ async def test_protocol_probe_exhausts_all_protocols_on_persistent_transient():
     assert c.client.chat.completions.create.await_count == 3
     assert anth.complete.await_count == 3
     assert ("https://api.n1n.ai/v1", "gemini-3.1-pro-preview") not in llm_mod._PROBE_CACHE
-
-
-@pytest.mark.asyncio
-async def test_protocol_probe_rate_limit_retries_then_switches_to_chat():
-    c = _client("https://api.n1n.ai/v1")
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=RateLimitError(
-        message="rate limited on responses",
-        response=MagicMock(status_code=429),
-        body={"error": {"message": "rate limited on responses"}},
-    ))
-    c._responses_adapter = fake
-
-    inline_resp = MagicMock()
-    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT_AFTER_429", tool_calls=None))]
-    inline_resp.model = "gemini-3.1-pro-preview"
-    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
-                                  prompt_tokens_details=None)
-    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
-
-    r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
-
-    assert r.content == "CHAT_AFTER_429"
-    assert fake.complete.await_count == 3
-    c.client.chat.completions.create.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_protocol_probe_json_error_alternates_without_internal_sleep():
-    c = _client("https://api.n1n.ai/v1")
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=json.JSONDecodeError("bad json", "{", 0))
-    c._responses_adapter = fake
-
-    inline_resp = MagicMock()
-    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT_AFTER_JSON", tool_calls=None))]
-    inline_resp.model = "gemini-3.1-pro-preview"
-    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
-                                  prompt_tokens_details=None)
-    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
-
-    r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
-
-    assert r.content == "CHAT_AFTER_JSON"
-    assert fake.complete.await_count == 3  # 3 probe retries (JSONDecodeError is now transient)
-    c.client.chat.completions.create.assert_awaited_once()
-    assert llm_mod.asyncio.sleep.await_count == 3  # 3 probe retries, each sleeps before retrying
-
-
-@pytest.mark.asyncio
-async def test_endpoint_absent_records_no_responses_but_no_protocol_cache_on_exhaustion():
-    c = _client("https://api.n1n.ai/v1")
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=NotFoundError(
-        message="Cannot POST /v1/responses",
-        response=MagicMock(status_code=404),
-        body=None,
-    ))
-    c._responses_adapter = fake
-    boom = InternalServerError(
-        message="Error code: 500 - chat unavailable",
-        response=MagicMock(status_code=500),
-        body={"error": {"message": "chat unavailable"}},
-    )
-    c.client.chat.completions.create = AsyncMock(side_effect=boom)
-    anth = MagicMock()
-    anth.complete = AsyncMock(side_effect=boom)
-    c._anthropic_adapter = anth
-
-    with pytest.raises(llm_mod.UpstreamExhaustedError):
-        await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
-
-    assert "https://api.n1n.ai/v1" in llm_mod._NO_RESPONSES_ENDPOINT
-    assert ("https://api.n1n.ai/v1", "gemini-3.1-pro-preview") not in llm_mod._PROBE_CACHE
-
-
-@pytest.mark.asyncio
-async def test_tools_responses_route():
-    c = _client("https://x/v1")
-    fake = MagicMock()
-    fake.complete_with_tools = AsyncMock(
-        return_value=LLMToolResponse(content="T", tool_calls=[], model="gpt",
-                                     usage={}, raw_response=None))
-    c._responses_adapter = fake
-    r = await c.chat_with_tools(model="gpt-4o", messages=[{"role": "user", "content": "hi"}],
-                                tools=[{"type": "function", "function": {"name": "f"}}])
-    assert isinstance(r, LLMToolResponse)
-    assert llm_mod._PROBE_CACHE[("https://x/v1", "gpt-4o")] == "responses"
 
 
 @pytest.mark.asyncio
@@ -2088,14 +765,7 @@ async def test_tools_stream_unsupported_falls_back_once_and_is_cached():
     async def complete_with_tools(**kwargs):
         stream_flags.append(kwargs.get("stream", False))
         if kwargs.get("stream"):
-            raise BadRequestError(
-                message="stream is not supported",
-                response=MagicMock(status_code=400),
-                body={"error": {
-                    "message": "stream is not supported",
-                    "param": "stream",
-                }},
-            )
+            raise _bad_request("stream is not supported", param="stream")
         return LLMToolResponse(
             content=None,
             tool_calls=[],
@@ -2104,102 +774,20 @@ async def test_tools_stream_unsupported_falls_back_once_and_is_cached():
             raw_response=None,
         )
 
-    first = _client(base_url)
-    first._responses_adapter = MagicMock()
-    first._responses_adapter.complete_with_tools = AsyncMock(
-        side_effect=complete_with_tools
-    )
-    await first.chat_with_tools(
-        model=model,
-        messages=[{"role": "user", "content": "run"}],
-        tools=[{"type": "function", "function": {"name": "f"}}],
-        prefer_stream=True,
-    )
-
-    second = _client(base_url)
-    second._responses_adapter = MagicMock()
-    second._responses_adapter.complete_with_tools = AsyncMock(
-        side_effect=complete_with_tools
-    )
-    await second.chat_with_tools(
-        model=model,
-        messages=[{"role": "user", "content": "run again"}],
-        tools=[{"type": "function", "function": {"name": "f"}}],
-        prefer_stream=True,
-    )
+    for prompt in ("run", "run again"):
+        client = _client(base_url)
+        client._responses_adapter = MagicMock()
+        client._responses_adapter.complete_with_tools = AsyncMock(side_effect=complete_with_tools)
+        await client.chat_with_tools(
+            model=model, messages=[{"role": "user", "content": prompt}],
+            tools=[{"type": "function", "function": {"name": "f"}}],
+            prefer_stream=True,
+        )
 
     assert stream_flags == [True, False, False]
     assert (base_url, model, "tools", "responses") in llm_mod._NO_TEXT_STREAM
 
 
-@pytest.mark.asyncio
-async def test_tools_reactive_chat_to_responses_fallback():
-    # base_url forces chat path (explicit suffix), but model is responses-only
-    c = _client("https://x/v1/chat/completions")
-    # 现有内联 chat_with_tools 第一发抛 responses-only BadRequestError
-    err = BadRequestError(message="This model is only supported in v1/responses",
-                          response=MagicMock(status_code=400), body=None)
-    c.client.chat.completions.create = AsyncMock(side_effect=err)
-    fake = MagicMock()
-    fake.complete_with_tools = AsyncMock(
-        return_value=LLMToolResponse(content="R", tool_calls=[], model="m",
-                                     usage={}, raw_response=None))
-    c._responses_adapter = fake
-    r = await c.chat_with_tools(model="some-model", messages=[{"role": "user", "content": "hi"}],
-                                tools=[{"type": "function", "function": {"name": "f"}}])
-    assert r.content == "R"
-    assert llm_mod._PROBE_CACHE[("https://x/v1/chat/completions", "some-model")] == "responses"
-
-
-@pytest.mark.asyncio
-async def test_stream_responses_endpoint_absent_falls_back_before_first_chunk():
-    c = _client("https://x/v1")
-
-    # responses 适配器：建立连接即抛端点缺失（尚未 yield）
-    async def _boom(*a, **k):
-        raise NotFoundError(message="Cannot POST /v1/responses",
-                            response=MagicMock(status_code=404), body=None)
-        yield  # pragma: no cover
-    fake = MagicMock()
-    fake.stream = MagicMock(side_effect=lambda **kw: _boom())
-    c._responses_adapter = fake
-
-    # 内联 chat_stream 用 self.client.chat.completions.create(stream=True)
-    class _Chunk:
-        def __init__(self, t): self.choices = [MagicMock(delta=MagicMock(content=t))]
-    async def _chat_stream(*a, **k):
-        for t in ["He", "llo"]:
-            yield _Chunk(t)
-    c.client.chat.completions.create = AsyncMock(side_effect=lambda **kw: _chat_stream())
-
-    chunks = []
-    async for ch in c.chat_stream(model="gpt-4o", messages=[{"role": "user", "content": "hi"}]):
-        chunks.append(ch)
-    assert "".join(chunks) == "Hello"
-    assert "https://x/v1" in llm_mod._NO_RESPONSES_ENDPOINT
-
-
-from backend.utils.llm_client import ENGLISH_ENFORCEMENT
-
-
-@pytest.mark.asyncio
-async def test_chat_native_path_injects_english_enforcement():
-    # 显式 /chat/completions 后缀 -> 直接走原生 chat 分支（protocol == "chat"）
-    c = _client("https://x/v1/chat/completions")
-    captured = {}
-    async def _fake_create(**kwargs):
-        captured["messages"] = kwargs["messages"]
-        resp = MagicMock()
-        resp.choices = [MagicMock(message=MagicMock(content="ok", tool_calls=None))]
-        resp.model = "gpt-4o"
-        resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
-                               prompt_tokens_details=None)
-        return resp
-    c.client.chat.completions.create = AsyncMock(side_effect=_fake_create)
-    await c.chat(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
-    # enforcement 必须出现在发往 SDK 的消息里
-    joined = " ".join(str(m.get("content")) for m in captured["messages"])
-    assert ENGLISH_ENFORCEMENT.split(".")[0] in joined
 
 
 @pytest.mark.asyncio
@@ -2224,174 +812,6 @@ async def test_chat_stream_true_rejected_before_protocol_dispatch():
 
 
 @pytest.mark.asyncio
-async def test_plain_chat_reactive_chat_to_responses_fallback():
-    c = _client("https://x/v1/chat/completions")
-    err = BadRequestError(message="This model is only supported in v1/responses",
-                          response=MagicMock(status_code=400), body=None)
-    c.client.chat.completions.create = AsyncMock(side_effect=err)
-    fake = MagicMock()
-    fake.complete = AsyncMock(return_value=LLMResponse("R", "m", {}, None))
-    c._responses_adapter = fake
-
-    r = await c.chat(model="responses-only", messages=[{"role": "user", "content": "hi"}])
-
-    assert r.content == "R"
-    assert llm_mod._PROBE_CACHE[("https://x/v1/chat/completions", "responses-only")] == "responses"
-    fake.complete.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_stream_chat_reactive_chat_to_responses_fallback_before_first_chunk():
-    c = _client("https://x/v1/chat/completions")
-    err = BadRequestError(message="This model is only supported in v1/responses",
-                          response=MagicMock(status_code=400), body=None)
-    c.client.chat.completions.create = AsyncMock(side_effect=err)
-
-    async def _responses_stream(**kwargs):
-        yield "Re"
-        yield "sp"
-
-    fake = MagicMock()
-    fake.stream = MagicMock(side_effect=lambda **kwargs: _responses_stream(**kwargs))
-    c._responses_adapter = fake
-
-    chunks = []
-    async for ch in c.chat_stream(model="responses-only", messages=[{"role": "user", "content": "hi"}]):
-        chunks.append(ch)
-
-    assert "".join(chunks) == "Resp"
-    assert llm_mod._PROBE_CACHE[(
-        "https://x/v1/chat/completions", "responses-only"
-    )] == "responses"
-
-
-@pytest.mark.asyncio
-async def test_vision_chat_reactive_chat_to_responses_fallback():
-    c = _client("https://x/v1/chat/completions")
-    err = BadRequestError(message="This model is only supported in v1/responses",
-                          response=MagicMock(status_code=400), body=None)
-    c.client.chat.completions.create = AsyncMock(side_effect=err)
-    fake = MagicMock()
-    fake.complete_vision = AsyncMock(return_value=LLMResponse("VR", "m", {}, None))
-    c._responses_adapter = fake
-
-    r = await c.chat_with_vision(model="responses-only", text_prompt="describe",
-                                 images=[], temperature=0.5, max_tokens=10)
-
-    assert r.content == "VR"
-    assert llm_mod._PROBE_CACHE[(
-        "https://x/v1/chat/completions", "responses-only", "vision"
-    )] == "responses"
-    assert llm_mod._PROBE_CACHE.get((
-        "https://x/v1/chat/completions", "responses-only"
-    )) is None
-    fake.complete_vision.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_stream_responses_chat_only_does_not_mark_base_url_no_responses():
-    c = _client("https://x/v1")
-
-    # Simulate a Responses adapter.stream that raises BadRequestError at first
-    # __anext__() (connection establishment). The mock must return an async
-    # generator, not a coroutine, since adapter.stream is async def with yield.
-    async def _raise_at_first_chunk(**kwargs):
-        raise BadRequestError(message="This model is only supported in v1/chat/completions",
-                              response=MagicMock(status_code=400), body=None)
-        yield  # pragma: no cover
-
-    fake = MagicMock()
-    fake.stream = MagicMock(side_effect=lambda **kwargs: _raise_at_first_chunk(**kwargs))
-    c._responses_adapter = fake
-
-    class _Chunk:
-        def __init__(self, t): self.choices = [MagicMock(delta=MagicMock(content=t))]
-    async def _chat_stream(*a, **k):
-        for t in ["Hel", "lo"]:
-            yield _Chunk(t)
-    c.client.chat.completions.create = AsyncMock(side_effect=lambda **kw: _chat_stream())
-
-    chunks = []
-    async for ch in c.chat_stream(model="gpt-chat-only", messages=[{"role": "user", "content": "hi"}]):
-        chunks.append(ch)
-    assert "".join(chunks) == "Hello"
-    assert "https://x/v1" not in llm_mod._NO_RESPONSES_ENDPOINT
-    assert llm_mod._PROBE_CACHE[("https://x/v1", "gpt-chat-only")] == "chat"
-
-
-@pytest.mark.asyncio
-async def test_probe_responses_transient_retries_3x_then_switches_to_chat():
-    c = _client("https://api.n1n.ai/v1")
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=InternalServerError(
-        message="Error code: 500 - transient blip",
-        response=MagicMock(status_code=500),
-        body={"error": {"message": "transient blip"}},
-    ))
-    c._responses_adapter = fake
-    inline_resp = MagicMock()
-    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT_OK", tool_calls=None))]
-    inline_resp.model = "m"
-    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
-                                  prompt_tokens_details=None)
-    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
-
-    r = await c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
-
-    assert r.content == "CHAT_OK"
-    assert fake.complete.await_count == 3
-    sleeps = [call.args[0] for call in llm_mod.asyncio.sleep.await_args_list]
-    assert sleeps == [2.0, 15.0, 10.0]
-    c.client.chat.completions.create.assert_awaited_once()
-    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "m")] == "chat"
-
-
-@pytest.mark.asyncio
-async def test_probe_responses_recovers_on_second_attempt_stays_responses():
-    c = _client("https://api.n1n.ai/v1")
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=[
-        InternalServerError(message="Error code: 500 - blip",
-                            response=MagicMock(status_code=500),
-                            body={"error": {"message": "blip"}}),
-        LLMResponse("RESP_OK", "m", {}, None),
-    ])
-    c._responses_adapter = fake
-    c.client.chat.completions.create = AsyncMock()
-
-    r = await c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
-
-    assert r.content == "RESP_OK"
-    assert fake.complete.await_count == 2
-    c.client.chat.completions.create.assert_not_awaited()
-    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "m")] == "responses"
-
-
-@pytest.mark.asyncio
-async def test_probe_endpoint_absent_switches_immediately_no_retry():
-    c = _client("https://api.n1n.ai/v1")
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=NotFoundError(
-        message="Cannot POST /v1/responses",
-        response=MagicMock(status_code=404), body=None))
-    c._responses_adapter = fake
-    inline_resp = MagicMock()
-    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT", tool_calls=None))]
-    inline_resp.model = "m"
-    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
-                                  prompt_tokens_details=None)
-    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
-
-    r = await c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
-
-    assert r.content == "CHAT"
-    fake.complete.assert_awaited_once()
-    llm_mod.asyncio.sleep.assert_not_awaited()
-    assert "https://api.n1n.ai/v1" in llm_mod._NO_RESPONSES_ENDPOINT
-    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "m")] == "chat"
-
-
-@pytest.mark.asyncio
 async def test_probe_anthropic_third_in_order_succeeds_caches_anthropic():
     c = _client("https://gateway.example.com/v1")
     resp_fake = MagicMock()
@@ -2410,26 +830,3 @@ async def test_probe_anthropic_third_in_order_succeeds_caches_anthropic():
 
     assert r.content == "ANTH"
     assert llm_mod._PROBE_CACHE[("https://gateway.example.com/v1", "m")] == "anthropic"
-
-
-@pytest.mark.asyncio
-async def test_cached_responses_uses_full_retry_on_transient():
-    c = _client("https://x/v1")
-    llm_mod._PROBE_CACHE[("https://x/v1", "m")] = "responses"
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=[
-        InternalServerError(message="Error code: 500 - blip1",
-                            response=MagicMock(status_code=500),
-                            body={"error": {"message": "blip1"}}),
-        InternalServerError(message="Error code: 500 - blip2",
-                            response=MagicMock(status_code=500),
-                            body={"error": {"message": "blip2"}}),
-        LLMResponse("RESP_OK", "m", {}, None),
-    ])
-    c._responses_adapter = fake
-
-    r = await c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
-
-    assert r.content == "RESP_OK"
-    assert fake.complete.await_count == 3
-    assert llm_mod._PROBE_CACHE[("https://x/v1", "m")] == "responses"

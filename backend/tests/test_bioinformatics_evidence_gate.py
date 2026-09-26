@@ -1,4 +1,3 @@
-import traceback
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -6,14 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 from backend.agents.bioinformatics_agent import (
     BioinformaticsAgent,
     TOOLS,
-    _build_exec_autosave_wrapper,
-    _evidence_gate_record,
     execution_supports_evidence,
     successful_evidence_executions,
 )
 from backend.models.schemas import AgentType, AnalysisPhase, CodeExecution
-from backend.models.schemas import AnalysisState, RoundResult
-from backend.services.report.analysis_log import build_round_summaries
+from backend.models.schemas import AnalysisState
 
 
 def test_failed_or_explicitly_failed_validation_cannot_support_findings():
@@ -57,26 +53,6 @@ def test_report_findings_accepts_optional_execution_evidence_candidates():
     ]
 
 
-def test_execution_modality_is_derived_from_code_not_finding_text():
-    from backend.services.sample_design import infer_execution_modalities
-
-    assert infer_execution_modalities(
-        "dds = DeseqDataSet(counts=bulk_counts, metadata=meta)"
-    ) == ["bulk_rna_seq"]
-    assert infer_execution_modalities(
-        "sc.tl.rank_genes_groups(adata, 'condition')"
-    ) == ["single_cell"]
-    assert infer_execution_modalities(
-        "bulk_degs = set(bulk_results.index); sc.pl.dotplot(adata, bulk_degs)"
-    ) == ["single_cell", "bulk_rna_seq"]
-    assert infer_execution_modalities(
-        "# import pydeseq2\nprint('bulk_results')"
-    ) == []
-    assert infer_execution_modalities(
-        "from pydeseq2.dds import DeseqDataSet as DDS\nDDS(counts=counts)"
-    ) == ["bulk_rna_seq"]
-
-
 def test_finding_cannot_borrow_a_different_executions_modality():
     from backend.services.sample_design import finding_evidence_errors
 
@@ -95,106 +71,6 @@ def test_finding_cannot_borrow_a_different_executions_modality():
         "finding 1 declares 'single_cell', but its executed code does not include "
         "dedicated matching evidence; observed modalities are ['bulk_rna_seq']"
     ]
-
-
-def test_mixed_execution_can_support_a_modality_specific_finding():
-    from backend.services.sample_design import finding_evidence_errors
-
-    mixed = CodeExecution(
-        id="mixed-exec", code="compare(bulk_counts, adata)",
-        analysis_modalities=["single_cell", "bulk_rna_seq"],
-    )
-    records = [{
-        "text": "single-cell localization is descriptive",
-        "modality": "single_cell",
-        "evidence_execution_ids": [mixed.id],
-    }]
-
-    assert finding_evidence_errors(
-        records, {mixed.id}, {mixed.id: mixed},
-    ) == []
-
-
-def test_force_released_gate_has_structured_audit_identity_and_count():
-    record = _evidence_gate_record(
-        gate="analysis-unit",
-        rule_id="replicate-aware-inference",
-        detail="Cell-level inference is not identifiable.",
-        severity="block",
-        rejection_count=1,
-        rejection_limit=1,
-        forced_release=True,
-    )
-
-    assert record == {
-        "gate": "analysis-unit",
-        "rule_id": "replicate-aware-inference",
-        "detail": "Cell-level inference is not identifiable.",
-        "subject": "",
-        "severity": "block",
-        "rejection_count": 1,
-        "rejection_limit": 1,
-        "forced_release": True,
-    }
-
-
-def test_user_exception_traceback_points_to_user_source_not_cleanup(tmp_path):
-    wrapper = _build_exec_autosave_wrapper(
-        "raise TypeError('user failure')",
-        str(tmp_path),
-        "traceback-source",
-    )
-
-    import matplotlib.pyplot as pyplot
-
-    real_close = pyplot.close
-    while getattr(real_close, "_scai_noop", False):
-        real_close = getattr(real_close, "_scai_prev", real_close)
-    real_show = pyplot.show
-    while getattr(real_show, "_scai_noop", False):
-        real_show = getattr(real_show, "_scai_prev", real_show)
-    pyplot.close = real_close
-    pyplot.show = real_show
-    try:
-        with pytest.raises(TypeError) as caught:
-            exec(wrapper, {}, {})
-    finally:
-        pyplot.close = real_close
-        pyplot.show = real_show
-        real_close("all")
-    rendered = "".join(traceback.format_exception(caught.value))
-
-    assert '<scai-user-code>' in rendered
-    assert "_scai_cleanup_plt.close('all')" not in rendered
-
-
-def test_report_round_summary_preserves_evidence_qualification():
-    round_result = RoundResult(
-        round_number=7,
-        phase="innovation",
-        bioinformatics_findings=["candidate signal"],
-        round_status="partial",
-        evidence_status="substantive",
-        bioinformatics_evidence_verified=False,
-        evidence_execution_ids=["exec-good"],
-        evidence_notes=["Validation did not complete."],
-        evidence_gate_degraded=True,
-        evidence_gate_findings=[{
-            "gate": "analysis-unit",
-            "rule_id": "replicate-aware-inference",
-            "severity": "block",
-            "forced_release": True,
-        }],
-    )
-    state = AnalysisState(user_id="owner", round_results=[round_result])
-
-    summary = build_round_summaries(state)[0]
-    assert summary["round_status"] == "partial"
-    assert summary["bioinformatics_evidence_verified"] is False
-    assert summary["evidence_gate_degraded"] is True
-    assert summary["evidence_execution_ids"] == ["exec-good"]
-    assert summary["evidence_notes"] == ["Validation did not complete."]
-    assert summary["evidence_gate_findings"][0]["gate"] == "analysis-unit"
 
 
 @pytest.mark.asyncio

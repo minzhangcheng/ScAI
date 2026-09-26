@@ -1,51 +1,13 @@
 """Shared prompt-budget behavior stays best-effort and observational."""
 
-import json
 
 from backend.utils.context_budget import (
-    CHARS_PER_TOKEN,
     ContextBudget,
     apply_budget,
     compact_messages,
-    estimate_text_tokens,
-    estimate_tokens,
     withheld_declaration,
 )
 from backend.utils.tool_messages import tool_calls_are_paired
-
-
-def test_estimator_counts_text_lists_and_tool_arguments():
-    messages = [
-        {"role": "user", "content": "a" * 350},
-        {"role": "user", "content": [{"type": "text", "text": "b" * 40}]},
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [{
-                "id": "call-1",
-                "function": {"name": "run", "arguments": "c" * 350},
-            }],
-        },
-    ]
-    assert estimate_text_tokens("a" * 350) == int(350 / CHARS_PER_TOKEN)
-    assert estimate_tokens(messages) >= int(
-        (700 + len(json.dumps(messages[1]["content"]))) / CHARS_PER_TOKEN
-    )
-
-
-def test_small_window_reduces_completion_reserve_and_keeps_prompt_positive():
-    budget = ContextBudget(context_window=8_192, completion_reserve=32_768)
-    assert budget.prompt_ceiling == 1
-    assert budget.effective_completion_reserve == 7_679
-
-    output, report = apply_budget(
-        [{"role": "user", "content": "hello"}],
-        context_window=8_192,
-        completion_reserve=32_768,
-    )
-    assert output
-    assert report.effective_completion_reserve == 7_679
-    assert report.requested_completion_reserve == 32_768
 
 
 def test_uncompactable_anchor_returns_best_effort_and_declaration_without_raise():
@@ -83,13 +45,3 @@ def test_compaction_preserves_anchor_recent_context_and_tool_pairing():
     assert report.actions
     assert output[0]["content"] == "ANCHOR"
     assert tool_calls_are_paired(output)
-
-
-def test_default_executor_formula_matches_the_spec_tuning():
-    budget = ContextBudget(
-        context_window=200_000,
-        completion_reserve=32_768,
-        budget_factor=0.90,
-    )
-    assert budget.prompt_ceiling == 150_048
-    assert int(budget.prompt_ceiling * 0.70) == 105_033

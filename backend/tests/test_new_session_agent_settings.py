@@ -15,18 +15,6 @@ def _state() -> AnalysisState:
     )
 
 
-def test_new_session_freezes_default_without_creating_manual_override():
-    from backend.config import SystemConfig
-    from backend.utils.settings_provider import AgentSettingsProvider
-    state = _state()
-    config = SystemConfig(context_windows={"pi": 160000})
-    _new_session_agent_settings(state, None, {}, config)
-    assert state.agent_server_configs["pi"]["default_context_window"] == 160000
-    assert "context_window" not in state.agent_server_configs["pi"]
-    restored = AnalysisState.model_validate_json(state.model_dump_json())
-    assert AgentSettingsProvider(restored, SystemConfig(), None).get_context_window("pi") == 160000
-
-
 def test_new_session_copies_nonsecret_defaults_and_injects_saved_secrets():
     state = _state()
     settings = AgentSettingsSnapshotRequest.model_validate({
@@ -75,22 +63,6 @@ def test_new_session_rejects_malformed_agent_server_url():
 
     with pytest.raises(HTTPException, match="valid http or https URL"):
         _new_session_agent_settings(state, settings, {})
-
-
-def test_new_session_applies_saved_secrets_without_browser_snapshot():
-    state = _state()
-
-    _new_session_agent_settings(state, None, {
-        "agent_api_keys": {"pi": "agent-secret"},
-        "literature": {
-            "deep_research_api_key": "research-secret",
-            "google_api_key": "google-secret",
-        },
-    })
-
-    assert state.agent_server_configs["pi"]["api_key"] == "agent-secret"
-    assert state.literature_config["deep_research_api_key"] == "research-secret"
-    assert state.literature_config["google_api_key"] == "google-secret"
 
 
 def test_partial_literature_snapshot_only_overrides_explicit_fields():

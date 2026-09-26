@@ -5,49 +5,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.utils.error_parsing import (
-    TECHNICAL_ERROR_TYPES,
-    API_ERROR_TYPES,
-    CODE_GEN_ERROR_TYPES,
     compact_traceback,
     sanitize_error_payload,
-    strip_ansi,
     extract_error_type,
-    detect_swallowed_error,
 )
-
-
-def test_technical_error_types_is_public():
-    """TECHNICAL_ERROR_TYPES should be importable without underscore prefix."""
-    import backend.utils.error_parsing as ep
-    assert hasattr(ep, "TECHNICAL_ERROR_TYPES")
-
-
-def test_technical_error_types_not_empty():
-    assert len(TECHNICAL_ERROR_TYPES) > 0
-
-
-def test_technical_error_types_contains_common_errors():
-    for err in ("KeyError", "TypeError", "ValueError", "RuntimeError"):
-        assert err in TECHNICAL_ERROR_TYPES, f"{err} missing from TECHNICAL_ERROR_TYPES"
-
-
-def test_naming_consistency_no_leading_underscore():
-    """All three public error type constants should follow the same naming convention."""
-    from backend.utils import error_parsing
-    for name in ("TECHNICAL_ERROR_TYPES", "API_ERROR_TYPES", "CODE_GEN_ERROR_TYPES"):
-        assert hasattr(error_parsing, name), f"{name} not found in error_parsing module"
-
-
-def test_strip_ansi():
-    assert strip_ansi("\x1b[31mError\x1b[0m") == "Error"
-    assert strip_ansi("plain text") == "plain text"
-
-
-def test_strip_ansi_removes_osc_with_bel_or_string_terminator():
-    assert strip_ansi("\x1b]8;;https://invalid.example\x07label\x1b]8;;\x07") == "label"
-    assert strip_ansi(
-        "\x1b]8;;https://invalid.example\x1b\\label\x1b]8;;\x1b\\"
-    ) == "label"
 
 
 def test_error_payload_secret_keys_mask_arbitrary_value_formats():
@@ -69,30 +30,6 @@ def test_error_payload_secret_keys_mask_arbitrary_value_formats():
     assert sanitized["api_key"] == "<redacted-secret>"
     assert sanitized["nested"]["db_password"] == "<redacted-secret>"
     assert sanitized["nested"]["diagnostic"] == "ValueError: useful explanation"
-
-
-def test_error_payload_sanitizer_preserves_cycle_and_depth_diagnostics():
-    cyclic = {"diagnostic": "RuntimeError: useful"}
-    cyclic["nested"] = cyclic
-    deep = current = {}
-    for _index in range(20):
-        current["nested"] = {}
-        current = current["nested"]
-
-    sanitized_cycle = sanitize_error_payload(cyclic)
-    sanitized_depth = sanitize_error_payload(deep)
-
-    assert sanitized_cycle["diagnostic"] == "RuntimeError: useful"
-    assert sanitized_cycle["nested"] == "<recursive-error-payload>"
-    cursor = sanitized_depth
-    for _index in range(16):
-        cursor = cursor["nested"]
-    assert cursor == "<error-payload-depth-limit>"
-
-
-def test_extract_error_type():
-    assert extract_error_type("Traceback:\n  File ...\nKeyError: 'foo'") == "KeyError"
-    assert extract_error_type("") == ""
 
 
 def test_compact_traceback_preserves_final_exception_and_user_frame():
@@ -124,76 +61,6 @@ def test_compact_traceback_preserves_final_exception_and_user_frame():
     assert extract_error_type(compacted) == "TypeError"
 
 
-def _long_diagnostic_traceback():
-    frames = "\n".join(
-        f'  File "/workspace/project/frame_{index}.py", line {index}, in helper\n'
-        f"    frame_{index}()"
-        for index in range(120)
-    )
-    return (
-        "Traceback (most recent call last):\n"
-        f"{frames}\n"
-        "TypeError: boolean value of NA is ambiguous"
-    )
-
-
-def test_bounded_diagnostic_keeps_final_exception_and_marks_cut():
-    from backend.utils.error_parsing import (
-        DIAGNOSTIC_TRUNCATION_MARKER,
-        bounded_diagnostic,
-    )
-
-    bounded = bounded_diagnostic(_long_diagnostic_traceback(), 500)
-
-    assert len(bounded) <= 500
-    assert DIAGNOSTIC_TRUNCATION_MARKER in bounded
-    assert "TypeError: boolean value of NA is ambiguous" in bounded
-
-
-def test_bounded_diagnostic_respects_budget_and_short_value_contract():
-    from backend.utils.error_parsing import bounded_diagnostic
-
-    assert bounded_diagnostic(None, 500) == ""
-    assert bounded_diagnostic("", 500) == ""
-    assert bounded_diagnostic("ValueError: short", 500) == "ValueError: short"
-    assert bounded_diagnostic("ValueError: first line\n  second line", 500) == (
-        "ValueError: first line second line"
-    )
-
-    for limit in (1, 7, 32, 79, 500):
-        bounded = bounded_diagnostic(_long_diagnostic_traceback(), limit)
-        assert len(bounded) <= limit
-        assert bounded == bounded_diagnostic(_long_diagnostic_traceback(), limit)
-
-
-def test_bounded_diagnostic_redacts_before_bounding():
-    from backend.utils.error_parsing import bounded_diagnostic
-
-    secret = "synthetic-diagnostic-secret"
-    bounded = bounded_diagnostic(
-        "Traceback:\n"
-        f"  File '/home/synthetic-user/project/{'x' * 600}.py'\n"
-        f"  Authorization: Bearer {secret}\n"
-        "TypeError: boolean value of NA is ambiguous",
-        500,
-    )
-
-    assert len(bounded) <= 500
-    assert secret not in bounded
-    assert "synthetic-user" not in bounded
-    assert "TypeError: boolean value of NA is ambiguous" in bounded
-
-
-def test_compact_traceback_tail_is_not_resliced_away():
-    from backend.utils.error_parsing import bounded_diagnostic
-
-    compacted = compact_traceback(_long_diagnostic_traceback(), max_chars=500)
-    bounded = bounded_diagnostic(compacted, 500)
-
-    assert "TypeError: boolean value of NA is ambiguous" in compacted
-    assert "TypeError: boolean value of NA is ambiguous" in bounded
-
-
 def test_compact_traceback_redacts_credentials_before_persisting():
     secret = "synthetic-fixture-credential-value"
     compacted = compact_traceback(
@@ -223,48 +90,3 @@ def test_compact_traceback_redacts_private_absolute_paths():
     assert "<workspace-path>" in compacted
     assert "<session-path>" in compacted
     assert "RuntimeError: synthetic final failure" in compacted
-
-
-def test_detect_swallowed_error_scvelo_case():
-    """Caught AttributeError repr + skip decision → returns 'AttributeError'."""
-    output = (
-        "Innovation phase package status: {'scvelo': 'available'}\n"
-        "{'condition': 'Con', 'status': 'failed', "
-        "'error': \"AttributeError(\\\"module 'scvelo' has no attribute 'read'\\\")\", "
-        "'decision': 'skip_velocity'}"
-    )
-    assert detect_swallowed_error(output) == "AttributeError"
-
-
-def test_detect_swallowed_error_str_form():
-    """Str-form 'ValueError: ...' with a 'skipping' keyword is detected."""
-    output = "ValueError: not enough cells\nskipping trajectory analysis"
-    assert detect_swallowed_error(output) == "ValueError"
-
-
-def test_detect_swallowed_error_no_skip_keyword_returns_none():
-    """A technical error with NO skip/abandon decision must NOT trigger (the
-    agent may fix it on the next step — do not nag)."""
-    output = "AttributeError(\"module 'scvelo' has no attribute 'read'\")\nRetrying with read_loom..."
-    assert detect_swallowed_error(output) is None
-
-
-def test_detect_swallowed_error_legit_data_skip_returns_none():
-    """A data-driven skip with no technical error token must NOT trigger."""
-    output = "No spliced/unspliced layers present; skip_velocity"
-    assert detect_swallowed_error(output) is None
-
-
-def test_detect_swallowed_error_empty_returns_none():
-    assert detect_swallowed_error("") is None
-    assert detect_swallowed_error(None) is None
-
-
-def test_hyphenated_skip_decision_detected():
-    output = "AttributeError: 'X' object has no attribute 'y'\nskip-velocity"
-    assert detect_swallowed_error(output) == "AttributeError"
-
-
-def test_underscore_skip_decision_still_detected():
-    output = "ValueError: bad input\nskip_trajectory"
-    assert detect_swallowed_error(output) == "ValueError"

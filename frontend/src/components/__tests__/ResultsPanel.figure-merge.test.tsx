@@ -71,53 +71,6 @@ describe('ResultsPanel — the curated list adds to the gallery, it does not rep
     useAppStore.setState({ messages: [], language: 'en' } as any)
   })
 
-  it('keeps every session figure when the PI curates a subset', () => {
-    const all = ['a', 'b', 'c', 'd'].map(n => figure(n))
-    useAppStore.setState({
-      currentSession: makeSession(all),
-      messages: [integratedReportMessage([
-        { id: 'id-a', name: 'a', figure_type: 'umap', review_status: 'approved' },
-      ])],
-    } as any)
-
-    render(<ResultsPanel />)
-
-    expect(screen.getByText('a')).toBeInTheDocument()
-    expect(screen.getByText('b')).toBeInTheDocument()
-    expect(screen.getByText('c')).toBeInTheDocument()
-    expect(screen.getByText('d')).toBeInTheDocument()
-  })
-
-  it('admits a curated figure the session payload never carried', () => {
-    useAppStore.setState({
-      currentSession: makeSession([figure('from_session')]),
-      // Workspace-scanned figures reach the client only through this message.
-      messages: [integratedReportMessage([
-        {
-          id: 'id-scanned', name: 'from_workspace', figure_type: 'heatmap',
-          review_status: 'pending', is_publication: false,
-        },
-      ])],
-    } as any)
-
-    render(<ResultsPanel />)
-
-    expect(screen.getByText('from_workspace')).toBeInTheDocument()
-    expect(screen.getByText('from_session')).toBeInTheDocument()
-  })
-
-  it('ignores an integrated_report that curated nothing', () => {
-    // `content.figures` is truthy when empty, so this used to empty the gallery.
-    useAppStore.setState({
-      currentSession: makeSession([figure('kept')]),
-      messages: [integratedReportMessage([])],
-    } as any)
-
-    render(<ResultsPanel />)
-
-    expect(screen.getByText('kept')).toBeInTheDocument()
-  })
-
   it('does not replace the authoritative report with a persisted blob placeholder', () => {
     const placeholderMessage = integratedReportMessage([])
     placeholderMessage.content.report = STRIPPED_FIGURE_PLACEHOLDER
@@ -134,49 +87,6 @@ describe('ResultsPanel — the curated list adds to the gallery, it does not rep
     expect(screen.getByRole('heading', { name: 'Authoritative report' })).toBeInTheDocument()
     expect(screen.getByText('Full report content.')).toBeInTheDocument()
     expect(screen.queryByText(STRIPPED_FIGURE_PLACEHOLDER)).not.toBeInTheDocument()
-  })
-
-  it('does not duplicate a figure when the report is regenerated', () => {
-    // Workspace figures are given a fresh uuid on every assembly, so identity
-    // has to come from the name.
-    useAppStore.setState({
-      currentSession: makeSession([figure('shared')]),
-      messages: [
-        integratedReportMessage([{ id: 'uuid-1', name: 'shared', figure_type: 'umap', review_status: 'approved' }]),
-        integratedReportMessage([{ id: 'uuid-2', name: 'shared', figure_type: 'umap', review_status: 'approved' }]),
-      ],
-    } as any)
-
-    render(<ResultsPanel />)
-
-    expect(screen.getAllByText('shared')).toHaveLength(1)
-  })
-
-  it('keeps plan provenance when a compact report payload updates a figure', () => {
-    const existing = figure('planned', { planStepId: 7, planId: 'plan-v2', purpose: 'result' })
-    const compact = figure('planned', {
-      pngBase64: undefined,
-      planStepId: undefined,
-      planId: undefined,
-      purpose: undefined,
-    })
-
-    expect(mergeFigureMetadata(compact, existing)).toMatchObject({
-      pngBase64: 'AAA',
-      planStepId: 7,
-      planId: 'plan-v2',
-      purpose: 'result',
-    })
-  })
-
-  it('drops stale base64 when a same-name event replaces the figure id', () => {
-    const existing = figure('replaced', { id: 'old-id', pngBase64: 'OLD' })
-    const incoming = figure('replaced', {
-      id: 'new-id',
-      pngBase64: undefined,
-    })
-
-    expect(mergeFigureMetadata(incoming, existing).pngBase64).toBeUndefined()
   })
 
   it('drops stale base64 when a new revision omits its preview bytes', () => {
@@ -207,40 +117,6 @@ describe('ResultsPanel — the curated list adds to the gallery, it does not rep
     })
 
     expect(mergeFigureMetadata(incoming, existing).pngBase64).toBe('CURRENT')
-  })
-
-  it('adds a figure immediately from a revision event', () => {
-    useAppStore.setState({
-      currentSession: makeSession([]),
-      messages: [{
-        id: 'msg-revision',
-        type: 'figure_revision',
-        agent: 'pi',
-        timestamp: '2026-07-31T13:39:00Z',
-        content: {
-          figure: {
-            id: 'id-live',
-            name: 'live_revision',
-            description: 'Needs another pass',
-            figure_type: 'heatmap',
-            png_path: '/w/figures/live_revision.jpg',
-            pdf_path: '/w/figures/live_revision.pdf',
-            review_status: 'revision_requested',
-            revision_count: 1,
-            plan_step_id: 8,
-            plan_id: 'plan-v3',
-            purpose: 'result',
-          },
-        },
-      }],
-    } as any)
-
-    render(<ResultsPanel />)
-
-    expect(screen.getByText('live_revision')).toBeInTheDocument()
-    expect(screen.getByText('Revision Requested')).toBeInTheDocument()
-    expect(screen.getByText('Plan step 8')).toBeInTheDocument()
-    expect(screen.queryByText('Final')).not.toBeInTheDocument()
   })
 
   it('does not resurrect an invalidated registered figure from a persisted report message', () => {

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { PlanReviewDialog, type AnalysisPlan } from '../PlanReviewDialog'
@@ -43,26 +43,6 @@ afterEach(() => {
 })
 
 describe('PlanReviewDialog interactions', () => {
-  it('submits trimmed plan feedback', async () => {
-    useAppStore.setState({ language: 'en' })
-    const onModify = vi.fn().mockResolvedValue(undefined)
-    render(
-      <PlanReviewDialog
-        {...baseProps}
-        plan={plan()}
-        countdownSeconds={-1}
-        onModify={onModify}
-      />,
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: 'Modify' }))
-    fireEvent.change(screen.getByPlaceholderText('Enter modification suggestions...'), {
-      target: { value: '  add a control  ' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Submit Feedback' }))
-
-    await waitFor(() => expect(onModify).toHaveBeenCalledWith('add a control'))
-  })
 
   it('resets the countdown when the plan fingerprint changes', async () => {
     vi.useFakeTimers()

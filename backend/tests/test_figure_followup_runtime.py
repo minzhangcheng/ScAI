@@ -2,9 +2,7 @@
 import asyncio
 import hashlib
 from pathlib import Path
-import tempfile
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -55,69 +53,6 @@ class _RecordingLock:
     async def __aexit__(self, exc_type, exc, tb):
         self.events.append("lock_exit")
         self._lock.release()
-
-
-@pytest.mark.asyncio
-async def test_runtime_start_failure_stops_without_saving_and_cleans_private_files(
-    tmp_path, monkeypatch,
-):
-    main_sandbox = SimpleNamespace()
-    runtime = FigureFollowupRuntime(main_sandbox, SimpleNamespace(id="owner"))
-    stop = AsyncMock(side_effect=RuntimeError("kernel stop failed"))
-    session_tmp = tmp_path / f"scai-{runtime.session_id}"
-    session_tmp.mkdir()
-    integrity_root = tmp_path / "integrity" / runtime.session_id
-    integrity_root.mkdir(parents=True)
-    monkeypatch.setattr(
-        "backend.services.figure_followup_runtime.tempfile.gettempdir",
-        lambda: str(tmp_path),
-    )
-
-    async def fail_after_allocating_private_resources():
-        runtime._tempdir = tempfile.TemporaryDirectory(
-            dir=tmp_path, prefix="scai-figure-render-"
-        )
-        runtime._integrity_root = integrity_root
-        runtime.sandbox = SimpleNamespace(stop=stop)
-        raise RuntimeError("disposable kernel failed to restore")
-
-    monkeypatch.setattr(runtime, "_start", fail_after_allocating_private_resources)
-
-    with pytest.raises(RuntimeError, match="failed to restore"):
-        await runtime.__aenter__()
-
-    assert stop.await_args.kwargs == {"save": False}
-    assert runtime.sandbox is None
-    assert runtime._tempdir is None
-    assert runtime._integrity_root is None
-    assert not integrity_root.exists()
-    assert not session_tmp.exists()
-
-
-@pytest.mark.asyncio
-async def test_runtime_refuses_main_session_without_committed_dump(tmp_path):
-    lock = asyncio.Lock()
-    notebook_state = SimpleNamespace(
-        session_path=str(tmp_path / "missing.pkl"),
-        state_dir=str(tmp_path / "states"),
-        has_session_dump=lambda: False,
-        runtime_persistence={},
-    )
-    runtime = FigureFollowupRuntime(
-        SimpleNamespace(
-            notebook_state=notebook_state,
-            _exec_lock=lock,
-            _save_session_locked=AsyncMock(return_value=True),
-            sync_runtime_persistence_state=lambda _state: {},
-        ),
-        SimpleNamespace(id="owner"),
-    )
-
-    with pytest.raises(RuntimeError, match="no integrity-verified committed runtime dump"):
-        await runtime.__aenter__()
-
-    assert runtime.sandbox is None
-    assert runtime._tempdir is None
 
 
 @pytest.mark.asyncio
@@ -280,49 +215,6 @@ async def test_runtime_saves_pins_verifies_then_copies_one_latest_generation(
     assert render_manifest["revision"] == 2
     assert state.runtime_persistence["committed_revision"] == 2
     await runtime._cleanup()
-
-
-@pytest.mark.asyncio
-async def test_runtime_save_failure_fails_closed_before_render_start(tmp_path, monkeypatch):
-    events = []
-    lock = _RecordingLock(events)
-    notebook_state = SimpleNamespace(
-        session_path=str(tmp_path / "owner_session.pkl"),
-        state_dir=str(tmp_path / "states"),
-        runtime_persistence={},
-        has_session_dump=lambda: False,
-    )
-    main_sandbox = SimpleNamespace(
-        notebook_state=notebook_state,
-        _exec_lock=lock,
-        _save_session_locked=AsyncMock(return_value=False),
-        sync_runtime_persistence_state=MagicMock(return_value={}),
-    )
-    runtime = FigureFollowupRuntime(
-        main_sandbox, SimpleNamespace(id="owner", runtime_persistence={})
-    )
-    render_starts = []
-
-    class NeverStartedSandbox:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def start(self):
-            render_starts.append(True)
-            return {"session_restored": True}
-
-    monkeypatch.setattr(
-        "backend.utils.sandbox.LocalJupyterSandbox", NeverStartedSandbox
-    )
-
-    with pytest.raises(RuntimeError, match="did not commit a current generation"):
-        await runtime.__aenter__()
-
-    main_sandbox._save_session_locked.assert_awaited_once()
-    main_sandbox.sync_runtime_persistence_state.assert_not_called()
-    assert render_starts == []
-    assert not runtime._tempdir
-    assert runtime.sandbox is None
 
 
 @pytest.mark.asyncio

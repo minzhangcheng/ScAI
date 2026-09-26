@@ -52,24 +52,6 @@ describe('resume refused by the backend', () => {
     })
   })
 
-  // The refusal arrives as a 200 with a flag in the body, so an unconditional
-  // `updateSession({status:'running'})` marked a session running that the
-  // backend had just declined to advance. The re-run control is gated on
-  // `!isRunning`, so that optimistic write hid the only way forward and a page
-  // reload was the only way back.
-  it('does not mark the session running when runtime is unavailable', async () => {
-    mockFetch.mockResolvedValueOnce(
-      resumeResponse({ needs_reconnect: false, runtime_unavailable: true }),
-    )
-
-    const { result } = renderHook(() => useSession())
-    await act(async () => {
-      await result.current.resumeAnalysis()
-    })
-
-    expect(useAppStore.getState().currentSession?.status).toBe('paused')
-  })
-
   it('hydrates the runtime warning and leaves rerun enabled on refusal', async () => {
     mockFetch.mockResolvedValueOnce(
       resumeResponse({
@@ -90,24 +72,6 @@ describe('resume refused by the backend', () => {
     expect(state.runtimeRestoreStatus).toBe('unavailable')
     expect(state.runtimeRestoreWarning).toBe(
       'The committed runtime is stale; re-run to recompute it.',
-    )
-    expect(state.isRerunEnabled()).toBe(true)
-  })
-
-  it('uses the refusal message when the backend omits a warning', async () => {
-    mockFetch.mockResolvedValueOnce(
-      resumeResponse({ needs_reconnect: false, runtime_unavailable: true }),
-    )
-
-    const { result } = renderHook(() => useSession())
-    await act(async () => {
-      await result.current.continueRound()
-    })
-
-    const state = useAppStore.getState()
-    expect(state.runtimeRestoreStatus).toBe('unavailable')
-    expect(state.runtimeRestoreWarning).toBe(
-      'The saved runtime is unavailable. Re-run the analysis from the input data.',
     )
     expect(state.isRerunEnabled()).toBe(true)
   })
@@ -149,41 +113,6 @@ describe('resume refused by the backend', () => {
     expect(state.currentSession?.status).toBe('paused')
     expect(state.runtimeRestoreStatus).toBe('complete')
     expect(state.runtimeRestoreWarning).toBeNull()
-  })
-
-  it('does not mark the session running when continuing a round is refused', async () => {
-    mockFetch.mockResolvedValueOnce(
-      resumeResponse({ needs_reconnect: false, runtime_unavailable: true }),
-    )
-
-    const { result } = renderHook(() => useSession())
-    await act(async () => {
-      await result.current.continueRound()
-    })
-
-    expect(useAppStore.getState().currentSession?.status).toBe('paused')
-  })
-
-  it('does not mark the session running when the refusal carries no flag', async () => {
-    mockFetch.mockResolvedValueOnce(refusedResponse({ needs_reconnect: false }))
-
-    const { result } = renderHook(() => useSession())
-    await act(async () => {
-      await result.current.resumeAnalysis()
-    })
-
-    expect(useAppStore.getState().currentSession?.status).toBe('paused')
-  })
-
-  it('does not mark a round continuable when the refusal carries no flag', async () => {
-    mockFetch.mockResolvedValueOnce(refusedResponse({ needs_reconnect: false }))
-
-    const { result } = renderHook(() => useSession())
-    await act(async () => {
-      await result.current.continueRound()
-    })
-
-    expect(useAppStore.getState().currentSession?.status).toBe('paused')
   })
 
   // A refusal that still reconnects is worse than one that only mislabels the

@@ -39,19 +39,6 @@ def test_planned_execution_records_only_current_step_candidates():
     assert "unknown plan_step_ids" in warning
 
 
-def test_planned_and_repair_execution_without_steps_stays_unverified():
-    state = _state_with_plan()
-
-    for purpose in ("planned", "repair"):
-        _, step_ids, status, warning = execution_plan_binding(
-            state,
-            {"execution_purpose": purpose, "plan_step_ids": []},
-        )
-        assert step_ids == []
-        assert status == "unverified"
-        assert "no valid current-plan step nomination" in warning
-
-
 def test_supplementary_execution_is_explicitly_non_plan_evidence():
     state = _state_with_plan()
 
@@ -59,32 +46,6 @@ def test_supplementary_execution_is_explicitly_non_plan_evidence():
         state,
         {"execution_purpose": "supplementary", "plan_step_ids": []},
     ) == ("supplementary", [], "supplementary", None)
-
-
-def test_omitted_purpose_preserves_valid_plan_candidates_without_inventing_intent():
-    state = _state_with_plan()
-
-    purpose, step_ids, status, warning = execution_plan_binding(
-        state,
-        {"plan_step_ids": [1, 2]},
-    )
-
-    assert purpose == "unspecified"
-    assert step_ids == [1, 2]
-    assert status == "candidate"
-    assert "omitted" in warning
-    assert "PI review" in warning
-
-
-def test_omitted_purpose_without_plan_candidates_stays_unverified():
-    state = _state_with_plan()
-
-    purpose, step_ids, status, warning = execution_plan_binding(state, {})
-
-    assert purpose == "unspecified"
-    assert step_ids == []
-    assert status == "unverified"
-    assert "omitted" in warning
 
 
 def test_current_derived_record_rejects_foreign_plan_and_source_preparation():

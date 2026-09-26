@@ -1,6 +1,6 @@
 """Tests for hardened validate_file_path_ownership (P0-2)."""
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from fastapi import HTTPException
 

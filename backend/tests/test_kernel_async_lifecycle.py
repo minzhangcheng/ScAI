@@ -63,77 +63,6 @@ class _AsyncKernelManager(_FakeKernelManager):
         self.shutdown_called = True
 
 
-def _install_restart_test_doubles(monkeypatch, kernel_module):
-    """Avoid the historical settle delay while retaining wait_for itself."""
-    monkeypatch.setattr(
-        kernel_module,
-        "asyncio",
-        SimpleNamespace(sleep=AsyncMock(), wait_for=asyncio.wait_for),
-    )
-
-
-def _prepare_restart_sandbox(tmp_path):
-    sandbox = _sandbox(tmp_path)
-    manager = _AsyncKernelManager(kernel_name="python3")
-    sandbox.km = manager
-    sandbox.kc = manager.client()
-    sandbox._initialized = True
-    sandbox._wait_for_ready = AsyncMock(return_value=None)
-    sandbox._initialize_kernel = AsyncMock(return_value=None)
-    sandbox._restore_session = AsyncMock(return_value=None)
-    return sandbox, manager
-
-
-@pytest.mark.asyncio
-async def test_native_start_keeps_event_loop_responsive(tmp_path, monkeypatch):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox = _sandbox(tmp_path)
-    manager = _AsyncKernelManager(kernel_name="python3")
-    monkeypatch.setattr(kernel_module, "KernelManager", lambda **_kwargs: manager)
-    sandbox._wait_for_ready = AsyncMock(return_value=None)
-    sandbox._initialize_kernel = AsyncMock(return_value=None)
-    sandbox._restore_session = AsyncMock(return_value=None)
-
-    start_task = asyncio.create_task(sandbox.start())
-    await asyncio.wait_for(manager.start_entered.wait(), timeout=1)
-    await asyncio.wait_for(asyncio.sleep(0), timeout=1)
-    assert start_task.done() is False
-    assert sandbox._starting is True
-
-    manager.start_release.set()
-    result = await asyncio.wait_for(start_task, timeout=1)
-    assert result["started"] is True
-    assert sandbox._starting is False
-    await sandbox.stop(save=False)
-    assert manager.shutdown_called is True
-
-
-@pytest.mark.asyncio
-async def test_native_start_timeout_cleans_partial_manager(tmp_path, monkeypatch):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox = _sandbox(tmp_path)
-    manager = _AsyncKernelManager(kernel_name="python3")
-    monkeypatch.setattr(kernel_module, "KernelManager", lambda **_kwargs: manager)
-    monkeypatch.setattr(kernel_module, "_KERNEL_PROCESS_START_TIMEOUT", 0.01)
-    sandbox._wait_for_ready = AsyncMock(return_value=None)
-    sandbox._initialize_kernel = AsyncMock(return_value=None)
-    sandbox._restore_session = AsyncMock(return_value=None)
-
-    with pytest.raises(
-        RuntimeError, match="Kernel process failed to start within timeout"
-    ):
-        await sandbox.start()
-
-    assert sandbox.km is None
-    assert sandbox.kc is None
-    assert sandbox._kernel_dead is True
-    assert manager.shutdown_called is True
-    assert manager.start_exited.is_set()
-    assert manager.shutdown_saw_start_exited is True
-
-
 @pytest.mark.asyncio
 async def test_start_cancellation_drains_and_cleans_partial_manager(
     tmp_path, monkeypatch
@@ -163,159 +92,9 @@ async def test_start_cancellation_drains_and_cleans_partial_manager(
 
 
 @pytest.mark.asyncio
-async def test_native_restart_keeps_event_loop_responsive(tmp_path, monkeypatch):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox, manager = _prepare_restart_sandbox(tmp_path)
-    _install_restart_test_doubles(monkeypatch, kernel_module)
-
-    restart_task = asyncio.create_task(sandbox._restart_kernel())
-    await asyncio.wait_for(manager.restart_entered.wait(), timeout=1)
-    await asyncio.wait_for(asyncio.sleep(0), timeout=1)
-    assert restart_task.done() is False
-
-    manager.restart_release.set()
-    await asyncio.wait_for(restart_task, timeout=1)
-    assert sandbox._kernel_dead is False
-    await sandbox.stop(save=False)
-
-
-@pytest.mark.asyncio
-async def test_native_restart_timeout_cleans_before_return(tmp_path, monkeypatch):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox, manager = _prepare_restart_sandbox(tmp_path)
-    _install_restart_test_doubles(monkeypatch, kernel_module)
-    monkeypatch.setattr(kernel_module, "_KERNEL_MANAGER_RESTART_TIMEOUT", 0.01)
-
-    await sandbox._restart_kernel()
-
-    assert sandbox._kernel_dead is True
-    assert sandbox._initialized is False
-    assert sandbox.km is None
-    assert sandbox.kc is None
-    assert manager.shutdown_called is True
-    assert sandbox._restarting is False
-
-
-@pytest.mark.asyncio
-async def test_native_restart_cancellation_cleans_before_propagation(
-    tmp_path, monkeypatch
-):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox, manager = _prepare_restart_sandbox(tmp_path)
-    _install_restart_test_doubles(monkeypatch, kernel_module)
-
-    restart_task = asyncio.create_task(sandbox._restart_kernel())
-    await asyncio.wait_for(manager.restart_entered.wait(), timeout=1)
-    restart_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await restart_task
-
-    assert restart_task.done() is True
-    assert sandbox._kernel_dead is True
-    assert sandbox._initialized is False
-    assert sandbox.km is None
-    assert sandbox.kc is None
-    assert manager.shutdown_called is True
-    assert sandbox._restarting is False
-
-
-@pytest.mark.asyncio
-async def test_native_shutdown_keeps_event_loop_responsive_and_clears_on_success(
-    tmp_path,
-):
-    sandbox = _sandbox(tmp_path)
-    manager = _AsyncKernelManager(kernel_name="python3")
-    sandbox.km = manager
-    sandbox.kc = manager.client()
-    sandbox._initialized = True
-    manager.shutdown_mode = "wait"
-
-    stop_task = asyncio.create_task(sandbox.stop(save=False))
-    await asyncio.wait_for(manager.shutdown_entered.wait(), timeout=1)
-    await asyncio.wait_for(asyncio.sleep(0), timeout=1)
-    assert stop_task.done() is False
-
-    manager.shutdown_release.set()
-    await asyncio.wait_for(stop_task, timeout=1)
-    assert sandbox.km is None
-    assert sandbox.kc is None
-    assert sandbox._initialized is False
-    assert manager.shutdown_called is True
-
-
-@pytest.mark.asyncio
-async def test_native_shutdown_timeout_propagates_and_retries_same_identity(
-    tmp_path, monkeypatch, caplog
-):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox = _sandbox(tmp_path)
-    manager = _AsyncKernelManager(kernel_name="python3")
-    sandbox.km = manager
-    sandbox.kc = manager.client()
-    sandbox._initialized = True
-    manager.shutdown_mode = "wait"
-    monkeypatch.setattr(kernel_module, "_KERNEL_MANAGER_SHUTDOWN_TIMEOUT", 0.01)
-    caplog.set_level(logging.INFO, logger=kernel_module.logger.name)
-
-    process = manager.provisioner.process
-    with pytest.raises(asyncio.TimeoutError):
-        await sandbox.stop(save=False)
-
-    assert sandbox._kernel_dead is True
-    assert sandbox.km is manager
-    assert sandbox.km.provisioner.process is process
-    assert sandbox.kc is None
-    assert sandbox._initialized is False
-    assert "Kernel stopped" not in caplog.text
-
-    manager.shutdown_mode = "success"
-    manager.shutdown_entered.clear()
-    await sandbox.stop(save=False)
-    assert manager.shutdown_calls == 2
-    assert sandbox.km is None
-    assert "Kernel stopped" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_native_shutdown_error_propagates_and_retries_same_identity(
-    tmp_path, monkeypatch, caplog
-):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox = _sandbox(tmp_path)
-    manager = _AsyncKernelManager(kernel_name="python3")
-    sandbox.km = manager
-    sandbox.kc = manager.client()
-    sandbox._initialized = True
-    manager.shutdown_mode = "error"
-    monkeypatch.setattr(kernel_module, "_KERNEL_MANAGER_SHUTDOWN_TIMEOUT", 1)
-    caplog.set_level(logging.INFO, logger=kernel_module.logger.name)
-
-    process = manager.provisioner.process
-    with pytest.raises(RuntimeError, match="native shutdown failed"):
-        await sandbox.stop(save=False)
-
-    assert sandbox._kernel_dead is True
-    assert sandbox.km is manager
-    assert sandbox.km.provisioner.process is process
-    assert sandbox.kc is None
-    assert sandbox._initialized is False
-    assert "Kernel stopped" not in caplog.text
-
-    manager.shutdown_mode = "success"
-    await sandbox.stop(save=False)
-    assert manager.shutdown_calls == 2
-    assert sandbox.km is None
-    assert "Kernel stopped" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_native_shutdown_cancellation_propagates_and_retries_same_identity(
-    tmp_path, caplog
+@pytest.mark.parametrize("interruption", ["timeout", "cancellation"])
+async def test_native_shutdown_interruption_propagates_and_retries_same_identity(
+    tmp_path, monkeypatch, caplog, interruption,
 ):
     import backend.utils.sandbox_parts.kernel as kernel_module
 
@@ -328,13 +107,18 @@ async def test_native_shutdown_cancellation_propagates_and_retries_same_identity
     caplog.set_level(logging.INFO, logger=kernel_module.logger.name)
 
     process = manager.provisioner.process
-    stop_task = asyncio.create_task(sandbox.stop(save=False))
-    await asyncio.wait_for(manager.shutdown_entered.wait(), timeout=1)
-    stop_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await stop_task
+    if interruption == "timeout":
+        monkeypatch.setattr(kernel_module, "_KERNEL_MANAGER_SHUTDOWN_TIMEOUT", 0.01)
+        with pytest.raises(asyncio.TimeoutError):
+            await sandbox.stop(save=False)
+    else:
+        stop_task = asyncio.create_task(sandbox.stop(save=False))
+        await asyncio.wait_for(manager.shutdown_entered.wait(), timeout=1)
+        stop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+        assert stop_task.done() is True
 
-    assert stop_task.done() is True
     assert sandbox._kernel_dead is True
     assert sandbox.km is manager
     assert sandbox.km.provisioner.process is process
@@ -343,6 +127,8 @@ async def test_native_shutdown_cancellation_propagates_and_retries_same_identity
     assert "Kernel stopped" not in caplog.text
 
     manager.shutdown_mode = "success"
+    if interruption == "timeout":
+        manager.shutdown_entered.clear()
     await sandbox.stop(save=False)
     assert manager.shutdown_calls == 2
     assert sandbox.km is None

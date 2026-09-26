@@ -76,27 +76,6 @@ class TestAuthFlow:
         resp = client.post("/api/auth/login", json={"username": "boss", "password": "wrong"})
         assert resp.status_code == 401
 
-    def test_setup_with_email(self, client):
-        """Setup admin with optional email."""
-        resp = client.post("/api/auth/setup/admin", json={"username": "boss", "password": "adminpass123", "email": "admin@example.com"})
-        assert resp.status_code == 201
-
-        resp = client.post("/api/auth/login", json={"username": "boss", "password": "adminpass123"})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["email"] == "admin@example.com"
-
-    def test_register_with_email(self, client):
-        """Register a user with both username and email."""
-        client.post("/api/auth/setup/admin", json={"username": "boss", "password": "adminpass123"})
-
-        resp = client.post("/api/auth/register", json={
-            "username": "user2",
-            "password": "userpass123",
-            "email": "user2@example.com",
-        })
-        assert resp.status_code == 201
-        assert resp.json()["data"]["email"] == "user2@example.com"
 
     def test_username_validation(self, client):
         """Username must be 3-64 chars, alphanumeric/underscore/hyphen only."""

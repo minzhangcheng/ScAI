@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from backend.routes.sessions import _safe_remove_session_file
 

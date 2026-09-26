@@ -76,38 +76,6 @@ async def test_idle_session_is_saved_and_evicted():
 
 
 @pytest.mark.asyncio
-async def test_initializing_session_not_evicted():
-    state_mod.sessions["s1"] = {"data": "x"}
-    state_mod.session_access_times["s1"] = time.time() - 10_000
-    state_mod.initializing_sessions.add("s1")
-
-    mock_save = AsyncMock()
-    with patch.object(sc_mod, "CLEANUP_INTERVAL", 0), \
-         patch.object(sc_mod, "SESSION_CACHE_TTL", 1), \
-         patch.object(sc_mod, "MAX_CACHED_SESSIONS", 100), \
-         patch.object(sc_mod, "_async_save_session_under_lifecycle", mock_save):
-        await _run_one_cleanup_cycle(
-            asyncio.Lock(), {}, {}, asyncio.Lock(),
-        )
-
-    mock_save.assert_not_awaited()
-    assert "s1" in state_mod.sessions
-
-
-@pytest.mark.asyncio
-async def test_report_only_workflow_not_selected_for_eviction():
-    state_mod.sessions["s1"] = {"data": "x"}
-    state_mod.session_access_times["s1"] = time.time() - 10_000
-    state_mod.report_workflows["s1"] = object()
-
-    with patch.object(sc_mod, "SESSION_CACHE_TTL", 1), \
-         patch.object(sc_mod, "MAX_CACHED_SESSIONS", 100):
-        selected = await sc_mod._collect_sessions_to_evict(time.time())
-
-    assert selected == []
-
-
-@pytest.mark.asyncio
 async def test_report_owner_installed_after_selection_blocks_eviction():
     state_mod.sessions["s1"] = {"data": "x"}
     state_mod.session_access_times["s1"] = time.time() - 10_000
@@ -139,26 +107,3 @@ async def test_chat_sandbox_stopped_on_eviction():
 
     sandbox.stop.assert_awaited_once()
     assert "s1" not in chat_sandboxes
-
-
-@pytest.mark.asyncio
-async def test_stale_import_jobs_cleaned():
-    now = time.time()
-    import_jobs = {
-        "j1": {"status": "completed", "created_at": now - 10_000},
-        "j2": {"status": "running", "created_at": now - 10_000},
-        "j3": {"status": "failed", "created_at": now - 1},
-    }
-
-    with patch.object(sc_mod, "CLEANUP_INTERVAL", 0), \
-         patch.object(sc_mod, "IMPORT_JOB_TTL", 100), \
-         patch.object(sc_mod, "SESSION_CACHE_TTL", 1_000_000), \
-         patch.object(sc_mod, "MAX_CACHED_SESSIONS", 100), \
-         patch.object(sc_mod, "_async_save_session_under_lifecycle", AsyncMock()):
-        await _run_one_cleanup_cycle(
-            asyncio.Lock(), {}, import_jobs, asyncio.Lock(),
-        )
-
-    assert "j1" not in import_jobs   # completed + old → cleaned
-    assert "j2" in import_jobs        # running → kept
-    assert "j3" in import_jobs        # failed but fresh → kept

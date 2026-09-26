@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import sys
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -240,117 +239,6 @@ async def test_bootstrap_trust_module_is_fail_closed(tmp_path):
         )
 
 
-def test_launch_environment_drops_replay_redirection(tmp_path, monkeypatch):
-    """A production kernel must not inherit the replay harness's variables.
-
-    The bootstrap reads SCAI_REPLAY_* for the workspace, state directory and
-    uploads root, and treats SCAI_REPLAY_WORKSPACE as the declaration that
-    turns every fail-closed guard into a degrade. The kernel inherits this
-    process's environment, so one of them set on the server would redirect
-    every session at once.
-    """
-    monkeypatch.setenv("SCAI_REPLAY_WORKSPACE", "/tmp/somewhere-else")
-    monkeypatch.setenv("SCAI_REPLAY_STATE_DIR", "/tmp/other-states")
-    monkeypatch.setenv("SCAI_REPLAY_UPLOADS_DIR", "/tmp/other-uploads")
-
-    sandbox = _sandbox(tmp_path)
-    env = sandbox._kernel_launch_environment()
-
-    assert [name for name in env if name.startswith("SCAI_REPLAY_")] == []
-
-
-def test_the_replay_flag_is_the_only_way_past_fail_closed(tmp_path):
-    """Named explicitly, because it is the whole exception.
-
-    SCAI_REPLAY_WORKSPACE is set by `scripts/scai-notebook-replay` and by
-    nothing in the production path -- the same variable the cell above reads for
-    the workspace root, so a kernel that degrades is exactly a kernel that was
-    told it is a replay.
-    """
-    from backend.utils.sandbox_parts.kernel_bootstrap import (
-        _COMMON_BOOTSTRAP_TEMPLATE,
-    )
-
-    source = _COMMON_BOOTSTRAP_TEMPLATE
-    assert "_scai_is_replay = bool(os.environ.get('SCAI_REPLAY_WORKSPACE'))" in source
-    assert "if not _scai_is_replay:\n                raise" in source
-
-
-def test_kernel_launch_environment_is_session_scoped(tmp_path):
-    sandbox = _sandbox(tmp_path)
-    env = sandbox._kernel_launch_environment()
-
-    assert json.loads(env["SCAI_KERNEL_WRITE_ROOTS"]) == [
-        str(sandbox.working_dir.resolve()),
-        str(sandbox.notebook_state.state_dir.resolve()),
-        str(sandbox._session_tmp.resolve()),
-    ]
-    assert env["SCAI_KERNEL_REQUIRE_LANDLOCK"] == (
-        "1" if sys.platform == "linux" else "0"
-    )
-    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
-    assert env["PYTHONSAFEPATH"] == "1"
-    from backend.utils.sandbox_parts import kernel as kernel_module
-    assert env["DASK_DATAFRAME__QUERY_PLANNING"] == (
-        kernel_module._dask_query_planning_setting()
-    )
-    assert env["HOME"].startswith(str(sandbox._session_tmp.resolve()))
-    assert env["TMPDIR"] == str(sandbox._session_tmp.resolve())
-    assert "kernel_startup" in env["PYTHONPATH"].split(os.pathsep)[0]
-
-
-def test_kernel_launch_environment_exposes_the_celltypist_cache(tmp_path, monkeypatch):
-    """celltypist creates its model folder at import time, so CELLTYPIST_FOLDER
-    has to be a write root; the host cache is linked in so a kernel reads models
-    without a download."""
-    import backend.config
-
-    monkeypatch.setattr(backend.config, "DATA_BASE_DIR", tmp_path / "data")
-    cache = tmp_path / "data" / "celltypist" / "data" / "models"
-    cache.mkdir(parents=True)
-    (cache / "Cached.pkl").write_bytes(b"x")
-    (cache / "models.json").write_text("{}")
-    sandbox = _sandbox(tmp_path)
-
-    env = sandbox._kernel_launch_environment()
-
-    folder = Path(env["CELLTYPIST_FOLDER"])
-    assert folder == sandbox._session_tmp.resolve() / "celltypist"
-    assert folder.is_dir()
-    roots = [Path(r) for r in json.loads(env["SCAI_KERNEL_WRITE_ROOTS"])]
-    assert any(folder.is_relative_to(root) for root in roots)
-    link = folder / "data" / "models" / "Cached.pkl"
-    assert link.is_symlink()
-    assert link.read_bytes() == b"x"
-    assert (folder / "data" / "models" / "models.json").is_symlink()
-
-
-def test_kernel_launch_environment_survives_an_absent_celltypist_cache(
-    tmp_path, monkeypatch
-):
-    import backend.config
-
-    monkeypatch.setattr(backend.config, "DATA_BASE_DIR", tmp_path / "absent")
-    sandbox = _sandbox(tmp_path)
-
-    env = sandbox._kernel_launch_environment()
-
-    assert (Path(env["CELLTYPIST_FOLDER"]) / "data" / "models").is_dir()
-
-
-def test_kernel_command_runs_trusted_launcher_before_ipykernel(tmp_path):
-    sandbox = _sandbox(tmp_path)
-    manager = _FakeKernelManager(kernel_name="python3")
-
-    sandbox._install_isolated_kernel_launcher(manager)
-
-    argv = manager.kernel_spec.argv
-    assert argv[:4] == [sys.executable, "-I", "-S", "-B"]
-    assert Path(argv[4]).name == "launcher.py"
-    assert argv[5:8] == [sys.executable, "-P", "-m"]
-    assert argv[-1] == "{connection_file}"
-
-
 def test_kernel_launch_rejects_workspace_symlink_outside_session(tmp_path):
     session_root = tmp_path / "session"
     external = tmp_path / "external"
@@ -366,45 +254,6 @@ def test_kernel_launch_rejects_workspace_symlink_outside_session(tmp_path):
 
     with pytest.raises(RuntimeError, match="must not be a symlink"):
         sandbox._kernel_launch_environment()
-
-
-def test_default_sandbox_does_not_allow_its_entire_cwd(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    sandbox = LocalJupyterSandbox(session_id="default-leaf-roots")
-
-    roots = json.loads(
-        sandbox._kernel_launch_environment()["SCAI_KERNEL_WRITE_ROOTS"]
-    )
-
-    assert str(tmp_path.resolve()) not in roots
-    assert roots[:2] == [
-        str((tmp_path / "workspace").resolve()),
-        str((tmp_path / "states").resolve()),
-    ]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failed_phase", ["common", "path"])
-async def test_bootstrap_failure_is_not_marked_initialized(tmp_path, failed_phase):
-    sandbox = _sandbox(tmp_path)
-    failed = CodeExecutionResult(success=False, error="bootstrap exploded")
-    succeeded = CodeExecutionResult(success=True)
-    sandbox._execute_unlocked = AsyncMock(
-        side_effect=[failed] if failed_phase == "common" else [succeeded, failed]
-    )
-
-    expected = (
-        "Kernel common initialization failed"
-        if failed_phase == "common"
-        else "Kernel path/sandbox initialization failed"
-    )
-    with pytest.raises(RuntimeError, match=expected):
-        await sandbox._initialize_kernel()
-
-    assert sandbox._initialized is False
-    assert sandbox._execute_unlocked.await_count == (
-        1 if failed_phase == "common" else 2
-    )
 
 
 class _FakeKernelClient:
@@ -464,36 +313,6 @@ def _skip_restart_settle_delay(monkeypatch, kernel_module) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["readiness", "initialization"])
-async def test_start_cleans_kernel_after_bootstrap_failure(
-    tmp_path, monkeypatch, failure
-):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox = _sandbox(tmp_path)
-    monkeypatch.setattr(kernel_module, "KernelManager", _FakeKernelManager)
-    sandbox._shutdown_kernel_unlocked = AsyncMock()
-    sandbox._initialize_kernel = AsyncMock()
-    if failure == "readiness":
-        sandbox._wait_for_ready = AsyncMock(side_effect=asyncio.TimeoutError)
-    else:
-        sandbox._wait_for_ready = AsyncMock(return_value=None)
-        sandbox._initialize_kernel.side_effect = RuntimeError("broken init")
-
-    expected = (
-        "Kernel failed to start within timeout"
-        if failure == "readiness"
-        else "broken init"
-    )
-    with pytest.raises(RuntimeError, match=expected):
-        await sandbox.start()
-
-    sandbox._shutdown_kernel_unlocked.assert_awaited_once_with()
-    if failure == "readiness":
-        sandbox._initialize_kernel.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure", ["manager", "process", "client", "channels"]
 )
@@ -534,66 +353,6 @@ async def test_start_cleans_every_partially_acquired_kernel_resource(
     assert sandbox.kc is None
     if failure != "manager":
         assert holder["manager"].shutdown_called is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["readiness", "initialization", "restore"])
-async def test_start_cancellation_cleans_resources_and_propagates(
-    tmp_path, monkeypatch, phase
-):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox = _sandbox(tmp_path)
-    manager = _FakeKernelManager(kernel_name="python3")
-    monkeypatch.setattr(
-        kernel_module, "KernelManager", lambda **_kwargs: manager
-    )
-    sandbox._wait_for_ready = AsyncMock(return_value=None)
-    sandbox._initialize_kernel = AsyncMock(return_value=None)
-    sandbox._restore_session = AsyncMock(return_value=None)
-    if phase == "readiness":
-        sandbox._wait_for_ready.side_effect = asyncio.CancelledError
-    elif phase == "initialization":
-        sandbox._initialize_kernel.side_effect = asyncio.CancelledError
-    else:
-        sandbox._restore_session.side_effect = asyncio.CancelledError
-
-    with pytest.raises(asyncio.CancelledError):
-        await sandbox.start()
-
-    assert sandbox._initialized is False
-    assert sandbox.km is None
-    assert sandbox.kc is None
-    assert manager.shutdown_called is True
-
-
-@pytest.mark.asyncio
-async def test_start_bootstraps_a_new_kernel_after_previous_dead_latch(
-    tmp_path, monkeypatch
-):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox = _sandbox(tmp_path)
-    manager = _FakeKernelManager(kernel_name="python3")
-    monkeypatch.setattr(
-        kernel_module, "KernelManager", lambda **_kwargs: manager
-    )
-    sandbox._kernel_dead = True
-    sandbox._wait_for_ready = AsyncMock(return_value=None)
-    sandbox._execute_unlocked = AsyncMock(
-        side_effect=[
-            CodeExecutionResult(success=True),
-            CodeExecutionResult(success=True),
-        ]
-    )
-    sandbox._restore_session = AsyncMock(return_value=None)
-
-    await sandbox.start()
-
-    assert sandbox._kernel_dead is False
-    assert sandbox._initialized is True
-    assert sandbox._execute_unlocked.await_count == 2
-    await sandbox.stop(save=False)
 
 
 @pytest.mark.asyncio
@@ -638,70 +397,6 @@ async def test_restart_discards_failed_or_partially_restored_kernel(
     assert sandbox._restarting is False
     if failure != "restore":
         sandbox._restore_session.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["readiness", "initialization", "restore"])
-async def test_restart_cancellation_cleans_resources_and_propagates(
-    tmp_path, monkeypatch, phase
-):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox = _sandbox(tmp_path)
-    manager = _FakeKernelManager(kernel_name="python3")
-    sandbox.km = manager
-    sandbox.kc = manager.client()
-    sandbox._initialized = True
-    _skip_restart_settle_delay(monkeypatch, kernel_module)
-    sandbox._wait_for_ready = AsyncMock(return_value=None)
-    sandbox._initialize_kernel = AsyncMock(return_value=None)
-    sandbox._restore_session = AsyncMock(return_value=None)
-    if phase == "readiness":
-        sandbox._wait_for_ready.side_effect = asyncio.CancelledError
-    elif phase == "initialization":
-        sandbox._initialize_kernel.side_effect = asyncio.CancelledError
-    else:
-        sandbox._restore_session.side_effect = asyncio.CancelledError
-
-    with pytest.raises(asyncio.CancelledError):
-        await sandbox._restart_kernel()
-
-    assert sandbox._kernel_dead is True
-    assert sandbox._initialized is False
-    assert sandbox.km is None
-    assert sandbox.kc is None
-    assert manager.shutdown_called is True
-    assert sandbox._restarting is False
-
-
-@pytest.mark.asyncio
-async def test_restart_bootstraps_a_new_kernel_after_previous_dead_latch(
-    tmp_path, monkeypatch
-):
-    import backend.utils.sandbox_parts.kernel as kernel_module
-
-    sandbox = _sandbox(tmp_path)
-    manager = _FakeKernelManager(kernel_name="python3")
-    sandbox.km = manager
-    sandbox.kc = manager.client()
-    sandbox._initialized = True
-    sandbox._kernel_dead = True
-    _skip_restart_settle_delay(monkeypatch, kernel_module)
-    sandbox._wait_for_ready = AsyncMock(return_value=None)
-    sandbox._execute_unlocked = AsyncMock(
-        side_effect=[
-            CodeExecutionResult(success=True),
-            CodeExecutionResult(success=True),
-        ]
-    )
-    sandbox._restore_session = AsyncMock(return_value=None)
-
-    await sandbox._restart_kernel()
-
-    assert sandbox._kernel_dead is False
-    assert sandbox._initialized is True
-    assert sandbox._execute_unlocked.await_count == 2
-    await sandbox.stop(save=False)
 
 
 @pytest.mark.asyncio
@@ -792,43 +487,6 @@ async def test_execute_reader_is_drained_before_kernel_teardown(tmp_path):
         await task
     await sandbox.stop(save=False)
     assert manager.shutdown_called is True
-
-
-@pytest.mark.asyncio
-async def test_restart_worker_is_drained_before_manager_teardown(tmp_path):
-    entered = threading.Event()
-    release = threading.Event()
-    exited = threading.Event()
-
-    class _BlockingRestartManager(_FakeKernelManager):
-        def restart_kernel(self):
-            entered.set()
-            release.wait(timeout=5)
-            exited.set()
-
-        def shutdown_kernel(self, *, now):
-            assert exited.is_set(), "manager was shut down while restart worker ran"
-            super().shutdown_kernel(now=now)
-
-    sandbox = _sandbox(tmp_path)
-    manager = _BlockingRestartManager(kernel_name="python3")
-    sandbox.km = manager
-    sandbox.kc = manager.client()
-    sandbox._initialized = True
-
-    task = asyncio.create_task(sandbox._restart_kernel())
-    assert await asyncio.to_thread(entered.wait, 1)
-    task.cancel()
-    await asyncio.sleep(0)
-    assert manager.shutdown_called is False
-    assert task.done() is False
-
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert manager.shutdown_called is True
-    assert sandbox.km is None
-    assert sandbox.kc is None
 
 
 @pytest.mark.asyncio

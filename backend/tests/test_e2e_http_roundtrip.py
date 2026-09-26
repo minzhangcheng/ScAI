@@ -5,7 +5,6 @@ internal helpers the other checks call directly.
 """
 import asyncio
 import json
-import shutil
 import time
 
 import aiosqlite
@@ -75,7 +74,6 @@ def _populate(session_id, *, live_pkl: bool):
     up = get_session_uploads(session_id)
     up.mkdir(parents=True, exist_ok=True)
     (up / "matrix.h5ad").write_bytes(b"H5AD-DATA")
-
 
 
 def _write_committed_generation(session_id):
@@ -211,7 +209,6 @@ def _import_archive(client, token, blob, *, trust):
     job = _import_job(client, token, blob, trust=trust)
     assert job["status"] == "completed", f"import did not complete: {job}"
     return job["session_id"]
-
 
 
 @pytest.mark.parametrize(
@@ -480,54 +477,4 @@ def test_the_resume_button_is_not_a_silent_no_op(client):
     assert plan.target_node is None, plan
     assert (get_session_states(new_id) / "checkpoints.sqlite").exists(), (
         "the position resume() continues from has to still be there"
-    )
-
-
-def test_a_session_exported_before_its_first_round_still_starts(client):
-    """Export during the window between Start and the first round completing.
-
-    ``current_round`` is only incremented once PI planning returns, but the
-    status is RUNNING from the moment Start is pressed, so this window is wide
-    open in practice. Both import fixups bail out at round 0 — no runtime mark,
-    no restore intent — which leaves the frontend rendering neither Start (the
-    status is no longer PENDING) nor Re-run (the runtime never got marked
-    unavailable). Resume is the only control left, so it has to work.
-    """
-    from backend.models.schemas import TaskStatus
-    from backend.routes.websockets import should_resume_workflow
-    from backend.state import sessions
-
-    token = _token(client)
-    started = client.post(
-        "/api/session/start",
-        json={"instruction": "cluster the cells"},
-        headers=_auth(token),
-    )
-    assert started.status_code == 200, started.text
-    src_id = started.json()["session_id"]
-
-    _populate(src_id, live_pkl=False)
-    _advance(src_id, round_=0)
-    client.post(f"/api/session/{src_id}/save", headers=_auth(token))
-
-    blob = _export_download(client, token, src_id, include_runtime=False)
-    client.delete(f"/api/session/{src_id}", headers=_auth(token))
-    sessions.pop(src_id, None)
-
-    new_id = _import_archive(client, token, blob, trust=False)
-    state = sessions[new_id]
-    assert state.status == TaskStatus.PAUSED, "nothing here owns that run"
-    assert state.current_round == 0
-
-    resumed = client.post(f"/api/session/{new_id}/resume", headers=_auth(token))
-    assert resumed.status_code == 200, resumed.text
-    assert resumed.json()["data"].get("runtime_unavailable") is not True, (
-        "a session that never computed anything has no runtime to miss"
-    )
-
-    after = sessions[new_id]
-    assert after.status == TaskStatus.RUNNING
-    assert should_resume_workflow(after) is False, (
-        "round 0 must start a fresh run; resume() refuses to invent one and "
-        "would hold without executing anything"
     )

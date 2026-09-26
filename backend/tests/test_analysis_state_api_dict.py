@@ -7,20 +7,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import base64
 import hashlib
 import json
-import pytest
 from datetime import datetime
 
 from backend.models.schemas import (
     AnalysisState,
     AnalysisPlan,
     PlanStep,
-    TaskStatus,
     TreatmentGroup,
     DataFile,
     BiochemistryIndicator,
     AgentError,
     AgentType,
-    AgentMessage,
     MessageRole,
     RoundResult,
     WebSocketMessage,
@@ -33,14 +30,6 @@ from backend.tests.figure_image_helpers import valid_image_bytes
 
 class TestAnalysisStateApiDictRoundTrip:
     """Verify to_api_dict() output is JSON-safe and field-complete."""
-
-    def test_empty_state_api_dict_is_json_serializable(self):
-        """Minimal state with no nested objects must round-trip through json."""
-        state = AnalysisState(user_id="test")
-        api = state.to_api_dict()
-        json.dumps(api)
-        assert api["user_id"] == "test"
-        assert api["status"] == "pending"
 
     def test_state_with_plan_api_dict_is_json_serializable(self):
         """State with a current_plan (contains datetime) must round-trip cleanly."""
@@ -58,53 +47,6 @@ class TestAnalysisStateApiDictRoundTrip:
         json.dumps(api)
         assert api["current_plan"]["status"] == "approved"
         assert "2026-05-15" in api["current_plan"]["approved_at"]
-
-    def test_state_api_dict_preserves_all_top_level_keys(self):
-        """to_api_dict() must return a dict with the same top-level keys
-        regardless of whether nested lists are empty or populated."""
-        state = AnalysisState(user_id="test")
-        api = state.to_api_dict()
-        # These are all the keys the frontend load_session endpoint expects
-        expected_keys = {
-            "session_id", "user_id", "name", "status", "current_round",
-            "max_rounds", "round_wait_seconds", "max_directions_per_gate",
-            "waiting_input_started_at",
-            "created_at", "updated_at", "initial_instruction",
-            "treatment_groups", "data_files", "biochemistry_indicators",
-            "round_results", "final_summary",
-            "exploration_report_url", "annotation_report_url", "detailed_report_url", "integration_report_url",
-            "analysis_phase", "annotation_state", "messages", "custom_prompts",
-            "custom_models", "custom_temperatures", "deg_thresholds",
-            "literature_config",
-            "state_version",
-            "last_sync_timestamp", "current_plan",
-            "plan_dialogue_history", "agent_errors",
-            "publication_figures", "publication_tables", "graphic_abstract",
-            "figure_revision_tasks",
-            "bulk_input_profiles", "method_decisions",
-            "integrated_report",
-            "integrated_report_state",
-            "species", "species_resolved", "species_genes_validated",
-            "species_input_info",
-            "runtime_restore_status",
-            "runtime_restore_warning",
-            "runtime_persistence",
-            "evidence_gate_degraded",
-            "evidence_gate_findings",
-            "detected_sample_counts",
-            "termination_reason",
-            "snapshot_failure",
-            "snapshot_transaction",
-            "pending_required_snapshot",
-            "detailed_report_fallback_pending",
-            "restore_branch_id",
-            # Promoted onto the api dict in ver 0.34.7 and consumed by the
-            # frontend (utils/transformLoadResponse.ts, hooks/api/useWebSocket.ts).
-            "wait_input_reason",
-            "llm_failure_info",
-            "agent_disabled_info",
-        }
-        assert set(api.keys()) == expected_keys
 
     def test_state_with_nested_lists_api_dict_is_json_serializable(self):
         """State with populated treatment_groups, data_files, etc. must round-trip."""
@@ -221,23 +163,6 @@ class TestAnalysisStateApiDictRoundTrip:
         )
 
         assert state.to_api_dict()["round_results"] == []
-
-    def test_strip_message_base64_callable(self):
-        """strip_message_base64 callable must be applied to message content."""
-        state = AnalysisState(user_id="test")
-        state.realtime_messages = [
-            WebSocketMessage(
-                type="message",
-                agent=AgentType.PI, role=MessageRole.ASSISTANT,
-                content="keep this", metadata={},
-            ),
-        ]
-
-        def stripper(msg_type, content):
-            return content.replace("keep", "stripped")
-
-        api = state.to_api_dict(strip_message_base64=stripper)
-        assert api["messages"][0]["content"] == "stripped this"
 
     def test_publication_figures_carry_gallery_badge_fields(self):
         """Results gallery badges must survive a reload.

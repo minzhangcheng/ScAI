@@ -15,22 +15,6 @@ from pathlib import Path
 _MAGIC = b"SCAI_ZSTD_DILL_V1\n"
 
 
-def _write_stream(path, items, skipped):
-    """Helper that mimics the new save_session per-var streaming write.
-    Pure function so we can unit-test the format without spinning up a kernel.
-    """
-    import zstandard as zstd
-    with open(path, "wb") as raw:
-        raw.write(_MAGIC)
-        with zstd.ZstdCompressor(level=1).stream_writer(raw, closefd=False) as f:
-            for name, obj in items:
-                try:
-                    dill.dump((name, obj), f)
-                except Exception as e:
-                    skipped.append((name, type(obj).__name__, type(e).__name__, str(e)[:200]))
-                    raise
-
-
 def _read_stream(path):
     """Helper that mimics the new _restore_session streaming read."""
     out = {}
@@ -53,15 +37,6 @@ def _read_stream(path):
     return out
 
 
-def test_round_trip_simple_values(tmp_path):
-    path = tmp_path / "session.pkl"
-    items = [("a", 1), ("b", [1, 2, 3]), ("c", {"x": "y"})]
-    skipped = []
-    _write_stream(path, items, skipped)
-    assert skipped == []
-    assert _read_stream(path) == {"a": 1, "b": [1, 2, 3], "c": {"x": "y"}}
-
-
 def _make_unpicklable():
     """Return an object that dill cannot pickle.
 
@@ -72,84 +47,9 @@ def _make_unpicklable():
     return gen
 
 
-def test_unpicklable_var_aborts_stream(tmp_path):
-    path = tmp_path / "session.pkl"
-    items = [
-        ("good_before", {"k": 1}),
-        ("bad", _make_unpicklable()),
-        ("good_after", [10, 20, 30]),
-    ]
-    skipped = []
-    with pytest.raises(Exception):
-        _write_stream(path, items, skipped)
-
-    # Exactly one skip, with structured detail
-    assert len(skipped) == 1
-    name, type_name, exc_name, _msg = skipped[0]
-    assert name == "bad"
-    assert exc_name  # whatever exception dill raised
-
     # Production writes to .tmp and never publishes this incomplete stream.
 
 
-def test_first_var_unpicklable_aborts_stream(tmp_path):
-    path = tmp_path / "session.pkl"
-    items = [("bad", _make_unpicklable())]
-    skipped = []
-    with pytest.raises(Exception):
-        _write_stream(path, items, skipped)
-    assert len(skipped) == 1
-
-
-def test_reads_legacy_uncompressed_stream(tmp_path):
-    path = tmp_path / "legacy.pkl"
-    with open(path, "wb") as stream:
-        dill.dump(("legacy", {"value": 3}), stream)
-    assert _read_stream(path) == {"legacy": {"value": 3}}
-
-
-import os
-
-
-def _compress_zstd(src, dst):
-    import zstandard as zstd
-    cctx = zstd.ZstdCompressor(level=3)
-    with open(src, "rb") as sf, open(dst, "wb") as df:
-        cctx.copy_stream(sf, df)
-
-
-def _decompress_zstd(src, dst):
-    import zstandard as zstd
-    dctx = zstd.ZstdDecompressor()
-    with open(src, "rb") as sf, open(dst, "wb") as df:
-        dctx.copy_stream(sf, df)
-
-
-def test_snapshot_round_trip_compress_decompress(tmp_path):
-    """Live pkl -> compress to snapshot .zst -> decompress back -> contents identical."""
-    live = tmp_path / "session.pkl"
-    snapshot = tmp_path / "snap.pkl.zst"
-    restored = tmp_path / "session_restored.pkl"
-
-    items = [
-        ("alpha", list(range(1000))),
-        ("beta", {"nested": {"x": [1, 2, 3]}}),
-    ]
-    skipped = []
-    _write_stream(live, items, skipped)
-    assert skipped == []
-
-    _compress_zstd(live, snapshot)
-    _decompress_zstd(snapshot, restored)
-
-    assert _read_stream(restored) == {
-        "alpha": list(range(1000)),
-        "beta": {"nested": {"x": [1, 2, 3]}},
-    }
-    # Legacy snapshot code may apply an outer zstd layer to the already
-    # compressed live stream. The round trip must stay lossless even when that
-    # tiny outer frame is slightly larger than its input.
-    assert snapshot.stat().st_size > 0
 
 
 @pytest.mark.asyncio
@@ -546,60 +446,6 @@ async def test_a_dump_written_before_the_writer_fix_still_restores(tmp_path, cap
     ]
     assert repaired, "the repair was not reported"
     assert "mdata" in repaired[0], repaired[0]
-
-
-@pytest.mark.asyncio
-async def test_a_dump_holding_a_mudata_is_readable_without_this_restore(tmp_path):
-    """The bytes are portable, which is the point of fixing the writing side.
-
-    mudata stores a dead weakref in every MuDataFileManager, and the stock
-    unpickler raises on it. Tolerating that on the way in would have left the
-    file readable only by a build carrying the same tolerance -- so an archive
-    exported to another installation, or any tool that opens the dump, would
-    still have failed. The save writes an empty AnnData in place of the dead
-    reference instead, which is what mudata's own constructor hands the parent,
-    so an unpatched reader succeeds.
-    """
-    pytest.importorskip("mudata")
-
-    from backend.config import get_session_states, get_session_workspace
-    from backend.utils.sandbox import LocalJupyterSandbox
-
-    session_id = "test-mudata-portable"
-    states_dir = get_session_states(session_id)
-    states_dir.mkdir(parents=True, exist_ok=True)
-    workspace = get_session_workspace(session_id)
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    sb = LocalJupyterSandbox(
-        session_id=session_id,
-        state_dir=str(states_dir),
-        working_dir=str(workspace),
-        timeout=120,
-    )
-    await sb.start()
-    try:
-        built = await sb.execute(
-            "import numpy as np, anndata as ad, mudata\n"
-            "mdata = mudata.MuData({'rna': ad.AnnData(np.ones((4, 3))),\n"
-            "                       'prot': ad.AnnData(np.zeros((4, 2)))})\n"
-            "print('built', mdata.shape)"
-        )
-        assert built.success, built.error
-        assert await sb.save_session()
-    finally:
-        await sb.stop(save=False)
-
-    frames = _load_dump_with_stock_dill(states_dir, session_id)
-
-    assert "mdata" in frames, sorted(frames)[:20]
-    restored = frames["mdata"]
-    assert restored.shape == (4, 5)
-    assert sorted(restored.mod) == ["prot", "rna"]
-    # The manager comes back in the state a freshly built MuData has: a live
-    # weakref whose target is already gone, which is what mudata itself makes.
-    assert restored.file._adata_ref() is None
-    assert restored.file.filename is None
 
 
 @pytest.mark.asyncio

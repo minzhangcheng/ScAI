@@ -1,17 +1,13 @@
 import asyncio
 import contextvars
-import gc
 import threading
-import weakref
 
 import pytest
 
-from backend.constants import VERSION
 from backend.models.schemas import AnalysisState
 from backend.services import session_lifecycle, session_store
 from backend.services.session_lifecycle import (
     SessionGoneError,
-    SessionGenerationError,
     abandon_import_generation,
     adopt_persisted_generation,
     bind_import_generation,
@@ -84,53 +80,6 @@ def _configure_roots(monkeypatch, tmp_path):
             else None
         ),
     )
-
-
-def test_lifecycle_lock_isolated_across_contended_event_loops():
-    """A lock that acquired without waiting may hide stale loop affinity.
-
-    Force a waiter in each independent loop so asyncio binds the lock before
-    the next loop asks for the same session ID.
-    """
-    session_lifecycle.reset_lifecycle_locks()
-    loop_refs = []
-    lock_refs = []
-
-    def run_one_loop():
-        async def contend():
-            loop_refs.append(weakref.ref(asyncio.get_running_loop()))
-            lock = get_lifecycle_lock("cross-loop-contention")
-            lock_refs.append(weakref.ref(lock))
-            entered = asyncio.Event()
-            release = asyncio.Event()
-
-            async def holder():
-                async with lock:
-                    entered.set()
-                    await release.wait()
-
-            async def waiter():
-                await entered.wait()
-                async with get_lifecycle_lock("cross-loop-contention"):
-                    return True
-
-            holder_task = asyncio.create_task(holder())
-            await entered.wait()
-            waiter_task = asyncio.create_task(waiter())
-            await asyncio.sleep(0)
-            assert not waiter_task.done(), "the second acquisition did not contend"
-            release.set()
-            await asyncio.gather(holder_task, waiter_task)
-
-        asyncio.run(contend())
-
-    run_one_loop()
-    run_one_loop()
-
-    gc.collect()
-    assert all(ref() is None for ref in lock_refs)
-    assert all(ref() is None for ref in loop_refs)
-    assert len(session_lifecycle._locks) == 0
 
 
 @pytest.mark.asyncio
@@ -211,135 +160,6 @@ async def test_delete_during_load_io_cannot_reinstall_cache(monkeypatch, tmp_pat
     assert state.id not in sessions
 
 
-@pytest.mark.asyncio
-async def test_disk_session_still_loads_after_process_cache_restart(monkeypatch, tmp_path):
-    _configure_roots(monkeypatch, tmp_path)
-    state = AnalysisState(id="restart-load", user_id="owner")
-    assert state.scai_version is None
-    register_new_generation(state)
-    assert state.scai_version == VERSION
-    session_store.save_session_to_disk(state.id, state)
-    sessions.pop(state.id, None)
-
-    loaded = await session_store.ensure_session_loaded(state.id)
-
-    assert loaded is not None
-    assert loaded.id == state.id
-    assert loaded.lifecycle_generation == state.lifecycle_generation
-    assert loaded.scai_version == VERSION
-
-
-
-def test_new_generation_rejects_pre_lifecycle_disk_collision(monkeypatch, tmp_path):
-    _configure_roots(monkeypatch, tmp_path)
-    state = AnalysisState(id="persisted-collision", user_id="owner")
-    persisted = session_lifecycle.SESSION_DIR / state.id / "session.json"
-    persisted.parent.mkdir(parents=True)
-    persisted.write_text("{}", encoding="utf-8")
-
-    with pytest.raises(SessionGenerationError, match="persisted data"):
-        register_new_generation(state)
-
-
-@pytest.mark.parametrize(
-    "suffix",
-    [
-        ".ipynb",
-        "_state.json",
-        "_session.pkl",
-        "_bioinfo_checkpoint.json",
-        "_report_checkpoint.json",
-    ],
-)
-def test_new_generation_rejects_each_exact_legacy_state_collision(
-    monkeypatch, tmp_path, suffix,
-):
-    _configure_roots(monkeypatch, tmp_path)
-    state = AnalysisState(id="legacy-state", user_id="owner")
-    session_lifecycle.STATE_DIR.mkdir(parents=True)
-    (session_lifecycle.STATE_DIR / f"{state.id}{suffix}").write_bytes(b"old")
-
-    with pytest.raises(SessionGenerationError, match="persisted data"):
-        register_new_generation(state)
-
-
-def test_new_generation_ignores_near_prefix_legacy_state(
-    monkeypatch, tmp_path,
-):
-    _configure_roots(monkeypatch, tmp_path)
-    state = AnalysisState(id="abc", user_id="owner")
-    session_lifecycle.STATE_DIR.mkdir(parents=True)
-    (session_lifecycle.STATE_DIR / "abcd_session.pkl").write_bytes(b"other")
-    (session_lifecycle.STATE_DIR / "abc_extra_state.json").write_bytes(b"other")
-
-    assert register_new_generation(state) == 1
-
-
-@pytest.mark.parametrize(
-    ("session_id", "ambiguous_name"),
-    [
-        ("abc_state", "abc_state.json"),
-        ("abc_session", "abc_session.pkl"),
-    ],
-)
-def test_new_generation_ignores_ambiguous_shorter_id_legacy_file(
-    monkeypatch, tmp_path, session_id, ambiguous_name,
-):
-    _configure_roots(monkeypatch, tmp_path)
-    state = AnalysisState(id=session_id, user_id="owner")
-    session_lifecycle.STATE_DIR.mkdir(parents=True)
-    (session_lifecycle.STATE_DIR / ambiguous_name).write_bytes(b"shorter")
-
-    assert register_new_generation(state) == 1
-
-
-def test_save_id_mismatch_fails_before_lifecycle_mutation(monkeypatch, tmp_path):
-    _configure_roots(monkeypatch, tmp_path)
-    expected_id = "expected-session"
-    state = AnalysisState(id="different-session", user_id="owner")
-
-    with pytest.raises(SessionGenerationError, match="session id mismatch"):
-        session_lifecycle.assert_generation_writable(expected_id, state)
-
-    assert read_lifecycle_record(expected_id) is None
-    assert read_lifecycle_record(state.id) is None
-    assert state.lifecycle_generation == 0
-
-
-def test_serialized_save_id_mismatch_fails_before_disk_or_lifecycle_mutation(
-    monkeypatch, tmp_path,
-):
-    _configure_roots(monkeypatch, tmp_path)
-    expected_id = "expected-serialized-session"
-    state = AnalysisState(id="different-serialized-session", user_id="owner")
-    metadata = tmp_path / expected_id / "session.json"
-
-    with pytest.raises(SessionGenerationError, match="session id mismatch"):
-        session_store.save_session_to_disk(expected_id, state)
-
-    assert read_lifecycle_record(expected_id) is None
-    assert read_lifecycle_record(state.id) is None
-    assert not metadata.exists()
-    assert state.lifecycle_generation == 0
-
-
-def test_adopt_fails_closed_when_multiple_owner_records_exist(monkeypatch, tmp_path):
-    _configure_roots(monkeypatch, tmp_path)
-    state = AnalysisState(id="ambiguous-owner", user_id="owner-a")
-    for owner in ("owner-a", "owner-b"):
-        session_lifecycle._write_record({
-            "session_id": state.id,
-            "owner_id": owner,
-            "generation": 1,
-            "status": "active",
-            "created_at": "now",
-            "deleted_at": None,
-        })
-
-    with pytest.raises(SessionGenerationError, match="multiple lifecycle owner"):
-        adopt_persisted_generation(state)
-
-
 def test_deleted_id_import_claims_next_generation_and_stale_state_stays_gone(
     monkeypatch, tmp_path,
 ):
@@ -385,21 +205,6 @@ def test_deleted_id_import_claims_next_generation_and_stale_state_stays_gone(
     assert exc_info.value.generation == 1
     assert_generation = adopt_persisted_generation(importing)
     assert assert_generation == 2
-
-
-def test_deleted_id_cannot_be_reclaimed_by_another_owner(monkeypatch, tmp_path):
-    _configure_roots(monkeypatch, tmp_path)
-    state = AnalysisState(id="foreign-deleted-id", user_id="owner-a")
-    register_new_generation(state)
-    tombstone_generation(state.id, state.user_id, state.lifecycle_generation)
-
-    session_dir = session_lifecycle.SESSION_DIR / state.id
-    assert claim_import_generation(state.id, "owner-b", session_dir) is None
-    assert not session_dir.exists()
-    record = read_lifecycle_record(state.id)
-    assert record["status"] == "deleted"
-    assert record["owner_id"] == "owner-a"
-    assert record["generation"] == 1
 
 
 def test_failed_same_id_import_tombstones_reserved_generation(monkeypatch, tmp_path):

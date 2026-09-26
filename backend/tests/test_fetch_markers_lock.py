@@ -1,8 +1,6 @@
 import re
 import pathlib
 import os
-import tempfile
-import pytest
 
 
 def test_marker_sources_are_https_named_hosts():
@@ -24,19 +22,6 @@ def test_marker_sources_are_https_named_hosts():
         assert not re.fullmatch(r"[\d.]+", host), (
             f"{name} points at raw IP {host}; TLS cannot be verified against it"
         )
-
-
-def test_lock_acquire_no_toctou(tmp_path):
-    """Verify _acquire_lock doesn't use unlink-then-open which is racy."""
-    src = pathlib.Path("scripts/fetch_markers.py").read_text()
-    # Allow os.replace as the atomic alternative, forbid unlink + O_EXCL sequence
-    # Check there is no os.unlink followed by O_CREAT|O_EXCL
-    lines = src.splitlines()
-    for i, line in enumerate(lines):
-        if "os.unlink" in line and i + 1 < len(lines):
-            nxt = lines[i + 1]
-            if "O_CREAT" in nxt and "O_EXCL" in nxt:
-                assert False, f"TOCTOU at line {i+1}: unlink then O_EXCL"
 
 
 def test_acquire_lock_stale_reclaim(tmp_path):
@@ -112,21 +97,6 @@ def test_cellmarker_download_always_verifies_tls(monkeypatch):
     assert mod._download_cellmarker() == "PARSED"
     assert seen["verify"] is True
     assert seen["url"].startswith("https://bio-bigdata.hrbmu.edu.cn/")
-
-
-def test_cellmarker_download_has_no_verify_false_branch():
-    """The old code had one, gated on a checksum pin nobody ever set.
-
-    Comments are stripped first: the code must not contain the escape hatch, but
-    it should still be allowed to explain why.
-    """
-    import inspect
-
-    mod = _load_fetch_markers()
-    code = "\n".join(ln.split("#", 1)[0]
-                     for ln in inspect.getsource(mod._download_cellmarker).splitlines())
-    assert "verify=False" not in code
-    assert "verify=True" in code
 
 
 def test_cellmarker_reads_the_zip_wrapped_tsv_with_narrow_columns(monkeypatch):

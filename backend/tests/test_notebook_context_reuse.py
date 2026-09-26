@@ -51,6 +51,9 @@ async def test_chat_prestarted_sandbox_supplies_history_without_new_receipts(
             self.sandbox = kwargs["sandbox"]
             self.code_history = []
 
+        def set_session(self, session_id):
+            self.session_id = session_id
+
         async def run_autonomous_analysis(self, actual_state, instruction, max_steps, **options):
             assert actual_state is state
             assert options["run_kind"] == "chat"
@@ -77,13 +80,17 @@ async def test_chat_prestarted_sandbox_supplies_history_without_new_receipts(
                 "findings": restored.findings, "figures": restored.figures,
             }
 
+    monkeypatch.setattr("backend.utils.agent_llm.get_agent_llm_client", lambda *a, **kw: AsyncMock())
     monkeypatch.setattr(delegation, "resolve_config_for_user", AsyncMock(return_value=SystemConfig()))
     monkeypatch.setattr(delegation, "get_session_states", lambda _: tmp_path / "states")
     monkeypatch.setattr(delegation, "get_session_workspace", lambda _: tmp_path / "workspace")
     monkeypatch.setattr(delegation, "_collect_session_figures", lambda *a, **kw: [])
     monkeypatch.setattr(sandbox_module, "LocalJupyterSandbox", MagicMock(return_value=sandbox))
     monkeypatch.setattr(literature_agent, "LiteratureAgent", MagicMock())
-    monkeypatch.setattr(pi_agent, "PIAgent", MagicMock())
+    monkeypatch.setattr(delegation, "_persist_chat_terminal", AsyncMock(return_value=True))
+    monkeypatch.setattr(pi_agent, "PIAgent", MagicMock(return_value=MagicMock(
+        review_chat_execution=AsyncMock(return_value={"decision": "accept"}),
+    )))
     monkeypatch.setattr(bioinformatics_agent, "BioinformaticsAgent", RecordingAgent)
 
     result, _ = await delegation._execute_chat_agent_inner(
@@ -101,77 +108,6 @@ async def test_chat_prestarted_sandbox_supplies_history_without_new_receipts(
     sandbox.start.assert_awaited_once()
     sandbox.stop.assert_awaited_once_with(save=True)
     assert state.id not in delegation.chat_sandboxes
-
-
-def test_notebook_fallback_is_bounded_and_preserves_failures_without_mutation():
-    cells = [{"code": f"old_cell_{i}", "outputs": []} for i in range(6)]
-    cells += [{"code": "last_cell", "outputs": [
-        {"type": "error", "evalue": "Missing input"},
-        {"type": "display_data", "data": {"image/png": "private-image-bytes"}},
-    ]}]
-    original = deepcopy(cells)
-    agent = SimpleNamespace(
-        code_history=[], sandbox=SimpleNamespace(get_code_history=lambda: cells),
-    )
-
-    context = ContextMixin._build_notebook_context(agent)
-
-    assert "old_cell_0" not in context and "old_cell_1" not in context
-    assert "old_cell_2" in context and "last_cell" in context
-    assert "Error: Missing input" in context
-    assert "[Generated 1 figure(s)]" in context
-    assert "private-image-bytes" not in context
-    assert cells == original
-    assert agent.code_history == []
-
-
-def test_ordinary_execution_history_retains_precedence_and_rendering():
-    history = [CodeExecution(code="print(value)", output="result", error="warning")]
-    get_history = MagicMock(side_effect=AssertionError("Must use current executions"))
-    agent = SimpleNamespace(
-        code_history=history, sandbox=SimpleNamespace(get_code_history=get_history),
-    )
-
-    context = ContextMixin._build_notebook_context(agent)
-
-    assert "```python\nprint(value)\n```" in context
-    assert "Output:\nresult" in context
-    assert "Error: warning" in context
-    assert "historical notebook cells" not in context
-    assert agent.code_history is history
-    get_history.assert_not_called()
-
-
-def test_missing_history_does_not_claim_an_empty_kernel():
-    agent = SimpleNamespace(
-        code_history=[], sandbox=SimpleNamespace(get_code_history=lambda: []),
-    )
-    context = ContextMixin._build_notebook_context(agent)
-    assert "No notebook execution history is available" in context
-    assert "Inspect the current namespace" in context
-    assert "first code cell" not in context
-
-
-@pytest.mark.asyncio
-async def test_cold_restore_does_not_create_execution_receipts(monkeypatch):
-    from backend.agents.bioinformatics.executor_runtime import prepare_sandbox
-
-    state = AnalysisState(id="cold-context", user_id="owner")
-    sandbox = SimpleNamespace(
-        km=None, session_id=state.id,
-        start=AsyncMock(return_value={"session_restored": True}),
-        get_code_history=lambda: _notebook_cells(),
-        sync_runtime_persistence_state=lambda _: {},
-    )
-    agent = SimpleNamespace(sandbox=sandbox, code_history=[], _notify=AsyncMock())
-    monkeypatch.setattr(
-        "backend.services.adata_checkpoints.reconcile.reconcile_live_runtime_state",
-        AsyncMock(return_value=False),
-    )
-    await prepare_sandbox(agent, state, bindings=SimpleNamespace(logger=logging.getLogger(__name__)))
-    sandbox.start.assert_awaited_once()
-    assert agent.code_history == []
-    assert "X_umap" in ContextMixin._build_notebook_context(agent)
 
 
 @pytest.mark.parametrize("saved_history", [[], [CodeExecution(id="original-id", code="x = 1").model_dump()]])

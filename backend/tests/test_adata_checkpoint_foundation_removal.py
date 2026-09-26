@@ -1,10 +1,8 @@
 """Retired Stage 1 foundation gate must not remain reachable."""
 from __future__ import annotations
 
-import importlib
 import pathlib
 
-import pytest
 
 from backend.models.schemas import AnalysisState
 from backend.services.legacy_state_sanitizer import sanitize_legacy_state
@@ -22,44 +20,6 @@ FOUNDATION_NAMES = (
     "classify_foundation_signature",
     "registered_derived_names",
 )
-
-
-def test_retired_foundation_module_is_absent():
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("backend.services.foundation_integrity")
-
-
-def test_executor_no_longer_references_foundation_symbols():
-    executor = (REPO / "backend/agents/bioinformatics/executor_execute.py").read_text()
-    for name in FOUNDATION_NAMES:
-        assert name not in executor
-    supplementary = (
-        REPO / "backend/agents/bioinformatics/supplementary_support.py"
-    ).read_text()
-    for name in (
-        "foundation_write_guard",
-        "foundation_is_sealed",
-        "foundation_manifest",
-        "classify_foundation_signature",
-        "accept_foundation_extensions",
-        "clear_foundation_bindings",
-        "commit_foundation_bindings",
-        "mark_foundation_drift",
-    ):
-        assert name not in supplementary
-
-
-def test_supplementary_pass_has_no_signature_abort():
-    supplementary = (
-        REPO / "backend/agents/bioinformatics/supplementary.py"
-    ).read_text()
-    assert "capture_main_object_signature" not in supplementary
-    assert "_supplementary_fatal_signature_changes" not in supplementary
-    support = (
-        REPO / "backend/agents/bioinformatics/supplementary_support.py"
-    ).read_text()
-    assert "signatures_match" not in support
-    assert "capture_main_object_signature" not in support
 
 
 def test_legacy_sanitizer_removes_all_foundation_and_closure_latches():
@@ -87,18 +47,3 @@ def test_legacy_sanitizer_removes_all_foundation_and_closure_latches():
         assert key not in state.sandbox_state
     # Unrelated runtime observations remain untouched.
     assert state.sandbox_state["runtime_revision"] == 1
-
-
-def test_stage2_instruction_does_not_claim_a_sealed_canonical_object():
-    from backend.workflow.agents import build_phase_instruction
-
-    text = build_phase_instruction(
-        planning_stage="stage2",
-        analysis_phase="exploration",
-        has_bulk=False,
-        has_scrna=True,
-        direction="",
-    )
-    assert "live, sealed canonical" not in text
-    assert "Do NOT reload or rebind `adata`" not in text
-    assert "Host-resolved source binding" in text

@@ -1,11 +1,7 @@
-"""Integration test fixtures for Snapshot V2 production verification.
-
-One kernel per module, bounded by timeout, always stopped in finalizer.
-"""
+"""Shared fixtures for real-kernel integration tests."""
 
 import os
 import uuid
-from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -28,30 +24,9 @@ def session_id() -> str:
     return f"int-{uuid.uuid4().hex[:12]}"
 
 
-@pytest.fixture
-def v2_paths(tmp_path):
-    class FakePaths:
-        root = tmp_path / "v2"
-        objects = tmp_path / "objects"
-        staging = tmp_path / "staging"
-        journals = tmp_path / "journals"
-        integrity = tmp_path / "integrity"
-        committed = tmp_path / "committed"
-
-        def ensure_dirs(self):
-            for d in [self.root, self.objects, self.staging,
-                      self.journals, self.integrity, self.committed]:
-                d.mkdir(parents=True, exist_ok=True)
-
-    p = FakePaths()
-    p.ensure_dirs()
-    return p
-
-
-
 @pytest_asyncio.fixture
 async def sandbox(tmp_path, session_id):
-    """One real kernel per test module, bounded by 120s timeout."""
+    """One real kernel per test, stopped after use."""
     from backend.utils.sandbox import LocalJupyterSandbox
     state_dir = str(tmp_path / "states")
     working_dir = str(tmp_path / "workspace")

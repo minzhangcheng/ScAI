@@ -1,31 +1,10 @@
 """Tests for V1 API endpoints and upload service logic."""
-import os
 import sqlite3
 
-import hashlib
 import pytest
-import pytest_asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
-
-
-@pytest.fixture
-def config_dict():
-    return {
-        "schema_version": "1.0",
-        "analysis": {"name": "API Test", "initial_instruction": "Test", "round_wait_seconds": 0},
-        "api_config": {
-            "default_llm": {"llm_base_url": "https://api.test.com", "api_key": "sk-test"},
-            "literature": {"mode": "disabled"},
-        },
-        "data": {
-            "groups": [{"key": "ctrl", "name": "Control", "sample_count": 1}],
-            "files": [
-                {"local_path": "test.h5ad", "section": "sequencing", "data_type": "h5ad", "group": "ctrl"},
-            ],
-        },
-    }
 
 
 class TestUploadDB:
@@ -240,27 +219,6 @@ class TestUploadService:
                 assert "already completed" in str(exc_info.value.detail).lower()
         finally:
             sessions.pop("sid1", None)
-
-
-class TestValidation:
-    def test_round_wait_minus1_valid_in_config(self, config_dict):
-        """-1 should pass ConfigV1 validation (manual skip mode)."""
-        from backend.models.config_schema import ConfigV1
-        config_dict["analysis"]["round_wait_seconds"] = -1
-        c = ConfigV1.model_validate(config_dict)
-        assert c.analysis.round_wait_seconds == -1
-
-    def test_agent_override_custom_prompt(self):
-        from backend.models.config_schema import AgentOverride
-        ov = AgentOverride(custom_prompt="Be precise")
-        assert ov.custom_prompt == "Be precise"
-        assert not hasattr(ov, "prompt")
-
-    def test_agent_override_vision(self):
-        from backend.models.config_schema import AgentOverride
-        ov = AgentOverride(vision=True)
-        assert ov.vision is True
-        assert not hasattr(ov, "vision_enabled")
 
 
 class TestReportArtifacts:

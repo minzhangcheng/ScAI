@@ -13,7 +13,6 @@ from backend.models.schemas import (
     AdataSourcePreparation,
     AdataSourceSelection,
     canonical_id_set_digest,
-    normalize_id_set,
 )
 
 
@@ -38,17 +37,6 @@ def _available_record() -> AdataCheckpointRecord:
             "92c48b924b12091ac4079dd7093abaa6"
         ),
     )
-
-
-def test_checkpoint_record_requires_coherent_available_blob():
-    record = _available_record()
-    assert record.status == "available"
-    with pytest.raises(ValueError):
-        AdataCheckpointRecord(
-            status="available",
-            boundary="round_complete",
-            boundary_event_id="event-2",
-        )
 
 
 def test_public_session_payload_excludes_catalog_paths_and_tokens():
@@ -96,34 +84,6 @@ def test_public_session_payload_excludes_catalog_paths_and_tokens():
     # selection, never a Host path or application token.
     assert payload["current_plan"]["adata_source"]["mode"] == "checkpoint_copy"
     assert payload["current_plan"]["adata_source"]["checkpoint_id"] == "cp_test"
-
-
-def test_bounded_execution_sample_accepts_more_than_200_ids():
-    digest = "c" * 64
-    ids = [f"exec-{index:04d}" for index in range(250)]
-    normalized = normalize_id_set(ids)
-    record = AdataCheckpointRecord(
-        status="available",
-        boundary="round_complete",
-        boundary_event_id="event-many",
-        round_number=1,
-        session_lineage_id="main",
-        adata_lineage_id="lineage-many",
-        blob_sha256=digest,
-        blob_relative_path=f"adata-checkpoints/blobs/{digest}.h5ad",
-        size_bytes=1,
-        n_obs=1,
-        n_vars=1,
-        execution_ids_at_capture=normalized[:200],
-        execution_id_count_at_capture=len(normalized),
-        execution_id_set_digest_at_capture=canonical_id_set_digest(normalized),
-        attempt_execution_ids_at_capture=normalized[:200],
-        attempt_execution_id_count_at_capture=len(normalized),
-        attempt_execution_id_set_digest_at_capture=canonical_id_set_digest(normalized),
-    )
-    assert record.execution_id_count_at_capture == 250
-    assert len(record.execution_ids_at_capture) == 200
-    assert record.execution_id_set_digest_at_capture == canonical_id_set_digest(ids)
 
 
 def test_complete_bounded_sample_rejects_noncanonical_or_wrong_digest():

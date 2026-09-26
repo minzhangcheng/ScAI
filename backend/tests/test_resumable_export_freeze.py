@@ -1,6 +1,7 @@
 """Behavioral export races and validation of the captured generation."""
 import asyncio
 import hashlib
+import sqlite3
 import tarfile
 import threading
 import uuid
@@ -125,6 +126,8 @@ async def test_archive_freeze_blocks_execute_save_and_shutdown_until_worker_drai
     register_new_generation(state)
     sb = LocalJupyterSandbox(session_id=sid, state_dir=str(get_session_states(sid)),
                               working_dir=str(get_session_workspace(sid)))
+    with sqlite3.connect(get_session_states(sid) / "checkpoints.sqlite") as connection:
+        connection.execute("CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, checkpoint_id TEXT)")
     sb.km = MagicMock()
     sb.kc = MagicMock()
     sb._initialized = True

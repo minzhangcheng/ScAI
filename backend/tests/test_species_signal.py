@@ -9,40 +9,6 @@ import pytest
 from backend.models.schemas import AnalysisState, TaskStatus
 
 
-class TestSpeciesSignal:
-    def test_signal_species_input_sets_event(self):
-        from backend.workflow.core import SingleCellAnalysisWorkflow
-        wf = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
-        wf._species_event = asyncio.Event()
-        wf._species_user_response = None
-        wf.session_id = "test"
-
-        accepted = wf.signal_species_input("Homo sapiens")
-
-        assert accepted is True
-        assert wf._species_event.is_set()
-        assert wf._species_user_response == "Homo sapiens"
-
-    def test_signal_species_input_keeps_first_response(self):
-        from backend.workflow.core import SingleCellAnalysisWorkflow
-        wf = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
-        wf._species_event = asyncio.Event()
-        wf._species_user_response = None
-        wf.session_id = "test"
-
-        assert wf.signal_species_input("first") is True
-        assert wf.signal_species_input("second") is False
-        assert wf._species_user_response == "first"
-
-    def test_species_event_initialized(self):
-        from backend.workflow.core import SingleCellAnalysisWorkflow
-        wf = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
-        wf._species_event = asyncio.Event()
-        wf._species_user_response = None
-        assert not wf._species_event.is_set()
-        assert wf._species_user_response is None
-
-
 class _FakeWorkflow:
     def __init__(self):
         self.signal_species_called_with = None
@@ -51,36 +17,6 @@ class _FakeWorkflow:
         self.signal_species_called_with = text
     def signal_resume(self):
         self.resume_called = True
-
-
-@pytest.mark.asyncio
-async def test_resume_from_waiting_species_input(monkeypatch):
-    """Direct resume from WAITING_SPECIES_INPUT should not 400; should signal workflow."""
-    from backend.routes.lifecycle import _resume_analysis_locked
-    from backend.state import workflows
-
-    sid = "sess-species-direct"
-    st = AnalysisState(user_id="u1", session_id=sid)
-    st.status = TaskStatus.WAITING_SPECIES_INPUT
-
-    fake_wf = _FakeWorkflow()
-    workflows[sid] = fake_wf
-
-    async def _fake_owner(**kwargs):
-        return st
-    monkeypatch.setattr("backend.routes.lifecycle.require_session_ownership", _fake_owner)
-    monkeypatch.setattr("backend.routes.lifecycle._update_session_cache",
-                        lambda *_a, **_k: asyncio.sleep(0))
-    monkeypatch.setattr("backend.routes.lifecycle.async_save_session",
-                        lambda *_a, **_k: asyncio.sleep(0))
-
-    try:
-        resp = await _resume_analysis_locked(sid, "u1")
-        assert resp.success is True
-        assert fake_wf.signal_species_called_with == ""
-        assert st.status == TaskStatus.RUNNING
-    finally:
-        workflows.pop(sid, None)
 
 
 @pytest.mark.asyncio

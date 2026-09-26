@@ -1,37 +1,9 @@
 """Supervisor report generation wiring for round-bound figure placement."""
-import hashlib
-import os
-import re
-from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from backend.agents.supervisor import report_content, report_prompt
 from backend.agents.supervisor_agent import SupervisorAgent
-from backend.models.schemas import AnalysisState, FigureReviewStatus, PublicationFigure
-from backend.services.report.report_outline import build_report_outline
-
-_T0 = datetime(2026, 1, 1, 12, 0, 0)
-
-
-def _round(n, phase, direction=""):
-    return SimpleNamespace(
-        round_number=n, phase=phase, direction=direction,
-        timestamp=_T0 + timedelta(minutes=n * 10),
-    )
-
-
-def _outline():
-    return build_report_outline(SimpleNamespace(
-        round_results=[
-            _round(1, "exploration"),
-            _round(2, "innovation", "direction A"),
-            _round(3, "integration"),
-        ],
-        publication_figures=[],
-    ))
 
 
 def _agent():
@@ -44,331 +16,17 @@ def _png(path: Path) -> Path:
     return path
 
 
-def test_allocation_text_lists_figures_under_their_own_section(tmp_path):
-    outline = _outline()
-    figure_map = {"a.png": tmp_path / "a.png", "b.png": tmp_path / "b.png"}
-    text = _agent()._build_figure_allocation_text(
-        outline, figure_map, {"a.png": 1, "b.png": 2}
-    )
-    assert "[exploration_findings]" in text
-    # Each figure appears under exactly the section owning its round.
-    expl = text.index("[exploration_findings]")
-    d1 = text.index("[direction_1]")
-    assert expl < text.index("a.png") < d1 < text.index("b.png")
-
-
-def test_allocation_text_preserves_numbered_analysis_order(tmp_path):
-    outline = _outline()
-    figure_map = {
-        "first.png": tmp_path / "first.png",
-        "second.png": tmp_path / "second.png",
-        "third.png": tmp_path / "third.png",
-    }
-
-    text = _agent()._build_figure_allocation_text(
-        outline,
-        figure_map,
-        {name: 2 for name in figure_map},
-    )
-
-    direction = text[text.index("[direction_1]"):]
-    assert "analysis order (preserve exactly)" in direction
-    assert direction.index("1. first.png") < direction.index("2. second.png")
-    assert direction.index("2. second.png") < direction.index("3. third.png")
-
-
-@pytest.mark.asyncio
-async def test_report_placement_uses_analysis_order_not_file_mtime(tmp_path):
-    outline = _outline()
-    first = _png(tmp_path / "first.png")
-    second = _png(tmp_path / "second.png")
-    os.utime(first, (200, 200))
-    os.utime(second, (100, 100))
-    figure_map = {"first.png": first, "second.png": second}
-    sections = [
-        {
-            "id": section.id,
-            "title": section.default_title,
-            "content": "Narrative.",
-            "analysis_type": section.analysis_type,
-            "figures": [],
-            "tables": [],
-        }
-        for section in outline
-    ]
-
-    agent = _agent()
-    agent.session_id = "s"
-    agent._validate_report_content = lambda _content: True
-    agent._parse_report_sections = lambda *_args, **_kwargs: sections
-    report_prompt.bind_facade(report_content)
-
-    async def progress(*_args):
-        return None
-
-    ctx = {
-        "_progress": progress,
-        "report_content": "valid",
-        "language": "en",
-        "outline": outline,
-        "used_fallback": False,
-        "attribution": {name: 2 for name in figure_map},
-        "figure_map": figure_map,
-        "figure_metadata_by_stem": {},
-        "client": SimpleNamespace(base_url=""),
-    }
-
-    await report_prompt.parse_and_place_report(
-        agent,
-        ctx,
-        SimpleNamespace(),
-        workspace_dir=None,
-        chat_messages=None,
-        progress_callback=None,
-        report_model="test-model",
-    )
-
-    direction = next(
-        section for section in ctx["sections"] if section["id"] == "direction_1"
-    )
-    figures = re.findall(r"\[FIGURE:\s*([^\]]+)\]", direction["content"])
-    assert figures == ["first.png", "second.png"]
-
-
-def test_allocation_marks_figureless_sections_explicitly(tmp_path):
-    text = _agent()._build_figure_allocation_text(
-        _outline(), {"a.png": tmp_path / "a.png"}, {"a.png": 1}
-    )
-    for sid in ("abstract", "methods", "conclusions"):
-        line = next(l for l in text.splitlines() if l.startswith(f"[{sid}]"))
-        assert "no figures" in line
-
-    integration = next(s for s in _outline() if s.kind == "integration_final")
-    line = next(l for l in text.splitlines() if l.startswith(f"[{integration.id}]"))
-    assert "text-only" in line
-    assert "no figure required" in line
-    assert "no figures were produced" not in line
-
-
-def test_allocation_flags_unattributed_figures(tmp_path):
-    text = _agent()._build_figure_allocation_text(
-        _outline(), {"mystery.png": tmp_path / "mystery.png"}, {}
-    )
-    # A figure the round cannot place is still offered to the model, told to
-    # place it by content -- never silently dropped from the allocation.
-    assert "mystery.png" in text
-    assert "by content" in text
-
-
-def test_a_round_several_sections_claim_allocates_to_none_of_them(tmp_path):
-    """The legacy outline organises by analysis type, not by round.
-
-    Its four findings sections each declare every round, so the round number
-    carries no allocation. Handing the figures to the first claimant put the
-    whole report in quality control and told the model the other three chapters
-    produced nothing -- a statement it then wrote prose around.
-    """
-    outline = build_report_outline(SimpleNamespace(
-        round_results=[_round(1, "exploration"), _round(2, "exploration")],
-        publication_figures=[],
-    ))
-    shared = [sec.id for sec in outline if sec.rounds]
-    assert len(shared) > 1, "expected the legacy outline's shared-round sections"
-
-    text = _agent()._build_figure_allocation_text(
-        outline, {"umap.png": tmp_path / "umap.png"}, {"umap.png": 1}
-    )
-    assert "no figures were produced" not in text
-    assert "by content" in text
-    # Offered once, to no single section.
-    assert text.count("umap.png") == 1
-
-
-def test_parse_uses_outline_titles_and_types():
-    outline = _outline()
-    agent = _agent()
-    agent.session_id = "s"
-    content = (
-        "## [direction_1] Section Title\nbody one\n\n"
-        "## [methods] Section Title\nbody two\n"
-        "## [exploration_findings] Baseline findings\nbody three\n"
-    )
-    sections = agent._parse_report_sections(content, "en", outline=outline)
-    by_id = {s["id"]: s for s in sections}
-    # Placeholder titles are repaired from the outline, not the static table.
-    assert by_id["direction_1"]["title"] == "Innovation Round 2"
-    assert by_id["direction_1"]["analysis_type"] == "specific"
-    assert by_id["methods"]["title"] == "Methods"
-    assert by_id["methods"]["analysis_type"] == "general"
-    assert by_id["exploration_findings"]["analysis_type"] == "general"
-
-
-def test_html_round_badges_match_in_toc_and_body(tmp_path):
-    agent = _agent()
-    agent.session_id = "s"
-    sections = agent._parse_report_sections(
-        "## [methods] Methods\nMethods text\n"
-        "## [exploration_findings] Baseline findings\nExploration text\n"
-        "## [direction_1] Targeted findings\nInnovation text\n"
-        "## [integrated_findings] Synthesis\nIntegration text\n",
-        "en", outline=_outline(),
-    )
-    out = tmp_path / "reports"
-    out.mkdir()
-    html_path = agent._generate_html_report(
-        {"title": "T", "figures": [], "tables": []},
-        sections, "abstract", "conclusions", [], {},
-        {"total_steps_monitored": 0, "steps_with_technical_issues": 0,
-         "pi_escalations": 0},
-        "en", out, tmp_path / "workspace",
-    )
-    html = Path(html_path).read_text(encoding="utf-8")
-    for type_class, label in [
-        ("general", "General / Exploration"),
-        ("specific", "Specific / Innovation"),
-        ("specific", "Integration"),
-        ("general", "General"),
-    ]:
-        assert f'class="section-type {type_class}">{label}</span>' in html
-        assert f'class="analysis-type-badge {type_class}">{label}</span>' in html
-
-
-def test_parse_without_outline_keeps_legacy_behaviour():
-    agent = _agent()
-    agent.session_id = "s"
-    sections = agent._parse_report_sections(
-        "## [data_qc] Section Title\nbody\n", "en"
-    )
-    assert sections[0]["title"] == "Data Overview and Quality Control"
-
-
-def test_html_embeds_a_repeated_figure_only_once(tmp_path):
-    """A filename cited three times used to be inlined three times."""
-    agent = _agent()
-    agent.session_id = "s"
-    fig = _png(tmp_path / "workspace" / "figures" / "dup.png")
-    sections = [{
-        "id": "direction_1",
-        "title": "Direction",
-        "analysis_type": "specific",
-        "content": (
-            "[FIGURE: dup.png]\n[FIGURE_CAPTION: CAPTIONALPHA]\n"
-            "text\n[FIGURE: dup.png]\n[FIGURE_CAPTION: CAPTIONBETA]\n"
-            "more\n[FIGURE: dup.png]\n"
-        ),
-        "figures": [], "tables": [],
-    }]
-    out = tmp_path / "reports"
-    out.mkdir(parents=True, exist_ok=True)
-
-    html_path = agent._generate_html_report(
-        {"title": "T", "figures": [], "tables": []},
-        sections, "abstract", "conclusions",
-        [{"filename": "dup.png", "path": str(fig), "category": "other"}],
-        {"dup.png": fig},
-        {"total_steps_monitored": 0, "steps_with_technical_issues": 0,
-         "pi_escalations": 0},
-        "en", out, tmp_path / "workspace",
-    )
-    html = Path(html_path).read_text(encoding="utf-8")
-    # One <img> for the figure, and the surviving caption is the first one.
-    assert html.count('alt="dup.png"') == 1
-    assert html.count("CAPTIONALPHA") == 1
-    assert "CAPTIONBETA" not in html
-
-
-def test_html_matches_registered_metadata_by_stem_when_record_path_is_empty(tmp_path):
-    agent = _agent()
-    agent.session_id = "s"
-    fig = _png(tmp_path / "workspace" / "figures" / "planned_result.png")
-    state = AnalysisState(id="s", user_id="u", name="T")
-    state.publication_figures = [PublicationFigure(
-        name="planned_result",
-        description="Authoritative planned-result description.",
-        figure_type="heatmap",
-        png_path="",
-        pdf_path="",
-        render_sha256=hashlib.sha256(fig.read_bytes()).hexdigest(),
-        pdf_sha256="2" * 64,
-        review_status=FigureReviewStatus.APPROVED,
-    )]
-    sections = [{
-        "id": "direction_1",
-        "title": "Direction",
-        "analysis_type": "specific",
-        "content": "[FIGURE: planned_result.png]",
-        "figures": [],
-        "tables": [],
-    }]
-    out = tmp_path / "reports"
-    out.mkdir(parents=True, exist_ok=True)
-
-    html_path = agent._generate_html_report(
-        {"title": "T", "figures": [], "tables": [], "_analysis_state": state},
-        sections,
-        "abstract",
-        "conclusions",
-        [{"filename": "planned_result.png", "path": str(fig), "category": "heatmap"}],
-        {"planned_result.png": fig},
-        {"total_steps_monitored": 0, "steps_with_technical_issues": 0,
-         "pi_escalations": 0},
-        "en",
-        out,
-        tmp_path / "workspace",
-    )
-
-    html = Path(html_path).read_text(encoding="utf-8")
-    assert "Authoritative planned-result description." in html
-
-
-def test_html_deterministically_discloses_registered_figure_reservation(tmp_path):
-    agent = _agent()
-    agent.session_id = "s"
-    fig = _png(tmp_path / "workspace" / "figures" / "reserved.png")
-    state = AnalysisState(id="s", user_id="u", name="T")
-    reserved = PublicationFigure(
-        name="reserved",
-        description="Reserved panel.",
-        figure_type="heatmap",
-        png_path=str(fig),
-        pdf_path="",
-        render_sha256=hashlib.sha256(fig.read_bytes()).hexdigest(),
-        pdf_sha256="2" * 64,
-        review_status=FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS,
-        pi_degraded_acceptance=True,
-        pi_degraded_acceptance_reason="A & B < C labels remain crowded.",
-        unresolved_must_fix=["Separate A & B < C labels."],
-    )
-    state.publication_figures = [reserved]
-    sections = [{
-        "id": "direction_1", "title": "Direction", "analysis_type": "specific",
-        "content": "[FIGURE: reserved.png]", "figures": [], "tables": [],
-    }]
-    out = tmp_path / "reports"
-    out.mkdir(parents=True, exist_ok=True)
-
-    html_path = agent._generate_html_report(
-        {"title": "T", "figures": [], "tables": [], "_analysis_state": state},
-        sections, "abstract", "conclusions",
-        [{"filename": "reserved.png", "path": str(fig), "category": "heatmap"}],
-        {"reserved.png": fig},
-        {"total_steps_monitored": 0, "steps_with_technical_issues": 0,
-         "pi_escalations": 0},
-        "en", out, tmp_path / "workspace",
-    )
-    rendered = Path(html_path).read_text(encoding="utf-8")
-
-    assert rendered.count("figure-reservation-notice") == 1
-    assert "A &amp; B &lt; C labels remain crowded" in rendered
-    assert "&amp;amp;" not in rendered
-
-
-def test_html_does_not_guess_same_stem_pdf_for_download_or_package(tmp_path):
+@pytest.mark.parametrize("validated", [False, True], ids=["guessed-pdf", "validated-pdf"])
+def test_html_packages_only_explicitly_validated_figure_pdf(tmp_path, validated):
     agent = _agent()
     agent.session_id = "s"
     fig = _png(tmp_path / "workspace" / "figures" / "result.png")
-    sibling_pdf = fig.with_suffix(".pdf")
-    sibling_pdf.write_bytes(b"%PDF-1.4\nunreviewed replacement")
+    pdf = tmp_path / "validated" / "reviewed-result.pdf" if validated else fig.with_suffix(".pdf")
+    pdf.parent.mkdir(exist_ok=True)
+    pdf.write_bytes(b"%PDF-1.4\nvalidated" if validated else b"%PDF-1.4\nunreviewed replacement")
+    report_figure = {"filename": "result.png", "path": str(fig), "category": "other"}
+    if validated:
+        report_figure["pdf_path"] = str(pdf)
     out = tmp_path / "reports"
     out.mkdir(parents=True)
     sections = [{
@@ -385,7 +43,7 @@ def test_html_does_not_guess_same_stem_pdf_for_download_or_package(tmp_path):
         sections,
         "abstract",
         "conclusions",
-        [{"filename": "result.png", "path": str(fig), "category": "other"}],
+        [report_figure],
         {"result.png": fig},
         {"total_steps_monitored": 0, "steps_with_technical_issues": 0,
          "pi_escalations": 0},
@@ -395,47 +53,9 @@ def test_html_does_not_guess_same_stem_pdf_for_download_or_package(tmp_path):
     )
 
     html = Path(html_path).read_text(encoding="utf-8")
-    assert "Download PDF" not in html
-    assert not (out / "figures" / sibling_pdf.name).exists()
-
-
-def test_html_uses_only_validated_report_figure_pdf_path(tmp_path):
-    agent = _agent()
-    agent.session_id = "s"
-    fig = _png(tmp_path / "workspace" / "figures" / "result.png")
-    validated_pdf = tmp_path / "validated" / "reviewed-result.pdf"
-    validated_pdf.parent.mkdir()
-    validated_pdf.write_bytes(b"%PDF-1.4\nvalidated")
-    out = tmp_path / "reports"
-    out.mkdir(parents=True)
-    sections = [{
-        "id": "results",
-        "title": "Results",
-        "analysis_type": "specific",
-        "content": "[FIGURE: result.png]",
-        "figures": [],
-        "tables": [],
-    }]
-
-    html_path = agent._generate_html_report(
-        {"title": "T", "figures": [], "tables": []},
-        sections,
-        "abstract",
-        "conclusions",
-        [{
-            "filename": "result.png",
-            "path": str(fig),
-            "pdf_path": str(validated_pdf),
-            "category": "other",
-        }],
-        {"result.png": fig},
-        {"total_steps_monitored": 0, "steps_with_technical_issues": 0,
-         "pi_escalations": 0},
-        "en",
-        out,
-        tmp_path / "workspace",
-    )
-
-    html = Path(html_path).read_text(encoding="utf-8")
-    assert 'figures/reviewed-result.pdf' in html
-    assert (out / "figures" / "reviewed-result.pdf").read_bytes() == validated_pdf.read_bytes()
+    if validated:
+        assert 'figures/reviewed-result.pdf' in html
+        assert (out / "figures" / pdf.name).read_bytes() == pdf.read_bytes()
+    else:
+        assert "Download PDF" not in html
+        assert not (out / "figures" / pdf.name).exists()

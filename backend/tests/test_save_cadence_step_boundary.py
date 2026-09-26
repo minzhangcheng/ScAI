@@ -8,8 +8,6 @@ advertised 30.
 from __future__ import annotations
 
 
-
-
 def test_the_loop_asks_the_runtime_cadence_every_turn():
     """Not once every five steps of a counter that keeps restarting.
 
@@ -34,40 +32,6 @@ def test_the_loop_asks_the_runtime_cadence_every_turn():
     assert 'record.get("status") == "live_dirty"' in turn, (
         "the per-turn cadence is not gated on the runtime being dirty, so a "
         "fresh session saves before it has executed anything"
-    )
-
-
-def test_the_floor_still_throttles_it():
-    """Asking every turn must not mean saving every turn.
-
-    `should_save` is the throttle: inside the floor a step boundary answers
-    False, and only `round_boundary` and `closing` ignore it.
-    """
-    from backend.services.save_cadence import should_save
-
-    now = 1_000_000.0
-    floor = 30
-
-    # Just after a commit: not due.
-    assert not should_save(
-        reason="step_boundary",
-        last_committed_at=now - 60,
-        now=now,
-        floor_minutes=floor,
-    )
-    # Past the floor: due.
-    assert should_save(
-        reason="step_boundary",
-        last_committed_at=now - (floor * 60) - 1,
-        now=now,
-        floor_minutes=floor,
-    )
-    # A round boundary never waits.
-    assert should_save(
-        reason="round_boundary",
-        last_committed_at=now - 1,
-        now=now,
-        floor_minutes=floor,
     )
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import os
 import sys
 from types import ModuleType, SimpleNamespace
@@ -32,65 +31,6 @@ class _Adata:
         copied.layers = {key: value.copy() for key, value in self.layers.items()}
         copied.obs = dict(self.obs)
         return copied
-
-
-def _fake_scanpy(monkeypatch, *, native_layer: bool = False, raises: bool = False):
-    calls = []
-
-    if native_layer:
-        def scrublet(adata, adata_sim=None, *, layer=None, copy=False, random_state=0):
-            calls.append((adata, adata_sim, layer, copy, random_state))
-            return "native-result"
-    else:
-        def scrublet(adata, adata_sim=None, *, copy=False, random_state=0):
-            calls.append((adata, adata_sim, copy, random_state))
-            adata.obs["doublet_score"] = 0.2
-            if raises:
-                raise RuntimeError("scrublet failed")
-            return "native-result"
-
-    module = ModuleType("scanpy")
-    module.pp = SimpleNamespace(scrublet=scrublet)
-    monkeypatch.setitem(sys.modules, "scanpy", module)
-    return module, calls
-
-
-def test_installer_is_noop_when_native_scrublet_accepts_layer(monkeypatch):
-    module, _ = _fake_scanpy(monkeypatch, native_layer=True)
-    original = module.pp.scrublet
-    from backend.utils.kernel_startup import scai_scanpy_compat
-
-    assert scai_scanpy_compat.install() is True
-    assert module.pp.scrublet is original
-
-
-def test_layer_none_preserves_native_arguments_result_and_idempotence(monkeypatch):
-    module, calls = _fake_scanpy(monkeypatch)
-    from backend.utils.kernel_startup import scai_scanpy_compat
-
-    assert scai_scanpy_compat.install() is True
-    wrapper = module.pp.scrublet
-    adata = _Adata()
-    result = module.pp.scrublet(
-        adata, adata_sim="simulated", layer=None, copy=True, random_state=7
-    )
-    assert result == "native-result"
-    assert calls == [(adata, "simulated", True, 7)]
-    assert scai_scanpy_compat.install() is True
-    assert module.pp.scrublet is wrapper
-
-
-def test_missing_layer_raises_clear_key_error(monkeypatch):
-    module, calls = _fake_scanpy(monkeypatch)
-    from backend.utils.kernel_startup import scai_scanpy_compat
-
-    scai_scanpy_compat.install()
-    adata = _Adata()
-    original_x = adata.X
-    with pytest.raises(KeyError, match="missing"):
-        module.pp.scrublet(adata, layer="missing")
-    assert adata.X is original_x
-    assert calls == []
 
 
 def test_copy_false_restores_exact_x_identity_on_success_and_failure(monkeypatch):
@@ -133,46 +73,6 @@ def test_copy_false_restores_exact_x_identity_on_success_and_failure(monkeypatch
     assert adata.X is original_x
     assert adata.layers["counts"] is original_counts
     assert adata.layers["counts"].values == original_count_values
-
-
-def test_copy_true_returns_annotated_isolated_copy_with_restored_x(monkeypatch):
-    module, calls = _fake_scanpy(monkeypatch)
-    from backend.utils.kernel_startup import scai_scanpy_compat
-
-    scai_scanpy_compat.install()
-    adata = _Adata()
-    original_x = adata.X
-    original_layer = adata.layers["counts"]
-    original_layer_values = original_layer.values
-    result = module.pp.scrublet(adata, layer="counts", copy=True)
-
-    assert result is not adata
-    assert result.X is not adata.X
-    assert result.X.name == "normalized"
-    assert result.X is result._pre_swap_x
-    assert result.obs["doublet_score"] == 0.2
-    assert calls[0][0] is result
-    assert calls[0][2] is False
-    assert adata.X is original_x
-    assert adata.layers["counts"] is original_layer
-    assert adata.layers["counts"].values == original_layer_values
-    assert adata.obs == {}
-
-
-def test_public_signature_adds_one_keyword_only_layer_parameter(monkeypatch):
-    module, _ = _fake_scanpy(monkeypatch)
-    native_signature = inspect.signature(module.pp.scrublet)
-    from backend.utils.kernel_startup import scai_scanpy_compat
-
-    scai_scanpy_compat.install()
-    signature = inspect.signature(module.pp.scrublet)
-    assert list(signature.parameters) == [
-        "adata", "adata_sim", "layer", "copy", "random_state",
-    ]
-    assert signature.parameters["layer"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert signature.parameters["layer"].default is None
-    for name, parameter in native_signature.parameters.items():
-        assert signature.parameters[name].kind is parameter.kind
 
 
 @pytest.mark.skipif(

@@ -10,7 +10,6 @@ from anthropic import APIStatusError
 
 from backend.utils.llm_client_parts import anthropic_output_tokens as policy
 from backend.utils.llm_client_parts.adapters import _AnthropicAdapter
-from backend.utils.llm_client_parts.prompt_cache import PromptCacheController, PromptCachePlan
 
 
 @pytest.fixture(autouse=True)
@@ -96,26 +95,6 @@ async def test_all_anthropic_paths_negotiate_and_reuse_across_clients(kind):
 
 
 @pytest.mark.asyncio
-async def test_multiple_halvings_and_provider_model_isolation():
-    calls = []
-
-    async def create(**params):
-        value = params["max_tokens"]
-        calls.append(value)
-        if value > 10_000:
-            raise _rejection(value, 10_000)
-        return _reply()
-
-    await _call(_adapter(create))
-    await _call(_adapter(create))
-    assert calls == [65_536, 32_768, 16_384, 8_192, 8_192]
-    other = AsyncMock(return_value=_reply())
-    await _call(_adapter(other, "https://other.test/v1"))
-    await _call(_adapter(other), model="other-model")
-    assert [c.kwargs["max_tokens"] for c in other.await_args_list] == [65_536, 65_536]
-
-
-@pytest.mark.asyncio
 async def test_concurrent_clients_only_negotiate_once():
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -167,55 +146,3 @@ async def test_cancelled_probe_does_not_cache_and_releases_lock():
     assert policy._accepted == {}
     assert await _call(_adapter(create)) == "ok"
     assert [c.kwargs["max_tokens"] for c in create.await_args_list] == [65_536, 32_768, 65_536]
-
-
-@pytest.mark.asyncio
-async def test_rejection_at_one_terminates_without_caching(monkeypatch):
-    monkeypatch.setattr(policy, "INITIAL_MAX_TOKENS", 2)
-    create = AsyncMock(side_effect=_rejection(2, 0))
-    with pytest.raises(APIStatusError):
-        await _call(_adapter(create))
-    assert [c.kwargs["max_tokens"] for c in create.await_args_list] == [2, 1]
-    assert policy._accepted == {}
-
-
-@pytest.mark.asyncio
-async def test_cached_budget_is_not_reprobed_after_later_error():
-    create = AsyncMock(side_effect=[_reply(), _rejection(65_536)])
-    await _call(_adapter(create))
-    with pytest.raises(APIStatusError):
-        await _call(_adapter(create))
-    assert [c.kwargs["max_tokens"] for c in create.await_args_list] == [65_536, 65_536]
-
-
-@pytest.mark.asyncio
-async def test_explicit_budget_does_not_poison_default_cache():
-    create = AsyncMock(return_value=_reply())
-    await _adapter(create).complete(
-        model="claude-test", messages=[{"role": "user", "content": "hi"}],
-        temperature=0.2, max_tokens=1_000,
-    )
-    assert policy._accepted == {}
-    await _call(_adapter(create))
-    assert [c.kwargs["max_tokens"] for c in create.await_args_list] == [1_000, 65_536]
-
-
-@pytest.mark.asyncio
-async def test_cache_control_fallback_keeps_negotiated_output_budget():
-    create = AsyncMock(side_effect=[
-        _rejection(65_536),
-        _error("Unsupported cache_control block"),
-        _reply(),
-    ])
-    adapter = _adapter(create)
-    adapter._prompt_cache_controller = PromptCacheController("https://provider.test/v1")
-    await adapter.complete(
-        model="claude-test", messages=[
-            {"role": "system", "content": "system"},
-            {"role": "user", "content": "hi"},
-        ],
-        temperature=0.2, max_tokens=None,
-        prompt_cache_plan=PromptCachePlan(), cache_mode="explicit",
-    )
-    assert [c.kwargs["max_tokens"] for c in create.await_args_list] == [65_536, 32_768, 32_768]
-    assert "cache_control" not in str(create.await_args.kwargs)

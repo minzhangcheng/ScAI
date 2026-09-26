@@ -410,6 +410,12 @@
     ]
   ],
   [
+    "/api/session/{session_id}/integrated-report/{generation_id}/figure/{number}",
+    [
+      "GET"
+    ]
+  ],
+  [
     "/api/session/{session_id}/integration-report/html",
     [
       "GET"
@@ -632,6 +638,12 @@
     ]
   ],
   [
+    "/api/session/{session_id}/round-report/{segment_id}/html",
+    [
+      "GET"
+    ]
+  ],
+  [
     "/api/session/{session_id}/round-wait",
     [
       "POST"
@@ -671,6 +683,12 @@
     "/api/session/{session_id}/species-input",
     [
       "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/stage-review-report/{report_id}/html",
+    [
+      "GET"
     ]
   ],
   [

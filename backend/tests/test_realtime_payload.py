@@ -20,7 +20,6 @@ from backend.utils.websocket_delivery import (
     append_durable_realtime_message,
     json_safe_payload,
     serialize_realtime_message,
-    strip_nested_binary_payload,
 )
 
 

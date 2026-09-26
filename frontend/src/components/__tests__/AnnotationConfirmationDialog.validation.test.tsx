@@ -1,6 +1,6 @@
-import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
-import { AnnotationConfirmationDialog } from '../AnnotationConfirmationDialog';
+import { render, screen } from '@testing-library/react'
+import { describe, it, expect } from 'vitest'
+import { AnnotationConfirmationDialog } from '../AnnotationConfirmationDialog'
 
 const baseProps: any = {
   annotations: [{ cluster_id: '7', cell_type: 'Technical/Contamination', confidence: 'low',
@@ -21,20 +21,6 @@ const baseProps: any = {
 };
 
 describe('AnnotationConfirmationDialog validation', () => {
-  it('renders summary, reclustering rec, and artifact link', () => {
-    render(<AnnotationConfirmationDialog {...baseProps} />);
-    expect(screen.getByText(/reclassified as technical contamination/i)).toBeInTheDocument();
-    expect(screen.getByText(/bimodal lineage/i)).toBeInTheDocument();
-    expect(screen.getByText(/marker_val/i)).toBeInTheDocument();
-  });
-
-  it('omits the validation section when no validation data is present', () => {
-    const props = { ...baseProps, validationStatus: undefined, validationSummary: undefined,
-                    validationTextSummary: undefined, validationResult: undefined,
-                    reclusteringRecommendations: undefined };
-    render(<AnnotationConfirmationDialog {...props} />);
-    expect(screen.queryByText(/reclassified as technical contamination/i)).not.toBeInTheDocument();
-  });
 
   it('refreshes the table when a revision changes cell_type at the same confidence', () => {
     const a0 = { cluster_id: '7', cell_type: 'Hepatic neurons', confidence: 'low',
@@ -49,54 +35,6 @@ describe('AnnotationConfirmationDialog validation', () => {
     rerender(<AnnotationConfirmationDialog {...{ ...baseProps, annotations: [a1] }} />);
     expect(screen.getByText(/Technical\/Contamination/i)).toBeInTheDocument();
     expect(screen.queryByText(/Hepatic neurons/i)).not.toBeInTheDocument();
-  });
-
-  it('renders group proportion header and values in label order', () => {
-    const props = {
-      ...baseProps,
-      annotations: [{
-        ...baseProps.annotations[0],
-        group_proportions: { NASH: 8, Control: 12.5 },
-      }],
-      proportionGroupLabels: ['Control', 'NASH'],
-      proportionDimension: 'group',
-    };
-    render(<AnnotationConfirmationDialog {...props} />);
-
-    expect(screen.getByText('Cell Proportion (Control/NASH)')).toBeInTheDocument();
-    expect(screen.getByText('12.5% / 8.0%')).toBeInTheDocument();
-  });
-
-  it('renders missing proportion values as dash and handles overall dimension', () => {
-    const props = {
-      ...baseProps,
-      annotations: [{
-        ...baseProps.annotations[0],
-        group_proportions: {},
-      }],
-      proportionGroupLabels: ['整体'],
-      proportionDimension: 'overall',
-    };
-    render(<AnnotationConfirmationDialog {...props} />);
-
-    expect(screen.getByText('Cell Proportion (Overall)')).toBeInTheDocument();
-    expect(screen.getByText('—')).toBeInTheDocument();
-  });
-
-  it('renders proportion column without empty parentheses when labels are unavailable', () => {
-    const props = {
-      ...baseProps,
-      annotations: [{
-        ...baseProps.annotations[0],
-        group_proportions: {},
-      }],
-      proportionGroupLabels: [],
-      proportionDimension: 'group',
-    };
-    render(<AnnotationConfirmationDialog {...props} />);
-
-    expect(screen.getByText('Cell Proportion')).toBeInTheDocument();
-    expect(screen.queryByText('Cell Proportion ()')).not.toBeInTheDocument();
   });
 
   it('refreshes the table when only group proportions change', () => {

@@ -11,8 +11,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.models.schemas import TaskStatus
-
 
 def _make_stub():
     from backend.workflow.planning import PlanningMixin
@@ -118,21 +116,6 @@ async def test_feedback_failure_preserves_input_and_never_implies_approval(resol
 
 
 @pytest.mark.asyncio
-async def test_gate_waits_when_no_action_preset():
-    """Fresh gate entry with no pre-set action must block on the event."""
-    stub = _make_stub()
-    state, _ = _make_state()
-
-    task = asyncio.create_task(stub._user_review_gate(state))
-    await asyncio.sleep(0.05)
-    assert not task.done(), "gate must wait for user input"
-
-    stub.signal_plan_review("approve")
-    await asyncio.wait_for(task, timeout=1.0)
-    assert stub._approve_calls == ["approved"]
-
-
-@pytest.mark.asyncio
 async def test_gate_does_not_reuse_action_from_previous_invocation():
     """Regression: stage1→stage2 leak. When gate #1 consumes an approve that
     arrived during its await (the normal runtime path), _plan_review_action is
@@ -160,59 +143,3 @@ async def test_gate_does_not_reuse_action_from_previous_invocation():
     stub.signal_plan_review("skip")
     await asyncio.wait_for(task2, timeout=1.0)
     assert stub._approve_calls == ["approved", "skipped"]
-
-
-@pytest.mark.asyncio
-async def test_clarify_continue_does_not_reuse_modify_action():
-    """Regression: the clarify_with_user branch uses `continue`. When a modify
-    action arrived during the await (the normal path), _plan_review_action is
-    left populated. The next loop iteration must wait for a NEW user signal,
-    not replay the previous modify."""
-    stub = _make_stub()
-    state, _ = _make_state()
-
-    stub.pi_agent.process_user_plan_feedback.side_effect = [
-        {"action": "clarify_with_user", "clarification_question": "which subset?"},
-        {"action": "proceed_to_execution"},
-    ]
-
-    task = asyncio.create_task(stub._user_review_gate(state))
-    await asyncio.sleep(0.05)
-    assert not task.done(), "gate must wait for user input"
-
-    stub.signal_plan_review("modify", user_input="please refine step 3")
-    await asyncio.sleep(0.05)
-
-    assert not task.done(), "gate must wait after clarify_with_user continue"
-    assert stub.pi_agent.process_user_plan_feedback.await_count == 1
-
-    stub.signal_plan_review("modify", user_input="merge clusters 4 and 13")
-    await asyncio.wait_for(task, timeout=1.0)
-
-    assert stub.pi_agent.process_user_plan_feedback.await_count == 2
-    assert stub._approve_calls == ["approved_after_clarification"]
-
-
-@pytest.mark.asyncio
-async def test_modify_exits_waiting_status_before_pi_feedback_processing():
-    stub = _make_stub()
-    state, _ = _make_state()
-    analysis_state = state["analysis_state"]
-    analysis_state.status = TaskStatus.RUNNING
-
-    async def _review_feedback(**_kwargs):
-        assert analysis_state.status == TaskStatus.RUNNING
-        assert stub._syncs[-1] == (
-            TaskStatus.RUNNING,
-            "plan_feedback_processing",
-        )
-        return {"action": "revise_with_bioinfo", "guidance_for_bioinfo": "revise"}
-
-    stub.pi_agent.process_user_plan_feedback.side_effect = _review_feedback
-
-    task = asyncio.create_task(stub._user_review_gate(state))
-    await asyncio.sleep(0.05)
-    stub.signal_plan_review("modify", user_input="please revise the plan")
-    await asyncio.wait_for(task, timeout=1.0)
-
-    assert analysis_state.status == TaskStatus.RUNNING

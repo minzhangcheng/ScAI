@@ -3,7 +3,6 @@
 Ensures _resolve_report_file preserves subdirectory paths
 while still blocking path traversal.
 """
-from pathlib import Path
 import pytest
 
 

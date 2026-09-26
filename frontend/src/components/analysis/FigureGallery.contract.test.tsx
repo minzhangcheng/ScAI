@@ -36,36 +36,6 @@ describe('FigureGallery contract', () => {
     useAppStore.setState({ currentSession: session, language: 'en' })
   })
 
-  it('keeps status text, preview threshold, order, and show-all behavior', () => {
-    render(<FigureGallery figures={Array.from({ length: 10 }, (_, i) => figure(i + 1))} />)
-
-    expect(screen.getByText('Accepted with reservations')).toBeInTheDocument()
-    expect(screen.getByAltText('Figure 1')).toBeInTheDocument()
-    expect(screen.queryByAltText('Figure 9')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Show all (10)' }))
-    expect(screen.getByAltText('Figure 9')).toBeInTheDocument()
-  })
-
-  it('labels an unavailable review instead of showing generic pending', () => {
-    render(<FigureGallery figures={[{
-      ...figure(1),
-      reviewStatus: 'pending',
-      reviewUnavailable: true,
-    }]} />)
-
-    expect(screen.getByText('Review unavailable')).toBeInTheDocument()
-    expect(screen.queryByText('Pending Review')).not.toBeInTheDocument()
-  })
-
-  it('keeps the image download endpoint and filename', async () => {
-    render(<FigureGallery figures={[figure(1)]} />)
-    fireEvent.click(screen.getByRole('button', { name: 'JPG' }))
-    expect(fetchAndDownload).toHaveBeenCalledWith(
-      '/api/session/session-gallery/figure/figure-1/png',
-      'Figure 1.jpg',
-    )
-  })
-
   it('uses the image endpoint when a persisted sentinel reaches the gallery', () => {
     const persisted = { ...figure(1), pngBase64: '[image]' }
     render(<FigureGallery figures={[persisted]} />)

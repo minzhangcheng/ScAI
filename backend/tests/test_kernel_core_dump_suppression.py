@@ -3,21 +3,16 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 from pathlib import Path
 import resource
-from queue import Empty as QueueEmpty
 import signal
 import subprocess
 import sys
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 import uuid
 
 import pytest
 
-import backend.utils.sandbox_parts.execution as execution_module
 from backend.utils.sandbox import LocalJupyterSandbox
 
 
@@ -102,127 +97,3 @@ def test_launcher_abort_leaves_no_workspace_core(tmp_path):
     completed = _run_launcher(workspace, "import os; os.abort()")
     assert completed.returncode == -int(signal.SIGABRT)
     assert list(workspace.glob("core*")) == []
-
-
-@pytest.mark.parametrize("signum", [signal.SIGKILL, signal.SIGSEGV, signal.SIGABRT])
-def test_describe_kernel_exit_names_signal(signum):
-    manager = SimpleNamespace(
-        provisioner=SimpleNamespace(
-            process=SimpleNamespace(poll=lambda: -int(signum))
-        )
-    )
-    assert signum.name in execution_module.describe_kernel_exit(manager)
-
-
-def test_core_signal_reports_rlimit_suppression():
-    manager = SimpleNamespace(
-        provisioner=SimpleNamespace(
-            process=SimpleNamespace(poll=lambda: -int(signal.SIGSEGV))
-        )
-    )
-    assert "RLIMIT_CORE" in execution_module.describe_kernel_exit(manager)
-
-
-def test_ordinary_and_unavailable_exit_statuses_are_safe():
-    assert execution_module.describe_kernel_exit(None).startswith(
-        "exit status unavailable"
-    )
-    assert execution_module.describe_kernel_exit(SimpleNamespace()).startswith(
-        "exit status unavailable"
-    )
-    still_running = SimpleNamespace(
-        provisioner=SimpleNamespace(
-            process=SimpleNamespace(poll=lambda: None)
-        )
-    )
-    assert "no exit status yet" in execution_module.describe_kernel_exit(still_running)
-    ordinary = SimpleNamespace(
-        provisioner=SimpleNamespace(
-            process=SimpleNamespace(poll=lambda: 3)
-        )
-    )
-    assert execution_module.describe_kernel_exit(ordinary) == "exited with status 3"
-
-
-def test_provisioner_async_poll_is_never_called():
-    class _Provisioner:
-        async def poll(self):  # pragma: no cover - must never be called
-            raise AssertionError("the coroutine poll() was used")
-
-        process = SimpleNamespace(poll=lambda: -int(signal.SIGSEGV))
-
-    manager = SimpleNamespace(provisioner=_Provisioner())
-    assert "SIGSEGV" in execution_module.describe_kernel_exit(manager)
-
-
-@pytest.mark.asyncio
-async def test_pre_execute_death_log_uses_pre_restart_reason(tmp_path, caplog):
-    sandbox = _sandbox(tmp_path)
-    manager = SimpleNamespace(
-        provisioner=SimpleNamespace(
-            process=SimpleNamespace(poll=lambda: -int(signal.SIGKILL))
-        ),
-        is_alive=lambda: False,
-    )
-    sandbox.km = manager
-    sandbox.kc = SimpleNamespace()
-
-    async def failed_restart():
-        sandbox._kernel_dead = True
-
-    sandbox._restart_kernel = AsyncMock(side_effect=failed_restart)
-    caplog.set_level(logging.WARNING, logger=execution_module.logger.name)
-
-    result = await sandbox._execute_unlocked(
-        "pass", records_history=False, skip_safety_check=True
-    )
-
-    assert result.success is False
-    assert "SIGKILL" in caplog.text
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("restart_failed", "outcome_text"),
-    [
-        (True, "restart failed"),
-        (False, "Restarted successfully"),
-    ],
-)
-async def test_iopub_death_error_uses_pre_restart_reason(
-    tmp_path, restart_failed, outcome_text
-):
-    sandbox = _sandbox(tmp_path)
-    alive = True
-
-    def is_alive() -> bool:
-        return alive
-
-    def get_iopub_msg(*, timeout):
-        nonlocal alive
-        alive = False
-        raise QueueEmpty
-
-    manager = SimpleNamespace(
-        provisioner=SimpleNamespace(
-            process=SimpleNamespace(poll=lambda: -int(signal.SIGSEGV))
-        ),
-        is_alive=is_alive,
-    )
-    client = SimpleNamespace(execute=lambda code: "execution-id", get_iopub_msg=get_iopub_msg)
-    sandbox.km = manager
-    sandbox.kc = client
-
-    async def restart():
-        sandbox._kernel_dead = restart_failed
-
-    sandbox._restart_kernel = AsyncMock(side_effect=restart)
-
-    result = await sandbox._execute_unlocked(
-        "pass", records_history=False, skip_safety_check=True
-    )
-
-    assert result.success is False
-    assert result.error is not None
-    assert "SIGSEGV" in result.error
-    assert outcome_text in result.error

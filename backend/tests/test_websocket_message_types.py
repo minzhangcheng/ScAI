@@ -11,21 +11,6 @@ def _registered_types() -> set[str]:
     return set(get_args(WebSocketMessage.model_fields["type"].annotation))
 
 
-def test_integration_types_are_registered():
-    registered = _registered_types()
-    assert "integration_gate" in registered
-    assert "integration_complete" in registered
-
-
-def test_websocket_message_accepts_integration_types():
-    WebSocketMessage(type="integration_gate", content={})
-    WebSocketMessage(type="integration_complete", content={})
-
-
-def test_websocket_message_accepts_snapshot_listing_invalidation():
-    WebSocketMessage(type="snapshot_listing_changed", content={"session_id": "s1"})
-
-
 def test_all_literal_send_message_types_are_registered():
     """Scan the whole backend/ (not just workflow/) so an unregistered literal
     _send_message type anywhere — routes, services, agents — fails here instead

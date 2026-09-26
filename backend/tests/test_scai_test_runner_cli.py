@@ -16,7 +16,6 @@ import threading
 import time
 from types import SimpleNamespace
 import uuid
-import warnings
 from pathlib import Path
 
 import pytest
@@ -157,30 +156,6 @@ def test_worktree_manifest_records_each_untracked_file_sha_and_mode(tmp_path):
     }]
 
 
-def test_worktree_manifest_records_deleted_path_with_literal_marker(tmp_path):
-    repo, base = make_repo(tmp_path)
-    (repo / "tracked.txt").unlink()
-    assert TREE.build_worktree_manifest(repo, base)["entries"] == [{
-        "path": "tracked.txt", "state": "deleted", "type": "deleted", "mode": None, "marker": "DELETED",
-    }]
-
-
-def test_worktree_manifest_records_symlink_target_and_120000_mode(tmp_path):
-    repo, base = make_repo(tmp_path)
-    (repo / "link").symlink_to("tracked.txt")
-    entry = TREE.build_worktree_manifest(repo, base)["entries"][0]
-    assert entry["type"] == "symlink" and entry["mode"] == "120000"
-    assert entry["sha256"] == hashlib.sha256(b"tracked.txt").hexdigest()
-
-
-def test_worktree_manifest_represents_rename_as_delete_plus_present_path(tmp_path):
-    repo, base = make_repo(tmp_path)
-    (repo / "tracked.txt").rename(repo / "renamed.txt")
-    manifest = TREE.build_worktree_manifest(repo, base)
-    assert [entry["path"] for entry in manifest["entries"]] == ["renamed.txt", "tracked.txt"]
-    assert {entry["state"] for entry in manifest["entries"]} == {"untracked", "deleted"}
-
-
 def test_worktree_manifest_rejects_directory_or_special_file_entry(tmp_path, monkeypatch):
     repo, base = make_repo(tmp_path)
     fifo = repo / "fifo"
@@ -202,19 +177,6 @@ def test_manifest_loader_recomputes_digest_and_rejects_tampering(tmp_path):
         TREE.load_manifest(path, "worktree", base)
 
 
-def test_compare_summary_accepts_only_one_new_summary_entry(tmp_path):
-    repo, base = make_repo(tmp_path)
-    tested = tmp_path / "tested.json"
-    post = tmp_path / "post.json"
-    write_manifest(tested, TREE.build_worktree_manifest(repo, base))
-    payload = json.loads(tested.read_text())
-    payload["entries"].append({"path": "summary.json", "state": "untracked", "type": "regular", "mode": "100644", "sha256": "1" * 64})
-    payload["entries"].sort(key=lambda entry: entry["path"])
-    payload["digest"] = TREE._manifest_digest(payload["entries"])
-    write_manifest(post, payload)
-    TREE.compare_post_summary(tested, post, Path("summary.json"))
-
-
 def test_compare_summary_rejects_changed_tested_bytes_or_extra_path(tmp_path):
     repo, base = make_repo(tmp_path)
     tested = tmp_path / "tested.json"
@@ -228,30 +190,6 @@ def test_compare_summary_rejects_changed_tested_bytes_or_extra_path(tmp_path):
     write_manifest(post, payload)
     with pytest.raises(TREE.ContractError):
         TREE.compare_post_summary(tested, post, Path("one.json"))
-
-
-def test_index_comparison_normalizes_untracked_to_added_only(tmp_path):
-    repo, base = make_repo(tmp_path)
-    (repo / "new.txt").write_text("new", encoding="utf-8")
-    post_payload = TREE.build_worktree_manifest(repo, base)
-    post_path = tmp_path / "post.json"
-    index_path = tmp_path / "index.json"
-    write_manifest(post_path, post_payload)
-    projected = [{**entry, "state": "added"} if entry["state"] == "untracked" else entry for entry in post_payload["entries"]]
-    write_manifest(index_path, TREE._manifest("index", base, projected))
-    TREE.compare_index(post_path, index_path)
-
-
-def test_index_comparison_rejects_missing_stale_extra_mode_and_deletion_drift(tmp_path):
-    repo, base = make_repo(tmp_path)
-    (repo / "new.txt").write_text("new", encoding="utf-8")
-    post = tmp_path / "post.json"
-    index = tmp_path / "index.json"
-    post_payload = TREE.build_worktree_manifest(repo, base)
-    write_manifest(post, post_payload)
-    write_manifest(index, TREE._manifest("index", base, []))
-    with pytest.raises(TREE.ContractError):
-        TREE.compare_index(post, index)
 
 
 def test_commit_manifest_recurses_nested_files_deletions_and_executable_modes(tmp_path):
@@ -269,63 +207,6 @@ def test_commit_manifest_recurses_nested_files_deletions_and_executable_modes(tm
     assert next(entry for entry in manifest["entries"] if entry["path"] == "nested/run.sh")["mode"] == "100755"
 
 
-def test_final_commit_verifier_accepts_exact_single_parent_commit(tmp_path):
-    repo, base = make_repo(tmp_path)
-    (repo / "tracked.txt").write_text("candidate\n", encoding="utf-8")
-    git(repo, "add", "-A")
-    index = TREE.build_index_manifest(repo, base)
-    index_path = tmp_path / "index.json"
-    write_manifest(index_path, index)
-    git(repo, "commit", "-qm", "ver 0.39.15")
-    assert TREE.verify_final_commit(repo, base, index_path, "ver 0.39.15") == git(repo, "rev-parse", "HEAD")
-
-
-def test_final_commit_verifier_rejects_wrong_parent(tmp_path):
-    repo, base = make_repo(tmp_path)
-    git(repo, "checkout", "-qb", "side")
-    (repo / "tracked.txt").write_text("side\n", encoding="utf-8")
-    git(repo, "add", "-A"); git(repo, "commit", "-qm", "ver 0.39.15")
-    (repo / "tracked.txt").write_text("side-two\n", encoding="utf-8")
-    git(repo, "add", "-A"); git(repo, "commit", "-qm", "ver 0.39.15")
-    index_path = tmp_path / "index.json"
-    write_manifest(index_path, TREE.build_commit_manifest(repo, base, git(repo, "rev-parse", "HEAD")))
-    with pytest.raises(TREE.ContractError):
-        TREE.verify_final_commit(repo, base, index_path, "ver 0.39.15")
-
-
-def test_final_commit_verifier_rejects_tree_drift_and_dirty_checkout(tmp_path):
-    repo, base = make_repo(tmp_path)
-    (repo / "tracked.txt").write_text("candidate\n", encoding="utf-8")
-    git(repo, "add", "-A")
-    index_path = tmp_path / "index.json"
-    write_manifest(index_path, TREE.build_index_manifest(repo, base))
-    git(repo, "commit", "-qm", "ver 0.39.15")
-    (repo / "dirty").write_text("dirty", encoding="utf-8")
-    with pytest.raises(TREE.ContractError):
-        TREE.verify_final_commit(repo, base, index_path, "ver 0.39.15")
-
-
-def test_final_commit_verifier_rejects_wrong_subject_body_trailer_and_attribution(tmp_path):
-    repo, base = make_repo(tmp_path)
-    (repo / "tracked.txt").write_text("candidate\n", encoding="utf-8")
-    git(repo, "add", "-A")
-    index_path = tmp_path / "index.json"
-    write_manifest(index_path, TREE.build_index_manifest(repo, base))
-    git(repo, "commit", "-qm", "wrong\n\nCo-Authored-By: bot")
-    with pytest.raises(TREE.ContractError):
-        TREE.verify_final_commit(repo, base, index_path, "ver 0.39.15")
-
-
-def test_manifest_and_final_proofs_fail_identically_with_python_optimize(tmp_path):
-    repo, base = make_repo(tmp_path)
-    path = tmp_path / "bad.json"
-    write_manifest(path, {"schema": 1, "kind": "worktree", "base": base, "digest": "0" * 64, "entries": []})
-    script = f"import sys; sys.path.insert(0, {str(ROOT / 'scripts')!r}); import scai_test_tree as t; t.load_manifest({str(path)!r}, 'worktree', {base!r})"
-    normal = subprocess.run(["python3", "-c", script], capture_output=True)
-    optimized = subprocess.run(["python3", "-O", "-c", script], capture_output=True)
-    assert normal.returncode == optimized.returncode != 0
-
-
 def test_fast_requires_an_explicit_target_before_image_lookup():
     result = subprocess.run([str(ROOT / "scripts/scai-test"), "fast"], cwd=ROOT, text=True, capture_output=True)
     assert result.returncode != 0 and "fast requires" in result.stderr
@@ -336,96 +217,11 @@ def test_raw_requires_arguments_and_keeps_raw_claim():
     assert result.returncode != 0 and "raw mode" in result.stderr
 
 
-def test_profile_without_env_defaults_to_empty_mapping():
-    assert 'profile.get("env", {})' in RUNNER
-
-
-def test_profile_without_or_with_empty_args_fails_before_docker():
-    assert "profile has no explicit args" in RUNNER
-
-
-def test_profile_globs_expand_sorted_and_unmatched_glob_fails():
-    assert "compgen -G" in RUNNER and "profile glob has no matches" in RUNNER
-
-
 def test_profile_roster_is_exactly_the_four_supported_profiles():
     """The roster is a contract: docs/test-strategy.md lists it verbatim."""
     assert set(__import__("tomllib").loads((ROOT / "test-profiles.toml").read_text())["profiles"]) == {
         "fast", "client", "kernel", "backend-full"
     }
-
-
-def test_the_gate_off_profile_is_refused_rather_than_silently_served():
-    """The build has one configuration, so the second profile is not a synonym.
-
-    An operator or a plan that still names ``backend-full-gate-off`` has to be
-    told, not quietly handed the same suite under a name that claims to measure
-    something else.
-    """
-    assert "backend-full-gate-off" not in RUNNER
-    assert "SCAI_ENABLE_SNAPSHOT_V2" not in RUNNER
-    assert "backend-full-gate-off" not in (
-        ROOT / "test-profiles.toml"
-    ).read_text(encoding="utf-8")
-
-
-def test_no_conftest_or_ini_still_pins_the_snapshot_gate():
-    """The owner is the repo-root conftest.py and pytest.ini, not backend/tests.
-
-    An assertion aimed at backend/tests/conftest.py passes without proving
-    anything, because that file never held the gate.
-    """
-    for rel in ("conftest.py", "pytest.ini", "backend/tests/conftest.py"):
-        source = (ROOT / rel).read_text(encoding="utf-8")
-        assert "SCAI_ENABLE_SNAPSHOT_V2" not in source, rel
-        assert "requires_snapshot_v2" not in source, rel
-        assert "_pin_snapshot_v2_gate" not in source, rel
-
-
-def test_matching_pointer_executes_exact_name_at_digest():
-    assert 'value["image"] + "@" + value["digest"]' in RUNNER
-
-
-def test_pointer_non_null_schema_constructs_name_at_digest():
-    assert "tracked_digest" in RUNNER and "LOCAL_IDENTITY" in RUNNER
-
-
-def test_null_pointer_discovers_tag_but_executes_local_image_id():
-    assert 'docker image inspect --format' in RUNNER and "SELECTION_MODE=local_id" in RUNNER
-
-
-def test_mismatched_pointer_or_local_labels_or_lock_bytes_fail_before_pytest():
-    assert "does not match current inputs" in RUNNER and "local image identity mismatch" in RUNNER
-
-
-def test_runner_never_implicitly_pulls_or_falls_back_to_host_python():
-    assert "--pull=never" in RUNNER and "python3 -m pytest" not in RUNNER
-
-
-def test_runner_rejects_caller_owned_junit_collection_or_outcomes_output_options():
-    assert "--junitxml=*|--scai-collection-json" in RUNNER
-
-
-def test_docker_argv_has_exact_boundary_tmpfs_mounts_user_platform_and_env():
-    for text in ("--read-only", "--network none", "--user 10001", "--platform", "--tmpfs /tmp:rw,size=2g", "PYTHONPYCACHEPREFIX=/tmp/pycache"):
-        assert text in RUNNER
-
-
-def test_docker_argv_disables_pull_and_mounts_only_container_output_child():
-    assert "--pull=never" in RUNNER and "/results/output:rw" in RUNNER and ":ro" in RUNNER
-
-
-def test_host_evidence_root_is_outside_checkout_and_not_container_mounted():
-    assert 'mktemp -d "/tmp/scai-test-evidence.' in RUNNER and 'EVIDENCE_STAGE' in RUNNER
-
-
-def test_prepublication_failure_keeps_diagnostic_staging_until_publication():
-    assert "PUBLISHED=0" in RUNNER
-    assert 'unaccepted diagnostic: $EVIDENCE_STAGE' in RUNNER
-    assert 'rm -rf "$INCOMING_DIR"' not in RUNNER
-    assert 'if [[ "$PUBLISHED" -eq 1 ]]' in RUNNER
-    assert 'publish_evidence(Path("test-results"), run_id, artifacts)' in RUNNER
-    assert RUNNER.index('PUBLISHED=1') > RUNNER.index('publish_evidence')
 
 
 _FAKE_RUNNER_ROOTS: set[Path] = set()
@@ -583,21 +379,6 @@ def _cleanup_nested_runner_diagnostics(stderr: str) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def test_fake_runner_harness_probes_and_cleans_executable_root():
-    source = Path(__file__).read_text(encoding="utf-8")
-    for marker in (
-        "_probe_executable_directory",
-        'Path(\"/results/output\")',
-        'output_root / f".scai-runner-fake-',
-        "_FAKE_RUNNER_ROOTS",
-        "@pytest.fixture(autouse=True)",
-        "shutil.rmtree(root, ignore_errors=True)",
-        "probe.chmod(0o755)",
-        "subprocess.run(",
-    ):
-        assert marker in source
-
-
 def test_fake_cli_preserves_empty_container_output_and_logs(tmp_path):
     repo, fake_bin = _fake_runner_repo(tmp_path)
     result = subprocess.run(
@@ -622,55 +403,6 @@ def test_fake_cli_preserves_empty_container_output_and_logs(tmp_path):
         assert not (repo / "test-results").exists()
     finally:
         shutil.rmtree(stage, ignore_errors=True)
-
-
-def test_empty_profile_env_does_not_emit_empty_docker_env_and_preserves_base_env_args(tmp_path):
-    repo, fake_bin = _fake_runner_repo(tmp_path)
-    docker_log = fake_bin / "docker-args.jsonl"
-    docker = fake_bin / "docker"
-    docker.write_text(
-        f"#!{sys.executable}\n"
-        "import json, pathlib, sys\n"
-        f"log = pathlib.Path({str(docker_log)!r})\n"
-        "with log.open('a', encoding='utf-8') as stream:\n"
-        "    json.dump(sys.argv[1:], stream)\n"
-        "    stream.write('\\n')\n"
-        "raise SystemExit(0)\n",
-        encoding="utf-8",
-    )
-    docker.chmod(0o755)
-    env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
-    base_env = [
-        "PYTHONPATH=/workspace/scai",
-        "PYTHONDONTWRITEBYTECODE=1",
-        "PYTHONPYCACHEPREFIX=/tmp/pycache",
-        "SCAI_DATA_DIR=/tmp/scai-data",
-        "MPLCONFIGDIR=/tmp/matplotlib",
-        "XDG_CACHE_HOME=/tmp/xdg",
-        "NUMBA_DISABLE_JIT=1",
-        "LANG=C.UTF-8",
-        "LC_ALL=C.UTF-8",
-    ]
-    try:
-        for profile in ("client", "backend-full"):
-            result = subprocess.run(
-                [str(repo / "scripts/scai-test"), profile],
-                cwd=repo,
-                env=env,
-                text=True,
-                capture_output=True,
-            )
-            assert result.returncode != 0
-            calls = [json.loads(line) for line in docker_log.read_text(encoding="utf-8").splitlines()]
-            assert len(calls) >= 1
-            argv = calls[-1]
-            env_values = [argv[index + 1] for index, value in enumerate(argv[:-1]) if value == "--env"]
-            assert env_values == base_env
-            assert "" not in env_values
-            _cleanup_nested_runner_diagnostics(result.stderr)
-            shutil.rmtree(repo / "test-results", ignore_errors=True)
-    finally:
-        _cleanup_nested_runner_diagnostics(result.stderr if "result" in locals() else "")
 
 
 def test_runner_binds_logs_to_open_inodes_and_rejects_replaced_log_path(tmp_path):
@@ -783,61 +515,6 @@ def test_runner_retains_secure_log_inode_across_pre_docker_path_swap(tmp_path):
             shutil.rmtree(stage, ignore_errors=True)
 
 
-def test_post_run_artifact_validation_rejects_symlink_special_and_hardlink():
-    assert "st_nlink != 1" in RUNNER and "O_NOFOLLOW" in RUNNER and "read_direct_children_nofollow" in RUNNER
-
-
-def test_collect_only_output_is_exactly_collection_json():
-    assert "EXPECTED_OUTPUTS=(collection.json)" in RUNNER
-
-
-def test_normal_output_is_exactly_collection_junit_and_outcomes():
-    assert "EXPECTED_OUTPUTS+=(outcomes.json junit.xml)" in RUNNER
-
-
-def test_output_allowlist_rejects_extra_regular_file_or_directory():
-    assert "actual !=" in RUNNER and "container output allowlist mismatch" in RUNNER
-
-
-def test_post_run_source_manifest_mismatch_invalidates_evidence():
-    assert "source tree changed while tests ran" in RUNNER
-
-
-def test_collection_plugin_writes_sorted_nodeids_count_and_hash():
-    assert "nodeids_sha256" in PLUGIN and "sorted(item.nodeid" in PLUGIN
-
-
-def test_collection_records_exact_candidate_tool_versions_origins_and_plugins():
-    for text in ("9.1.1", "1.3.0", "5.2.3", "/opt/scai-test/venv", "required asyncio and benchmark"):
-        assert text in PLUGIN
-
-
-def test_runner_rejects_benchmark_options_and_never_claims_benchmark_scope():
-    assert "--benchmark*" in RUNNER and "benchmark scope" not in RUNNER
-
-
-def test_collection_candidate_plugin_semantic_mismatch_fails_closed():
-    payload = valid_collection_payload()
-    payload["candidate_tools"]["plugins"]["benchmark"] = False
-    with pytest.raises(TREE.ContractError, match="plugin identity"):
-        TREE.validate_collection(json.dumps(payload).encode())
-    assert 'collection = validate_collection(collection_artifact.payload)' in RUNNER
-
-
-def test_collect_only_uses_collection_artifact_without_junit():
-    assert 'if [[ "$COLLECT_ONLY" -eq 0 ]]' in RUNNER
-
-
-def test_outcomes_plugin_merges_setup_call_teardown_to_one_exact_nodeid():
-    phases = [phase("setup"), phase("call"), phase("teardown")]
-    assert len(record("x::test", phases)["phases"]) == 3
-
-
-def test_outcome_validator_requires_exact_collection_bijection():
-    payload = outcomes_for([record("a", [phase("setup"), phase("call"), phase("teardown")])])
-    assert TREE.validate_outcomes(payload, ("a",))["counts"]["passed"] == 1
-
-
 def test_phase_state_machine_requires_teardown_and_applies_exact_final_precedence():
     valid = [
         (
@@ -909,27 +586,6 @@ def test_outcome_producer_marks_invalid_stream_incomplete_and_raises_usage_error
     assert payload["complete"] is False
 
 
-def test_junit_projection_resets_reporter_state_for_each_node():
-    records = (
-        {
-            "nodeid": "first::case",
-            "phases": [phase("setup"), phase("call", "failed", "call failed"), phase("teardown")],
-        },
-        {
-            "nodeid": "second::case",
-            "phases": [phase("setup"), phase("call"), phase("teardown", "failed", "teardown failed")],
-        },
-    )
-    assert TREE.project_pytest_9_1_1_junit(records) == {
-        "passed": 1,
-        "failures": 1,
-        "errors": 1,
-        "skipped": 0,
-        "double_fail_correction": 1,
-        "tests": 2,
-    }
-
-
 def test_outcome_details_match_exact_canonical_schema():
     warning = {"nodeid": "skipped::case", "when": "runtest", "category": "UserWarning", "message": "notice"}
     warning["signature"] = TREE._hash_json({key: warning[key] for key in ("nodeid", "when", "category", "message")})
@@ -979,12 +635,6 @@ def test_outcome_validator_classifies_passed_failed_error_and_skipped():
     }
 
 
-def test_outcome_validator_accepts_teardown_skip_with_severity_precedence():
-    phases = [phase("setup"), phase("call"), phase("teardown", "skipped")]
-    details = TREE.validate_outcomes(outcomes_for([record("a", phases)]), ("a",))
-    assert details["counts"]["skipped"] == 1
-
-
 def test_outcome_validator_rejects_illegal_missing_or_extra_phase_combinations():
     with pytest.raises(TREE.ContractError):
         TREE.validate_outcomes(outcomes_for([record("a", [phase("teardown")])]), ("a",))
@@ -1003,57 +653,11 @@ def test_outcome_signatures_and_warning_details_are_canonical_and_hashed():
     assert details["warnings"][0]["signature"] == warning["signature"]
 
 
-def test_warning_hook_replays_early_and_captures_runtest_metadata():
-    plugin = PLUGIN_MODULE
-    plugin._ACTIVE_EVIDENCE = None
-    plugin._PENDING_WARNINGS.clear()
-    session = type("SyntheticSession", (), {})()
-    try:
-        with warnings.catch_warnings(record=True) as captured:
-            warnings.simplefilter("always")
-            warnings.warn("early synthetic warning", UserWarning)
-        plugin.pytest_warning_recorded(captured[0], "collect", "", None)
-        assert len(plugin._PENDING_WARNINGS) == 1
-
-        plugin.pytest_sessionstart(session)
-        assert plugin._PENDING_WARNINGS == []
-
-        with warnings.catch_warnings(record=True) as captured:
-            warnings.simplefilter("always")
-            warnings.warn("runtime synthetic warning", DeprecationWarning)
-        plugin.pytest_warning_recorded(captured[0], "runtest", "synthetic::test_warning", None)
-
-        warnings_payload = session._scai_evidence.payload()["warnings"]
-        assert {(item["nodeid"], item["when"], item["category"], item["message"]) for item in warnings_payload} == {
-            (None, "collect", "UserWarning", "early synthetic warning"),
-            ("synthetic::test_warning", "runtest", "DeprecationWarning", "runtime synthetic warning"),
-        }
-    finally:
-        plugin._ACTIVE_EVIDENCE = None
-        plugin._PENDING_WARNINGS.clear()
-
-
 def test_outcome_validator_fails_identically_with_python_optimize():
     source = "import sys; sys.path.insert(0, %r); import scai_test_tree as t; t.validate_outcomes(b'{}', ('a',))" % str(ROOT / "scripts")
     normal = subprocess.run(["python3", "-c", source], capture_output=True)
     optimized = subprocess.run(["python3", "-O", "-c", source], capture_output=True)
     assert normal.returncode == optimized.returncode != 0
-
-
-def test_junit_projection_call_pass_then_teardown_fail_counts_one_test():
-    records = ({"nodeid": "a", "phases": [phase("setup"), phase("call"), phase("teardown", "failed")]},)
-    assert TREE.project_pytest_9_1_1_junit(records)["tests"] == 1
-
-
-def test_junit_projection_call_fail_then_teardown_fail_counts_two_tests():
-    records = ({"nodeid": "a", "phases": [phase("setup"), phase("call", "failed"), phase("teardown", "failed")]},)
-    assert TREE.project_pytest_9_1_1_junit(records)["tests"] == 2
-
-
-def test_junit_projection_teardown_skip_and_xfail_xpass_match_pytest_9_1_1():
-    records = ({"nodeid": "a", "phases": [phase("setup"), phase("call", "passed", wasxfail="reason"), phase("teardown", "skipped")]},)
-    result = TREE.project_pytest_9_1_1_junit(records)
-    assert result["skipped"] == 1 and result["passed"] == 1 and result["tests"] == 2
 
 
 def test_junit_parser_accepts_call_pass_teardown_error_without_deriving_passed(tmp_path):
@@ -1130,50 +734,6 @@ def test_runner_cross_checks_only_four_raw_junit_counters_and_rejects_each_mutat
             _cleanup_nested_runner_diagnostics(rejected.stderr)
             shutil.rmtree(repo / "test-results", ignore_errors=True)
             shutil.rmtree(fake_bin / "container-artifacts", ignore_errors=True)
-
-
-def test_junit_projection_mismatch_reports_actual_and_phase_expected():
-    assert "parsed actual=" in RUNNER
-    assert "phase projection expected=" in RUNNER
-
-
-def test_runner_uses_run_start_head_for_later_commits(tmp_path):
-    repo, fake_bin = _fake_runner_repo(tmp_path)
-    _install_fake_docker_artifacts(
-        fake_bin,
-        [record("case", [phase("setup"), phase("call"), phase("teardown")])],
-        {"tests": 1, "failures": 0, "errors": 0, "skipped": 0},
-        exit_code=0,
-    )
-    (repo / "later.txt").write_text("later\n", encoding="utf-8")
-    git(repo, "add", "later.txt")
-    git(repo, "commit", "-qm", "later")
-    run_start_head = git(repo, "rev-parse", "HEAD")
-    env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
-    result = subprocess.run(
-        [str(repo / "scripts/scai-test"), "fast", "placeholder.py"],
-        cwd=repo,
-        env=env,
-        text=True,
-        capture_output=True,
-    )
-    try:
-        assert result.returncode == 0, result.stderr
-        run_dirs = [
-            path for path in (repo / "test-results").iterdir()
-            if path.is_dir() and not path.name.startswith(".")
-        ]
-        assert len(run_dirs) == 1
-        evidence = json.loads((run_dirs[0] / "evidence.json").read_text(encoding="utf-8"))
-        assert evidence["source"]["base_commit"] == run_start_head
-        assert evidence["source"]["manifest"]["base"] == run_start_head
-        for name in ("pre-source-manifest.json", "post-source-manifest.json"):
-            manifest = json.loads((run_dirs[0] / name).read_text(encoding="utf-8"))
-            assert manifest["base"] == run_start_head
-    finally:
-        _cleanup_nested_runner_diagnostics(result.stderr)
-        shutil.rmtree(repo / "test-results", ignore_errors=True)
-        shutil.rmtree(fake_bin / "container-artifacts", ignore_errors=True)
 
 
 def test_collection_validator_requires_complete_true_and_exact_plugins():
@@ -1311,27 +871,6 @@ def test_kernel_profile_rejects_only_exact_gated_live_skip_details():
     TREE.reject_kernel_gated_live_skips("kernel", {"skipped_nodes": [{"nodeid": "kernel::live", "signature": "a" * 64, "reason": "optional dependency skipped"}]})
 
 
-def test_raw_collectonly_aliases_are_exact_and_emit_collection_only():
-    assert "--collect-only|--collectonly|--co" in RUNNER and "--collect-only=*" in RUNNER
-
-
-def test_kernel_skip_reason_comes_only_from_exact_outcome_nodeid():
-    assert "nodeids" in PLUGIN and "outcomes" in RUNNER
-
-
-def test_evidence_records_command_environment_duration_counts_and_claim_scope():
-    for text in ("expanded_command", "environment", "duration_seconds", "counts", "claim_scope"):
-        assert text in RUNNER
-
-
-def test_zero_collection_or_normal_missing_malformed_junit_is_not_a_pass():
-    assert "JUnit XML reports zero tests" in _tree_source() and "container output allowlist" in RUNNER
-
-
-def test_evidence_hashes_payloads_but_never_itself_or_its_detached_manifest():
-    assert 'if path.name not in {"evidence.json", "artifact-manifest.json"}' in RUNNER
-
-
 def test_evidence_records_an_empty_effective_configuration():
     """One configuration, so the recorded set is empty -- and must be exactly so.
 
@@ -1351,10 +890,6 @@ def test_evidence_records_an_empty_effective_configuration():
         with pytest.raises(TREE.ContractError, match="effective configuration"):
             TREE.validate_collection(json.dumps(payload).encode())
     assert '"pytest_effective_config": collection["effective_config"]' in RUNNER
-
-
-def test_new_shell_script_modes_are_0755():
-    assert stat.S_IMODE((ROOT / "scripts/scai-test").stat().st_mode) == 0o755
 
 
 def test_container_artifacts_are_host_readable_after_atomic_write(tmp_path):

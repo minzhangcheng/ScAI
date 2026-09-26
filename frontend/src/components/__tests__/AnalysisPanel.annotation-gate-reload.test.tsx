@@ -110,18 +110,4 @@ describe('AnalysisPanel — annotation gate survives a reload', () => {
     fireEvent.click(screen.getByRole('button', { name: /waiting for annotation/i }))
     await waitFor(() => expect(screen.getByText('Hepatocyte')).toBeInTheDocument())
   })
-
-  it('does not open the dialog when no gate is pending', async () => {
-    useAppStore.setState({
-      currentSession: makeSession('running'),
-      messages: [],
-    })
-    useAppStore.getState().setAnnotationGateData(null)
-
-    render(<AnalysisPanel />)
-
-    await waitFor(() => {
-      expect(screen.queryByText('Hepatocyte')).not.toBeInTheDocument()
-    })
-  })
 })

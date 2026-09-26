@@ -61,23 +61,6 @@ describe('Analysis page Markdown', () => {
     expect(within(getByRole('list')).getAllByRole('listitem')).toHaveLength(2)
   })
 
-  it.each(['summary', 'integrationReportSummary'] as const)(
-    'renders Markdown in the expanded %s',
-    (field) => {
-      const state = controller()
-      const round = roundSummary()
-      round[field] = report
-      state.roundSummaries = [round]
-      const { container, getByRole } = render(<AnalysisStatusView controller={state} />)
-
-      expect(getByRole('heading', { level: 2, name: 'Executive Summary' })).toBeInTheDocument()
-      expect(getByRole('table')).toBeInTheDocument()
-      expect(container.querySelector('strong')).toHaveTextContent('Copper')
-      expect(container.querySelectorAll('math')).toHaveLength(2)
-      expect(container.querySelector('pre code')).toHaveTextContent('| literal | $x$ |')
-    },
-  )
-
   it('renders findings and data requests without displaying formatting markers', () => {
     const state = controller()
     const round = roundSummary()

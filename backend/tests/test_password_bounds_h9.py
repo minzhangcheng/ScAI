@@ -1,6 +1,5 @@
 """Tests that admin/setup password paths enforce the 72-byte limit."""
 import pytest
-from pydantic import BaseModel
 from backend.routes.admin import SetPasswordRequest
 from backend.routes.setup import SetupAdminRequest
 from backend.utils.auth import hash_password

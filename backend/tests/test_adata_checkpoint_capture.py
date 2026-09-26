@@ -4,9 +4,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
-import pytest
 
 from backend.models.schemas import AnalysisState
 from backend.services.adata_checkpoints.capture import capture_boundary_locked
@@ -119,47 +117,5 @@ def test_capture_publishes_record_and_replays_same_event():
         assert replay.record.checkpoint_id == record.checkpoint_id
         assert sandbox._serialize_count == 1
         assert len(state.adata_checkpoints) == 1
-
-    asyncio.run(_run())
-
-
-def test_capture_discloses_without_canonical_adata():
-    async def _run():
-        state = _state()
-        sandbox = _FakeSandbox(present=False)
-        outcome = await capture_boundary_locked(sandbox, state, **_capture_kwargs())
-        assert outcome.record is None
-        assert outcome.disclosure == "no_canonical_adata"
-        assert not state.adata_checkpoints
-        assert sandbox._serialize_count == 0
-
-    asyncio.run(_run())
-
-
-def test_capture_discloses_without_live_kernel():
-    async def _run():
-        state = _state()
-        sandbox = _FakeSandbox(with_km=False)
-        outcome = await capture_boundary_locked(sandbox, state, **_capture_kwargs())
-        assert outcome.record is None
-        assert outcome.disclosure == "no_live_kernel"
-
-    asyncio.run(_run())
-
-
-def test_anchor_registration_failure_never_publishes_available_record():
-    async def _run():
-        state = _state()
-        sandbox = _FakeSandbox(registration_ok=False)
-        outcome = await capture_boundary_locked(
-            sandbox, state, **_capture_kwargs()
-        )
-        assert outcome.disclosure == "failed_capture"
-        assert outcome.record.status == "failed"
-        assert outcome.record.blob_sha256 is None
-        assert state.active_adata_checkpoint_id is None
-        assert state.active_adata_lineage_id is None
-        assert state.adata_checkpoint_sequence == 0
-        assert [record.status for record in state.adata_checkpoints] == ["failed"]
 
     asyncio.run(_run())

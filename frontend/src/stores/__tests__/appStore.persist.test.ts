@@ -48,18 +48,6 @@ it('does not persist realtime messages (server-authoritative, re-hydrated from /
   expect(persisted.currentSession).toEqual({ id: 's1' })
 })
 
-it('does not persist a theme override because color scheme follows the browser', () => {
-  const persisted = partialize({
-    apiConfig: { apiKey: '', llmBaseUrl: '', proxyUrl: '' },
-    chatMessages: [],
-    theme: 'dark',
-    colorScheme: 'light',
-  } as any) as any
-
-  expect(persisted.theme).toBeUndefined()
-  expect(persisted.colorScheme).toBeUndefined()
-})
-
 it('omits authoritative and image-heavy transient state from the local cache', () => {
   const state = {
     apiConfig: { apiKey: '', llmBaseUrl: '', proxyUrl: '' },

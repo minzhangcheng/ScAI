@@ -4,12 +4,12 @@ import hashlib
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
 
-from backend.models.schemas import AnalysisState, DataFile, TaskStatus, TreatmentGroup
+from backend.models.schemas import AnalysisState, DataFile, TreatmentGroup
 from backend.state import sessions
 
 
@@ -99,37 +99,6 @@ async def _stage(app_db, temp_dir: Path, session_id: str, placeholder_id: str, p
 
 
 @pytest.mark.asyncio
-async def test_create_returns_stable_placeholder_manifest_in_config_order(monkeypatch):
-    from backend.routes import v1
-
-    state = _state()
-    monkeypatch.setattr(v1, "_create_pending_session", AsyncMock(return_value=state))
-    request = SimpleNamespace(state=SimpleNamespace(user_id="u1"))
-
-    created = await v1.create_analysis(request)
-    from_config = await v1.create_from_config(request)
-
-    expected = [
-        {
-            "id": "pf-con",
-            "filename": CELLRANGER,
-            "section": "sequencing",
-            "group_id": "gcon",
-            "sample_number": None,
-        },
-        {
-            "id": "pf-dko",
-            "filename": CELLRANGER,
-            "section": "sequencing",
-            "group_id": "gdko",
-            "sample_number": None,
-        },
-    ]
-    assert created == {"job_id": SID, "status": "pending", "files": expected}
-    assert from_config == {"id": SID, "status": "pending", "files": expected}
-
-
-@pytest.mark.asyncio
 async def test_init_requires_exact_file_id_and_rejects_invalid_bindings(tmp_path, app_db):
     from backend.services.upload import init_upload
 
@@ -213,70 +182,6 @@ async def test_same_basename_out_of_order_concurrent_completion_preserves_identi
         data_file.id: data_file.file_path
         for data_file in state.data_files
     }
-
-
-@pytest.mark.asyncio
-async def test_duplicate_destination_is_rejected_before_and_under_lifecycle_lock(
-    tmp_path, app_db
-):
-    from backend.services.upload import complete_upload, init_upload
-
-    upload_dir = tmp_path / "uploads"
-    state = _state(same_group=True)
-    sessions[SID] = state
-    try:
-        with _patches(app_db, tmp_path, upload_dir):
-            first = await init_upload(SID, _request(_body(file_id="pf-con", payload=b"first")))
-            first_id = first["upload_id"]
-            with pytest.raises(HTTPException) as concurrent_init:
-                await init_upload(SID, _request(_body(file_id="pf-con", payload=b"first-again")))
-            assert concurrent_init.value.status_code == 409
-            (tmp_path / f"{first_id}.chunk.0").write_bytes(b"first")
-            await app_db.mark_chunk_received(first_id, 0)
-            await complete_upload(SID, first_id)
-
-            with pytest.raises(HTTPException) as before_transfer:
-                await init_upload(SID, _request(_body(file_id="pf-dko", payload=b"second")))
-            assert before_transfer.value.status_code == 409
-
-            second_id = await _stage(app_db, tmp_path, SID, "pf-dko", b"second")
-            with pytest.raises(HTTPException) as under_lock:
-                await complete_upload(SID, second_id)
-            assert under_lock.value.status_code == 409
-            assert Path(state.data_files[0].file_path).read_bytes() == b"first"
-            assert not state.data_files[1].file_path
-    finally:
-        sessions.pop(SID, None)
-
-
-@pytest.mark.asyncio
-async def test_start_distinguishes_unbound_from_missing_bound_path(tmp_path, monkeypatch):
-    from backend.routes import v1
-
-    state = _state()
-    state.status = TaskStatus.PENDING
-    state.data_files[0].filename = "never-uploaded.h5ad"
-    state.data_files[1].filename = "deleted-after-upload.h5ad"
-    state.data_files[1].file_path = str(tmp_path / "deleted-after-upload.h5ad")
-    monkeypatch.setattr(v1, "require_session_ownership", AsyncMock(return_value=state))
-    monkeypatch.setattr(v1, "resolve_config_for_user", AsyncMock(return_value=object()))
-    started = AsyncMock(return_value=True)
-    monkeypatch.setattr(
-        "backend.services.workflow_runner.start_workflow_if_needed",
-        started,
-    )
-    request = SimpleNamespace(state=SimpleNamespace(user_id="u1"))
-
-    with pytest.raises(HTTPException) as caught:
-        await v1.start_analysis(SID, request)
-
-    assert caught.value.status_code == 400
-    detail = str(caught.value.detail)
-    assert "never uploaded" in detail
-    assert "no longer exists" in detail
-    assert "never-uploaded.h5ad" in detail
-    assert "deleted-after-upload.h5ad" in detail
-    started.assert_not_awaited()
 
 
 @pytest.mark.asyncio

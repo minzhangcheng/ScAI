@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.61.1 · **Last updated**: 2026-09-24
+**Version**: 0.62.1 · **Last updated**: 2026-09-26
 
 ## 1. Runtime Architecture
 
@@ -334,6 +334,7 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
   `scripts/scai-test -- <raw pytest args>`.
 - **Supported frontend tests**: `scripts/scai-frontend-test --install-and-test` at the separately authorized isolated npm checkpoint.
 - **Test evidence**: every supported run records its image, source, command, counts, and artifact evidence under `test-results/`; focused evidence is not full-suite or release evidence.
+- **0.62.1 test baseline**: the retained suite contains 193,529 lines of application code and 58,047 lines of tests and test infrastructure (29.994%). The release verification passed backend-full `1,408/1,443` collected nodes with 35 existing skips, the real-kernel profile `88/88`, and the isolated frontend suite `205/205`. The detailed coverage audit and evidence paths are in [Test Suite Review](test-suite-review.md); the 30% ceiling does not justify removing persistence, security, ownership, provenance, or evidence-boundary regressions.
 - **Working-copy file modes**: a checkout made under `umask 002` carries `0664`/`0775` where git records `0644`/`0755`. Git tracks only the executable bit, so `git status` stays clean and nothing warns you. `test_startup_dependency_contract` and its three siblings then fail — 34 nodes — because they build a fixture checkout with `shutil.copy2`, which preserves the source mode, and assert `0o644` on the result. The failure names a mode, not a module, and points at no code that is wrong: `assert 436 == 420` is `0o664` against `0o644`. Restore the recorded modes rather than relaxing the assertion — the contract exists so a group-writable file cannot sit on the startup path. `git ls-files -s` gives the mode git holds for every tracked file, which is the authority to restore from.
 - **Adding a route**: create `backend/routes/<name>.py`, register it in `main.py`, update `route_snapshot.json` (`test_route_registry.py` will tell you if it drifts).
 - **Adding an agent**: subclass `backend/agents/base.py` where appropriate, register settings, and wire the node through `backend/workflow/` and `backend/constants.py`.
@@ -361,6 +362,16 @@ gate settings.
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.62.x — (2026-09-26 onward)**
+
+- `0.62.1` — Audits and reduces the retained test suite while restoring
+  important persistence, cleanup-lease, credential-rotation, bounded-replanning,
+  Chat ownership, report-transaction, and literature-evidence regressions. Shared
+  setup and parameterized variants keep the suite at 29.994% of application code.
+  Release verification passed backend-full `1,408` nodes with `35` existing
+  skips, the real-kernel profile `88/88`, and the isolated frontend suite
+  `205/205`; the full audit is recorded in `docs/test-suite-review.md`.
 
 **0.61.x — (2026-09-24 onward)**
 
