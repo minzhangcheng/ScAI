@@ -378,6 +378,7 @@ class FiguresMixin:
         producer_run_scope_id: Optional[str] = None,
         figure_followup_task_id: Optional[str] = None,
         figure_followup_scope: Optional[Dict[str, Any]] = None,
+        analysis_metadata: Optional[Dict[str, str]] = None,
     ) -> str:
         """
         Handle generate_publication_figure tool call.
@@ -423,6 +424,7 @@ class FiguresMixin:
             producer_run_scope_id=producer_run_scope_id,
             figure_followup_task_id=figure_followup_task_id,
             figure_followup_scope=figure_followup_scope,
+            analysis_metadata=analysis_metadata,
         )
         attempt, error = await prepare_figure_request(request)
         if error:

@@ -116,6 +116,11 @@ def figure_followup_source_prompt(state: Any, scope: dict[str, Any]) -> str:
     import json
 
     receipts = _receipt_map(state)
+    descriptions = {
+        _value(step, "execution_id"): _value(step, "code_description", "")
+        for step in getattr(state, "analysis_log", []) or []
+        if _value(step, "execution_id")
+    }
     tasks = []
     for task in scope.get("tasks", []):
         allowed = list(task.get("eligible_execution_ids") or [])
@@ -127,7 +132,13 @@ def figure_followup_source_prompt(state: Any, scope: dict[str, Any]) -> str:
             "source_receipts": [{
                 "execution_id": aid,
                 "plan_step_ids": _value(receipts.get(aid), "plan_step_ids", []),
-                "description": str(_value(receipts.get(aid), "description", "") or "")[:240],
+                "description": str(descriptions.get(aid) or "")[:240],
+                "declared_persistent_outputs": _value(
+                    receipts.get(aid), "declared_persistent_outputs", [],
+                ),
+                "realized_persistent_outputs": _value(
+                    receipts.get(aid), "realized_persistent_outputs", [],
+                ),
             } for aid in allowed],
         })
     return (
@@ -136,9 +147,28 @@ def figure_followup_source_prompt(state: Any, scope: dict[str, Any]) -> str:
         "logical_figure_id identifies the figure, NOT its source execution. Never extract "
         "a UUID from logical_figure_id or borrow another task's execution IDs. "
         "Choose the listed receipt supporting the plotted result. If none supports it, "
-        "report the task unresolved rather than inventing an ID.\n"
+        "report the task unresolved rather than inventing an ID. Persistent output "
+        "names describe historical execution outputs; check the measured live input "
+        "inventory for current paths and structure. Inventory membership alone does "
+        "not establish a task's execution provenance or scientific suitability.\n"
         + json.dumps(tasks, ensure_ascii=False)
     )
+
+
+def figure_followup_output_names(state: Any, scope: dict[str, Any]) -> list[str]:
+    """Prioritize bounded output names from this scope's source receipts."""
+    receipts = _receipt_map(state)
+    names = []
+    for task in scope.get("tasks", []):
+        for aid in task.get("eligible_execution_ids", []):
+            receipt = receipts.get(aid)
+            for field in ("realized_persistent_outputs", "declared_persistent_outputs"):
+                for name in _value(receipt, field, []) or []:
+                    if isinstance(name, str) and name.isidentifier() and name not in names:
+                        names.append(name)
+                        if len(names) >= 128:
+                            return names
+    return names
 
 
 def _receipt_map(state: Any, current_receipts: Iterable[Any] = ()) -> dict[str, Any]:

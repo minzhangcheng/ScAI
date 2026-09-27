@@ -5,6 +5,7 @@ Moved verbatim out of backend/agents/pi_agent.py; composed into PIAgent.
 from typing import List, Optional, Sequence
 import asyncio
 import logging
+import json
 
 from ...utils.direction_evidence import build_fallback_direction_evidence
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
@@ -36,6 +37,25 @@ from .shared import (  # noqa: F401
 
 class ReportsMixin:
     """Exploration report, integrated report, and research briefs."""
+
+    async def annotate_legacy_figure_methods(self, figures):
+        """Recover method notes without turning legacy images into reviewed results."""
+        prompt = """Annotate methods for these unregistered historical images.
+Use the supplied candidate code and outputs to summarize data sources, sample
+design, methods, parameters and limitations. Filename matches are leads, not
+proof that an execution generated these exact image bytes. Record the evidence
+IDs you used. Do not infer a model, pairing, score definition or input scale from
+a filename or variable name. If the source of reused objects is absent, say so.
+Use basis 'inferred' for a supported reconstruction or 'unknown' when unresolved.
+This is method documentation only, not image approval or scientific acceptance.
+Return JSON {"annotations": [{"figure_id": "provided ID", "basis": "inferred|unknown",
+"analysis_metadata": {"data_source": "...", "sample_design": "...",
+"methods": "...", "parameters": "...", "limitations": "..."},
+"evidence_execution_ids": ["provided execution ID"], "evidence_notes": "basis and uncertainty"}]}.
+Candidates:\n""" + json.dumps(figures, ensure_ascii=False)
+        response = await self.chat_without_history(prompt)
+        data = self._safe_parse_json(response, default={})
+        return data.get("annotations", []) if isinstance(data, dict) else []
 
     async def generate_stage_review_chapter(self, state, stage, catalog, context):
         """Explain and order all available results for a decision-time review."""
@@ -159,6 +179,7 @@ beside its owning result. This review does not replace the full final-report cha
                     figure_id=fig.id,
                     name=fig.name,
                     description=fig.description,
+                    analysis_metadata=dict(fig.analysis_metadata),
                     figure_type=fig.figure_type,
                     render_sha256=fig.render_sha256,
                     pdf_sha256=fig.pdf_sha256,
@@ -190,6 +211,9 @@ beside its owning result. This review does not replace the full final-report cha
                 f"Figure {ref.number}: {ref.name} "
                 f"(declared type: {ref.figure_type}) - {ref.description} [{status}]"
                 + (f" PI reservation: {ref.pi_report_note}" if ref.pi_report_note else "")
+                + ("\nProducer-recorded analysis metadata: "
+                   + json.dumps(ref.analysis_metadata, ensure_ascii=False)
+                   if ref.analysis_metadata else "")
             )
 
         if reporting_limitations is None:
@@ -260,8 +284,13 @@ beside its owning result. This review does not replace the full final-report cha
 **Available Figures:**
 {chr(10).join(figures_info) if figures_info else "No figures generated"}
 
-The declared figure type and description above are authoritative. Do not infer
-a different plot type from a filename, and keep every caption consistent with
+The declared figure type and description above are authoritative. Use figure
+analysis metadata rather than filenames for methods. Use those
+producer-recorded methods and data sources for the corresponding result, retaining
+uncertainty and disclosing conflicts with execution evidence rather than treating
+the record as independently verified. For figures without analysis metadata, use
+the available analysis context as before.
+Do not infer a different plot type from a filename, and keep every caption consistent with
 the supplied metadata (for example, never describe a declared barplot as a UMAP).
 Disclose each supplied PI reservation where it affects interpretation.
 Do not imply that an omitted or reserved figure passed ordinary review.

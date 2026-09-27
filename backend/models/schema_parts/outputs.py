@@ -12,7 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-from .analysis import CrossModalSynthesis, DataDrivenMechanismProgram
+from .analysis import CrossModalSynthesis, DataDrivenMechanismProgram, FigureMethodAnnotation
 from .enums import AgentType, FigureReviewStatus
 from .session import tolerant_from_llm_dict
 from .round_report import RoundReportChapter
@@ -147,6 +147,9 @@ class PublicationFigure(BaseModel):
     preview_sha256: Optional[str] = None
     pdf_sha256: Optional[str] = None
     interpretation: Optional[str] = None  # Scientific interpretation of the figure
+    # Producer-recorded methods for this render; not a host-verified scientific claim.
+    # Empty preserves older figures and the existing unregistered-image fallback.
+    analysis_metadata: Dict[str, str] = Field(default_factory=dict)
     review_status: FigureReviewStatus = FigureReviewStatus.PENDING
     # True means no visual review verdict was obtained. Keep PENDING so older
     # readers do not mistake this for approval; this flag distinguishes the
@@ -258,6 +261,7 @@ class LegacyArtifactRecord(BaseModel):
     pdf_sha256: Optional[str] = None
     source: str = "legacy_workspace"
     provenance_kind: Literal["legacy_unregistered"] = "legacy_unregistered"
+    method_annotation: Optional[FigureMethodAnnotation] = None
     lineage_id: str = "main"
     discovered_at: datetime = Field(default_factory=datetime.now)
 
@@ -301,6 +305,7 @@ class IntegratedReportFigureRef(BaseModel):
     figure_id: str
     name: str
     description: str = ""
+    analysis_metadata: Dict[str, str] = Field(default_factory=dict)
     figure_type: str = "other"
     # Required for newly generated reports. Optional only so sessions written
     # before this contract can still be loaded without claiming an exact bind.

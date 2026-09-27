@@ -142,6 +142,10 @@ def _build_report_prompt(
         description = str(metadata.get("description") or "").strip()
         if description:
             line += f" — authoritative description: {description[:600]}"
+        if metadata.get("analysis_metadata"):
+            line += "\n  Producer-recorded analysis metadata: " + json.dumps(
+                metadata["analysis_metadata"], ensure_ascii=False,
+            )
         degraded_reason = str(
             metadata.get("pi_degraded_acceptance_reason") or ""
         ).strip()
@@ -275,6 +279,13 @@ def _build_report_prompt(
     ) if table_list else "None"
 
     prompt = f"""Based on the following complete analysis records, generate a detailed scientific research report.
+
+For registered figures, use their analysis metadata to write methods and data
+sources for the specific result shown. It is producer-recorded evidence, not an
+independent verification: preserve unknowns and reconcile conflicts with actual
+execution records. Do not substitute another result's model or infer pairing from
+names. For figures without this metadata, infer from the available analysis
+records and image context as before, making uncertainty explicit.
 
 ## Analysis Narrative
 {narrative}
@@ -651,6 +662,13 @@ async def prepare_report_generation(
         report_only=True,
         state=analysis_state,
     )
+    if workspace_path:
+        from ...services.report.figure_discovery import resolve_state_figure_candidates
+        for candidate in resolve_state_figure_candidates(analysis_state, workspace_path, report_only=True):
+            if not candidate.get("is_publication") and candidate.get("analysis_metadata"):
+                figure_metadata_by_stem[Path(candidate["path"]).name] = {
+                    "analysis_metadata": candidate["analysis_metadata"],
+                }
 
     # Collect table paths from workspace
     table_list = self._collect_table_paths(

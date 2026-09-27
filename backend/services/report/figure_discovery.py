@@ -36,6 +36,7 @@ from backend.services.report.artifacts import (
 )
 from backend.models.schemas import LegacyArtifactRecord
 from backend.utils.files import validate_path_within, validate_session_id
+from .figure_methods import annotation_metadata, find_figure_method_annotation
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +319,7 @@ def publication_figure_metadata(
             "type": getattr(figure, "figure_type", "") or "other",
             "description": description_with_data_drift_warning(figure),
             "interpretation": getattr(figure, "interpretation", "") or "",
+            "analysis_metadata": dict(getattr(figure, "analysis_metadata", {}) or {}),
             "diagnostic": bool(getattr(figure, "diagnostic", False)),
             "round": int(getattr(figure, "round_number", 0) or 0) or None,
             "review_status": str(getattr(status, "value", status) or ""),
@@ -513,6 +515,13 @@ def prepare_discovered_figures(
                     "provenance_kind": "legacy_unregistered",
                     "render_sha256": candidate_digest,
                 })
+        if metadata is None and state is not None:
+            digest = candidate_digest or image_file_sha256(candidate.get("path"), min_bytes=1)
+            note = find_figure_method_annotation(
+                state, str(candidate.get("rel_path") or ""), digest,
+            )
+            if note:
+                merged["analysis_metadata"] = annotation_metadata(note)
         prepared.append(merged)
     return prepared
 
@@ -629,6 +638,9 @@ def resolve_state_figure_candidates(
             "is_publication": False,
             "is_legacy": True,
             "provenance_kind": "legacy_unregistered",
+            "analysis_metadata": annotation_metadata(find_figure_method_annotation(
+                state, legacy.relative_path, legacy.render_sha256,
+            )),
             "render_sha256": getattr(legacy, "render_sha256", None),
             "pdf_sha256": getattr(legacy, "pdf_sha256", None),
         })
@@ -661,6 +673,7 @@ def resolve_state_figure_candidates(
             ),
             "diagnostic": bool(getattr(record, "diagnostic", False)),
             "description": description_with_data_drift_warning(record),
+            "analysis_metadata": dict(record.analysis_metadata),
             "interpretation": str(getattr(record, "interpretation", "") or ""),
             "is_publication": True,
             "review_status": str(getattr(status, "value", status) or ""),

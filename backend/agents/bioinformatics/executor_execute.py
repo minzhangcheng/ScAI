@@ -464,6 +464,7 @@ def build_code_execution_receipt(
 
 async def record_execution_result(
     context, code_exec, result, code, description, step_type, purpose, step_ids,
+    figure_analysis_metadata=None,
 ):
     """Publish one execution receipt, log entry, result, and exploratory figures."""
     agent = context.agent
@@ -476,6 +477,11 @@ async def record_execution_result(
                 r'\[Auto-saved\] (?:JPG|PNG): (.+\.(?:jpe?g|png))', result.output,
             )
         ]
+    if figure_analysis_metadata:
+        from ...services.report.figure_methods import capture_figure_methods
+        capture_figure_methods(
+            code_exec, figure_analysis_metadata, saved_figures, agent.sandbox.working_dir,
+        )
     context.analysis_log.append(AnalysisStep(
         step_number=context.step_count,
         step_type="execute_code",
@@ -832,6 +838,7 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
     await record_execution_result(
         context, code_exec, result, code, description, step_type,
         execution_purpose, plan_step_ids,
+        figure_analysis_metadata=args.get("figure_analysis_metadata"),
     )
     swallowed_type, swallowed_doc_hint = (
         await self._detect_and_lookup_swallowed_error(result, code)

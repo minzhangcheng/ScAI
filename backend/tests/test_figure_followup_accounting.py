@@ -118,6 +118,7 @@ def _figure_tool_call(call_id, task):
             "code": "ax.scatter([0, 1], [1, 0])",
             "figure_name": "contrast_plot",
             "description": "Plot the existing contrast result.",
+            "analysis_metadata": {"methods": "Existing condition-only contrast."},
             "figure_type": "volcano",
             "evidence_execution_id": "figure-source",
             "plan_step_id": task.plan_step_id,
@@ -136,6 +137,7 @@ async def test_real_figure_handler_persists_attempts_before_render_and_keeps_the
     saved_before_render = []
 
     async def render(**_kwargs):
+        assert _kwargs["analysis_metadata"] == {"methods": "Existing condition-only contrast."}
         persisted = session_store.load_session_from_disk(state.id)
         saved_before_render.append(persisted)
         ids = persisted.figure_attempt_execution_ids["render-scope"]

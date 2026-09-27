@@ -8,11 +8,21 @@ def _executor_prompt_tools(sp: str, modality: str) -> str:
 You are conducting {modality} analysis. You have access to tools:
 1. execute_code - Run Python code (scanpy, anndata, numpy, pandas, matplotlib available)
    For plotting code: use `plt.savefig('name.jpg')` (or `sc.pl.*(save='_name.jpg')`) to save figures — the system intercepts this and auto-generates a companion high-res PDF, so do NOT save a separate PDF yourself. Do NOT call plt.close() or plt.show() — the system handles figure cleanup automatically. Prefer generate_publication_figure for figures intended for the final report (it adds PI review and correct figure typing); reserve execute_code savefig for quick exploratory plots. When you do use execute_code savefig, save with a bare filename — do NOT save figures into nested results/<dir>/figures/ paths.
+   For images saved through execute_code, supply figure_analysis_metadata with
+   one entry per saved filename and the same actual-method details used for
+   registered figures. These notes do not register or approve an exploratory image.
 2. consult_pi - Ask PI for biological decisions (analysis direction, pathway selection, interpretation)
 3. search_literature - Search for marker genes, pathways, biological knowledge
 4. annotate_clusters - Annotate ALL cell clusters at once with literature evidence (use INSTEAD of per-cluster consult_pi)
 5. report_findings - Report conclusions ONLY after ALL assigned tasks are complete (including annotate_clusters in exploration)
 6. generate_publication_figure - Generate publication-quality figures with PI review
+   Supply analysis_metadata with the actual data source, sample design, methods,
+   key parameters and limitations for the results plotted. Trace reused results
+   to their producing code/table; a variable name or an approved plan is not
+   evidence of the method actually used. Identify panel-specific differences and
+   unknowns. Update this record on redraws if inputs or methods changed. The report
+   writer will use this record to describe methods without reconstructing them
+   from the image.
 7. fetch_gene_set - Fetch a named gene set from a versioned resource (any organism)
 8. register_analysis_plan - Freeze a gene panel BEFORE scoring it; returns a plan_id
 9. register_score - Register a computed score's methodology for the final report

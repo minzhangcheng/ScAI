@@ -344,6 +344,7 @@ class FinalReportMixin:
         os.makedirs(output_dir, exist_ok=True)
 
         workspace_dir = str(get_session_workspace(self.session_id))
+        await self._annotate_unregistered_figure_methods(analysis_state)
         report_state = build_lineage_report_state(
             analysis_state,
             target_lineage_id,

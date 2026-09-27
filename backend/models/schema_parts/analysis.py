@@ -53,6 +53,17 @@ class AgentMessage(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
+class FigureMethodAnnotation(BaseModel):
+    """Methods attached to exact image bytes, without publication eligibility."""
+    relative_path: str
+    render_sha256: str
+    analysis_metadata: Dict[str, str] = Field(default_factory=dict)
+    basis: Literal["execution_context", "inferred", "unknown"] = "unknown"
+    author: Literal["bioinformatics", "pi"]
+    evidence_execution_ids: List[str] = Field(default_factory=list)
+    evidence_notes: str = ""
+
+
 class CodeExecution(BaseModel):
     """Record of code execution"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -60,6 +71,7 @@ class CodeExecution(BaseModel):
     output: Optional[str] = None
     error: Optional[str] = None
     figures: List[str] = Field(default_factory=list)  # Base64 encoded images
+    figure_method_annotations: List[FigureMethodAnnotation] = Field(default_factory=list)
     execution_time: Optional[float] = None
     round_number: int = 0
     evidence_eligible: bool = True

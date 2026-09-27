@@ -150,10 +150,23 @@ def _round_coverage_floor(candidates, selected_names) -> set:
 class GraphicAbstractMixin:
     """Graphic abstract: brief figure gallery, image and text variants, reviewer selection."""
 
+    async def _annotate_unregistered_figure_methods(self, state):
+        from ...services.report.figure_methods import annotate_legacy_figure_methods
+        annotate = getattr(self.pi_agent, "annotate_legacy_figure_methods", None)
+        if callable(annotate):
+            changed = await annotate_legacy_figure_methods(
+                state, get_session_workspace(self.session_id), annotate,
+            )
+            if changed:
+                await self._send_state_sync(
+                    state, "figure_methods_annotated", raise_on_save_error=True,
+                )
+
     async def _prepare_brief_figures(
         self, analysis_state,
     ) -> tuple[List[IntegratedReportFigureRef], List[str], List[Dict[str, Any]]]:
         """Select and freeze the numbered Integrated Report catalogue."""
+        await self._annotate_unregistered_figure_methods(analysis_state)
         DISCOVERY_CAP = 200
         # The report catalogue uses the existing report-eligibility and
         # published-head contract. Browsable pending/rejected revisions remain
@@ -273,6 +286,7 @@ class GraphicAbstractMixin:
                     "id": fig.id,
                     "name": fig.name,
                     "description": fig.description,
+                    "analysis_metadata": dict(fig.analysis_metadata),
                     "figure_type": fig.figure_type,
                     "png_base64": fig.png_base64,
                     "png_path": fig.png_path,
@@ -315,6 +329,7 @@ class GraphicAbstractMixin:
                     "id": str(wf.get("id") or wf.get("legacy_artifact_id") or ""),
                     "name": wf["name"],
                     "description": "",
+                    "analysis_metadata": dict(wf.get("analysis_metadata") or {}),
                     "figure_type": wf["type"],
                     "png_base64": b64,
                     "png_path": wf["path"],
@@ -400,6 +415,7 @@ class GraphicAbstractMixin:
                 figure_id=figure_id,
                 name=str(item.get("name") or ""),
                 description=str(item.get("description") or ""),
+                analysis_metadata=dict(item.get("analysis_metadata") or {}),
                 figure_type=str(item.get("figure_type") or "other"),
                 render_sha256=render_sha256,
                 pdf_sha256=item.get("pdf_sha256"),

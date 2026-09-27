@@ -889,6 +889,7 @@ async def handle_publication_figure(context, tool_call) -> ToolAction:
             code=code,
             figure_name=figure_name,
             description=description,
+            analysis_metadata=args.get("analysis_metadata"),
             figure_type=figure_type,
             state=state,
             review_callback=context.review_callback,

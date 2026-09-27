@@ -224,6 +224,24 @@ TOOLS = [
                         "type": "string",
                         "description": "Name for the figure file (English, no spaces, e.g., 'umap_cell_types')"
                     },
+                    "analysis_metadata": {
+                        "type": "object",
+                        "description": (
+                            "Record the actual analysis behind this figure for report writing. "
+                            "Use executed code and the specific results plotted, including the "
+                            "origin of reused results; do not copy a planned method or infer it "
+                            "from a variable name. Distinguish panels when their inputs or methods "
+                            "differ. State unknown provenance explicitly."
+                        ),
+                        "properties": {
+                            "data_source": {"type": "string", "description": "Actual input files/checkpoints, objects, expression layers, result tables and known source execution IDs."},
+                            "sample_design": {"type": "string", "description": "Included samples/cells, groups, exclusions, biological replication and documented pairing, as applicable."},
+                            "methods": {"type": "string", "description": "Executed transformations, model formula/contrast, tests or scoring definitions; distinguish analysis from visualization."},
+                            "parameters": {"type": "string", "description": "Relevant thresholds, gene sets or registered score IDs, multiple-testing correction, software versions and seeds when known."},
+                            "limitations": {"type": "string", "description": "Missing or uncertain provenance, method limitations and panel-specific qualifications."},
+                        },
+                        "additionalProperties": False,
+                    },
                     "logical_figure_id": {
                         "type": "string",
                         "description": (
@@ -955,6 +973,23 @@ REGISTER_SAMPLE_COUNTS_TOOL = {
 }
 
 _TOOL_BY_NAME = {t["function"]["name"]: t for t in TOOLS}
+
+_TOOL_BY_NAME["execute_code"]["function"]["parameters"]["properties"]["figure_analysis_metadata"] = {
+    "type": "array",
+    "description": (
+        "When saving exploratory images, record methods for each actual filename "
+        "(for example contrast.jpg). This adds version-bound method notes, not "
+        "publication registration or approval. Omit for cells without figures."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string"},
+            "analysis_metadata": _TOOL_BY_NAME["generate_publication_figure"]["function"]["parameters"]["properties"]["analysis_metadata"],
+        },
+        "required": ["filename", "analysis_metadata"],
+    },
+}
 
 #: The two-tool set for the pre-planning profiling pass. It reuses the
 #: executor's own execute_code schema so persistent_outputs keeps its meaning,

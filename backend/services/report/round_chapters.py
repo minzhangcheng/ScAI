@@ -99,6 +99,7 @@ def _chapter_analysis_context(state, catalog):
             "source_execution_id", "producer_run_kind", "source_execution_run_kind",
             "logical_figure_id", "revision_of_id", "supersedes_id",
             "figure_followup_task_id", "round_number",
+            "analysis_metadata",
         })
         task = tasks.get(getattr(record, "figure_followup_task_id", None))
         if task is not None:
@@ -177,7 +178,12 @@ step dependencies: describe each step's recorded method, relevant parameters,
 result, and limitations, then place its supporting artifacts immediately after
 that explanation. Follow this study's actual workflow, not a fixed assay template.
 Planned steps and expected outputs are not proof of execution. Use execution
-records and reported findings to distinguish performed, partial, and unperformed
+records and figure analysis_metadata to describe the actual methods and inputs.
+These producer-recorded methods are not independently verified: preserve their
+uncertainty and reconcile conflicts with execution evidence. Do not substitute
+another result's model or infer pairing from names. When metadata is absent,
+use the existing analysis context and disclose uncertainty.
+Use execution records and reported findings to distinguish performed, partial, and unperformed
 work; disclose missing methods or parameters instead of inventing them. Refer to
 retained execution records for reproducibility without dumping code or tool logs.
 Plan step IDs are local to their plan_id; never equate steps across different plans.

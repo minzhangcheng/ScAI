@@ -181,15 +181,27 @@ async def start_turn(context) -> TurnStart:
             prompt_cache_plan = PromptCachePlan()
     anchor_count = context.agent._context_anchor_count(request_messages)
     if figure_followup and state is not None:
-        from backend.services.figure_followup import figure_followup_source_prompt
+        from backend.services.figure_followup import (
+            figure_followup_output_names, figure_followup_source_prompt,
+        )
+        from .figure_context import figure_input_context
+
+        scope = context.figure_followup_scope or {}
+        inventory = await figure_input_context(
+            getattr(context.agent, "sandbox", None), "",
+            preferred_names=figure_followup_output_names(state, scope),
+        )
 
         # Request-only protected anchor: survives history trimming, checkpoint
         # resume, and shared context compaction without duplicating transcripts.
         request_messages.insert(anchor_count, {
             "role": "user",
             "content": figure_followup_source_prompt(
-                state, context.figure_followup_scope or {},
-            ),
+                state, scope,
+            ) + "\nMeasured live input inventory (bounded metadata):\n" + inventory
+            + "\nUse exact listed paths, including dictionary entries. Omission from "
+            "this bounded inventory is not proof that a result is absent. Do not "
+            "recompute analysis or guess a replacement source.",
             PROMPT_CACHE_EPHEMERAL_TAIL_KEY: True,
         })
         anchor_count += 1

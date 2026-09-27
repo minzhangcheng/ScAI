@@ -321,6 +321,7 @@ async def execute_initial_render(attempt: FigureAttemptState) -> str | None:
         id=str(uuid.uuid4()),
         name=attempt.safe_name,
         description=request.description,
+        analysis_metadata=request.analysis_metadata or {},
         figure_type=request.figure_type,
         png_path=str(attempt.jpg_path),
         pdf_path=str(attempt.pdf_path),

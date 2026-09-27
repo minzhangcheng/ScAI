@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 _MARKER = "__SCAI_FIGURE_INPUTS__:"
 
 
-async def figure_input_context(sandbox, original_code: str) -> str:
+async def figure_input_context(sandbox, original_code: str, *, preferred_names=()) -> str:
     """Inspect names/shapes/columns, never expression values or analysis outputs."""
     if sandbox is None or getattr(sandbox, "kc", None) is None:
         return "Live input inventory unavailable; do not assume new variables or columns exist."
@@ -20,21 +20,24 @@ async def figure_input_context(sandbox, original_code: str) -> str:
         })[:128]
     except SyntaxError:
         preferred = []
+    preferred = list(dict.fromkeys([
+        name for name in preferred_names if isinstance(name, str) and name.isidentifier()
+    ] + preferred))[:128]
     code = f'''
 def _scai_figure_input_inventory():
     import json
+    from itertools import islice
     namespace = globals()
     preferred = {preferred!r}
     names = sorted(name for name in namespace if not name.startswith('_'))
     ordered = [name for name in preferred if name in namespace]
     ordered += [name for name in names if name not in ordered]
     rows = []
-    for name in ordered:
-        value = namespace[name]
+    def describe(name, value):
         kind = type(value)
         module = kind.__module__
         if not module.startswith(('pandas.', 'anndata.', 'numpy', 'scipy.sparse')):
-            continue
+            return None
         row = {{'name': name[:120], 'type': kind.__name__}}
         if hasattr(value, 'shape'):
             row['shape'] = list(value.shape)[:4]
@@ -44,10 +47,29 @@ def _scai_figure_input_inventory():
         if module.startswith('anndata.'):
             row['obs_columns'] = [str(item)[:100] for item in value.obs.columns[:80]]
             row['obs_column_count'] = len(value.obs.columns)
-        rows.append(row)
+        return row
+    for name in ordered:
+        value = namespace[name]
+        row = describe(name, value)
+        if row is not None:
+            rows.append(row)
+        elif type(value) is dict:
+            # Result dictionaries are common analysis outputs. Inspect only
+            # one bounded level of metadata, never values or arbitrary objects.
+            for key, child in islice(value.items(), 20):
+                if not isinstance(key, str) or len(key) > 120:
+                    continue
+                path = name + '[' + repr(key) + ']'
+                child_row = describe(path, child)
+                if child_row is not None:
+                    child_row['name'] = path
+                    rows.append(child_row)
+                if len(rows) >= 60:
+                    break
         if len(rows) >= 60:
             break
-    return {{'objects': rows, 'limits': {{'objects': 60, 'columns_per_object': 80}},
+    return {{'objects': rows, 'limits': {{'objects': 60, 'columns_per_object': 80,
+                                       'dictionary_entries': 20, 'dictionary_depth': 1}},
             'missing_referenced_names': [name for name in preferred if name not in namespace][:40]}}
 try:
     print({_MARKER!r} + __import__('json').dumps(_scai_figure_input_inventory()))

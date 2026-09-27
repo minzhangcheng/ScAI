@@ -286,6 +286,7 @@ class FiguresMixin:
                 "name": candidate.get("publication_name")
                         or png_file.stem.replace("_", " ").title(),
                 "description": candidate.get("description") or "",
+                "analysis_metadata": dict(candidate.get("analysis_metadata") or {}),
                 "png_path": str(dest_png),
                 "pdf_path": str(dest_pdf) if dest_pdf and dest_pdf.exists() else None,
                 "inferred_type": self._infer_figure_type(

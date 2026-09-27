@@ -443,7 +443,8 @@ IMPORTANT:
         figure_images: Dict[str, str],
         table_summaries: Dict[str, str],
         state: "AnalysisState",
-        language: str
+        language: str,
+        figure_method_context: str = "",
     ) -> Dict[str, Any]:
         """
         PI Agent performs a single comprehensive review of the entire analysis.
@@ -466,6 +467,23 @@ IMPORTANT:
         # Build figure filename list for the prompt
         figure_filenames = list(figure_images.keys())
         figures_list = "\n".join(f"  {i+1}. {fname}" for i, fname in enumerate(figure_filenames))
+        from .figure_discovery import publication_figure_metadata
+        import json
+        metadata = publication_figure_metadata(state.publication_figures, state=state)
+        records = {item["id"]: item for item in metadata.values()}
+        for item in records.values():
+            details = item.get("analysis_metadata")
+            if details:
+                figures_list += (
+                    f"\n{item['publication_name']} ({item['id']}) — producer-recorded analysis metadata: "
+                    + json.dumps(details, ensure_ascii=False)
+                )
+        figures_list += (
+            "\nUse registered analysis metadata for the corresponding figure's methods "
+            "and inputs; preserve unknowns and reconcile conflicts with code. These "
+            "records are producer declarations, not independent verification. For "
+            "figures without metadata, infer from the available evidence as before."
+        )
 
         # Collect all images for vision API
         all_images = list(figure_images.values())
@@ -518,6 +536,9 @@ Objective: {state.initial_instruction}
 
 ## Table Data Summaries
 {table_text if table_text else "(No tables available)"}
+
+## Version-bound notes for unregistered figures (not publication approval)
+{figure_method_context or "None"}
 
 ## Result Figures ({len(figure_filenames)} figures attached for visual inspection)
 {figures_list if figures_list else "(No figures available)"}
@@ -622,8 +643,7 @@ IMPORTANT:
         notebook_cells = self._read_notebook(state)
 
         if not notebook_cells:
-            logger.warning("No notebook cells found, returning empty analysis summary")
-            return self._empty_analysis_summary()
+            logger.warning("No notebook cells found; method recovery relies on retained figure/table evidence")
 
         logger.info(f"Read {len(notebook_cells)} code cells from notebook")
 
@@ -642,7 +662,11 @@ IMPORTANT:
         # Step 5: Single comprehensive PI review
         await self._report_progress(23, "PI Agent reviewing complete analysis from scratch...")
         analysis_summary = await self._pi_comprehensive_review(
-            code_digest, figure_images, table_summaries, state, language
+            code_digest, figure_images, table_summaries, state, language,
+            figure_method_context="\n".join(
+                f"{figure['filename']}: {figure['analysis_metadata']}"
+                for figure in existing_figures if figure.get("analysis_metadata")
+            ),
         )
 
         logger.info(f"Comprehensive analysis review complete: "

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.62.1 · **Last updated**: 2026-09-26
+**Version**: 0.62.2 · **Last updated**: 2026-09-27
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,13 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.62.x — (2026-09-26 onward)**
+
+- `0.62.2` — Records methods and inputs on publication figures and binds
+  annotations for unregistered figures to their exact image bytes and available
+  execution evidence. Carries this context through figure review and report
+  generation while preserving uncertainty for PI judgment. Figure follow-ups
+  also receive source-execution descriptions and declared or realized persistent
+  outputs to support reproducible figure generation.
 
 - `0.62.1` — Audits and reduces the retained test suite while restoring
   important persistence, cleanup-lease, credential-rotation, bounded-replanning,

@@ -170,6 +170,7 @@ class FigureRequestContext:
     producer_run_scope_id: Optional[str] = None
     figure_followup_task_id: Optional[str] = None
     figure_followup_scope: Optional[dict[str, Any]] = None
+    analysis_metadata: Optional[dict[str, str]] = None
 
 
 @dataclass

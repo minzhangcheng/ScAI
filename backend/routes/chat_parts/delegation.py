@@ -228,6 +228,7 @@ def _build_execution_context(result: Dict[str, Any]) -> str:
             for key in (
                 "id", "round_number", "plan_id", "execution_status",
                 "code", "output", "error",
+                "figure_method_annotations",
             )
         })
 
