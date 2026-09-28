@@ -149,6 +149,10 @@ the canonical Stage 1 atlas, bind the final accepted atlas to the live canonical
 Include `adata` in `persistent_outputs` for that execution. The Host captures canonical
 `adata` at the boundary; a working copy stays separate unless promotion is approved.
 PI-approved mutation and rebinding are allowed. Do not hand Stage 2 a guessed filename.
+Inputs inspected or loaded by pre-planning profiling for Stage 2-only work stay separate
+from the canonical Stage 1 atlas and are not used for downstream analysis in this stage.
+Whether a profiling object remains live in memory does not determine whether its registered
+original contains data or layers required by a later approved analysis.
 """
 
 
@@ -169,6 +173,22 @@ at the strongest class of evidence the available modalities reach.
 
 Call register_mechanism_programs BEFORE report_findings. If no supportable program exists, call
 register_mechanism_programs with an empty programs list and explain why in no_program_reason.
+"""
+
+
+_VELOCITY_INPUT_EXECUTION_GUIDANCE = """
+
+RNA-VELOCITY INPUT GUIDANCE:
+For an approved RNA-velocity or directional splicing question with registered Loom
+inputs, inspect the original registered files read-only before judging input
+feasibility. Check the actual layers and measure cell/feature mapping to the accepted
+atlas; absence of layers on the current atlas alone is not evidence that the originals
+lack them. Keep any mapped working object separate from the accepted atlas, and never
+fabricate spliced / unspliced layers from expression values. A splicing-kinetics method
+such as scVelo is an option to evaluate, not a required algorithm. Select and record the
+scientifically appropriate method with the PI. DPT/PAGA may answer a distinct
+expression-ordering or connectivity question, but is not an automatic replacement for
+RNA velocity.
 """
 
 
@@ -367,15 +387,17 @@ def build_phase_instruction(planning_stage: str, analysis_phase: str,
     if planning_stage == "stage1":
         return _STAGE1_INSTRUCTION
     if planning_stage == "stage2":
-        return _build_stage2_instruction(
+        instr = _build_stage2_instruction(
             has_bulk, has_scrna, scrna_replicated=scrna_replicated,
             bulk_replicated=bulk_replicated,
         )
-    if analysis_phase == "exploration":
-        return _build_exploration_instruction(
+    elif analysis_phase == "exploration":
+        instr = _build_exploration_instruction(
             has_bulk, has_scrna, scrna_replicated=scrna_replicated,
             bulk_replicated=bulk_replicated,
         )
-    return _build_innovation_instruction(
-        direction, has_bulk, bulk_replicated=bulk_replicated,
-    )
+    else:
+        instr = _build_innovation_instruction(
+            direction, has_bulk, bulk_replicated=bulk_replicated,
+        )
+    return instr + _VELOCITY_INPUT_EXECUTION_GUIDANCE

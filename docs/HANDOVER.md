@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.1 · **Last updated**: 2026-09-28
+**Version**: 0.63.2 · **Last updated**: 2026-09-28
 
 ## 1. Runtime Architecture
 
@@ -373,6 +373,11 @@ Detailed release notes for every version are available through `git log` and rel
   registered publication figures, excludes unregistered Chat plots from report
   figures, and discloses when execution reaches its step limit. Also improves
   supplementary source reuse and retries an invalid round report chapter once.
+
+- `0.63.2` — Extends the algorithm-neutral Loom handoff across Round 1 Stage 2 and later
+  full/innovation rounds: registered Loom inputs are inspected read-only and
+  mapped before velocity feasibility is judged, while scVelo, DPT, PAGA, and
+  other methods remain PI-reviewed options rather than mandatory algorithms.
 
 **0.62.x — (2026-09-26 onward)**
 

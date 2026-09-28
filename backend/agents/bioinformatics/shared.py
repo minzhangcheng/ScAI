@@ -484,12 +484,35 @@ plan deliverables, not optional substitutes for the platform baseline.
 
 Do NOT include downstream analysis (DEG, GO/KEGG, cell communication, RNA velocity, trajectory/pseudotime, etc.) — those will be planned in Stage 2 after seeing clustering results.
 
-Do NOT load, read, merge, or preprocess any data whose ONLY purpose is to feed a Stage 2 analysis. In particular:
-- Do NOT load Loom files or assign spliced / unspliced layers (these belong to Stage 2 RNA velocity).
+Do NOT add Stage 1 plan steps to load, read, merge, or preprocess data whose ONLY purpose is to feed a Stage 2 analysis. In particular:
+- Do NOT add a Stage 1 step to load Loom files or assign spliced / unspliced layers (these belong to Stage 2 RNA velocity).
 - Do NOT compute or store inputs for trajectory / pseudotime, cell-cell communication (CellChat / liana / NicheNet ligand-receptor tables), or DEG contrasts.
 - Do NOT pre-stage gene sets, signatures, or pathway databases for Stage 2 enrichment.
 
+If pre-planning profiling already inspected or loaded a Stage 2-only input, do
+not merge it into the canonical Stage 1 atlas or use it for downstream analysis.
+The registered original remains available to Stage 2 whether or not a profiling
+object remains live in memory. Deferral is a scope decision, not evidence that
+the registered original input lacks data or layers needed later.
+
 If a step's rationale references "for downstream", "to support Stage 2", "for velocity", "for trajectory", "for communication", or any Stage 2 analysis by name, the step does NOT belong in Stage 1. Defer it to Stage 2 where the loading can happen alongside the analysis."""
+
+_VELOCITY_INPUT_GUIDANCE = """
+When the user objective or PI tasks include an RNA-velocity or directional
+splicing question and registered Loom inputs are available, include an explicit
+input-inspection and mapping step before assessing feasibility. Recommend that
+the original registered Loom inputs be opened read-only, their actual layers be
+inspected, and their cell and feature identifiers be mapped to the accepted
+Stage 1 atlas. Missing layers on the accepted atlas alone do not establish that
+the original inputs lack them. Do not fabricate spliced / unspliced layers from
+the expression matrix.
+
+The plan may recommend a splicing-kinetics method such as scVelo when the
+observed inputs and question support it, but it must not require scVelo or any
+other specific algorithm. Bioinformatics proposes the method and the PI reviews
+the scientific choice. DPT/PAGA may be proposed for an expression-ordering or
+connectivity question, but must be described as a different analysis rather
+than an automatic substitute for RNA velocity."""
 
 _STAGE2_GUIDANCE = """
 This is STAGE 2 of exploration. Based on Stage 1 results (clustering + annotation above),
@@ -505,7 +528,9 @@ def _stage_guidance_text(planning_stage: str) -> str:
     if planning_stage == "stage1":
         return _STAGE1_GUIDANCE
     if planning_stage == "stage2":
-        return _STAGE2_GUIDANCE
+        return _STAGE2_GUIDANCE + "\n\n" + _VELOCITY_INPUT_GUIDANCE
+    if planning_stage == "full":
+        return _VELOCITY_INPUT_GUIDANCE
     return ""
 
 

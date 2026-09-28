@@ -281,6 +281,21 @@ If any step's method, input, or rationale references "for downstream", "to suppo
 ## Stage Scope (Stage 2)
 This plan is for **Stage 2**. Stage 2 covers downstream analyses (DEG, GO/KEGG, cell communication, RNA velocity, trajectory, etc.) and may load any data those analyses need. Do NOT flag Stage 2-specific steps as out of scope here."""
 
+        velocity_input_review = ""
+        if stage_label != "stage1":
+            velocity_input_review = """
+## Registered Loom input review
+When the user objective or PI tasks include an RNA-velocity or directional
+splicing question and the registered inputs include Loom data, check that the
+plan inspects the original registered Loom inputs and maps their cells/features
+to the accepted Stage 1 atlas before deciding whether that analysis is feasible.
+Request revision if the plan calls velocity infeasible solely because the
+accepted atlas lacks spliced / unspliced layers, or if it presents DPT/PAGA as
+an equivalent replacement without distinguishing the question and assumptions.
+This review requirement does not mandate scVelo or any other algorithm: the
+plan may recommend an appropriate method, and the PI retains the scientific
+decision after reviewing the observed input facts."""
+
         from ...services.plan_scope import (
             is_innovation_scope,
             render_innovation_scope_context,
@@ -319,6 +334,7 @@ references; method-family wording alone is not a reason to reject a plan."""
 - Data: {state.build_experimental_design_summary()}
 - Measured sequencing-design facts: {sample_design_facts or "No additional design facts."}
 {stage_scope_section}
+{velocity_input_review}
 
 ## Review Criteria
 1. **Stage scope**: Does every step belong in the declared stage? See "Stage Scope" above. Steps that prep data for a later stage are out of scope and require **revise**.
