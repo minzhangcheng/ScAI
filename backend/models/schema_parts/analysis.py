@@ -116,6 +116,7 @@ class CodeExecution(BaseModel):
         "ordinary", "supplementary", "figure_followup", "chat",
     ]] = None
     executor_run_scope_id: Optional[str] = None
+    chat_review_id: Optional[str] = None
     executor_settlement_scope_id: Optional[str] = None
     supplementary_request_id: Optional[str] = None
     input_profile_ids: List[str] = Field(default_factory=list)
@@ -165,6 +166,11 @@ class MethodDecision(BaseModel):
 class AnalysisStep(BaseModel):
     """A single step in the bioinformatics agent analysis log, covering all tool call types"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    executor_run_kind: Optional[Literal[
+        "ordinary", "supplementary", "figure_followup", "chat",
+    ]] = None
+    executor_run_scope_id: Optional[str] = None
+    chat_review_id: Optional[str] = None
     step_number: int
     step_type: str  # "execute_code" | "consult_pi" | "search_literature" | "annotate_clusters" | "report_findings" | "generate_publication_figure" | "text_response"
     timestamp: datetime = Field(default_factory=datetime.now)

@@ -304,7 +304,7 @@ class AdataSourceSelection(BaseModel):
 
 
 class AdataSourcePreparation(BaseModel):
-    """Host-owned record identifying one applied plan/supplementary source."""
+    """Host-owned record identifying one prepared analysis source."""
 
     preparation_id: str = Field(
         default_factory=lambda: f"prep_{uuid.uuid4().hex}",
@@ -316,7 +316,7 @@ class AdataSourcePreparation(BaseModel):
         min_length=1,
         max_length=240,
     )
-    owner_kind: Literal["plan", "supplementary"] = "plan"
+    owner_kind: Literal["plan", "supplementary", "chat"] = "plan"
     owner_id: str = Field(min_length=1, max_length=240)
     consumer_plan_ids: List[str] = Field(default_factory=list)
     consumer_supplementary_request_ids: List[str] = Field(default_factory=list)

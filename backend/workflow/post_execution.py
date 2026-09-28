@@ -1204,7 +1204,11 @@ class PostExecutionReviewMixin:
                 context_summary=self._build_supplementary_context(result, review_plan),
                 source_context={
                     **dict(result.get("resolved_adata_source_context") or {}),
-                    **dict(session_names.get("analysis_source") or {}),
+                    **{
+                        key: value
+                        for key, value in dict(session_names.get("analysis_source") or {}).items()
+                        if key != "selection_error"
+                    },
                 },
                 direction=direction,
                 max_iterations=max_iterations,
@@ -1580,13 +1584,18 @@ class PostExecutionReviewMixin:
             source = dict(result.get("resolved_adata_source_context") or {})
             if not source and not getattr(getattr(analysis_state, "current_plan", None), "adata_source_preparation_id", None):
                 source = dict(getattr(getattr(analysis_state, "annotation_state", None), "annotation_source", None) or {})
-            metadata = await self.bioinformatics_agent.resolve_analysis_source_metadata(source)
+            metadata = await self.bioinformatics_agent.resolve_analysis_source_metadata(
+                source, require_cluster_key=False,
+            )
         except Exception as e:
             logger.debug(f"[{self.session_id}] object introspection for review failed: {e}")
             return names
         if isinstance(metadata, dict) and metadata:
             names["analysis_source"] = {
-                key: metadata[key] for key in ("var", "cluster_key", "partition_digest", "preparation_id", "selection_error")
+                key: metadata[key] for key in (
+                    "var", "cluster_key", "partition_digest", "preparation_id",
+                    "candidate_names", "selection_error",
+                )
                 if metadata.get(key)
             }
             for source_key, target_key in (

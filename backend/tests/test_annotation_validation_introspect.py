@@ -1,6 +1,8 @@
 import pytest
 from types import SimpleNamespace
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
+from backend.agents.bioinformatics.executor_execute import record_active_adata_var
+from backend.models.schemas import AnalysisState
 
 
 def _agent(sandbox):
@@ -56,6 +58,68 @@ async def test_explicit_partition_ignores_earlier_subset_and_counts_same_source(
     )
     assert proportions["counts"] == {"0": 2, "1": 2}
     assert "cell_type" not in old.obs
+
+
+@pytest.mark.asyncio
+async def test_current_working_object_resolves_among_multiple_live_adata():
+    old, final = _partition_objects()
+    agent = _agent(_ExecSandbox({"adata": old, "adata_hep": final}))
+
+    ambiguous = await agent.resolve_analysis_source_metadata(
+        {"mode": "current"}, require_cluster_key=False,
+    )
+    assert ambiguous["candidate_names"] == ["adata", "adata_hep"]
+    assert "multiple AnnData" in ambiguous["selection_error"]
+
+    selected = await agent.resolve_analysis_source_metadata(
+        {"mode": "current", "active_adata_var": "adata_hep"},
+        require_cluster_key=False,
+    )
+    assert selected["var"] == "adata_hep"
+    assert selected["cluster_key"] == "leiden"
+    assert selected["candidate_names"] == ["adata_hep"]
+
+    agent.sandbox.host_managed_global_names = lambda: ["adata_hep"]
+    managed = await agent.resolve_analysis_source_metadata(
+        {"mode": "current", "active_adata_var": "adata_hep"},
+        require_cluster_key=False,
+    )
+    assert managed["var"] == "adata_hep"
+
+
+@pytest.mark.asyncio
+async def test_named_unclustered_adata_is_available_for_nonclustering_followup():
+    old, _ = _partition_objects()
+    old.obs.drop(columns="leiden_prelim", inplace=True)
+    agent = _agent(_ExecSandbox({"adata": old}))
+
+    selected = await agent.resolve_analysis_source_metadata(
+        {"mode": "current", "active_adata_var": "adata"},
+        require_cluster_key=False,
+    )
+    assert selected["var"] == "adata"
+    assert selected["cluster_key"] is None
+    assert (await agent.resolve_analysis_source_metadata(
+        {"mode": "current", "active_adata_var": "adata"},
+    ))["selection_error"] == "preferred AnnData is unavailable or has no clustering key"
+
+
+@pytest.mark.asyncio
+async def test_declared_working_object_updates_persisted_source_context():
+    old, final = _partition_objects()
+    agent = _agent(_ExecSandbox({"adata": old, "adata_hep": final}))
+    state = AnalysisState(id="s", user_id="u")
+    context = SimpleNamespace(resolved_adata_source_context={
+        "mode": "current", "active_adata_var": "adata",
+        "cluster_key": "leiden_prelim", "partition_digest": "old",
+    })
+
+    assert await record_active_adata_var(agent, state, context, "adata_hep")
+    assert context.resolved_adata_source_context["active_adata_var"] == "adata_hep"
+    assert "cluster_key" not in context.resolved_adata_source_context
+    assert state.sandbox_state["resolved_adata_source_context_v1"] == context.resolved_adata_source_context
+    assert not await record_active_adata_var(agent, state, context, "missing")
+    assert state.sandbox_state["resolved_adata_source_context_v1"]["active_adata_var"] == "adata_hep"
 
 
 @pytest.mark.asyncio

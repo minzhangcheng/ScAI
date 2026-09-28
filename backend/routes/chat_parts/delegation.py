@@ -615,6 +615,11 @@ async def _execute_chat_agent_inner(
         try:
             await sandbox.start()
             started = True
+            from .source_selection import select_chat_source
+
+            source_decision = await select_chat_source(
+                literature_pi_agent, sandbox, state, instruction,
+            )
             async def persist_review():
                 if not await _persist_chat_terminal(session_id, state):
                     raise RuntimeError("Chat review state could not be persisted for its owner")
@@ -626,6 +631,7 @@ async def _execute_chat_agent_inner(
                     session_id, state=state, run_scope_ids=scopes,
                 ),
                 execution_context=_build_execution_context,
+                source_decision=source_decision,
             )
             # These records live on AnalysisState. Include them in the PI
             # handoff so Methods are grounded in registered panels and

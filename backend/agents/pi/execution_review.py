@@ -37,6 +37,51 @@ _MAX_NAME_LEN = 80
 class ExecutionReviewMixin:
     """Post-execution plan review and supplementary-result assessment."""
 
+    async def select_chat_adata_source(
+        self, request: str, inventory: Dict[str, Any], catalog: str,
+        previous_source: Dict[str, Any], correction: str = "",
+    ) -> Dict[str, Any]:
+        """Choose the scientific source for one Chat analysis before execution."""
+        prompt = f"""Select the AnnData source for this Chat request before Bioinformatics executes code.
+
+Request and delegated task:
+{request}
+
+Live kernel AnnData inventory (observed now):
+{json.dumps(inventory, ensure_ascii=False)[:16000]}
+
+Registered source catalog:
+{catalog or '(none)'}
+
+Previously recorded working source (verify against the live inventory):
+{json.dumps(previous_source, ensure_ascii=False)[:2000]}
+
+If the task uses only non-AnnData results (for example a bulk table), set
+uses_adata=false and adata_source=null. Otherwise choose the object that
+matches the user's task and its analysis lineage. Reuse a
+matching live object by choosing mode=current and its exact variable name; this
+does not reload data. To use a registered checkpoint or live binding instead,
+choose checkpoint_copy, checkpoint_branch, live_binding, or promote_live and
+provide its exact catalog ID. Choose load_registered_inputs=true only when the
+task requires loading new registered inputs rather than reusing any live AnnData.
+If an AnnData source is scientifically ambiguous, set uses_adata=true,
+explain the ambiguity in rationale, and return no selection; do not guess from
+a variable name alone.
+
+Return only JSON:
+{{"uses_adata": true, "adata_source": {{"mode": "current",
+"checkpoint_id": null, "live_binding_id": null}},
+"active_adata_var": "exact live variable name or null",
+"load_registered_inputs": false, "rationale": "scientific reason"}}
+Replace mode with exactly one of current, checkpoint_copy, checkpoint_branch,
+live_binding, or promote_live. Fill only the ID required by that mode.
+For an ambiguous source, use adata_source=null and active_adata_var=null.
+{correction}
+"""
+        response = await self.chat_without_history(prompt)
+        parsed = self._safe_parse_json(response, default={})
+        return parsed if isinstance(parsed, dict) else {}
+
     async def review_chat_execution(
         self, request: str, evidence: str, remaining_steps: int,
         remaining_revisions: int,

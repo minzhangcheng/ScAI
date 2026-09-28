@@ -229,9 +229,28 @@ class IntrospectionMixin:
         metadata = await self.introspect_validation_metadata(cluster_key_hint)
         return metadata.get("var"), metadata.get("cluster_key")
 
+    async def is_live_adata(self, name: str) -> bool:
+        """Verify one declared kernel binding without searching other objects."""
+        if not isinstance(name, str) or not name.isidentifier() or not self.sandbox:
+            return False
+        code = (
+            "import anndata as _scai_ad\n"
+            f"print('SCAI_ACTIVE_ADATA=' + str(isinstance(globals().get({name!r}), _scai_ad.AnnData)))\n"
+        )
+        try:
+            result = await self.sandbox.execute(
+                code, records_history=False, skip_safety_check=True,
+                mutates_namespace=False,
+            )
+            return not getattr(result, "error", None) and (
+                "SCAI_ACTIVE_ADATA=True" in str(getattr(result, "output", "") or "").splitlines()
+            )
+        except Exception:
+            return False
+
     async def resolve_analysis_source_metadata(
         self, source_context=None, *, cluster_key=None, preferred_var_name=None,
-        permit_evolved_binding=False,
+        permit_evolved_binding=False, require_cluster_key=True,
     ) -> Dict[str, Any]:
         """Resolve an existing preparation or annotation source without guessing."""
         state = getattr(self, "_current_analysis_state", None)
@@ -239,7 +258,7 @@ class IntrospectionMixin:
         if source.get("selection_error"):
             return {"selection_error": str(source["selection_error"])}
         preparation_id = source.get("preparation_id")
-        if not preparation_id and not (source.get("adata_var") or source.get("var")):
+        if not preparation_id and not (source.get("adata_var") or source.get("active_adata_var") or source.get("var")):
             preparation_id = getattr(getattr(state, "current_plan", None), "adata_source_preparation_id", None)
         anchor = None
         binding_status = None
@@ -258,11 +277,17 @@ class IntrospectionMixin:
             if not preferred_var_name or (not anchor and not permit_evolved_binding):
                 return {"selection_error": "Analysis source preparation has no exact working binding"}
         elif not preferred_var_name:
-            preferred_var_name = source.get("adata_var") or source.get("var")
+            preferred_var_name = source.get("adata_var") or source.get("active_adata_var") or source.get("var")
         cluster_key = cluster_key or source.get("cluster_key")
         metadata = await self.introspect_validation_metadata(
             cluster_key, preferred_var_name=preferred_var_name,
             require_preferred=bool(preferred_var_name), expected_anchor_name=anchor,
+            allow_managed_preferred=bool(
+                preferred_var_name
+                and preferred_var_name == source.get("active_adata_var")
+                and source.get("mode", "current") == "current"
+            ),
+            require_cluster_key=require_cluster_key,
         )
         if preparation_id and permit_evolved_binding and not metadata.get("var"):
             # The supplementary contract permits live rebinding. After exact
@@ -271,6 +296,7 @@ class IntrospectionMixin:
             metadata = await self.introspect_validation_metadata(
                 cluster_key, preferred_var_name=preferred_var_name,
                 require_preferred=True, allow_managed_preferred=True,
+                require_cluster_key=require_cluster_key,
             )
             binding_status = "evolved"
         if preparation_id:
@@ -289,6 +315,7 @@ class IntrospectionMixin:
         require_preferred: bool = False,
         expected_anchor_name: Optional[str] = None,
         allow_managed_preferred: bool = False,
+        require_cluster_key: bool = True,
     ) -> Dict[str, Any]:
         """Inspect an exact preferred source or the sole matching AnnData object."""
         if not self.sandbox:
@@ -324,21 +351,22 @@ class IntrospectionMixin:
             "    return _key, _cand\n"
             "_candidates = {}\n"
             "_seen_ids = set()\n"
-            "_items = list(globals().items())\n"
+            f"_require_cluster_key = {bool(require_cluster_key)!r}\n"
+            "_items = [(_preferred, globals().get(_preferred))] if _preferred and _require_preferred else list(globals().items())\n"
             "_items.sort(key=lambda item: item[0] != _preferred)\n"
             "for _name, _o in _items:\n"
             "    if not isinstance(_o, _ad.AnnData) or _name.startswith('_'): continue\n"
             "    if (_name in _managed and not (_name == _preferred and (_expected_anchor or _allow_managed_preferred))) or id(_o) in _seen_ids: continue\n"
             "    _seen_ids.add(id(_o))\n"
             "    _key, _cand = _cluster_key(_o)\n"
-            "    if _key is not None: _candidates[_name] = (_key, _cand)\n"
+            "    if _key is not None or (not _require_cluster_key and not _hint): _candidates[_name] = (_key, _cand)\n"
             "_selected = None; _selection_source = None; _selection_error = None\n"
             "if _expected_anchor and (globals().get(_expected_anchor) is None or globals().get(_expected_anchor) is not globals().get(_preferred)):\n"
             "    _selection_error = 'Analysis source working binding no longer matches its exact anchor'\n"
             "elif _preferred and _preferred in _candidates:\n"
             "    _selected = _preferred; _selection_source = 'preferred'\n"
             "elif _preferred and _require_preferred:\n"
-            "    _selection_error = 'preferred AnnData is unavailable or has no clustering key'\n"
+            "    _selection_error = ('preferred AnnData is unavailable or has no clustering key' if _require_cluster_key or _hint else 'preferred AnnData is unavailable')\n"
             "elif _preferred and len(_candidates) == 1:\n"
             "    _selected = next(iter(_candidates)); _selection_source = 'sole_candidate'\n"
             "elif _preferred and len(_candidates) > 1:\n"
@@ -353,8 +381,9 @@ class IntrospectionMixin:
             "    _cols = [str(_c) for _c in _o.obs.columns]; _low = {_c: _c.lower() for _c in _cols}\n"
             "    _key, _cand = _candidates[_name]\n"
             "    import hashlib as _hashlib\n"
-            "    _partition = sorted(zip(map(str, _o.obs_names), map(str, _o.obs[_key])))\n"
-            "    _out['partition_digest'] = _hashlib.sha256(_json.dumps(_partition).encode()).hexdigest()\n"
+            "    if _key is not None:\n"
+            "        _partition = sorted(zip(map(str, _o.obs_names), map(str, _o.obs[_key])))\n"
+            "        _out['partition_digest'] = _hashlib.sha256(_json.dumps(_partition).encode()).hexdigest()\n"
             "    _summ = {}\n"
             "    for _c in _cols:\n"
             "        try:\n"

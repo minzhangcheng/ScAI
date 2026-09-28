@@ -11,7 +11,7 @@ from backend.agents.bioinformatics.context_mixin import ContextMixin
 from backend.agents.bioinformatics.executor_restore import restore_executor_state
 from backend.config import SystemConfig
 from backend.models.schemas import AnalysisState, AnalysisStep, CodeExecution
-from backend.routes.chat_parts import delegation
+from backend.routes.chat_parts import delegation, source_selection
 
 
 def _notebook_cells():
@@ -91,6 +91,10 @@ async def test_chat_prestarted_sandbox_supplies_history_without_new_receipts(
     monkeypatch.setattr(pi_agent, "PIAgent", MagicMock(return_value=MagicMock(
         review_chat_execution=AsyncMock(return_value={"decision": "accept"}),
     )))
+    monkeypatch.setattr(source_selection, "select_chat_source", AsyncMock(return_value={
+        "selection": {"mode": "current"}, "active_adata_var": "adata",
+        "rationale": "Use the restored result",
+    }))
     monkeypatch.setattr(bioinformatics_agent, "BioinformaticsAgent", RecordingAgent)
 
     result, _ = await delegation._execute_chat_agent_inner(

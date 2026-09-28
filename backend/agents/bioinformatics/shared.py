@@ -184,9 +184,11 @@ def format_adata_source_context(source_context: Optional[Dict[str, Any]]) -> str
         return ""
     mode = str(source_context.get("mode") or "current")
     if mode == "current":
+        active_var = str(source_context.get("active_adata_var") or "").strip()
         return (
             "\n\nApproved AnnData source: current live state (no reload was "
             "performed by the Host)."
+            + (f" Current default working object: `{active_var}`." if active_var else "")
         )
     binding_name = str(source_context.get("binding_name") or "") or "(canonical adata)"
     binding_id = str(source_context.get("binding_id") or "") or "canonical"

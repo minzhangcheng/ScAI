@@ -149,13 +149,19 @@ async def test_per_turn_clients_close_on_success_and_failure(monkeypatch, tmp_pa
             return None
 
     clients = []
+    bio_calls = 0
 
     def make_client(*_args, **_kwargs):
+        nonlocal bio_calls
         client = MagicMock()
-        if not clients:
-            client.chat = AsyncMock(return_value=SimpleNamespace(content="```python\npass\n```"))
+        if _args[2] == "workflow":
+            client.chat = AsyncMock()
         else:
-            client.chat = AsyncMock(side_effect=RuntimeError("chat failure"))
+            bio_calls += 1
+            client.chat = (
+                AsyncMock(return_value=SimpleNamespace(content="```python\npass\n```"))
+                if bio_calls == 1 else AsyncMock(side_effect=RuntimeError("chat failure"))
+            )
         client.close = AsyncMock()
         clients.append(client)
         return client
@@ -175,16 +181,23 @@ async def test_per_turn_clients_close_on_success_and_failure(monkeypatch, tmp_pa
         ),
     )
     monkeypatch.setattr("backend.utils.agent_llm.get_agent_llm_client", make_client)
+    monkeypatch.setattr("backend.agents.pi_agent.PIAgent", lambda **_kw: SimpleNamespace(
+        set_session=lambda _sid: None,
+    ))
+    monkeypatch.setattr(figures, "select_chat_source", AsyncMock(return_value={
+        "selection": {"mode": "current"}, "active_adata_var": "atlas",
+        "uses_adata": True, "load_registered_inputs": False,
+        "rationale": "Use the existing atlas",
+    }))
 
     await figures._generate_figures_in_chat("a1-success", SimpleNamespace(user_id="u"), ["plot"])
     await figures._generate_figures_in_chat("a1-failure", SimpleNamespace(user_id="u"), ["plot"])
 
-    assert len(clients) == 2
+    assert len(clients) == 4
     for client in clients:
+        client.close.assert_awaited_once()
+    for client in (clients[1], clients[3]):
         client.chat.assert_awaited_once()
         prompt = client.chat.await_args.kwargs["messages"][0]["content"]
-        assert '"name": "atlas"' in prompt
-        assert '"canonical_present": false' in prompt
-        assert "is already loaded" not in prompt
+        assert "working variable: 'atlas'" in prompt
         assert "do not reload" in prompt
-        client.close.assert_awaited_once()

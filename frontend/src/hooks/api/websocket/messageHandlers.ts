@@ -301,6 +301,8 @@ export function handleWebSocketMessage(
           timestamp: terminal.timestamp || data.timestamp || new Date().toISOString(),
           figures: terminal.figures,
           pending_figures: terminal.pending_figures,
+          chat_review_ids: terminal.chat_review_ids,
+          execution_incomplete: terminal.execution_incomplete,
           reply_to: terminal.reply_to,
           ...chatIdentityFields(terminal),
         }))

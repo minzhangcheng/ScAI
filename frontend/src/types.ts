@@ -511,6 +511,8 @@ export interface ChatMessage {
   id: string
   delegation_active?: boolean
   pending_figures?: boolean
+  chat_review_ids?: string[]
+  execution_incomplete?: boolean
   reply_to?: string
   followup_id?: string
   branch_id?: string
@@ -523,6 +525,9 @@ export interface ChatMessage {
     imageBase64?: string
     data?: string
     pdfPath?: string
+    figure_role?: 'publication' | 'quick_display'
+    artifact_id?: string
+    review_status?: string
   }[]
 }
 

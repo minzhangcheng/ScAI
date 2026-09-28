@@ -523,6 +523,30 @@ IMPORTANT:
                 "\n## Recorded Bulk Method Decisions\n" + "\n".join(lines) + "\n"
             )
 
+        chat_review_context = ""
+        if state.chat_analysis_reviews:
+            reviews = []
+            for review in state.chat_analysis_reviews[-10:]:
+                reviews.append({
+                    "review_id": review.get("id"),
+                    "request": str(review.get("request") or "")[:500],
+                    "pi_status": review.get("status"),
+                    "execution_incomplete": bool(review.get("execution_incomplete")),
+                    "unexecuted_revision": review.get("unexecuted_revision"),
+                    "cycles": [{
+                        "executor_status": cycle.get("executor_status"),
+                        "execution_ids": cycle.get("execution_ids") or [],
+                        "review": cycle.get("review"),
+                    } for cycle in review.get("cycles", [])],
+                })
+            chat_review_context = (
+                "\n## Separate Chat Analysis Reviews\n"
+                + json.dumps(reviews, ensure_ascii=False)
+                + "\nThese Chat executions are separate from approved round plans. "
+                "Reconcile their claims with the execution records; disclose "
+                "step limits and unexecuted corrections.\n"
+            )
+
         prompt = f"""You are a Principal Investigator. Your bioinformatics team has completed a single-cell RNA sequencing analysis. Below is the complete analysis notebook (all code and outputs in chronological order), along with all result figures and table data.
 
 Your task: Read through the analysis code carefully from beginning to end, examine every attached figure, and review the table data. Then write a comprehensive summary FROM SCRATCH that demonstrates your deep understanding of the entire analysis.
@@ -545,6 +569,7 @@ Objective: {state.initial_instruction}
 
 {self._build_score_definitions_context(state)}
 {method_decision_context}
+{chat_review_context}
 
 ## Task
 {lang_instruction}

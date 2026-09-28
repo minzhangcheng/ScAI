@@ -199,7 +199,7 @@ async def _execute_delegation_success(
         for name in dict.fromkeys(referenced_names):
             fig = fig_lookup.get(name)
             if fig:
-                entry = {"name": fig["name"], "path": fig["path"]}
+                entry = dict(fig)
                 pdf_path = Path(fig["path"]).with_suffix(".pdf")
                 if pdf_path.exists():
                     entry["pdfPath"] = str(pdf_path)
@@ -233,6 +233,22 @@ async def _execute_delegation_success(
     cleaned_content = generate_pattern.sub('', cleaned_content).strip()
     cleaned_content = re.sub(r'\n{3,}', '\n\n', cleaned_content)
 
+    chat_reviews = [
+        result["chat_review"] for result in agent_results.values()
+        if result.get("chat_review")
+    ]
+    incomplete_reviews = [
+        review for review in chat_reviews if review.get("execution_incomplete")
+    ]
+    if incomplete_reviews:
+        review_ids = ", ".join(review["id"] for review in incomplete_reviews)
+        cleaned_content += (
+            "\n\nBioinformatics reached its step limit before completion. "
+            f"The unfinished Chat review ID is {review_ids}. "
+            "Ask Chat to continue this review; saved execution records can be "
+            "reused, and kernel objects can be reused if restored."
+        )
+
     # 8. Build final chat message
     assistant_msg: Dict[str, Any] = {
         "role": "assistant",
@@ -247,6 +263,9 @@ async def _execute_delegation_success(
         })
     if merged_figures:
         assistant_msg["figures"] = merged_figures
+    if chat_reviews:
+        assistant_msg["chat_review_ids"] = [review["id"] for review in chat_reviews]
+        assistant_msg["execution_incomplete"] = bool(incomplete_reviews)
 
     # Replace placeholder message in chat_messages
     replaced = _replace_latest_delegation_message(state, assistant_msg)
@@ -266,6 +285,9 @@ async def _execute_delegation_success(
         "timestamp": datetime.now().isoformat(),
         "reply_to": assistant_msg.get("reply_to"),
         "pending_figures": False,
+        **({"chat_review_ids": assistant_msg["chat_review_ids"],
+            "execution_incomplete": assistant_msg["execution_incomplete"]}
+           if chat_reviews else {}),
         **({"followup_id": followup_id, "branch_id": branch_id} if followup_id else {}),
     })
 

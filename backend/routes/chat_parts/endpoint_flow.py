@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import File, Form, HTTPException
 
 from backend.constants import NO_OUTPUT_TOKEN_CAP
+from .source_selection import ChatSourceSelectionError
 
 _OWNED_NAMES = frozenset({"chat_with_pi"})
 
@@ -251,7 +252,7 @@ async def chat_with_pi(
         for name in dict.fromkeys(referenced_names):  # deduplicate, preserve order
             fig = fig_lookup.get(name)
             if fig:
-                entry = {"name": fig["name"], "path": fig["path"]}
+                entry = dict(fig)
                 # Check for corresponding PDF
                 pdf_path = Path(fig["path"]).with_suffix(".pdf")
                 if pdf_path.exists():
@@ -297,6 +298,11 @@ async def chat_with_pi(
             if generated:
                 existing = assistant_msg.get("figures", [])
                 assistant_msg["figures"] = existing + generated
+        except ChatSourceSelectionError as exc:
+            logger.info("Chat figure source was not resolved: %s", exc)
+            assistant_msg["content"] += (
+                "\n\nFigure generation could not proceed: " + str(exc)
+            )
         except Exception as e:
             logger.exception("Chat figure generation failed")
         finally:

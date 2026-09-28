@@ -170,6 +170,55 @@ async def start_turn(context) -> TurnStart:
     state = getattr(context.agent, "_current_analysis_state", None)
     if state is not None:
         input_anchor = context.agent._build_authoritative_input_anchor(state)
+        active_var = str(
+            (context.resolved_adata_source_context or {}).get("adata_var")
+            or (context.resolved_adata_source_context or {}).get("active_adata_var")
+            or ""
+        ).strip()
+        if active_var:
+            source_context = context.resolved_adata_source_context or {}
+            chat_selected = (
+                getattr(context, "executor_run_kind", None) == "chat"
+                and source_context.get("chat_source_owner_id")
+            )
+            input_anchor += (
+                f"\n\n[{'PI-selected Chat AnnData source' if chat_selected else 'Current AnnData working object'}]\n"
+                f"Default variable: `{active_var}`. "
+                + (
+                    f"Source mode: {source_context.get('mode')}. "
+                    f"PI rationale: {str(source_context.get('chat_source_rationale') or '')[:500]}. "
+                    "Use this PI-selected source for the delegated task. Consult "
+                    "PI before switching to an unrelated AnnData source. "
+                    if chat_selected else "Use the object required by the current task; "
+                )
+                + "Nominate a new active_adata_var on execute_code when the "
+                "working object changes."
+            )
+        elif (
+            getattr(context, "executor_run_kind", None) == "chat"
+            and (context.resolved_adata_source_context or {}).get(
+                "chat_load_registered_inputs"
+            )
+        ):
+            input_anchor += (
+                "\n\n[PI-selected Chat data source]\n"
+                "No existing AnnData was selected. Load the registered inputs "
+                "identified by the PI for this task."
+            )
+        elif (
+            getattr(context, "executor_run_kind", None) == "chat"
+            and (context.resolved_adata_source_context or {}).get(
+                "chat_uses_adata"
+            ) is False
+            and (context.resolved_adata_source_context or {}).get(
+                "chat_source_owner_id"
+            )
+        ):
+            input_anchor += (
+                "\n\n[PI-selected Chat data source]\n"
+                "This task uses non-AnnData results; no AnnData working object "
+                "was selected."
+            )
         if input_anchor:
             # Request-only: every turn receives the freshest registry without
             # duplicating the reminder in history or checkpoint transcripts.
@@ -524,9 +573,7 @@ async def process_response(context, response, agent_reasoning) -> TurnEffects:
         if getattr(context, "attempt_execution_ids", None) is not None
         else [],
         pending_dispatch=getattr(context, "pending_dispatch", None),
-        resolved_adata_source_context=dict(
-            getattr(context, "resolved_adata_source_context", None) or {}
-        ),
+        resolved_adata_source_context=context.resolved_adata_source_context,
         figure_followup_scope=getattr(context, "figure_followup_scope", None),
     )
     dispatch_context = ToolDispatchContext(
@@ -1082,11 +1129,20 @@ async def prepare_loop_context(
     # failure is operation-local and propagates as AdataSourcePreparationError.
     _source_selection = None
     _inherited_preparation_id = None
+    _chat_source = (
+        adata_source
+        if _run_kind == "chat" and isinstance(adata_source, dict)
+        and "selection" in adata_source
+        else None
+    )
     if _run_kind == "supplementary":
         _source_selection = _request_record.get("adata_source")
         _inherited_preparation_id = _request_record.get(
             "adata_source_preparation_id"
         )
+    elif _chat_source is not None:
+        _source_selection = _chat_source.get("selection")
+        _inherited_preparation_id = _chat_source.get("preparation_id")
     else:
         _source_selection = getattr(_source_owner_plan, "adata_source", None)
     from backend.models.schemas import AdataSourceSelection
@@ -1127,10 +1183,11 @@ async def prepare_loop_context(
             _source_selection,
             plan=_source_owner_plan,
             owner_kind=(
-                "supplementary" if _run_kind == "supplementary" else "plan"
+                _run_kind if _run_kind in {"supplementary", "chat"} else "plan"
             ),
             owner_id=(
                 supplementary_request_id
+                or (_chat_source or {}).get("owner_id")
                 or getattr(_source_owner_plan, "id", None)
             ),
             request_scope_id=_resolved_settlement_scope,
@@ -1144,8 +1201,49 @@ async def prepare_loop_context(
     )
     from backend.services.adata_checkpoints.selection import selection_signature
 
+    _source_mode = getattr(_source_selection, "mode", "current")
+    _previous_source = dict(
+        (getattr(state, "sandbox_state", None) or {}).get(
+            "resolved_adata_source_context_v1"
+        ) or {}
+    )
+    _lineage_id = getattr(state, "restore_branch_id", None) or "main"
+    _active_adata_var = None
+    if _preparation is not None:
+        _active_adata_var = (
+            "adata" if _source_mode == "checkpoint_branch"
+            else getattr(_preparation, "binding_name", None)
+        )
+    elif _chat_source is not None and _source_mode == "current":
+        _active_adata_var = _chat_source.get("active_adata_var")
+    elif (
+        _source_mode == "current"
+        and _previous_source.get("mode") == "current"
+        and _previous_source.get("lineage_id") == _lineage_id
+    ):
+        _active_adata_var = _previous_source.get("active_adata_var")
+    if _active_adata_var and not await self.is_live_adata(_active_adata_var):
+        if _chat_source is not None:
+            from backend.services.adata_checkpoints.errors import (
+                AdataSourcePreparationError,
+            )
+
+            raise AdataSourcePreparationError(
+                "The PI-selected Chat AnnData is no longer live",
+                reason="selected_live_object_unavailable",
+                context={"active_adata_var": _active_adata_var},
+            )
+        _active_adata_var = None
     _resolved_source_context = {
         "mode": getattr(_source_selection, "mode", "current"),
+        "active_adata_var": _active_adata_var,
+        "lineage_id": _lineage_id,
+        "chat_source_owner_id": (_chat_source or {}).get("owner_id"),
+        "chat_source_rationale": (_chat_source or {}).get("rationale"),
+        "chat_load_registered_inputs": bool(
+            (_chat_source or {}).get("load_registered_inputs")
+        ),
+        "chat_uses_adata": (_chat_source or {}).get("uses_adata"),
         "preparation_id": getattr(_preparation, "preparation_id", None),
         "active_source_preparation_id": getattr(
             _preparation, "preparation_id", None

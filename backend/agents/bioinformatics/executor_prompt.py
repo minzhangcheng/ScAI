@@ -127,6 +127,10 @@ WORKFLOW GUIDELINES:
   fields record producer intent only. The host captures objective identity and the
   PI later decides semantic plan credit; uncertain or omitted links remain available
   for PI review and never block the analysis.
+- On execute_code calls that use AnnData, set active_adata_var to the exact
+  variable that should be the default working object for the next step. Update
+  it when switching to a subset or another AnnData. This is a reference for
+  subsequent code and review, not a restriction on using other objects.
 - Do not submit an identical execute_code cell repeatedly. Under one approved plan,
   the host blocks a cell after three successful identical executions. After
   Supervisor or PI feedback, change the code or approach, move to the next plan

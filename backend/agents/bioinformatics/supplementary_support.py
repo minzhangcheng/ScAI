@@ -158,7 +158,9 @@ async def _execute_supplementary_pass(
         is being timed.
         """
         nonlocal final_result, abort_envelope
-        step_metadata = await agent.resolve_analysis_source_metadata(metadata, permit_evolved_binding=True)
+        step_metadata = await agent.resolve_analysis_source_metadata(
+            metadata, permit_evolved_binding=True, require_cluster_key=False,
+        )
         if not step_metadata.get("var"):
             abort_envelope = envelope(
                 "partial" if produced else "failed",
@@ -462,7 +464,9 @@ async def run_supplementary_tasks(
     source = dict(source_context or {})
     if not source and not getattr(getattr(state, "current_plan", None), "adata_source_preparation_id", None):
         source = dict(getattr(getattr(state, "annotation_state", None), "annotation_source", None) or {})
-    metadata = await agent.resolve_analysis_source_metadata(source)
+    metadata = await agent.resolve_analysis_source_metadata(
+        source, require_cluster_key=False,
+    )
     var_name = metadata.get("var")
     cluster_key = metadata.get("cluster_key")
     active_object_selection.update({

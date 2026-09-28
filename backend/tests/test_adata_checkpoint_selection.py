@@ -109,3 +109,20 @@ def test_checkpoint_copy_registers_working_binding_without_rebinding_adata():
         assert state.active_adata_checkpoint_id is None
 
     asyncio.run(_run())
+
+
+def test_chat_checkpoint_copy_has_chat_owner_without_plan_credit():
+    async def _run():
+        state, record = _state_with_checkpoint()
+        sandbox = _FakeSandbox()
+        preparation = await ensure_adata_source_prepared(
+            sandbox, state,
+            AdataSourceSelection(mode="checkpoint_copy", checkpoint_id=record.checkpoint_id),
+            owner_kind="chat", owner_id="chat-review", request_scope_id="chat-run",
+        )
+        assert preparation.owner_kind == "chat"
+        assert preparation.owner_id == "chat-review"
+        assert preparation.consumer_plan_ids == []
+        assert sandbox.apply_calls[0]["owner_kind"] == "chat"
+
+    asyncio.run(_run())

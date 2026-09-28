@@ -10,6 +10,7 @@ import re
 
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
 from ...utils.formatting import loads_llm_json
+from ...utils.llm_client import UpstreamExhaustedError
 from ...services.report.round_chapters import (
     assemble_round_chapter, chapter_prompt, round_artifact_catalog,
 )
@@ -46,6 +47,11 @@ from .shared import (  # noqa: F401
 def _synthesis_report_chapter(data, response, catalog, round_number):
     """Recover an unambiguous separately fenced chapter without merging JSON."""
     raw = data.get("report_chapter")
+    if isinstance(raw, str):
+        try:
+            raw = loads_llm_json(raw)
+        except json.JSONDecodeError:
+            pass
     if raw is None:
         candidates = []
         for match in re.finditer(
@@ -234,6 +240,40 @@ INNOVATION PHASE — focused synthesis:
         data = self._safe_parse_json(response, default={})
 
         if data and "summary" in data:
+            chapter = _synthesis_report_chapter(
+                data, response, catalog, state.current_round,
+            )
+            if chapter.source == "fallback":
+                repair_prompt = (
+                    "The report_chapter in your previous synthesis could not be "
+                    "validated as a JSON object with a nonempty title and blocks. "
+                    "Correct only that chapter using the analysis and artifact "
+                    "catalog already provided. Return exactly one JSON object "
+                    "with a report_chapter field whose value is an object with "
+                    "title, blocks (each with text and artifact_ids), and "
+                    "conclusions. Do not encode report_chapter as a string, "
+                    "repeat the synthesis fields, or invent artifact IDs."
+                )
+                try:
+                    repair_response = await self.chat(repair_prompt, temperature=0.3)
+                except UpstreamExhaustedError as exc:
+                    logger.warning(
+                        "[PI] Round %s report chapter repair call failed: %s",
+                        state.current_round, exc,
+                    )
+                else:
+                    repair_data = self._safe_parse_json(repair_response, default={})
+                    if isinstance(repair_data, dict):
+                        repaired = _synthesis_report_chapter(
+                            repair_data, repair_response, catalog, state.current_round,
+                        )
+                        if repaired.source == "pi":
+                            chapter = repaired
+                if chapter.source == "fallback":
+                    logger.warning(
+                        "[PI] Round %s report chapter remained invalid after one repair attempt",
+                        state.current_round,
+                    )
             # Ensure bioinformatics is always included in agents_for_next_round
             agents_next = data.get("agents_for_next_round",
                 ["bioinformatics", "pathology", "biochemistry", "literature"])
@@ -249,9 +289,7 @@ INNOVATION PHASE — focused synthesis:
                 biochemistry_findings=data.get("biochemistry_findings", []),
                 literature_findings=data.get("literature_findings", []),
                 pi_summary=data.get("summary", ""),
-                report_chapter=_synthesis_report_chapter(
-                    data, response, catalog, state.current_round,
-                ),
+                report_chapter=chapter,
                 conflicts=data.get("conflicts", []),
                 next_steps=self._extract_next_steps(data),
                 new_findings=data.get("new_findings", True),

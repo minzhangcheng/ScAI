@@ -382,6 +382,21 @@ def _resolved_input_binding_name(state, executor_context=None):
     return None
 
 
+async def record_active_adata_var(agent, state, context, name) -> bool:
+    """Record one agent-declared working object after exact kernel validation."""
+    if not await agent.is_live_adata(name):
+        return False
+    resolved = context.resolved_adata_source_context
+    if resolved.get("active_adata_var") != name:
+        for key in ("adata_var", "var", "cluster_key", "partition_digest", "selection_error"):
+            resolved.pop(key, None)
+    resolved["active_adata_var"] = name
+    sandbox_state = dict(state.sandbox_state or {})
+    sandbox_state["resolved_adata_source_context_v1"] = dict(resolved)
+    state.sandbox_state = sandbox_state
+    return True
+
+
 def build_code_execution_receipt(
     state, code, result, execution_time, purpose, step_ids, cohort, profile_ids,
     binding_status, binding_reason, persistent_outputs, executor_context=None,
@@ -857,6 +872,13 @@ async def handle_execute_code(context, tool_call) -> ToolAction:
         context.consecutive_errors = 0
         self._force_skip_counter = 0
         self._force_skip_error_type = None
+        declared_active = args.get("active_adata_var")
+        if declared_active is not None:
+            if not await record_active_adata_var(self, state, context, declared_active):
+                tool_result += (
+                    f"\nActive AnnData declaration {declared_active!r} was not "
+                    "recorded: the named live variable is not an AnnData."
+                )
         if (self._current_analysis_state
                 and self._current_analysis_state.species
                 and not self._current_analysis_state.species_genes_validated

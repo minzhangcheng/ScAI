@@ -570,6 +570,26 @@ def build_lineage_report_state(
                 result for result in normalized if result.lineage_id == target
             ]
     report_state.round_results = target_rounds
+    report_state.chat_analysis_reviews = [
+        review for review in report_state.chat_analysis_reviews
+        if review.get("branch_id", "main") == target
+    ]
+    chat_review_ids = {
+        str(review.get("id") or "") for review in report_state.chat_analysis_reviews
+    }
+    report_state.code_history = [
+        execution for execution in report_state.code_history
+        if execution.executor_run_kind != "chat"
+        or (
+            execution.lineage_id == target
+            and execution.chat_review_id in chat_review_ids
+        )
+    ]
+    report_state.analysis_log = [
+        step for step in report_state.analysis_log
+        if step.executor_run_kind != "chat"
+        or step.chat_review_id in chat_review_ids
+    ]
     inherited_round_keys = {
         (
             str(result.inherited_from_lineage_id),

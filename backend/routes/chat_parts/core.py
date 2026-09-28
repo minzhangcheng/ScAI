@@ -81,6 +81,29 @@ def _build_chat_context(
     if state.final_summary:
         parts.append(f"\nFinal Summary: {state.final_summary[:1000]}")
 
+    # A later Chat request starts a new executor transcript. Give the PI the
+    # durable prior review and receipt identities needed to continue useful work.
+    current_branch = getattr(state, "restore_branch_id", None) or "main"
+    recent_reviews = [
+        review for review in (getattr(state, "chat_analysis_reviews", None) or [])
+        if review.get("branch_id", "main") == current_branch
+    ][-3:]
+    for review in recent_reviews:
+        execution_ids = [
+            execution_id
+            for cycle in review.get("cycles", [])
+            for execution_id in cycle.get("execution_ids", [])
+        ]
+        parts.append(
+            "\nPrevious Chat analysis: "
+            f"review_id={review.get('id')}; status={review.get('status')}; "
+            f"execution_incomplete={bool(review.get('execution_incomplete'))}; "
+            f"request={str(review.get('request') or '')[:500]}; "
+            f"execution_ids={execution_ids[-12:]}; "
+            f"unexecuted_revision={str(review.get('unexecuted_revision') or '')[:500]}. "
+            "Use these as prior evidence, not as proof that unfinished work ran."
+        )
+
     # A report follow-up may refer to a direction from an older round.  The
     # caller resolves that context against the owned session before any chat
     # mutation; keep the optional block separate from the ordinary recency
@@ -100,6 +123,15 @@ def _build_chat_context(
     # Scan disk for actual figure files
     figure_inventory: List[Dict[str, str]] = []
     seen_names: set = set()
+    from backend.services.report.artifacts import eligible_artifacts, verified_artifact_bytes
+
+    publication_by_path = {
+        str(Path(figure.png_path).resolve()): figure
+        for figure in eligible_artifacts(
+            getattr(state, "publication_figures", None), state=state,
+        )
+        if verified_artifact_bytes(figure.png_path, figure, kind="image") is not None
+    }
 
     def _add_pngs(directory: Path):
         if not directory.exists():
@@ -108,7 +140,16 @@ def _build_chat_context(
         for img in sorted(directory.glob("*.jpg")) + sorted(directory.glob("*.png")):
             if img.stem not in seen_names:
                 seen_names.add(img.stem)
-                figure_inventory.append({"name": img.stem, "path": str(img)})
+                entry = {"name": img.stem, "path": str(img),
+                         "figure_role": "quick_display"}
+                artifact = publication_by_path.get(str(img.resolve()))
+                if artifact is not None:
+                    entry.update({
+                        "figure_role": "publication",
+                        "artifact_id": artifact.id,
+                        "review_status": artifact.review_status.value,
+                    })
+                figure_inventory.append(entry)
 
     _add_pngs(get_session_workspace(state.id))
     _add_pngs(get_session_workspace(state.id) / "figures")
@@ -122,6 +163,6 @@ def _build_chat_context(
     if figure_inventory:
         parts.append(f"\nAvailable Figures ({len(figure_inventory)} on disk):")
         for fig in figure_inventory:
-            parts.append(f"  - {fig['name']}")
+            parts.append(f"  - {fig['name']} ({fig['figure_role']})")
 
     return "\n".join(parts), figure_inventory

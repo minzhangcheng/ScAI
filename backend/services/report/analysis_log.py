@@ -503,6 +503,9 @@ class AnalysisLogMixin:
                     "timestamp": step.timestamp.isoformat() if hasattr(step.timestamp, 'isoformat') else str(step.timestamp),
                     "agent_reasoning": step.agent_reasoning,
                     "round_number": step.round_number,
+                    "executor_run_kind": step.executor_run_kind,
+                    "executor_run_scope_id": step.executor_run_scope_id,
+                    "chat_review_id": step.chat_review_id,
                 }
                 if step.step_type == "execute_code":
                     entry.update({

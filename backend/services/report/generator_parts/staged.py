@@ -491,6 +491,7 @@ async def _assemble_report(
         "followups": followups,
         "appendix": appendix_data,
         "analysis_log": generator._build_full_analysis_log(report_state),
+        "chat_analysis_reviews": report_state.chat_analysis_reviews,
         "score_definitions": [sd.model_dump(mode="json") for sd in report_state.score_definitions] if report_state.score_definitions else [],
         "bulk_input_profiles": [item.model_dump(mode="json") for item in report_state.bulk_input_profiles],
         "method_decisions": [item.model_dump(mode="json") for item in report_state.method_decisions],

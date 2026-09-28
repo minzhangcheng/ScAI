@@ -53,6 +53,15 @@ TOOLS = [
                         ),
                         "default": [],
                     },
+                    "active_adata_var": {
+                        "type": "string",
+                        "description": (
+                            "Name of the AnnData variable this cell establishes or uses "
+                            "as the default working object for subsequent analysis. "
+                            "Nominate it when working with AnnData, especially when "
+                            "switching to a subset. Other objects remain available."
+                        ),
+                    },
                     "plan_step_ids": {
                         "type": "array",
                         "items": {"type": "integer", "minimum": 1},

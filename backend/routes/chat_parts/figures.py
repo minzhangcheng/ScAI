@@ -30,6 +30,7 @@ from backend.utils.files import safe_filename, validate_session_id
 from backend.utils.upload import stream_save_file
 from backend.utils.settings_provider import AgentSettingsProvider
 from backend.utils.sandbox import _TPL_NOOP_INSTALL
+from .source_selection import ChatSourceSelectionError, select_chat_source
 
 
 logger = logging.getLogger(__name__)
@@ -179,6 +180,7 @@ async def _generate_figures_in_chat(
         return []
 
     generated_figures: List[Dict[str, str]] = []
+    pi_client = None
     try:
         user_id = getattr(state, "user_id", "") if state else ""
         config = await resolve_config_for_user(user_id)
@@ -204,23 +206,62 @@ async def _generate_figures_in_chat(
             started = False
             raise RuntimeError("The previous kernel runtime is unavailable for Chat figures")
 
+        from backend.agents.pi_agent import PIAgent
+        from backend.services.adata_checkpoints import ensure_adata_source_prepared
+
+        pi_client = get_agent_llm_client(state, config, "workflow", session_id)
+        pi_provider = AgentSettingsProvider(
+            state, config, global_client=pi_client, session_id=session_id,
+        )
+        pi_agent = PIAgent(settings_provider=pi_provider)
+        pi_agent.set_session(session_id)
+        source_owner_id = f"chat_figure_{uuid.uuid4().hex}"
+        prior_selection = None
+        prior_preparation_id = None
+
         for desc_idx, desc in enumerate(descriptions):
-            # Reuse the existing read-only inspector, under its required lock.
-            # Inventory is context, not a scientific source-selection decision.
-            async with sandbox._exec_lock:
-                inventory = await sandbox.inspect_checkpoint_adata_locked()
-            inventory_text = json.dumps(inventory, ensure_ascii=False)[:12000]
+            source = await select_chat_source(pi_agent, sandbox, state, desc)
+            selection = source["selection"]
+            if source["load_registered_inputs"] or (
+                source["uses_adata"]
+                and selection["mode"] == "current"
+                and not source["active_adata_var"]
+            ):
+                raise ChatSourceSelectionError(
+                    "Chat figure rendering requires an existing AnnData source"
+                )
+            inherited_id = (
+                prior_preparation_id if selection == prior_selection else None
+            )
+            prepared = await ensure_adata_source_prepared(
+                sandbox, state, selection, owner_kind="chat",
+                owner_id=source_owner_id,
+                request_scope_id=source_owner_id,
+                inherited_preparation_id=inherited_id,
+            )
+            working_var = (
+                "adata" if selection["mode"] == "checkpoint_branch"
+                else prepared.binding_name if prepared is not None
+                else source["active_adata_var"]
+            )
+            prior_selection = selection
+            prior_preparation_id = (
+                prepared.preparation_id if prepared is not None else None
+            )
             code_prompt = (
                 "You are a bioinformatics expert. Write Python code using scanpy and matplotlib "
                 "to generate the following figure from existing results.\n"
-                "Current kernel AnnData inventory (bounded metadata; not an assurance of "
-                "result completeness):\n" + inventory_text + "\n"
-                "Use the matching existing objects, annotations, and embeddings. Do not "
-                "assume a variable named adata or any requested result exists. Inspect "
+                f"PI-selected source: {json.dumps(selection)}; "
+                f"uses AnnData: {source['uses_adata']}; "
+                f"working variable: {working_var!r}. "
+                "Use this exact source when AnnData is required.\n"
+                "Use existing results and annotations. Do not assume "
+                "any requested result exists. Inspect "
                 "other required objects before using them. If the requested source or "
                 "result is missing or ambiguous, report that limitation; do not reload "
                 "raw data or recompute QC, clustering, embeddings, or annotations to "
-                "satisfy a plotting request. Additional analysis requires PI planning.\n"
+                "satisfy a plotting request. Additional analysis requires a separate "
+                "PI-delegated Chat request.\n"
                 "IMPORTANT: End your code with plt.show() to display the figure. "
                 "Do NOT call plt.close(). Do NOT use plt.savefig().\n"
                 "Output ONLY a single ```python code block, no explanations.\n\n"
@@ -291,6 +332,7 @@ async def _generate_figures_in_chat(
                             "name": fig_name,
                             "path": str(fig_path),
                             "base64": b64_data,
+                            "figure_role": "quick_display",
                         }
                         # PDF was saved by the kernel code directly
                         if pdf_path.exists():
@@ -301,14 +343,23 @@ async def _generate_figures_in_chat(
                         generated_figures.append({
                             "name": fig_name,
                             "base64": b64_data,
+                            "figure_role": "quick_display",
                         })
             else:
                 logger.warning(f"Chat sandbox: no figures captured from kernel output "
                                f"(success={result.success})")
 
+    except ChatSourceSelectionError:
+        logger.info("Chat figure source was not resolved", exc_info=True)
+        raise
     except Exception as e:
         logger.exception("Chat figure generation error")
     finally:
+        if pi_client is not None:
+            try:
+                await pi_client.close()
+            except Exception:
+                logger.warning("Failed to close chat figure PI client", exc_info=True)
         try:
             from backend.services.session_lifecycle import is_session_tombstoned
 
@@ -353,6 +404,7 @@ def _collect_session_figures(
                 continue
             entry = {"name": figure.name, "path": figure.png_path,
                      "artifact_id": figure.id,
+                     "figure_role": "publication",
                      "review_status": figure.review_status.value,
                      "review_unavailable": figure.review_unavailable}
             if verified_artifact_bytes(figure.pdf_path, figure, kind="pdf") is not None:

@@ -1,6 +1,7 @@
 """Replay incomplete tool responses before restarting the workflow node."""
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -75,6 +76,84 @@ async def test_tool_request_recovers_without_repeating_turn_work(replay_context,
     assert (await executor_loop.start_turn(context)).response is response
     assert client.chat_with_tools.await_count == 7
     assert context.step_count == step + 2
+
+
+@pytest.mark.asyncio
+async def test_each_code_request_receives_latest_working_adata(replay_context):
+    context, client, response = replay_context
+    client.chat_with_tools.return_value = response
+    context.resolved_adata_source_context["active_adata_var"] = "adata"
+    original_messages = list(context.messages)
+
+    await executor_loop.start_turn(context)
+    first = client.chat_with_tools.await_args.kwargs["messages"]
+    assert "Default variable: `adata`" in first[-1]["content"]
+
+    context.resolved_adata_source_context["active_adata_var"] = "adata_hep"
+    await executor_loop.start_turn(context)
+    second = client.chat_with_tools.await_args.kwargs["messages"]
+    assert "Default variable: `adata_hep`" in second[-1]["content"]
+    assert context.messages == original_messages
+
+
+@pytest.mark.asyncio
+async def test_chat_uses_pi_selected_live_adata_instead_of_prior_plan(monkeypatch, tmp_path):
+    from backend.models.schemas import AdataSourceSelection
+    from backend.tests.test_bioinfo_context_scopes import _plan
+
+    agent = _bare_agent(monkeypatch, tmp_path)
+    agent.is_live_adata = AsyncMock(return_value=True)
+    state = AnalysisState(id="test-session", user_id="test-user")
+    state.current_plan = _plan(plan_id="older-plan")
+    state.current_plan.adata_source = AdataSourceSelection(
+        mode="checkpoint_copy", checkpoint_id="older-checkpoint"
+    )
+    executor_loop.bind_facade(facade)
+    context = await executor_loop.prepare_loop_context(
+        agent, state, "Analyze the selected cells", max_steps=5,
+        run_kind="chat", run_scope_id="chat-run", resume_from_checkpoint=False,
+        adata_source={
+            "selection": {"mode": "current"}, "active_adata_var": "selected_cells",
+            "owner_id": "chat-review", "rationale": "Matches the request",
+        },
+    )
+    assert context.resolved_adata_source_context["mode"] == "current"
+    assert context.resolved_adata_source_context["active_adata_var"] == "selected_cells"
+    assert context.resolved_adata_source_context["chat_source_owner_id"] == "chat-review"
+    assert "Approved Analysis Plan" not in str(context.messages)
+    agent.is_live_adata.assert_awaited_with("selected_cells")
+
+
+@pytest.mark.asyncio
+async def test_chat_passes_pi_checkpoint_and_inherited_preparation(monkeypatch, tmp_path):
+    from backend.services import adata_checkpoints
+
+    agent = _bare_agent(monkeypatch, tmp_path)
+    agent.is_live_adata = AsyncMock(return_value=True)
+    preparation = SimpleNamespace(
+        preparation_id="prep-chat", binding_name="scai_work_chat",
+        selection_signature="signature", scope_id="scope-chat",
+        binding_id="binding-chat", binding_identity_status="exact",
+        adata_lineage_id="lineage", loaded_checkpoint_id="checkpoint",
+        ancestor_checkpoint_id="checkpoint",
+    )
+    prepare = AsyncMock(return_value=preparation)
+    monkeypatch.setattr(adata_checkpoints, "ensure_adata_source_prepared", prepare)
+    executor_loop.bind_facade(facade)
+    context = await executor_loop.prepare_loop_context(
+        agent, AnalysisState(id="test-session", user_id="test-user"),
+        "Analyze a prior state", max_steps=5,
+        run_kind="chat", run_scope_id="chat-run", resume_from_checkpoint=False,
+        adata_source={
+            "selection": {"mode": "checkpoint_copy", "checkpoint_id": "checkpoint"},
+            "active_adata_var": None, "owner_id": "chat-review",
+            "preparation_id": "prep-chat", "rationale": "Use this stage",
+        },
+    )
+    assert prepare.await_args.kwargs["owner_kind"] == "chat"
+    assert prepare.await_args.kwargs["owner_id"] == "chat-review"
+    assert prepare.await_args.kwargs["inherited_preparation_id"] == "prep-chat"
+    assert context.resolved_adata_source_context["active_adata_var"] == "scai_work_chat"
 
 
 @pytest.mark.asyncio

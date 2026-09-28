@@ -452,6 +452,8 @@ async def test_supplementary_uses_exact_preparation_and_retains_source_receipt()
     assert observed[-1] == ("leiden", {
         "preferred_var_name": "scai_work_test", "require_preferred": True,
         "expected_anchor_name": "scai_anchor_test",
+        "allow_managed_preferred": False,
+        "require_cluster_key": False,
     })
     assert result["active_object_selection"]["name"] == "scai_work_test"
     assert result["code_history"][0].adata_source_preparation_id == "prep_test"

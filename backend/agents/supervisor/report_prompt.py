@@ -1074,6 +1074,9 @@ async def parse_and_place_report(
     if chat_messages:
         try:
             from backend.services.report.chat_sections import build_chat_sections_async
+            from backend.services.report.artifacts import (
+                eligible_artifacts, verified_artifact_bytes,
+            )
             chat_sections = await build_chat_sections_async(
                 chat_messages,
                 figures_dir=str(Path(workspace_dir) / "figures") if workspace_dir else "",
@@ -1085,6 +1088,15 @@ async def parse_and_place_report(
                 context_budget_ack_callback=(
                     self._provider.acknowledge_text_dispatch
                 ),
+                publication_figure_paths={
+                    figure.id: figure.png_path for figure in eligible_artifacts(
+                        getattr(analysis_state, "publication_figures", None),
+                        state=analysis_state,
+                    )
+                    if verified_artifact_bytes(
+                        figure.png_path, figure, kind="image",
+                    ) is not None
+                },
             )
             sections.extend(chat_sections)
         except Exception as e:

@@ -58,6 +58,7 @@ async def build_chat_sections_async(
     model: Optional[str] = None,
     context_budget_callback: Optional[Callable] = None,
     context_budget_ack_callback: Optional[Callable] = None,
+    publication_figure_paths: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Process chat messages and return a list of report section dicts.
 
@@ -137,7 +138,17 @@ async def build_chat_sections_async(
         if not content:
             continue
         
-        figures = [fig for fig in (assistant_msg.get("figures") or []) if _figure_exists(fig, figures_dir)]
+        # Chat's direct renderer makes display plots without publication review.
+        # Only registered, eligible artifacts may enter the manuscript report.
+        figures = [
+            fig for fig in (assistant_msg.get("figures") or [])
+            if fig.get("figure_role") == "publication"
+            and fig.get("artifact_id") in (publication_figure_paths or {})
+            and Path(str(fig.get("path") or "")).resolve() == Path(
+                publication_figure_paths[fig["artifact_id"]]
+            ).resolve()
+            and _figure_exists(fig, figures_dir)
+        ]
         tables = assistant_msg.get("tables") or []
         
         sections.append({

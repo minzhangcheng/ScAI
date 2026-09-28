@@ -293,7 +293,7 @@ async def _ensure_locked(
     preparation = AdataSourcePreparation(
         preparation_id=f"prep_{uuid.uuid4().hex}",
         scope_id=f"prep_scope_{uuid.uuid4().hex}",
-        owner_kind="supplementary" if owner_kind == "supplementary" else "plan",
+        owner_kind=owner_kind,
         owner_id=owner_id,
         selection=selection,
         selection_signature=selection_signature(selection),

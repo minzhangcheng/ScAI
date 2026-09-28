@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.62.2 · **Last updated**: 2026-09-27
+**Version**: 0.63.1 · **Last updated**: 2026-09-28
 
 ## 1. Runtime Architecture
 
@@ -362,6 +362,17 @@ gate settings.
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.63.x — (2026-09-28 onward)**
+
+- `0.63.1` — Gives the PI explicit control of Chat AnnData source selection and
+  records the selected source and active working variable. Persists Chat
+  execution receipts and review cycles under independent Chat identities, makes
+  them available to later Chat requests and reports, and keeps them separate
+  from ordinary round-plan credit. Distinguishes quick display plots from
+  registered publication figures, excludes unregistered Chat plots from report
+  figures, and discloses when execution reaches its step limit. Also improves
+  supplementary source reuse and retries an invalid round report chapter once.
 
 **0.62.x — (2026-09-26 onward)**
 
