@@ -1,12 +1,14 @@
 """Method-neutral bulk input profiling and method-decision contracts."""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from backend.agents import bioinformatics_agent as bio_facade
-from backend.agents.bioinformatics import executor_registration
+from backend.agents.bioinformatics import executor_collaboration, executor_registration
 from backend.models.schemas import (
+    AnalysisStep,
     AnalysisPlan,
     AnalysisState,
     CodeExecution,
@@ -132,3 +134,116 @@ async def test_method_decision_must_cite_current_bulk_execution(tmp_path):
 
     assert len(state.method_decisions) == 1
     assert "another approved plan" in context.messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_trajectory_method_decision_records_agent_judgment_without_bulk_gate():
+    executor_registration.bind_facade(bio_facade)
+    state = AnalysisState(
+        id="trajectory-decision",
+        user_id="user",
+        current_round=1,
+        current_plan=AnalysisPlan(
+            id="trajectory-plan",
+            phase="exploration",
+            status="approved",
+            steps=[PlanStep(
+                id=15,
+                title="Evaluate directional dynamics",
+                method="Choose a supported kinetic or ordering analysis",
+            )],
+        ),
+    )
+    execution = CodeExecution(
+        id="velocity-diagnostics",
+        code="inspect_velocity_diagnostics()",
+        round_number=1,
+        analysis_modalities=["single_cell"],
+        evidence_schema_version=2,
+        plan_id=state.current_plan.id,
+        plan_step_ids=[15],
+        execution_status="succeeded",
+    )
+    consultation = AnalysisStep(
+        id="pi-trajectory-consultation",
+        step_number=3,
+        step_type="consult_pi",
+        pi_question="How should the unexpected direction be interpreted?",
+        pi_response="Treat the kinetic result as inconclusive pending diagnostics.",
+    )
+    context = SimpleNamespace(
+        state=state,
+        agent=SimpleNamespace(code_history=[execution]),
+        messages=[],
+        analysis_log=[consultation],
+        step_count=4,
+        agent_reasoning="record the PI-reviewed scientific choice",
+    )
+    call = SimpleNamespace(
+        id="call-trajectory",
+        arguments={
+            "modality": "single_cell_trajectory",
+            "plan_step_id": 15,
+            "claim_level": "descriptive",
+            "decision_status": "inconclusive",
+            "method": "RNA velocity model",
+            "rationale": (
+                "The fitted direction was unexpected, so Bioinformatics and PI "
+                "retained it as an inconclusive kinetic result rather than replacing it."
+            ),
+            "diagnostics": [
+                "Spliced and unspliced layers were mapped to the accepted atlas.",
+                "Local directions and gene fits require further interpretation.",
+            ],
+            "limitations": "Cross-sectional data and one specimen per condition.",
+            "execution_id": execution.id,
+            "pi_consultation_id": consultation.id,
+        },
+    )
+
+    await executor_registration.handle_register_method_decision(context, call)
+
+    assert len(state.method_decisions) == 1
+    decision = state.method_decisions[0]
+    assert decision.modality == "single_cell_trajectory"
+    assert decision.input_profile_id is None
+    assert decision.plan_step_id == 15
+    assert decision.decision_status == "inconclusive"
+    assert decision.execution_id == execution.id
+    assert decision.pi_consultation_id == consultation.id
+    assert decision.decision_source == "bioinformatics_with_pi_consultation"
+    assert len(decision.diagnostics) == 2
+    assert "does not control workflow progress" in context.messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_consult_pi_returns_a_receipt_for_advisory_method_provenance():
+    executor_collaboration.bind_facade(bio_facade)
+    agent = SimpleNamespace(
+        _notify=AsyncMock(),
+        pi_callback=AsyncMock(return_value="Inspect the kinetic diagnostics."),
+    )
+    context = SimpleNamespace(
+        agent=agent,
+        has_substantive_work=False,
+        messages=[],
+        analysis_log=[],
+        step_count=2,
+        agent_reasoning="ask PI about an unexpected direction",
+        plan_revision_needed=False,
+        plan_revision_context=None,
+    )
+    call = SimpleNamespace(
+        id="consult-call",
+        arguments={
+            "question": "How should the direction be interpreted?",
+            "context": "The velocity result is unexpected.",
+            "options": ["retain as inconclusive", "select another question"],
+        },
+    )
+
+    await executor_collaboration.handle_consult_pi(context, call)
+
+    receipt = context.analysis_log[0].id
+    assert context.analysis_log[0].step_type == "consult_pi"
+    assert f"PI consultation receipt: {receipt}" in context.messages[-1]["content"]

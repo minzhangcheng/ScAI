@@ -148,18 +148,25 @@ class BulkInputProfile(BaseModel):
 
 
 class MethodDecision(BaseModel):
-    """Agent scientific choice linked to host-observed input and execution."""
+    """Agent scientific choice linked to objective execution provenance."""
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    modality: Literal["bulk_rna_seq"] = "bulk_rna_seq"
-    input_profile_id: str
+    modality: str = "bulk_rna_seq"
+    input_profile_id: Optional[str] = None
+    plan_step_id: Optional[int] = None
     claim_level: Literal["inferential", "descriptive", "not_feasible"]
+    decision_status: Literal[
+        "selected", "not_selected", "inconclusive",
+    ] = "selected"
     method: str
     rationale: str
+    diagnostics: List[str] = Field(default_factory=list)
+    limitations: str = ""
     execution_id: str
     decision_source: Literal[
-        "approved_plan_and_bioinformatics",
+        "approved_plan_and_bioinformatics", "bioinformatics_with_pi_consultation",
     ] = "approved_plan_and_bioinformatics"
+    pi_consultation_id: Optional[str] = None
     round_number: int = 0
     created_at: datetime = Field(default_factory=datetime.now)
 

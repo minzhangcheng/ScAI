@@ -512,7 +512,18 @@ observed inputs and question support it, but it must not require scVelo or any
 other specific algorithm. Bioinformatics proposes the method and the PI reviews
 the scientific choice. DPT/PAGA may be proposed for an expression-ordering or
 connectivity question, but must be described as a different analysis rather
-than an automatic substitute for RNA velocity."""
+than an automatic substitute for RNA velocity.
+
+Recommend a diagnostic strategy appropriate to the proposed kinetic method,
+such as documenting layer provenance, preprocessing and model mode, inspecting
+gene fits or phase portraits, and comparing local directions with the sampled
+manifold. These are scientific responsibilities for Bioinformatics and PI, not
+host pass/fail thresholds. When a kinetic result is selected, not selected, or
+remains inconclusive, recommend recording the decision and the observed
+diagnostics with register_method_decision. If a visual result would communicate
+the outcome, recommend an appropriate velocity or diagnostic figure; do not
+manufacture a positive velocity result or require a figure when the analysis is
+genuinely infeasible."""
 
 _STAGE2_GUIDANCE = """
 This is STAGE 2 of exploration. Based on Stage 1 results (clustering + annotation above),
@@ -542,8 +553,10 @@ def _build_swallowed_error_feedback(error_type: str, doc_hint: str) -> str:
         f"decision. A skip is ONLY acceptable when the DATA is genuinely "
         f"incompatible (e.g. missing spliced/unspliced layers, no overlapping "
         f"barcodes). If this was an API or version error, do NOT skip: it is "
-        f"fixable. Correct the call and retry, or fall back to an equivalent "
-        f"method (e.g. DPT/PAGA for trajectory) instead of dropping the analysis."
+        f"fixable. Correct the call and retry. If the planned scientific question "
+        f"still cannot be answered, consult the PI and record the observed "
+        f"diagnostics and method decision. DPT/PAGA answer different questions "
+        f"from RNA velocity and must never be presented as equivalent fallbacks."
     )
     if doc_hint:
         msg += f"\n[API Documentation]\n{doc_hint}"

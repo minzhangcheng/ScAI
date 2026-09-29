@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.3 · **Last updated**: 2026-09-29
+**Version**: 0.63.4 · **Last updated**: 2026-09-29
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,14 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.4` — Generalizes advisory method-decision provenance beyond host-profiled
+  bulk inputs so Bioinformatics can record selected, not-selected, or inconclusive
+  trajectory/velocity methods with diagnostics, limitations, plan-step linkage, and
+  optional PI-consultation receipts tied to successful executions. Extends Loom and
+  velocity guidance with read-only source inspection and method-appropriate diagnostics
+  without prescribing scVelo, conflating DPT/PAGA with velocity, or introducing workflow
+  gates. Keeps legacy payloads compatible in the frontend and PI report context.
 
 - `0.63.3` — Separates Bioinformatics agent plan-step nominations from Host-verified
   execution identity. Post-execution review now reports candidate receipt bindings

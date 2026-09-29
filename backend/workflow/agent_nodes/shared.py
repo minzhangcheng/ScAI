@@ -189,6 +189,24 @@ such as scVelo is an option to evaluate, not a required algorithm. Select and re
 scientifically appropriate method with the PI. DPT/PAGA may answer a distinct
 expression-ordering or connectivity question, but is not an automatic replacement for
 RNA velocity.
+
+When evaluating a kinetic method, choose diagnostics appropriate to the data and
+question. Consider documenting the velocity mode, layer provenance, preprocessing and
+moments, gene fits or phase portraits, and agreement of local directions with the
+sampled manifold. Do not apply a host-prescribed threshold. An unexpected or inverted
+scalar pseudotime is a reason to inspect roots, terminal states, the vector field, and
+model diagnostics and to consult the PI; it is not by itself proof that every velocity
+result is invalid. Record selected, not-selected, or inconclusive methods with
+register_method_decision, citing the successful execution and the consult_pi receipt
+when one informed the choice.
+
+When the kinetic result is scientifically interpretable, normally generate a velocity
+or diagnostic visualization chosen by Bioinformatics and PI. When it is not selected
+or remains inconclusive, retain the diagnostic evidence and explain the decision rather
+than manufacturing a positive result. Kernel process creation is blocked: for library
+operations that otherwise use process workers, select a supported thread backend and
+bounded worker count (for example scVelo velocity_graph with backend='threading' and
+n_jobs=1).
 """
 
 

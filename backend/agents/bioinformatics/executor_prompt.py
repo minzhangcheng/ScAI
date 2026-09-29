@@ -38,8 +38,9 @@ You are conducting {modality} analysis. You have access to tools:
    Returns concise summary (signature, key params, example).
    Use when unsure about API usage, especially for: decoupler, gseapy, scvelo, cellrank.
    Example: lookup_documentation(function_path="decoupler.get_collectri")
-13. register_method_decision - Record the PI/Bioinformatics scientific choice for
-    a host-profiled bulk input, linked to the successful execution that used it
+13. register_method_decision - Record a PI/Bioinformatics method choice,
+    non-selection, or inconclusive result linked to successful execution evidence;
+    this provenance is advisory and never controls workflow progress
 14. register_publication_table - Register an existing workspace CSV for report use;
     unregistered CSV files remain workspace outputs and are not report evidence
 15. list_adata_checkpoints - List bounded, path-free AnnData checkpoint metadata
@@ -155,7 +156,9 @@ WORKFLOW GUIDELINES:
   * UMAP: `'X_umap' in adata.obsm` — if True, SKIP sc.tl.umap
   * Neighbors graph: `'neighbors' in adata.uns` — if True, SKIP sc.pp.neighbors
   * Batch correction: `'X_pca_harmony' in adata.obsm` (or similar) — if True, SKIP
-  * Trajectory/Velocity: `'velocity' in adata.layers` — if True, SKIP scvelo steps
+  * Trajectory/Velocity: `'velocity' in adata.layers` — if True, reuse the fitted
+    result instead of blindly refitting it, but still complete any approved diagnostics,
+    visualization, PI consultation, and method-decision recording that remain undone
   * At the START of any analysis, run a quick diagnostic:
     print(f"obs columns: {list(adata.obs.columns)}")
     print(f"obsm keys: {list(adata.obsm.keys())}")

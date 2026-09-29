@@ -166,12 +166,18 @@ export interface BulkInputProfile {
 
 export interface MethodDecision {
   id: string
-  inputProfileId: string
+  modality: string
+  inputProfileId?: string
+  planStepId?: number
   claimLevel: 'inferential' | 'descriptive' | 'not_feasible'
+  decisionStatus: 'selected' | 'not_selected' | 'inconclusive'
   method: string
   rationale: string
+  diagnostics: string[]
+  limitations: string
   executionId: string
-  decisionSource: 'approved_plan_and_bioinformatics'
+  decisionSource: 'approved_plan_and_bioinformatics' | 'bioinformatics_with_pi_consultation'
+  piConsultationId?: string
   roundNumber: number
   createdAt: string
 }

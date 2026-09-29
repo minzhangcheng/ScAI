@@ -720,25 +720,67 @@ TOOLS = [
         "function": {
             "name": "register_method_decision",
             "description": (
-                "Record the PI/Bioinformatics scientific method choice for a bulk "
-                "input before reporting its findings. The platform supplies input "
-                "facts but does not choose the method or fallback."
+                "Record a PI/Bioinformatics scientific method choice, non-selection, "
+                "or inconclusive decision against a successful execution. This is "
+                "provenance for PI/report review and never controls workflow progress "
+                "or selects a method. For host-profiled bulk input, input_profile_id "
+                "is required; other analyses may omit it."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "input_profile_id": {"type": "string"},
+                    "modality": {
+                        "type": "string",
+                        "description": (
+                            "Analysis modality or method family, for example "
+                            "'bulk_rna_seq' or 'single_cell_trajectory'."
+                        ),
+                    },
+                    "input_profile_id": {
+                        "type": "string",
+                        "description": (
+                            "Required only for a host-profiled bulk input."
+                        ),
+                    },
+                    "plan_step_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Approved plan step associated with the choice.",
+                    },
                     "claim_level": {
                         "type": "string",
                         "enum": ["inferential", "descriptive", "not_feasible"],
                     },
+                    "decision_status": {
+                        "type": "string",
+                        "enum": ["selected", "not_selected", "inconclusive"],
+                    },
                     "method": {"type": "string"},
                     "rationale": {"type": "string"},
+                    "diagnostics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Observed diagnostics considered by Bioinformatics/PI. "
+                            "No host-defined checklist or threshold is implied."
+                        ),
+                    },
+                    "limitations": {
+                        "type": "string",
+                        "description": "Known limitations or unresolved uncertainty.",
+                    },
                     "execution_id": {"type": "string"},
+                    "pi_consultation_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional receipt returned by consult_pi when that "
+                            "consultation informed the decision."
+                        ),
+                    },
                 },
                 "required": [
-                    "input_profile_id", "claim_level", "method", "rationale",
-                    "execution_id",
+                    "modality", "claim_level", "decision_status", "method",
+                    "rationale", "execution_id",
                 ],
             },
         },

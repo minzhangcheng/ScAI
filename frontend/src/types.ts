@@ -375,12 +375,18 @@ export interface RawBulkInputProfile {
 
 export interface RawMethodDecision {
   id: string
-  input_profile_id: string
+  modality?: string
+  input_profile_id?: string | null
+  plan_step_id?: number | null
   claim_level: 'inferential' | 'descriptive' | 'not_feasible'
+  decision_status?: 'selected' | 'not_selected' | 'inconclusive'
   method: string
   rationale: string
+  diagnostics?: string[]
+  limitations?: string
   execution_id: string
-  decision_source: 'approved_plan_and_bioinformatics'
+  decision_source: 'approved_plan_and_bioinformatics' | 'bioinformatics_with_pi_consultation'
+  pi_consultation_id?: string | null
   round_number: number
   created_at: string
 }

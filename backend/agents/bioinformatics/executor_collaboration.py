@@ -143,7 +143,7 @@ async def handle_consult_pi(context, tool_call) -> ToolAction:
             "remains unresolved. This is not approval to change the plan."
         )
 
-    context.analysis_log.append(AnalysisStep(
+    consultation = AnalysisStep(
         step_number=context.step_count,
         step_type="consult_pi",
         agent_reasoning=context.agent_reasoning,
@@ -151,7 +151,8 @@ async def handle_consult_pi(context, tool_call) -> ToolAction:
         pi_context=pi_context[:1000],
         pi_options=options or [],
         pi_response=(pi_response or "")[:2000],
-    ))
+    )
+    context.analysis_log.append(consultation)
 
     if PLAN_REVISION_NEEDED_TAG in pi_response:
         clean_response = pi_response.replace(PLAN_REVISION_NEEDED_TAG, "").strip()
@@ -159,7 +160,8 @@ async def handle_consult_pi(context, tool_call) -> ToolAction:
             "role": "tool",
             "tool_call_id": tool_call.id,
             "content": (
-                f"PI Response: {clean_response}\n\n"
+                f"PI Response: {clean_response}\n"
+                f"PI consultation receipt: {consultation.id}\n\n"
                 "[System: A plan revision has been triggered. Pause and wait for updated plan.]"
             ),
         })
@@ -173,7 +175,10 @@ async def handle_consult_pi(context, tool_call) -> ToolAction:
     context.messages.append({
         "role": "tool",
         "tool_call_id": tool_call.id,
-        "content": f"PI Response: {pi_response}",
+        "content": (
+            f"PI Response: {pi_response}\n"
+            f"PI consultation receipt: {consultation.id}"
+        ),
     })
     return ToolAction.CONTINUE
 

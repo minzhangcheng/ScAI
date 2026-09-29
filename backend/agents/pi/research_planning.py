@@ -294,7 +294,15 @@ accepted atlas lacks spliced / unspliced layers, or if it presents DPT/PAGA as
 an equivalent replacement without distinguishing the question and assumptions.
 This review requirement does not mandate scVelo or any other algorithm: the
 plan may recommend an appropriate method, and the PI retains the scientific
-decision after reviewing the observed input facts."""
+decision after reviewing the observed input facts.
+
+Review whether a proposed kinetic analysis gives Bioinformatics responsibility
+for method-appropriate diagnostics and for recording selected, not-selected, or
+inconclusive methods against execution evidence. When a kinetic result would be
+communicated visually, recommend an appropriate velocity or diagnostic figure;
+when it is infeasible or remains inconclusive, prefer an explicit diagnostic
+record over a fabricated positive result. Do not prescribe a velocity method,
+diagnostic threshold, or pass/fail outcome in this review."""
 
         from ...services.plan_scope import (
             is_innovation_scope,

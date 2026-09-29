@@ -38,11 +38,12 @@ def mechanism_execution_id_error(programs, eligible_ids: set[str]) -> str | None
 
 
 async def handle_register_method_decision(context, tool_call) -> ToolAction:
-    """Persist an agent-selected bulk method without prescribing one."""
+    """Persist an agent method decision without prescribing or judging it."""
     from ...models.schemas import MethodDecision
 
     state = context.state
     args = tool_call.arguments
+    modality = str(args.get("modality") or "bulk_rna_seq").strip()
     profile_id = str(args.get("input_profile_id") or "").strip()
     profile = next((
         item for item in state.bulk_input_profiles if item.id == profile_id
@@ -52,17 +53,54 @@ async def handle_register_method_decision(context, tool_call) -> ToolAction:
         item for item in context.agent.code_history if item.id == execution_id
     ), None)
     error = current_execution_identity_error(state, execution, executor_context=context)
-    if profile is None:
+    if not modality:
+        error = error or "modality is required"
+    elif modality == "bulk_rna_seq":
+        if profile is None:
+            error = "input_profile_id does not identify a current host profile"
+        elif error is None and profile.id not in (execution.input_profile_ids or []):
+            error = "execution_id is not bound to the selected host input profile"
+    elif profile_id and profile is None:
         error = "input_profile_id does not identify a current host profile"
-    elif error is None and profile.id not in (execution.input_profile_ids or []):
-        error = "execution_id is not bound to the selected host input profile"
+
+    raw_step_id = args.get("plan_step_id")
+    plan_step_id = None
+    if raw_step_id is not None:
+        try:
+            plan_step_id = int(raw_step_id)
+        except (TypeError, ValueError):
+            error = error or "plan_step_id must be a positive integer"
+        else:
+            if plan_step_id < 1:
+                error = error or "plan_step_id must be a positive integer"
+            elif state.current_plan is not None and not any(
+                int(step.id) == plan_step_id for step in state.current_plan.steps
+            ):
+                error = error or "plan_step_id does not identify a current plan step"
+
+    pi_consultation_id = str(args.get("pi_consultation_id") or "").strip() or None
+    if pi_consultation_id is not None and not any(
+        item.id == pi_consultation_id and item.step_type == "consult_pi"
+        for item in context.analysis_log
+    ):
+        error = error or "pi_consultation_id does not identify a current PI consultation"
+
     rationale = str(args.get("rationale") or "").strip()
     method = str(args.get("method") or "").strip()
     claim_level = str(args.get("claim_level") or "").strip()
+    decision_status = str(args.get("decision_status") or "selected").strip()
+    diagnostics = [
+        str(item).strip()[:1000]
+        for item in (args.get("diagnostics") or [])
+        if str(item).strip()
+    ][:20]
+    limitations = str(args.get("limitations") or "").strip()[:4000]
     if not method:
         error = error or "method is required"
     elif claim_level not in {"inferential", "descriptive", "not_feasible"}:
         error = error or "claim_level is outside the closed vocabulary"
+    elif decision_status not in {"selected", "not_selected", "inconclusive"}:
+        error = error or "decision_status is outside the closed vocabulary"
     elif len(rationale) < 20:
         error = error or "rationale must explain the scientific choice"
     if error:
@@ -74,11 +112,22 @@ async def handle_register_method_decision(context, tool_call) -> ToolAction:
         return ToolAction.CONTINUE
 
     decision = MethodDecision(
-        input_profile_id=profile.id,
+        modality=modality,
+        input_profile_id=profile.id if profile is not None else None,
+        plan_step_id=plan_step_id,
         claim_level=claim_level,
+        decision_status=decision_status,
         method=method,
         rationale=rationale[:4000],
+        diagnostics=diagnostics,
+        limitations=limitations,
         execution_id=execution.id,
+        decision_source=(
+            "bioinformatics_with_pi_consultation"
+            if pi_consultation_id is not None
+            else "approved_plan_and_bioinformatics"
+        ),
+        pi_consultation_id=pi_consultation_id,
         round_number=state.current_round,
     )
     state.method_decisions.append(decision)
@@ -86,15 +135,20 @@ async def handle_register_method_decision(context, tool_call) -> ToolAction:
         "role": "tool",
         "tool_call_id": tool_call.id,
         "content": (
-            f"Method decision recorded: {decision.id}. Claim level: "
-            f"{decision.claim_level}; method: {decision.method}."
+            f"Method decision recorded: {decision.id}. Status: "
+            f"{decision.decision_status}; claim level: {decision.claim_level}; "
+            f"method: {decision.method}. This record is advisory provenance and "
+            "does not control workflow progress."
         ),
     })
     context.analysis_log.append(AnalysisStep(
         step_number=context.step_count,
         step_type="register_method_decision",
         agent_reasoning=context.agent_reasoning,
-        code_description=f"Bulk method decision {decision.id}: {decision.method}",
+        code_description=(
+            f"Method decision {decision.id} ({decision.modality}, "
+            f"{decision.decision_status}): {decision.method}"
+        ),
     ))
     return ToolAction.CONTINUE
 

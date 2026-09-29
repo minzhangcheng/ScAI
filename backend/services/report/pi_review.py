@@ -512,15 +512,34 @@ IMPORTANT:
             profiles = {item.id: item for item in state.bulk_input_profiles}
             for decision in state.method_decisions:
                 profile = profiles.get(decision.input_profile_id)
-                lines.append(
-                    f"- Bulk input {decision.input_profile_id} "
-                    f"(scale={getattr(profile, 'declared_scale', 'unknown')}, "
-                    f"profile_status={getattr(profile, 'profile_status', 'unknown')}): "
+                if decision.modality == "bulk_rna_seq":
+                    subject = (
+                        f"Bulk input {decision.input_profile_id} "
+                        f"(scale={getattr(profile, 'declared_scale', 'unknown')}, "
+                        f"profile_status={getattr(profile, 'profile_status', 'unknown')})"
+                    )
+                else:
+                    subject = (
+                        f"{decision.modality}"
+                        + (
+                            f" plan_step={decision.plan_step_id}"
+                            if decision.plan_step_id is not None else ""
+                        )
+                    )
+                detail = (
+                    f"- {subject}: status={decision.decision_status}; "
                     f"claim_level={decision.claim_level}; method={decision.method}; "
-                    f"rationale={decision.rationale}; execution={decision.execution_id}."
+                    f"rationale={decision.rationale}; execution={decision.execution_id}"
                 )
+                if decision.diagnostics:
+                    detail += f"; diagnostics={decision.diagnostics}"
+                if decision.limitations:
+                    detail += f"; limitations={decision.limitations}"
+                if decision.pi_consultation_id:
+                    detail += f"; pi_consultation={decision.pi_consultation_id}"
+                lines.append(detail + ".")
             method_decision_context = (
-                "\n## Recorded Bulk Method Decisions\n" + "\n".join(lines) + "\n"
+                "\n## Recorded Method Decisions\n" + "\n".join(lines) + "\n"
             )
 
         chat_review_context = ""
