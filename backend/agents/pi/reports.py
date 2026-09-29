@@ -295,8 +295,10 @@ the supplied metadata (for example, never describe a declared barplot as a UMAP)
 Disclose each supplied PI reservation where it affects interpretation.
 Do not imply that an omitted or reserved figure passed ordinary review.
 
-**Reader-facing PI limitations (preserve their meaning; do not create a metadata section):**
+**Figure follow-up notes for PI context (do not enumerate in the report):**
 {chr(10).join(f'- {note}' for note in figure_disposition_notes) if figure_disposition_notes else "None"}
+Discuss a note only where it affects the interpretation of an included result.
+Do not create a standalone Limitations or Reporting Limitations section.
 
 **Available Tables:**
 {chr(10).join(tables_info) if tables_info else "No tables generated"}

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.4 · **Last updated**: 2026-09-29
+**Version**: 0.63.5 · **Last updated**: 2026-09-29
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,13 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.5` — Stops adding a standalone Reporting Limitations section to the
+  Result-page integrated report. Figure follow-up notes remain available to the
+  PI and in persisted publication state, while reservations that affect an
+  included result can still be discussed in context. The report sanitizer also
+  removes standalone limitation sections produced by the model. This source
+  change does not rewrite reports already saved in existing sessions.
 
 - `0.63.4` — Generalizes advisory method-decision provenance beyond host-profiled
   bulk inputs so Bioinformatics can record selected, not-selected, or inconclusive

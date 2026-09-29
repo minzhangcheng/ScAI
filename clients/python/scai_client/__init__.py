@@ -45,4 +45,4 @@ __all__ = [
 ]
 # The client follows the application release version rather than maintaining
 # an independent release line.
-__version__ = "0.63.4"
+__version__ = "0.63.5"

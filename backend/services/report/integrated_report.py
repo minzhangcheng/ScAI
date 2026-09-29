@@ -38,6 +38,11 @@ _DECLARATION_TITLES = {
     "declarations",
     "metadata",
 }
+_LIMITATION_TITLES = {
+    "limitations",
+    "reporting limitations",
+    "study limitations",
+}
 
 
 def integrated_report_catalog_fingerprint(
@@ -173,8 +178,7 @@ def _strip_forbidden_sections(markdown: str) -> str:
     """Remove forbidden structural sections without matching fenced examples.
 
     Model-authored declarations and inventories are not authoritative. Canonical
-    PI reservations are rendered separately from structured state, so the whole
-    forbidden section can be removed without losing those disclosures.
+    PI reservations remain available with their figures and in structured state.
     """
     lines = markdown.splitlines()
     out: list[str] = []
@@ -205,6 +209,7 @@ def _strip_forbidden_sections(markdown: str) -> str:
                 title in _METHOD_TITLES
                 or title in _INTERNAL_DECLARATION_TITLES
                 or title in _DECLARATION_TITLES
+                or title in _LIMITATION_TITLES
             ):
                 skip_level = level
                 index += consumed
@@ -216,25 +221,7 @@ def _strip_forbidden_sections(markdown: str) -> str:
                 out.append(lines[index + 1])
         index += consumed
 
-    # Avoid leaving a renamed empty wrapper after all internal subsections were
-    # removed. This operates only on adjacent Markdown lines, not prose.
-    compact: list[str] = []
-    for index, line in enumerate(out):
-        heading = _heading_at(out, index)
-        if heading and heading[1] == "reporting limitations":
-            level = heading[0]
-            has_content = False
-            for following in out[index + 1:]:
-                next_heading = _ATX_HEADING_RE.match(following)
-                if next_heading and len(next_heading.group(1)) <= level:
-                    break
-                if following.strip() and not next_heading:
-                    has_content = True
-                    break
-            if not has_content:
-                continue
-        compact.append(line)
-    return "\n".join(compact).strip()
+    return "\n".join(out).strip()
 
 
 def _normalize_figure_links_chunk(markdown: str, valid_numbers: set[int]) -> str:
@@ -424,30 +411,6 @@ def sanitize_integrated_report(
     """Apply the Integrated Report structural and citation-only contract."""
     text = _strip_forbidden_sections(markdown or "")
     text = _normalize_figure_links(text, {ref.number for ref in figure_refs})
-    limitations = [str(note).strip() for note in reporting_limitations if str(note).strip()]
-    if limitations:
-        block = "\n".join(f"- {note}" for note in limitations)
-        lines = text.splitlines()
-        limitation_heading = None
-        index = 0
-        while index < len(lines):
-            heading = _heading_at(lines, index)
-            if heading and heading[1] == "reporting limitations":
-                limitation_heading = (index, heading[0], heading[2])
-                break
-            index += heading[2] if heading else 1
-        if limitation_heading is None:
-            text = f"{text.rstrip()}\n\n## Reporting Limitations\n\n{block}"
-        else:
-            heading_index, heading_level, heading_lines = limitation_heading
-            insertion_index = len(lines)
-            index = heading_index + heading_lines
-            while index < len(lines):
-                heading = _heading_at(lines, index)
-                if heading and heading[0] <= heading_level:
-                    insertion_index = index
-                    break
-                index += heading[2] if heading else 1
-            lines[insertion_index:insertion_index] = ["", block, ""]
-            text = "\n".join(lines)
+    # Keep reporting_limitations in the persisted publication contract, not in
+    # the reader-facing narrative.
     return text.strip()
