@@ -64,7 +64,7 @@ class PlanAudit:
         Deliberately not filtered through ``unmet``. Whether an approved step's
         declared artifact exists and links to this round is a technical
         observation, while ``unmet`` carries a completion verdict that
-        ``host_execution_linkage`` mode leaves to the PI (every step there is
+        ``agent_nominated_linkage`` mode leaves to the PI (every step there is
         ``awaiting_pi_decision`` with ``verifiable=False``). Routing the
         artifact fact through the verdict made this list permanently empty for
         exactly the rounds that rely on it. Steps whose requirement the plan
@@ -82,7 +82,7 @@ class PlanAudit:
         ``figure_unmet``'s counterpart, and for the same reason. Whether an
         approved step's named method appears in this round's executions is a
         technical observation about linkage; ``unmet`` carries the completion
-        verdict that ``host_execution_linkage`` mode leaves to the PI, so
+        verdict that ``agent_nominated_linkage`` mode leaves to the PI, so
         routing this fact through it left ``unmet_families`` permanently empty
         for exactly the rounds that run in that mode — while
         ``missing_families`` was populated on every step there. The PI read
@@ -242,7 +242,7 @@ def audit_plan_execution(
         audit.evidence_mode = (
             "supervisor_semantic"
             if reconciliation_current
-            else "host_execution_linkage"
+            else "agent_nominated_linkage"
         )
     else:
         audit.evidence_mode = "legacy_unverifiable"
@@ -269,39 +269,56 @@ def audit_plan_execution(
         title = str(getattr(step, "title", "") or "")[:300]
 
         if receipt_mode and not reconciliation_current:
-            linked_execution_ids = [
-                str(execution.id)
+            linked_executions = [
+                execution
                 for execution in eligible_receipt_records
                 if step_id in (getattr(execution, "plan_step_ids", None) or [])
             ][:40]
+            linked_execution_ids = [
+                str(execution.id) for execution in linked_executions
+            ]
+            nominated_families = executed_method_families(
+                linked_executions, round_number,
+            )
+            missing_nominated_families = sorted(
+                planned - nominated_families
+            )
             if linked_execution_ids:
                 reason = (
-                    "Host verified current successful execution receipt(s) linked "
-                    "to this approved step: "
+                    "The Bioinformatics agent nominated current successful "
+                    "execution receipt(s) as candidate evidence for this approved "
+                    "step: "
                     + ", ".join(linked_execution_ids[:8])
-                    + ". PI review determines scientific completion."
+                    + ". The Host verified receipt identity only; it did not verify "
+                    "that the executed method or output matches this plan step."
                 )
+                if missing_nominated_families:
+                    reason += (
+                        " The nominated execution code did not contain the plan's "
+                        "named method family identifier(s): "
+                        + ", ".join(missing_nominated_families)
+                        + "."
+                    )
                 if missing_figures:
                     reason += (
                         " Required reviewed artifact(s) remain missing: "
                         + ", ".join(missing_figures)
                         + "."
                     )
-                technical_linkage = "execution_linked"
+                technical_linkage = "agent_nominated"
             else:
                 reason = (
-                    "No current successful execution receipt is linked to this "
-                    "approved step. PI review determines whether it is completed, "
-                    "pending, or skipped."
+                    "No current successful execution receipt was nominated as "
+                    "candidate evidence for this approved step."
                 )
-                technical_linkage = "not_linked"
+                technical_linkage = "not_nominated"
             audit.steps.append(StepAudit(
                 step_id=step_id,
                 title=title,
                 status=STATUS_PENDING,
                 reason=reason,
                 planned_families=sorted(planned),
-                missing_families=([] if linked_execution_ids else sorted(planned)),
+                missing_families=missing_nominated_families,
                 planned_figure_kinds=sorted(planned_figures),
                 missing_figure_kinds=missing_figures,
                 verifiable=False,
@@ -697,7 +714,7 @@ def should_run_post_execution_review(
             f"evidence ({', '.join(absent[:6])})."
         )
     else:
-        # `unmet` is empty by construction in host_execution_linkage mode, so the
+        # `unmet` is empty by construction in agent_nominated_linkage mode, so the
         # same absences have to be read off the steps directly — otherwise the
         # reason names nothing for exactly the rounds that run in that mode.
         linkage_steps = {s.step_id for s in audit.family_unmet} | {
@@ -712,7 +729,7 @@ def should_run_post_execution_review(
             })
             absent = families + [f"figure:{kind}" for kind in figures]
             reasons.append(
-                f"{len(linkage_steps)} approved step(s) have no linked execution "
+                f"{len(linkage_steps)} approved step(s) have no matching execution "
                 f"or artifact evidence ({', '.join(absent[:6])})."
             )
 

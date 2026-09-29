@@ -84,7 +84,7 @@ def test_supervisor_confirmation_completes_only_its_semantic_plan_step():
     assert observations[1]["technical_linkage"] == "unverified"
 
 
-def test_host_execution_linkage_is_observation_not_plan_completion():
+def test_agent_nominated_linkage_is_not_host_verified_plan_completion():
     plan = AnalysisPlan(
         id="receipt-plan",
         phase="innovation",
@@ -101,14 +101,45 @@ def test_host_execution_linkage_is_observation_not_plan_completion():
         target_cohort_digest="a" * 64,
     )
 
-    assert audit.evidence_mode == "host_execution_linkage"
+    assert audit.evidence_mode == "agent_nominated_linkage"
     assert [step.status for step in audit.steps] == ["pending", "pending"]
     assert all(step.verifiable is False for step in audit.steps)
     observations = audit.summary()["step_observations"]
-    assert observations[0]["technical_linkage"] == "execution_linked"
-    assert observations[1]["technical_linkage"] == "not_linked"
+    assert observations[0]["technical_linkage"] == "agent_nominated"
+    assert observations[1]["technical_linkage"] == "not_nominated"
     assert "receipt-1" in observations[0]["reason"]
-    assert "PI review determines scientific completion" in observations[0]["reason"]
+    assert "Host verified receipt identity only" in observations[0]["reason"]
+    assert "Host verified current successful" not in observations[0]["reason"]
+
+
+def test_agent_nomination_does_not_hide_missing_planned_method_family():
+    plan = AnalysisPlan(
+        id="trajectory-plan",
+        phase="innovation",
+        steps=[PlanStep(
+            id=11,
+            title="PAGA and DPT ordering",
+            method="Run sc.tl.paga, sc.tl.diffmap, and sc.tl.dpt",
+        )],
+    )
+
+    audit = audit_plan_execution(
+        plan,
+        [_receipt(
+            plan,
+            id="unrelated-execution",
+            code="summarize_isr_and_er_upr()",
+            plan_step_ids=[11],
+        )],
+        round_number=2,
+        target_cohort_digest="a" * 64,
+    )
+
+    observation = audit.summary()["step_observations"][0]
+    assert observation["technical_linkage"] == "agent_nominated"
+    assert audit.summary()["unmet_families"] == ["trajectory"]
+    assert "did not contain" in observation["reason"]
+    assert "trajectory" in observation["reason"]
 
 
 def test_semantic_reconciliation_preserves_links_across_cohort_generations():

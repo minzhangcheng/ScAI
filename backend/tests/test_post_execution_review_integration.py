@@ -287,6 +287,9 @@ async def test_real_agents_complete_the_review_and_merge_back():
 
     # The PI actually saw the audit, and its prompt named the unmet step.
     assert "Pathway activity" in pi.prompts_seen[0]
+    assert "auditing a FINISHED EXECUTION ATTEMPT" in pi.prompts_seen[0]
+    assert "agent_nominated` is producer intent only" in pi.prompts_seen[0]
+    assert "Host-validated technical facts" not in pi.prompts_seen[0]
     assert "SUPPLEMENTARY TECHNICAL CONTRACT v2" in pi.prompts_seen[0]
     assert "may mutate, remap, filter, normalize, scale, re-cluster" in pi.prompts_seen[0]
     assert "live-object mutation alone is not a reason to defer it" in pi.prompts_seen[0]

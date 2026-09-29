@@ -269,7 +269,7 @@ useful increment remains. These are PI decisions, not host keyword verdicts.
                 "the next round. Keep this pass to what is unfinished here.\n"
             )
 
-        prompt = f"""You are the PI auditing a COMPLETED analysis round before writing its summary.
+        prompt = f"""You are the PI auditing a FINISHED EXECUTION ATTEMPT before writing its summary.
 {review_role}
 
 ## Project
@@ -277,14 +277,19 @@ Project: {state.name}
 Research objective: {state.initial_instruction}
 Round: {state.current_round}
 Research direction this round: {direction or "N/A"}
-Execution ended as: {result_status or "unknown"}
+Execution process ended as: {result_status or "unknown"} (this does not establish that every plan step ran)
 Why this review was triggered: {trigger_reason or "N/A"}
 
 ## Plan-versus-evidence observations
-Execution and artifact identities below are Host-validated technical facts. Semantic
-sufficiency is not decided by a Supervisor reconciliation. You, the PI, decide whether
-each plan step is completed, pending, or scientifically skipped; the Host will only
-validate step IDs and status syntax.
+The Host validated only the receipt and artifact identities below. A plan-step
+association labelled `agent_nominated` is producer intent only: the Host verified the
+receipt identity, not that its code, method, or output matches the nominated step. Do not
+mark a step completed solely because an agent nominated a receipt or because execution
+returned successfully. Compare the planned method and output with the bounded receipt and
+artifact observations; an explicitly reported missing method or artifact remains a gap
+unless you give an evidence-based reason otherwise. You, the PI, decide scientific
+sufficiency and whether each step is completed, pending, or scientifically skipped; the
+Host validates only objective identities plus step-ID and status syntax.
 {audit_block}
 
 ## Findings this round reported

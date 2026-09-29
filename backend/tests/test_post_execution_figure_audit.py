@@ -17,8 +17,8 @@ def _plan(*steps: PlanStep) -> AnalysisPlan:
     return AnalysisPlan(phase="innovation", stage="stage2", steps=list(steps))
 
 
-def test_host_linkage_mode_reports_missing_figures_for_pi_review():
-    """A missing required artifact must reach the PI in host-linkage mode.
+def test_agent_nominated_linkage_reports_missing_figures_for_pi_review():
+    """A missing required artifact must reach the PI for a candidate binding.
 
     Innovation rounds run without Supervisor semantic reconciliation, so every
     step is left `awaiting_pi_decision` and `verifiable=False` — the scientific
@@ -35,7 +35,7 @@ def test_host_linkage_mode_reports_missing_figures_for_pi_review():
         figure_requirements=[FigureRequirement(figure_type="heatmap")],
     ))
     receipt = CodeExecution(
-        id="host-linkage-receipt",
+        id="agent-nominated-receipt",
         code="run_condition_heatmap_step()",
         round_number=2,
         evidence_schema_version=2,
@@ -53,7 +53,7 @@ def test_host_linkage_mode_reports_missing_figures_for_pi_review():
         publication_figures=[],
     ).summary()
 
-    assert summary["evidence_mode"] == "host_execution_linkage"
+    assert summary["evidence_mode"] == "agent_nominated_linkage"
     assert summary["n_awaiting_pi_decision"] == 1
     assert summary["n_figure_steps"] == 1
     assert summary["n_figure_unmet"] == 1

@@ -1,6 +1,7 @@
 """Focused contracts for host-validated execution receipts."""
 
 from backend.agents.bioinformatics.executor_execute import execution_plan_binding
+from backend.agents.bioinformatics.executor_prompt import _executor_prompt_methods
 from backend.agents.bioinformatics.shared import current_execution_identity_error
 from backend.models.schemas import AnalysisPlan, AnalysisState, CodeExecution, PlanStep
 
@@ -46,6 +47,13 @@ def test_supplementary_execution_is_explicitly_non_plan_evidence():
         state,
         {"execution_purpose": "supplementary", "plan_step_ids": []},
     ) == ("supplementary", [], "supplementary", None)
+
+
+def test_executor_prompt_forbids_figure_label_plan_step_inference():
+    prompt = _executor_prompt_methods()
+
+    assert "Never derive a plan_step_id from a figure/task label" in prompt
+    assert "successful unrelated cell" in prompt
 
 
 def test_current_derived_record_rejects_foreign_plan_and_source_preparation():
