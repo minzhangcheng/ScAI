@@ -73,6 +73,56 @@ async def test_two_missing_outputs_remain_distinct_through_real_figure_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_followup_revision_lands_on_owner_filesystem_before_publish(
+    tmp_path, monkeypatch
+):
+    from backend.agents.bioinformatics import figures
+    from backend.agents.bioinformatics.figure_dependencies import FigureDependencies
+    from backend.agents.bioinformatics.figure_revision import execute_revision_candidate
+    from backend.tests.figure_image_helpers import valid_image_bytes, valid_pdf_bytes
+    from backend.tests.test_figure_revision_gate import _Agent, _FakeSandbox, CLEAN
+
+    renderer_root = tmp_path / "renderer"
+    owner_figures = tmp_path / "owner" / "figures"
+    owner_figures.mkdir(parents=True)
+    jpg_path = owner_figures / "f.jpg"
+    pdf_path = owner_figures / "f.pdf"
+    previous_jpg = valid_image_bytes("JPEG", min_bytes=4000)
+    previous_pdf = valid_pdf_bytes()
+    jpg_path.write_bytes(previous_jpg)
+    pdf_path.write_bytes(previous_pdf)
+
+    publish = figures._publish_render_attempt
+
+    def publish_on_owner_filesystem(attempt_dir, staged_jpg, staged_pdf, final_jpg, final_pdf):
+        assert attempt_dir.is_relative_to(owner_figures)
+        assert staged_jpg.parent == staged_pdf.parent == attempt_dir
+        assert final_jpg == jpg_path
+        assert final_pdf == pdf_path
+        return publish(attempt_dir, staged_jpg, staged_pdf, final_jpg, final_pdf)
+
+    monkeypatch.setattr(figures, "_publish_render_attempt", publish_on_owner_filesystem)
+    attempt = SimpleNamespace(
+        request=SimpleNamespace(producer_run_kind="figure_followup"),
+        agent=_Agent(_FakeSandbox(renderer_root, [CLEAN])),
+        deps=FigureDependencies.from_facade(),
+        figures_dir=owner_figures,
+        safe_name="f",
+        jpg_path=jpg_path,
+        pdf_path=pdf_path,
+    )
+
+    result, error = await execute_revision_candidate(attempt, "plot()")
+
+    assert result.error is None
+    assert error is None
+    assert jpg_path.read_bytes() != previous_jpg
+    assert pdf_path.read_bytes() != previous_pdf
+    assert not (renderer_root / "figures" / ".attempts").exists()
+    assert not (owner_figures / ".attempts").exists()
+
+
+@pytest.mark.asyncio
 async def test_node_retry_returns_persisted_main_findings_without_execution():
     from backend.workflow import agents as facade
     from backend.workflow.agent_nodes import bioinformatics_node as node

@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.5 · **Last updated**: 2026-09-29
+**Version**: 0.63.6 · **Last updated**: 2026-09-30
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,13 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.6` — Fixes cross-filesystem publication failures for figure-follow-up
+  revisions. Validated JPG/PDF output from the disposable renderer is copied to
+  owner-session staging and SHA256-checked before same-filesystem publication,
+  preventing `Invalid cross-device link` while preserving the previous render
+  when transfer or publication fails. Focused figure, revision, and capability
+  regressions passed `33/33`.
 
 - `0.63.5` — Stops adding a standalone Reporting Limitations section to the
   Result-page integrated report. Figure follow-up notes remain available to the

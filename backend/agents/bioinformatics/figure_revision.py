@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -189,6 +190,32 @@ async def execute_revision_candidate(
     if candidate_error:
         deps.get("_discard_render_attempt")(candidate_dir)
         return candidate_result, candidate_error
+    if figure_followup:
+        owner_dir = None
+        try:
+            owner_dir, owner_jpg, owner_pdf = deps.get(
+                "_new_render_attempt_paths"
+            )(attempt.figures_dir, attempt.safe_name, candidate_id)
+            shutil.copyfile(candidate_jpg, owner_jpg)
+            shutil.copyfile(candidate_pdf, owner_pdf)
+            jpg_sha = deps.get("image_file_sha256")(candidate_jpg)
+            pdf_sha = deps.get("pdf_file_sha256")(candidate_pdf)
+            if (
+                not jpg_sha
+                or not pdf_sha
+                or jpg_sha != deps.get("image_file_sha256")(owner_jpg)
+                or pdf_sha != deps.get("pdf_file_sha256")(owner_pdf)
+            ):
+                raise OSError("validated renderer bytes changed while being staged")
+        except OSError as exc:
+            if owner_dir is not None:
+                deps.get("_discard_render_attempt")(owner_dir)
+            deps.get("_discard_render_attempt")(candidate_dir)
+            return candidate_result, (
+                f"Could not transfer validated figure revision from disposable renderer: {exc}"
+            )
+        deps.get("_discard_render_attempt")(candidate_dir)
+        candidate_dir, candidate_jpg, candidate_pdf = owner_dir, owner_jpg, owner_pdf
     candidate_error = deps.get("_publish_render_attempt")(
         candidate_dir,
         candidate_jpg,
