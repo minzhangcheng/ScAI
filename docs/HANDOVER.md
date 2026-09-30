@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.7 · **Last updated**: 2026-09-30
+**Version**: 0.63.8 · **Last updated**: 2026-09-30
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,13 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.8` — Fixes transparent biochemistry-figure preprocessing by compositing
+  alpha-channel images onto an opaque white background before vision requests,
+  preserving labels, axes, control points, and significance annotations. Versioned
+  preprocessing invalidates stale image extractions, and successful re-extraction
+  replaces only the prior measurement rows linked to that image. Focused
+  biochemistry image regressions passed `13/13`.
 
 - `0.63.7` — Fixes invalidated AnnData binding persistence and deletion of
   sessions whose analysis state cannot be deserialized. Host reconciliation

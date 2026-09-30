@@ -19,6 +19,7 @@ from .biochemistry_parts.prompts import (
     indicator_analysis_prompt as _indicator_analysis_prompt,
 )
 from .biochemistry_parts.image_measurements import (
+    IMAGE_PREPROCESSING_VERSION as _IMAGE_PREPROCESSING_VERSION,
     extract_image_measurements as _extract_image_measurements,
 )
 from .biochemistry_parts.records import (
@@ -373,6 +374,7 @@ class BiochemistryAgent(BaseAgent):
             and input_sha256
             and cached.get("type") == "visual_analysis_v2"
             and cached.get("input_sha256") == input_sha256
+            and cached.get("preprocessing_version") == _IMAGE_PREPROCESSING_VERSION
             and cached.get("extraction_status") in {
                 "usable", "unreadable", "metadata_incomplete"
             }
@@ -390,7 +392,9 @@ class BiochemistryAgent(BaseAgent):
 
         try:
             img = load_image(bio_file.file_path)
-            image_data = create_overview_image(img, max_size=1536)
+            image_data = create_overview_image(
+                img, max_size=1536, background_color=(255, 255, 255)
+            )
             logger.info(
                 f"[BiochemistryAgent] Preprocessed image {bio_file.filename}: "
                 f"original {img.size}, resized for API"
@@ -419,6 +423,11 @@ class BiochemistryAgent(BaseAgent):
 7. **Expert interpretation**: Provide your interpretation of what these results mean
 
 Be thorough and extract EVERY piece of information visible in the image.
+Transcribe panel labels, group names, axis titles and units before estimating values.
+Do not infer assay names, units or numerical scales from the research context or
+from the shape of a familiar panel. Preserve relative/normalized readouts as labeled.
+If a label cannot be read, identify it as unreadable instead of guessing its identity.
+Keep observed measurements separate from mechanistic interpretation.
 If you see bar charts, describe the height/value of each bar for each group.
 If you see tables, extract all rows and columns.
 
@@ -465,6 +474,7 @@ insufficient for interpretation. Then provide the full analysis below that line.
                         "analysis": content,
                         "type": "visual_analysis_v2",
                         "input_sha256": input_sha256,
+                        "preprocessing_version": _IMAGE_PREPROCESSING_VERSION,
                         "extraction_status": extraction_status,
                         "terminal": extraction_status == "usable",
                     }

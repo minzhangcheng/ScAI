@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from backend.agents.biochemistry_agent import BiochemistryAgent
-from backend.agents.biochemistry_parts.image_measurements import _MARKER
+from backend.agents.biochemistry_parts.image_measurements import IMAGE_PREPROCESSING_VERSION, _MARKER
 from backend.models.schemas import (
     AgentType, AnalysisState, DataFile, TreatmentGroup,
 )
@@ -89,6 +89,7 @@ def _stub_vision(monkeypatch, text=VISION_PROSE):
             "analysis": text,
             "type": "visual_analysis_v2",
             "input_sha256": "sha-of-biochem-png",
+            "preprocessing_version": IMAGE_PREPROCESSING_VERSION,
             "extraction_status": "usable",
             "terminal": True,
         }
@@ -156,3 +157,49 @@ async def test_a_failure_part_way_through_registration_leaves_nothing_behind(mon
 
 
 # What the picture says about itself
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "vision_failure", "json_failure", "registration_failure"])
+async def test_preprocessing_upgrade_replaces_only_linked_rows_after_success(monkeypatch, outcome):
+    _stub_vision(monkeypatch)
+    agent = _agent()
+    state = _state()
+    manual = await agent.add_result("Manual assay", 10, "", state)
+    other_image = await agent.add_result("Other image assay", 20, "", state)
+    legacy = await agent.add_result("Legacy image assay", 30, "", state)
+    prior_marker = {
+        "input_sha256": "sha-of-biochem-png", "indicator_ids": [legacy.id], "count": 1,
+    }
+    image = _image(extracted_data={_MARKER: prior_marker})
+    agent.chat = AsyncMock(return_value=json.dumps(EXTRACTED_ROWS))
+    if outcome == "vision_failure":
+        monkeypatch.setattr(BiochemistryAgent, "_analyze_single_image", AsyncMock(return_value=None))
+    elif outcome == "json_failure":
+        agent.chat.return_value = "unparseable response"
+    elif outcome == "registration_failure":
+        real_add = BiochemistryAgent.add_result
+        calls = 0
+
+        async def fail_second_row(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise ValueError("registration failed")
+            return await real_add(self, *args, **kwargs)
+
+        monkeypatch.setattr(BiochemistryAgent, "add_result", fail_second_row)
+
+    await agent._step0_extract_image_measurements(state, [image], "review")
+    ids = {row.id for row in state.biochemistry_indicators}
+    assert {manual.id, other_image.id} <= ids
+    if outcome == "success":
+        assert legacy.id not in ids
+        assert len(state.biochemistry_indicators) == 4
+        assert image.extracted_data[_MARKER]["preprocessing_version"] == IMAGE_PREPROCESSING_VERSION
+        await agent._step0_extract_image_measurements(state, [image], "next round")
+        assert agent.chat.await_count == 1
+        assert {row.id for row in state.biochemistry_indicators} == ids
+    else:
+        assert ids == {manual.id, other_image.id, legacy.id}
+        assert image.extracted_data[_MARKER] == prior_marker

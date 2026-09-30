@@ -26,6 +26,7 @@ from .records import clean_optional_text, reconcile_provenance
 logger = logging.getLogger(__name__)
 
 _MARKER = "measurement_extraction"
+IMAGE_PREPROCESSING_VERSION = "white-background-v1"
 
 # Every indicator ever minted is rendered into step 1's classification
 # prompt, which does not truncate. How many rows one figure may contribute
@@ -52,8 +53,8 @@ def carry_marker_across_vision(bio_file: DataFile, marker: Optional[Dict[str, An
     on every non-terminal analysis, so an image the vision step grades anything
     other than usable is re-read each round -- and would have had its marker
     erased each round, re-minting the same measurements until they looked like
-    replicates. The marker is keyed by image digest, so restoring it is safe:
-    a genuinely changed image produces a different fingerprint and mints again.
+    replicates. The marker is keyed by image digest and preprocessing version,
+    so restoring it cannot suppress extraction after either changes.
     """
     if marker is None or (bio_file.extracted_data or {}).get(_MARKER):
         return
@@ -63,8 +64,13 @@ def carry_marker_across_vision(bio_file: DataFile, marker: Optional[Dict[str, An
 
 
 def already_minted(bio_file: DataFile, fingerprint: str) -> bool:
-    prior = (bio_file.extracted_data or {}).get(_MARKER) or {}
-    return bool(fingerprint) and prior.get("input_sha256") == fingerprint
+    extracted = bio_file.extracted_data or {}
+    prior = extracted.get(_MARKER) or {}
+    return (
+        bool(fingerprint)
+        and prior.get("input_sha256") == fingerprint
+        and prior.get("preprocessing_version") == extracted.get("preprocessing_version")
+    )
 
 
 def mark_minted(bio_file: DataFile, fingerprint: str, indicator_ids: List[str]) -> None:
@@ -77,6 +83,7 @@ def mark_minted(bio_file: DataFile, fingerprint: str, indicator_ids: List[str]) 
     extracted = dict(bio_file.extracted_data or {})
     extracted[_MARKER] = {
         "input_sha256": fingerprint,
+        "preprocessing_version": extracted.get("preprocessing_version"),
         "indicator_ids": list(indicator_ids),
         "count": len(indicator_ids),
     }
@@ -263,6 +270,15 @@ async def extract_image_measurements(agent, state: AnalysisState,
                 continue
             rows = usable_rows(payload)
             minted = await register_rows(agent, bio_file, rows, state)
+            if prior_marker and prior_marker.get("input_sha256") == fingerprint:
+                # Replace only this unchanged image's previous generation, and
+                # only after successful extraction/registration. Manual entries
+                # and other images are not identified by these stored IDs.
+                previous_ids = set(prior_marker.get("indicator_ids") or [])
+                state.biochemistry_indicators[:] = [
+                    record for record in state.biochemistry_indicators
+                    if record.id not in previous_ids
+                ]
         except UpstreamExhaustedError:
             raise
         except Exception:

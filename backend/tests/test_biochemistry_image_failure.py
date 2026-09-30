@@ -1,9 +1,14 @@
 """Biochemistry image outcomes preserve the distinction between no data and failure."""
 
+import base64
+import hashlib
+import io
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from PIL import Image
 
 from backend.agents.biochemistry_agent import BiochemistryAgent
 from backend.models.schemas import AgentType, DataFile
@@ -20,6 +25,55 @@ def _agent(llm_client=None):
     provider.get_system_prompt.return_value = "sys"
     agent._provider = provider
     return agent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["RGBA", "LA", "P", "RGB"])
+async def test_vision_receives_opaque_white_background_and_refreshes_legacy_cache(tmp_path, mode):
+    image = Image.new("RGBA", (1536, 16), (0, 0, 0, 0))
+    image.paste((0, 0, 0, 255), (16, 0, 32, 16))
+    image.putpixel((48, 8), (0, 0, 0, 128))
+    if mode == "LA":
+        image = image.convert("LA")
+    elif mode == "P":
+        image = Image.new("P", image.size, 0)
+        image.putpalette([0] * 768)
+        image.paste(1, (16, 0, 32, 16))
+        image.putpixel((48, 8), 2)
+        image.info["transparency"] = bytes([0, 255, 128])
+    elif mode == "RGB":
+        image = Image.alpha_composite(
+            Image.new("RGBA", image.size, "white"), image
+        ).convert("RGB")
+    path = tmp_path / "figure.png"
+    image.save(path)
+    original_bytes = path.read_bytes()
+    record = DataFile(
+        filename=path.name, file_path=str(path), section="biochemistry", data_type="image",
+        extracted_data={
+            "type": "visual_analysis_v2", "input_sha256": hashlib.sha256(original_bytes).hexdigest(),
+            "analysis": "legacy extraction", "extraction_status": "usable", "terminal": True,
+        },
+    )
+    client = MagicMock()
+    client.chat_with_vision = AsyncMock(
+        return_value=SimpleNamespace(content="EXTRACTION_STATUS: usable\nfresh extraction")
+    )
+    agent = _agent(client)
+
+    assert await agent._analyze_single_image(record, "review") == "EXTRACTION_STATUS: usable\nfresh extraction"
+    sent = Image.open(io.BytesIO(base64.b64decode(
+        client.chat_with_vision.await_args.kwargs["images"][0]
+    )))
+    assert sent.mode == "RGB"
+    assert sent.size == image.size
+    assert sent.getpixel((0, 0)) == (255, 255, 255)
+    assert sent.getpixel((20, 8)) == (0, 0, 0)
+    assert sent.getpixel((48, 8)) == (127, 127, 127)
+    assert path.read_bytes() == original_bytes
+
+    await agent._analyze_single_image(record, "next round")
+    assert client.chat_with_vision.await_count == 1
 
 
 @pytest.mark.asyncio

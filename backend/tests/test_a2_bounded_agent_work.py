@@ -102,6 +102,7 @@ async def test_biochemistry_sha_cache_requires_matching_terminal_usable_record(t
         extracted_data={
             "type": "visual_analysis_v2",
             "input_sha256": digest,
+            "preprocessing_version": "white-background-v1",
             "extraction_status": "usable",
             "terminal": True,
             "analysis": "cached analysis",
@@ -119,6 +120,11 @@ async def test_biochemistry_sha_cache_requires_matching_terminal_usable_record(t
     nonterminal.extracted_data["terminal"] = False
     assert await agent._analyze_single_image(nonterminal, "review") == "EXTRACTION_STATUS: usable\nfresh"
     assert client.chat_with_vision.await_count == 2
+
+    old_processing = matching.model_copy(deep=True)
+    old_processing.extracted_data["preprocessing_version"] = "old-processing"
+    assert await agent._analyze_single_image(old_processing, "review") == "EXTRACTION_STATUS: usable\nfresh"
+    assert client.chat_with_vision.await_count == 3
     assert all(call.kwargs["prefer_stream"] is True for call in client.chat_with_vision.await_args_list)
 
 

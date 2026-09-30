@@ -192,7 +192,8 @@ def process_pathology_image(
 
 def create_overview_image(
     image: Image.Image,
-    max_size: int = 1024
+    max_size: int = 1024,
+    background_color: Optional[Tuple[int, int, int]] = None,
 ) -> str:
     """
     Create a downscaled overview image for context
@@ -200,12 +201,19 @@ def create_overview_image(
     Args:
         image: Original image
         max_size: Maximum dimension
+        background_color: Optional opaque background for transparent inputs
         
     Returns:
         Base64 encoded overview image
     """
+    if background_color is not None:
+        # Dropping alpha alone can expose black RGB pixels behind transparency.
+        rgba = image.convert("RGBA")
+        background = Image.new("RGBA", image.size, (*background_color, 255))
+        image = Image.alpha_composite(background, rgba).convert("RGB")
+
     width, height = image.size
-    
+
     if width > height:
         new_width = max_size
         new_height = int(height * max_size / width)
