@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
 from backend.agents.pi_agent import PIAgent
+from backend.agents.pi.instructions import build_out_of_scope_context
 from backend.models.schemas import (
     AnalysisState,
     CodeExecution,
@@ -216,6 +217,87 @@ def _result():
     return {"findings": ["Cluster 0 differs from cluster 1."], "figures": [],
             "status": "completed", "analysis_log": [], "code_history": [],
             "evidence_execution_ids": ["e1"]}
+
+
+@pytest.mark.parametrize("unavailable", [[], ["cell_communication"]])
+def test_execution_audit_distinguishes_missing_execution_from_import_failure(unavailable):
+    rendered = PIAgent._format_execution_audit({
+        "unmet_families": ["cell_communication", "pathway_activity"],
+        "unavailable_families": unavailable,
+    }, [])
+    assert "Planned method families without execution evidence" in rendered
+    assert ("Method families with recorded import failures" in rendered) == bool(unavailable)
+    assert ("No method import failures are recorded" in rendered) == (not unavailable)
+    assert "Methods this kernel cannot run" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_supplementary_deferrals_remain_scoped_in_later_main_planning():
+    notes = [
+        "LIANA and decoupler are unavailable in this restricted pass.",
+        "Measure protein abundance — needs new laboratory work.",
+    ]
+    review_response = {"out_of_scope": notes, "verdict": "no_action"}
+    pi = _pi_agent([
+        json.dumps(review_response),
+        json.dumps({"overview": "Evaluate existing data", "bioinformatics_tasks": []}),
+        json.dumps({"decision": "approved", "feedback": "Review current scope.",
+                    "modifications": []}),
+    ])
+    state = AnalysisState(user_id="u1", current_round=1)
+    audit = {
+        "unmet_families": ["cell_communication", "pathway_activity"],
+        "unavailable_families": [], "executed_families": ["enrichment"],
+        "step_observations": [{"plan_step_id": 1, "technical_linkage": "not_nominated"}],
+    }
+    review = await pi.review_round_execution(
+        state=state, plan_audit=audit, admissions=[], findings=[], agent_suggestions=[],
+        direction="", result_status="completed", is_terminal_round=False,
+        max_tasks=2, trigger_reason="missing execution evidence",
+    )
+    # Even an old, inaccurate PI note is retained, rather than silently rewritten.
+    assert review == review_response
+    review_prompt = " ".join(pi.prompts_seen[0].split())
+    assert "No method import failures are recorded" in review_prompt
+    assert "do not establish dependency unavailability" in review_prompt
+    assert "do not label it environment unavailability" in review_prompt
+    state.post_execution_reviews = [{
+        "round_number": 1, "review_attempt_id": "review-1",
+        "review_plan": review, "plan_audit": audit,
+    }, {
+        # Legacy records may retain notes without an execution audit.
+        "round_number": 2, "review_plan": {"out_of_scope": [notes[0]]},
+    }]
+    before = json.dumps(state.post_execution_reviews)
+    context = build_out_of_scope_context(state)
+    records = [json.loads(line[2:]) for line in context.splitlines() if line.startswith("- {")]
+    assert [record["round_number"] for record in records] == [1, 1, 2]
+    assert [record["historical_note"] for record in records] == notes + [notes[0]]
+    assert records[0]["audit_unavailable_families"] == []
+    assert records[0]["audit_executed_families"] == ["enrichment"]
+    assert records[0]["review_attempt_id"] == "review-1"
+    assert records[2]["audit_unavailable_families"] is None
+    assert json.dumps(state.post_execution_reviews) == before
+
+    state.current_round = 3
+    await pi.innovation_instruction(state, "Compare communication and pathway responses")
+    plan = AnalysisPlan(
+        phase="innovation", stage="full", steps=[
+            PlanStep(id=1, title="Communication", method="LIANA"),
+            PlanStep(id=2, title="Pathway activity", method="decoupler"),
+        ],
+    )
+    result = await pi.review_bioinfo_plan(state, plan)
+    for prompt in pi.prompts_seen[1:]:
+        normalized = " ".join(prompt.split())
+        assert context in prompt
+        assert "not session-wide capability rulings" in normalized
+        assert "supersedes any earlier" in normalized
+        assert "## Already ruled out in previous rounds" not in prompt
+        assert "Do NOT plan a step whose purpose" not in normalized
+    assert "main bioinformatics executor in the declared stage" in pi.prompts_seen[-1]
+    assert result["decision"] == "approved" and result["modifications"] == []
+    assert [step.method for step in plan.steps] == ["LIANA", "decoupler"]
 
 
 @pytest.mark.asyncio

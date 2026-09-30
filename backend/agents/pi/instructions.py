@@ -42,19 +42,7 @@ _INSTRUCTION_LIST_FIELDS = (
 
 
 def build_out_of_scope_context(state: Any) -> str:
-    """Render the follow-ups previous rounds ruled out as unrunnable here.
-
-    A round records in ``out_of_scope`` the work that needs data, metadata, or
-    experiments this session does not hold. Nothing consumed that list, while
-    the findings the next planner *did* receive reported the same work as
-    unfinished -- so the same provenance, manifest and replication steps were
-    planned again round after round, and the executor spent its budget
-    re-deriving a limit that no analysis step can lift.
-
-    Naming them here closes that loop without deciding anything: the PI is told
-    what was already ruled out, and still chooses what to plan. Pure so the
-    carryover is testable without running a round.
-    """
+    """Carry historical deferrals with their review scope and audit facts."""
     seen: List[str] = []
     for review in (getattr(state, "post_execution_reviews", None) or []):
         if not isinstance(review, Mapping):
@@ -62,26 +50,40 @@ def build_out_of_scope_context(state: Any) -> str:
         plan = review.get("review_plan")
         if not isinstance(plan, Mapping):
             continue
+        audit = review.get("plan_audit")
+        audit = audit if isinstance(audit, Mapping) else {}
         for item in (plan.get("out_of_scope") or []):
-            text = str(item).strip()
-            if text and text not in seen:
-                seen.append(text)
+            note = str(item).strip()
+            if not note:
+                continue
+            record = json.dumps({
+                "source_scope": "bounded post-execution supplementary review",
+                "round_number": review.get("round_number"),
+                "direction_pass_id": review.get("direction_pass_id"),
+                "review_attempt_id": review.get("review_attempt_id"),
+                "historical_note": note,
+                "audit_executed_families": audit.get("executed_families"),
+                "audit_unavailable_families": audit.get("unavailable_families"),
+            }, ensure_ascii=False)
+            if record not in seen:
+                seen.append(record)
     if not seen:
         return ""
-    # Most recent last, and the cap keeps that end: a long session accumulates
-    # far more of these than fit (41 distinct entries in one measured 8-round
-    # run), and the rulings that bear on the round about to be planned are the
-    # ones the latest review just made.
-    lines = "\n".join(f"- {text}" for text in seen[-20:])
+    # Keep recent observations without merging notes from different reviews.
+    lines = "\n".join(f"- {record}" for record in seen[-20:])
     return f"""
-## Already ruled out in previous rounds
-Earlier rounds determined that each of the following needs data, metadata, or
-experiments this session does not hold. They are not unfinished work, and no
-analysis step can supply what they are missing. Do NOT plan a step whose
-purpose is to establish one of them: a round that tries spends its budget
-re-deriving the same limit. Where one of them would block a task you would
-otherwise propose, state the limit in that task's expected outcome and plan
-what the available data CAN answer instead.
+## Historical follow-ups deferred during supplementary review
+These are prior PI notes for a bounded supplementary pass, not session-wide
+capability rulings. Preserve their original reasons and reassess them against
+the current stage, registered inputs, execution evidence, and main executor.
+A method not executed, not nominated, or deferred by a pass's scope or budget
+has not thereby been shown unavailable. An empty audit_unavailable_families
+means no unavailability was recorded in that audit; null means no such audit
+field was retained. Neither proves that every method will succeed.
+You decide which follow-ups remain useful and feasible. Keep genuine missing
+data or measurement needs explicit; do not discard a current task solely
+because of a historical deferral. This scoped interpretation supersedes any
+earlier "Already ruled out" or blanket "Do NOT plan" wording in chat history.
 {lines}
 """
 
@@ -331,8 +333,7 @@ PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]
         if notes and notes.strip():
             notes_section = f"\n## User Notes for This Direction\n{notes.strip()}\n"
 
-        # What earlier rounds already ruled out. Without this the planner sees
-        # only the findings, which report the same work as unfinished.
+        # Preserve earlier reasons without promoting deferrals to method bans.
         out_of_scope_section = build_out_of_scope_context(state)
 
         # Detect data types for conditional toolkit inclusion

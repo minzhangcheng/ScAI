@@ -185,6 +185,34 @@ TOOLS = [
                                     ),
                                     "default": [],
                                 },
+                                "evidence_summary": {
+                                    "type": "object",
+                                    "description": (
+                                        "A concise evidence brief for PI review of a mechanism or material claim. "
+                                        "Distinguish performed comparisons from untested questions; include "
+                                        "opposing results and alternatives. Optional; missing briefs do not block reporting."
+                                    ),
+                                    "properties": {
+                                        "comparison": {"type": "string", "description": "Method, compared groups/populations, and biological/statistical unit."},
+                                        "supporting_results": {"type": "array", "items": {"type": "string"}},
+                                        "opposing_results": {"type": "array", "items": {"type": "string"}},
+                                        "alternative_explanations": {"type": "array", "items": {"type": "string"}},
+                                        "open_questions": {"type": "array", "items": {"type": "string"}},
+                                        "score_ids": {"type": "array", "items": {"type": "string"}, "description": "Exact score-definition IDs returned by register_score."},
+                                        "table_rows": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "table_id": {"type": "string"},
+                                                    "row_match": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Exact CSV column/value pairs identifying the relevant result rows."},
+                                                    "columns": {"type": "array", "items": {"type": "string"}},
+                                                },
+                                                "required": ["table_id", "row_match"],
+                                            },
+                                        },
+                                    },
+                                },
                             },
                             "required": ["text"],
                         },
@@ -601,7 +629,7 @@ TOOLS = [
                     "gene_list": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Gene names used for the score (if applicable, top 50)"
+                        "description": "Full gene panel supplied to the score calculation, when applicable. Do not substitute only top genes. Record actual matched/missing genes in parameters when measured; distinguish the supplied panel from its matched subset."
                     },
                     "gene_list_source": {
                         "type": "string",

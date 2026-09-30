@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from backend.services.round_snapshots.gates import round_boundary_gate
 from backend.services.round_snapshots.writer import capture_decision_snapshot
+from backend.utils.bioinformatics_evidence import render_evidence_briefs
 
 
 _PATHOLOGY_IMAGE_PROJECTION_LIMIT = 20
@@ -199,14 +200,20 @@ async def synthesize_agent_results(self, state):
                 payload["image_counts"] = image_counts
             agent_results[agent_name] = json.dumps(payload, ensure_ascii=False, default=str)
 
+        if agent_name == "bioinformatics" and result.get("finding_records"):
+            # Partial/error outcomes may still retain useful measured evidence.
+            payload = json.loads(agent_results[agent_name])
+            payload["evidence_briefs"] = render_evidence_briefs(result["finding_records"])
+            agent_results[agent_name] = json.dumps(payload, ensure_ascii=False)
+
     # Cross-modal audit (Gap 0/1/2 fix) — innovation rounds only, non-critical.
     cms = None
     if analysis_state.analysis_phase == AnalysisPhase.INNOVATION:
         try:
             current_agent_raw = {
+                "bioinformatics": json.loads(agent_results["bioinformatics"]),
                 "biochemistry": state.get("biochemistry_result") or {},
                 "pathology": state.get("pathology_result") or {},
-                "bioinformatics": state.get("bioinformatics_result") or {},
             }
             literature_context = self._build_literature_audit_context(state)
             biochemistry_raw = self._build_biochemistry_raw_context(state)
@@ -242,6 +249,10 @@ async def synthesize_agent_results(self, state):
     round_result.phase = analysis_state.analysis_phase
     round_result.direction = analysis_state.current_round_direction or ""
     bioinformatics_result = state.get("bioinformatics_result") or {}
+    # Exploration candidate generation runs before final round persistence.
+    round_result.bioinformatics_finding_records = list(
+        bioinformatics_result.get("finding_records") or []
+    )
 
     return {
         "state": state, "analysis_state": analysis_state,

@@ -292,6 +292,12 @@ sufficiency and whether each step is completed, pending, or scientifically skipp
 Host validates only objective identities plus step-ID and status syntax.
 {audit_block}
 
+Missing execution evidence, `not_nominated` linkage, and a method named in the
+plan do not establish dependency unavailability. Describe an import or runtime
+failure only when the supplied execution evidence records that failure, and
+keep its method, cause, and execution scope explicit. If no such failure is
+recorded, say the method was not executed or its execution was not evidenced.
+
 ## Findings this round reported
 {findings_block}
 
@@ -320,6 +326,11 @@ imaging or histology, a new sample or cohort, or any external or public dataset 
 executed here. Put those in `out_of_scope`, each with a one-line reason. That list is not
 a consolation prize — it is where most worthwhile follow-ups honestly belong, and routing
 one of them into the executor spends the whole budget on work it cannot perform.
+Deferral due only to this pass's budget, tools, or figure restrictions remains
+unfinished work for Chat or a later main plan. Describe that specific restriction
+in `gaps` or `followups` when available; do not label it environment unavailability
+or a permanent session-wide exclusion. Pathway activity is explicitly allowed
+by the shared contract when its required inputs and method are available.
 
 ## Order of preference
 1. Approved steps the audit found with no execution evidence — repairing these outranks
@@ -330,8 +341,9 @@ one of them into the executor spends the whole budget on work it cannot perform.
 4. The agent's own suggested follow-ups, where they are runnable on the loaded data.
 5. Genuinely new analyses — last, and only once the above are exhausted.
 
-Never propose a method the audit lists as unavailable in this kernel. If its intent still
-matters, name an available method that serves it, or record it in `out_of_scope`.
+For a recorded import failure, assess whether a supported alternative can serve
+the task within this pass. Preserve the observed failure and any unresolved work
+for PI review; a method-family label alone does not rule out every implementation.
 
 ## Hard limits
 - At most {cap} task(s). Return the highest-value ones and stop.
@@ -557,14 +569,17 @@ Reply with STRICT JSON only:
             lines.append("- Approved steps with NO execution evidence:")
             lines.append(unmet)
         for label, key in (
-            ("Methods the plan named that nothing ran", "unmet_families"),
+            ("Planned method families without execution evidence", "unmet_families"),
             ("Required publication figure types still missing", "unmet_figure_kinds"),
             ("Methods evidenced by a successful execution", "executed_families"),
-            ("Methods this kernel cannot run (import failure observed)", "unavailable_families"),
+            ("Method families with recorded import failures", "unavailable_families"),
         ):
             values = audit.get(key) or []
             if values:
                 lines.append(f"- {label}: {', '.join(str(v) for v in values[:_MAX_PROMPT_ITEMS])}")
+        if not audit.get("unavailable_families"):
+            lines.append("- No method import failures are recorded in this audit; "
+                         "this does not guarantee that every method is runnable.")
         admitted = cls._format_review_items(admissions)
         if admitted:
             lines.append("- The analysis agent itself recorded these as not run or failed:")

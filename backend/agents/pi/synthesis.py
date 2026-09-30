@@ -9,6 +9,7 @@ import logging
 import re
 
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from ...utils.bioinformatics_evidence import EVIDENCE_REVIEW_GUIDANCE, render_evidence_briefs
 from ...utils.formatting import loads_llm_json
 from ...utils.llm_client import UpstreamExhaustedError
 from ...services.report.round_chapters import (
@@ -150,6 +151,7 @@ This is the results summary for Round {state.current_round}. Please synthesize:
 
 ## Bioinformatics Analysis Results
 {bioinformatics_result or "No new results"}
+{EVIDENCE_REVIEW_GUIDANCE}
 
 ## Literature Research Results
 {literature_result or "No new results"}
@@ -408,6 +410,7 @@ Current research direction: {current_direction or "N/A"}
 
 ## Constraints
 - {MECHANISM_EVIDENCE_POLICY}
+- {EVIDENCE_REVIEW_GUIDANCE}
 - Do not invent mechanism names, pathways, gene sets, genes, PMIDs, or values that are absent from the supplied evidence.
 - The matrix_markdown column headers must reflect the four agent sources plus an evidence-consistency column, in the same language as this prompt. Do not hardcode labels.
 - Each candidate must draw evidence from at least TWO different sources, and at least one must be an experimental-data agent (biochemistry, pathology, or bioinformatics) — not purely literature.
@@ -487,16 +490,13 @@ Current research direction: {current_direction or "N/A"}
         # A synthesis with an empty candidates list carries no narrative value, so fall
         # back to the lightweight literature summary instead of emitting an empty header.
         cross_modal_block = ""
-        # O5 + consistency with planning.py: filter out do_not_emphasize candidates
-        # from the final summary narrative (they remain in the appendix for traceability).
+        # Prior emphasis decisions are context for the PI, not evidence filters.
         cm_parts = []
         for r in state.round_results:
             cms = r.cross_modal_synthesis
             if not cms or not cms.candidates:
                 continue
-            displayable = [c for c in cms.candidates if c.report_recommendation != "do_not_emphasize"]
-            if not displayable:
-                continue
+            displayable = cms.candidates
             if not cm_parts:
                 cm_parts.append("\n## Cross-Modal Mechanism Candidates (persisted audit)")
             cm_parts.append(f"\n### From Round {r.round_number}")
@@ -531,6 +531,10 @@ Current research direction: {current_direction or "N/A"}
         # rounds, while the projection itself applies lineage and per-direction
         # bounds and retains source execution references and limiting evidence.
         for projection in collect_direction_projections(state):
+            # Render the source briefs once below, within one final-context budget.
+            # These projections are disposable copies, not persisted round state.
+            for projected_round in projection.get("rounds") or []:
+                projected_round.pop("evidence_briefs", None)
             block = build_direction_projection_block(projection, max_chars=5000)
             if block:
                 mech_lines.append(block)
@@ -560,6 +564,10 @@ Current research direction: {current_direction or "N/A"}
 
         # integration insights into the final report so they are not lost.
         integration_block = build_integration_block(state, style="final")
+        evidence_briefs = render_evidence_briefs([
+            record for result in state.round_results
+            for record in result.bioinformatics_finding_records
+        ], max_chars=8000)
 
         prompt = f"""
 Based on all the analysis results below, write a complete analysis report:
@@ -571,9 +579,11 @@ Research Objective: {state.initial_instruction}
 ## Results from All Rounds
 {''.join(rounds_summary)}
 {cross_modal_block}{mechanism_block}{integration_block}
+{evidence_briefs}
 
 ## Mechanism Naming and Hypothesis Policy
 {MECHANISM_EVIDENCE_POLICY}
+{EVIDENCE_REVIEW_GUIDANCE}
 
 Please write a well-structured analysis report including:
 1. Research Overview
@@ -668,6 +678,7 @@ Please write in academic paper style.
 {findings}
 **Evidence Gaps**:
 {gaps}
+{render_evidence_briefs(d.get('finding_records'), max_chars=4000)}
 """
 
         evidence_instruction = (
@@ -689,6 +700,7 @@ Please write in academic paper style.
 
 ## Evidence Handling
 {evidence_instruction}
+{EVIDENCE_REVIEW_GUIDANCE}
 
 Analyze the correlations, complementarity, and potential synergies between these research directions:
 

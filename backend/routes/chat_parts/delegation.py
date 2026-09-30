@@ -190,6 +190,7 @@ def _synthesis_evidence_text(value: Any, *, limit: int) -> str:
 
 def _build_execution_context(result: Dict[str, Any]) -> str:
     """Expose executor records that are not part of the top-level findings."""
+    from ...utils.bioinformatics_evidence import render_evidence_briefs
     summaries = []
     errors = []
     figure_attempts = []
@@ -245,6 +246,9 @@ def _build_execution_context(result: Dict[str, Any]) -> str:
         scoring_plans.append(plan)
 
     parts = []
+    brief = render_evidence_briefs(result.get("finding_records"))
+    if brief:
+        parts.append(brief)
     outcome = {
         key: result[key]
         for key in (

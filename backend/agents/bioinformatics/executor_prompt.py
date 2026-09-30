@@ -522,6 +522,17 @@ if the assertion fails, print both shapes and stop rather than guessing an orien
 - Print key metrics and results
 - Generate informative visualizations
 - Use report_findings when completing an analysis phase
+- For mechanism candidates or material conclusions, organize the existing evidence
+  into a concise evidence_summary on the corresponding report_findings entry.
+  State the performed comparison/method and statistical unit, key quantitative
+  support, opposing results, alternative explanations, and still-open questions.
+  Cite exact registered score IDs and table_rows (table ID, exact row_match,
+  relevant columns), plus the finding's actual execution IDs. These references
+  supply small source excerpts to PI; do not dump notebooks or whole tables.
+  Read the score's actual panel before describing what it measures. If measured,
+  record matched/missing genes in register_score parameters. An unperformed
+  comparison is an open question, not a negative result. Do not manufacture new
+  work or evidence solely to fill a brief; legacy findings remain valid.
 """
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .executor_dispatch import ToolAction
+from ...utils.bioinformatics_evidence import attach_evidence_sources, record_evidence_context_failure
 from .executor_report_gates import (
     attach_report_observations,
     prepare_report_attempt,
@@ -37,6 +38,12 @@ async def handle_report_findings(context, tool_call) -> ToolAction:
         return ToolAction.CONTINUE
     await attach_report_observations(context, attempt)
     await record_report_evidence_candidates(context, tool_call, attempt)
+    try:
+        attach_evidence_sources(context.state, attempt.finding_records)
+    except Exception as exc:
+        record_evidence_context_failure(
+            attempt.finding_records, stage="source attachment", error=exc,
+        )
     self = context.agent
     state = context.state
     messages = context.messages

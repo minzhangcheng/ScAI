@@ -45,6 +45,7 @@ from ...utils.formatting import (
     truncate_for_llm,
 )
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from ...utils.bioinformatics_evidence import normalize_evidence_summary
 from ...utils.direction_payload import (
     DirectionContext,
     build_direction_context_block,
@@ -1257,6 +1258,8 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                             )
                             if str(value).strip()
                         ] or fallback_ids,
+                        **({"evidence_summary": normalize_evidence_summary(item["evidence_summary"])}
+                           if isinstance(item.get("evidence_summary"), dict) else {}),
                     })
             elif isinstance(item, str):
                 if item.strip():

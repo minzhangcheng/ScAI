@@ -556,6 +556,7 @@ async def handle_register_score(context, tool_call) -> ToolAction:
     action_word = "updated" if existing_idx is not None else "registered"
     result_lines = [
         f"Score '{score_def.score_name}' {action_word}. "
+        f"Score definition ID: {score_def.id}. "
         f"Method: {score_def.method}. "
         f"Provenance: {provenance.citation()}. "
         f"This will appear in the report methodology."

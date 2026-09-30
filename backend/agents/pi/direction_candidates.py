@@ -14,6 +14,7 @@ from ...utils.direction_payload import (
 )
 from ...utils.formatting import safe_parse_json_array
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
+from ...utils.bioinformatics_evidence import render_evidence_briefs
 
 # How much of the scoring prompt the candidate list and the novelty records may
 # use. Both blocks give every entry a slot rather than cutting the list short.
@@ -336,6 +337,7 @@ Do not pad the list to reach a count.
 **Biochemistry findings**: {json.dumps(round_result.biochemistry_findings[:5], ensure_ascii=False)}
 **Literature findings**: {json.dumps(round_result.literature_findings[:5], ensure_ascii=False)}
 **PI Summary**: {round_result.pi_summary[:1000]}
+{render_evidence_briefs(round_result.bioinformatics_finding_records)}
 
 ## Cell Annotations
 {ann_summary}
@@ -473,6 +475,7 @@ pad the list to reach a count.
 
 ## All Innovation Rounds (cumulative, round 2..current)
 {chr(10).join(rounds_block)}
+{render_evidence_briefs([record for result in cumulative_rounds for record in result.bioinformatics_finding_records])}
 
 ## Newly Retrieved Literature (integration-facing search)
 {new_literature[:3000]}

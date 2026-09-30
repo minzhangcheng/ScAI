@@ -15,6 +15,7 @@ from ...constants import PI_REVIEW_FALLBACK_DECISION
 from ...services.sample_design import sequencing_design_instruction
 from ...utils.formatting import as_list, coerce_json_text, loads_llm_json, render_plan_steps
 from ...utils.llm_client import UpstreamExhaustedError
+from .instructions import build_out_of_scope_context
 
 from .shared import (  # noqa: F401
     _CONTROL_SIGNAL_RESULTS,
@@ -343,6 +344,14 @@ references; method-family wording alone is not a reason to reject a plan."""
 - Measured sequencing-design facts: {sample_design_facts or "No additional design facts."}
 {stage_scope_section}
 {velocity_input_review}
+
+## Current execution scope
+This is a plan for the main bioinformatics executor in the declared stage.
+Restrictions of a previous bounded supplementary pass do not define this scope.
+Reassess historical deferrals using current registered inputs and execution
+evidence. Do not remove a method solely because it was previously not executed
+or deferred; require a concrete observed cause before describing it as unavailable.
+{build_out_of_scope_context(state)}
 
 ## Review Criteria
 1. **Stage scope**: Does every step belong in the declared stage? See "Stage Scope" above. Steps that prep data for a later stage are out of scope and require **revise**.

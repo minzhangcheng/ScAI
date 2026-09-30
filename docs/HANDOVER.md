@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.8 · **Last updated**: 2026-09-30
+**Version**: 0.63.9 · **Last updated**: 2026-09-30
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,17 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.9` — Makes Bioinformatics evidence briefs source-linked and non-blocking
+  for PI decisions. Compact briefs retain the performed comparison, score panel,
+  exact table rows, execution references, supporting and opposing results,
+  alternative explanations, and open questions, while preserving the complete
+  finding record. Supplementary execution review now distinguishes unexecuted or
+  budget-scoped work from recorded import failures instead of declaring a method
+  family unavailable without evidence. Malformed restored metadata and optional
+  source-attachment failures are downgraded to technical notes so original
+  findings and report completion are preserved. Focused evidence regressions
+  passed `20/20`.
 
 - `0.63.8` — Fixes transparent biochemistry-figure preprocessing by compositing
   alpha-channel images onto an opaque white background before vision requests,

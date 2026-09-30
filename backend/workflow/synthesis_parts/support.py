@@ -610,6 +610,7 @@ def _build_directions_with_results_for_correlation(analysis_state: AnalysisState
                 _direction_result_is_coverage_eligible(result) if result else False
             ),
             "available_findings": available_findings,
+            "finding_records": list(result.bioinformatics_finding_records) if result else [],
             "evidence_gaps": evidence_gaps,
         })
     return directions_with_results

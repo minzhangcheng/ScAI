@@ -12,6 +12,7 @@ from ...utils.direction_payload import (
     investigated_direction_texts,
 )
 from ...utils.formatting import as_list
+from ...utils.bioinformatics_evidence import render_evidence_briefs
 
 # The selection step is the only place a direction can now be turned down, so
 # its candidate list is never shortened by dropping entries.
@@ -302,6 +303,7 @@ Select directions that respect dependency ordering: dependent directions should 
 
 ## Exploration Report
 {exploration_context}
+{render_evidence_briefs([record for result in state.round_results for record in result.bioinformatics_finding_records])}
 {dependency_graph_section}
 ## Candidates
 {budgeted_prompt_block(candidates, CANDIDATE_PROMPT_FIELDS, SELECTION_CANDIDATE_BUDGET)}
@@ -495,6 +497,7 @@ Return JSON:
 
 ## Innovation Rounds (cumulative)
 {chr(10).join(rounds_block) if rounds_block else "No innovation rounds yet."}
+{render_evidence_briefs([record for result in state.round_results for record in result.bioinformatics_finding_records])}
 
 ## Integration Direction Candidates (ranked by the scoring step, not filtered by it)
 {budgeted_prompt_block(scored_candidates, CANDIDATE_PROMPT_FIELDS, SELECTION_CANDIDATE_BUDGET)}

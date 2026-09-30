@@ -23,6 +23,7 @@ import hashlib
 
 from ..models.schema_parts.enums import AgentType
 from .formatting import as_list
+from .bioinformatics_evidence import evidence_brief_references, render_evidence_briefs
 
 # Candidate fields that state what this direction still has to establish, in
 # the order a planner should see them. Values may be strings or lists.
@@ -1057,6 +1058,8 @@ def _result_projection(result: Any) -> Dict[str, Any]:
             _get(result, "evidence_gate_findings") or [], MAX_DIRECTION_FINDINGS,
         ),
         "mechanism_programs": programs,
+        "evidence_briefs": render_evidence_briefs(_get(result, "bioinformatics_finding_records")),
+        "evidence_brief_references": evidence_brief_references(_get(result, "bioinformatics_finding_records")),
     }
 
 
@@ -1352,6 +1355,9 @@ def build_direction_projection_block(
             _add_refs(round_data["evidence_execution_ids"])
         if round_data.get("summary"):
             lines.append(f"PI summary: {round_data['summary']}")
+        if round_data.get("evidence_briefs"):
+            _add_refs(round_data.get("evidence_brief_references") or [])
+            lines.extend(round_data["evidence_briefs"].splitlines())
         findings = round_data.get("findings") or {}
         for modality, values in findings.items():
             if values:
@@ -1472,15 +1478,22 @@ def build_direction_projection_block(
         body_lines.append(line)
         used += extra
     if omitted_count:
-        omitted_note = (
-            "Context omissions: direction context was capped; "
-            f"{omitted_count} rendered item(s) omitted. Persisted records and source references remain available."
-        )
-        if existing_omissions:
-            omitted_note += " " + "; ".join(existing_omissions)
-        trailer = "\n" + omitted_note + "\n" + references_line
-        if len(trailer) > max_len:
-            trailer = trailer[:max_len]
+        while True:
+            omitted_note = (
+                "Context omissions: direction context was capped; "
+                f"{omitted_count} rendered item(s) omitted. Persisted records and source references remain available."
+            )
+            if existing_omissions:
+                omitted_note += " " + "; ".join(existing_omissions)
+            trailer = "\n" + omitted_note + "\n" + references_line
+            if len(trailer) > max_len:
+                trailer = trailer[:max_len]
+                body_lines = []
+                break
+            if len("\n".join(body_lines)) + len(trailer) <= max_len:
+                break
+            body_lines.pop()
+            omitted_count += 1
     return "\n".join(body_lines) + trailer
 
 

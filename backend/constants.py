@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.63.8"
+VERSION = "0.63.9"
 
 
 # ── Authoritative graph node registry — single source of truth ─────
