@@ -251,6 +251,10 @@ export const zh = {
     // LLM failure dialog
     llmCallFailed: 'LLM 调用失败',
     llmCallFailedBadge: 'LLM调用失败',
+    annotationToolFailed: '细胞类型注释失败',
+    annotationToolFailureDesc: '请查看下方工具错误。重试会继续处理注释错误；跳过会向 PI 披露注释缺失，并继续剩余任务。',
+    annotationRetryHint: '继续处理注释错误',
+    annotationReopenHint: '关闭后，可点击“细胞类型注释失败”标签重新打开',
     llmAgent: '智能体',
     llmModel: '模型',
     llmServer: 'LLM 服务器',

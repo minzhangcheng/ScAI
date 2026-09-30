@@ -82,12 +82,15 @@ export default function LlmTimeoutDialog({
   const agentLabelKey = AGENT_LABEL_KEYS[llmFailureInfo.agent] || 'piAgent'
   const isMarkerDb = llmFailureInfo.reason === 'marker_db_missing'
   const isAgentDisabled = llmFailureInfo.reason === 'agent_disabled'
+  const isAnnotationFailure = llmFailureInfo.failureKind === 'annotation_tool_failure'
 
   const title = isMarkerDb
     ? t('markerDbMissingTitle')
     : isAgentDisabled
       ? t('agentDisabledTitle')
-      : t('llmCallFailed')
+      : isAnnotationFailure
+        ? t('annotationToolFailed')
+        : t('llmCallFailed')
 
   const description = isMarkerDb ? t('markerDbMissingDesc') : null
 
@@ -156,6 +159,9 @@ export default function LlmTimeoutDialog({
 
         {/* Info Section */}
         {!isMarkerDb && (<div className="px-6 py-4 space-y-3">
+          {isAnnotationFailure && (
+            <p className="text-sm text-gray-600">{t('annotationToolFailureDesc')}</p>
+          )}
           <div className="flex justify-between text-sm">
             <span className="text-gray-500">{t('llmAgent')}</span>
             <span className="font-medium text-gray-900">
@@ -167,7 +173,7 @@ export default function LlmTimeoutDialog({
               {t('agentDisabledBody', { agent: t(agentLabelKey as any) })}
             </div>
           )}
-          {llmFailureInfo.reason !== 'agent_disabled' && (
+          {!isAgentDisabled && !isAnnotationFailure && (
             <>
               <div className="flex justify-between text-sm">
                 <span className="text-gray-500">{t('llmModel')}</span>
@@ -270,15 +276,15 @@ export default function LlmTimeoutDialog({
               >
                 <span>{t('llmRetry')}</span>
                 <span className="text-xs text-blue-200">
-                  {t('llmRetryHint')}
+                  {t(isAnnotationFailure ? 'annotationRetryHint' : 'llmRetryHint')}
                 </span>
               </button>
-              <button
+              {!isAnnotationFailure && (<button
                 onClick={onModifyAgent}
                 className="w-full px-4 py-3 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-xl font-medium transition-colors border border-amber-200 text-left"
               >
                 {t('llmModifyAgent')}
-              </button>
+              </button>)}
               <button
                 onClick={onTerminate}
                 className="w-full px-4 py-3 bg-red-50 hover:bg-red-100 text-red-700 rounded-xl font-medium transition-colors border border-red-200 text-left"
@@ -301,7 +307,7 @@ export default function LlmTimeoutDialog({
         </div>
 
         <div className="px-6 pb-4 text-center text-xs text-gray-400">
-          {t('llmReopenHint')}
+          {t(isAnnotationFailure ? 'annotationReopenHint' : 'llmReopenHint')}
         </div>
       </div>
     </div>

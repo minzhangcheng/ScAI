@@ -122,6 +122,7 @@ export interface SessionLoadResponse {
     model?: string
     llm_server?: string
     error?: string
+    failure_kind?: string
     node_name?: string
     generation?: number
     wait_seconds?: number

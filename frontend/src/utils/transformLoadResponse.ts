@@ -407,6 +407,7 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
       model: typeof info.model === 'string' ? info.model : '',
       llmServer: typeof info.llm_server === 'string' ? info.llm_server : '',
       error: typeof info.error === 'string' ? info.error : '',
+      failureKind: typeof info.failure_kind === 'string' ? info.failure_kind : undefined,
       nodeName: info.node_name,
       generation: info.generation,
       waitSeconds: typeof info.wait_seconds === 'number' ? info.wait_seconds : undefined,

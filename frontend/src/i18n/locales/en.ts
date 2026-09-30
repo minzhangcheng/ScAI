@@ -251,6 +251,10 @@ export const en = {
     // LLM failure dialog
     llmCallFailed: 'LLM Call Failed',
     llmCallFailedBadge: 'LLM Call Failed',
+    annotationToolFailed: 'Cell-type annotation failed',
+    annotationToolFailureDesc: 'Review the tool error below. Retry continues annotation recovery; Skip discloses the annotation gap to the PI and continues the remaining tasks.',
+    annotationRetryHint: 'Continue annotation recovery',
+    annotationReopenHint: 'After closing, click the "Cell-type annotation failed" badge to reopen',
     llmAgent: 'Agent',
     llmModel: 'Model',
     llmServer: 'LLM Server',

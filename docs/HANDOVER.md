@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.9 · **Last updated**: 2026-09-30
+**Version**: 0.63.10 · **Last updated**: 2026-09-30
 
 ## 1. Runtime Architecture
 
@@ -350,20 +350,36 @@ Docker and direct-run deployment are supported. For ports, volumes, environment 
 analysis-plan review, cell annotation, research-direction selection, and the
 post-round summary. Exceptional error dialogs use a separate bounded recovery
 policy so a zero routine wait cannot silently discard a failed analysis: the
-first two error dialogs automatically retry the failed operation, and the third
-remains in the foreground indefinitely until the user chooses Retry, changes the
-agent configuration, skips, or terminates. This fallback also covers provider
+first two upstream LLM error dialogs automatically retry the failed operation,
+and the third remains in the foreground indefinitely until the user chooses Retry,
+changes the agent configuration, skips, or terminates. This fallback also covers provider
 errors the platform cannot classify, while preserving the original error details
 for the user. Exception recovery never overwrites the session-level
 `round_wait_seconds`; later routine decision gates continue to use the user's
 configured value. `DEFAULT_ROUND_WAIT_SECONDS` remains 300 for omitted routine
 gate settings.
 
+Annotation-tool failures use the existing intervention actions with a distinct
+failure kind. They require an explicit Retry, Skip, or Terminate choice and do not
+automatically retry or clear the LLM client cache. The dialog and analysis badge
+identify the annotation failure and omit unrelated model/server configuration.
+
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.10` — Distinguishes `annotate_clusters` tool failures from upstream LLM
+  failures in workflow intervention and the frontend. The failure kind survives
+  WebSocket synchronization and session reload. Annotation failures now wait for
+  explicit Retry, Skip, or Terminate instead of entering automatic provider
+  retries or clearing the LLM client cache; the English and Chinese dialogs and
+  analysis badges identify the tool failure and omit unrelated model settings.
+  Existing upstream recovery and legacy payload behavior remain compatible.
+  Focused workflow and executor regressions passed `25/25`; the isolated frontend
+  suite passed `210/210`. This changes classification and recovery, not source
+  identity validation, provider context handling, or historical session state.
 
 - `0.63.9` — Makes Bioinformatics evidence briefs source-linked and non-blocking
   for PI decisions. Compact briefs retain the performed comparison, score panel,

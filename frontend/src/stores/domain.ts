@@ -380,6 +380,7 @@ export interface LlmFailureInfo {
   model: string
   llmServer: string
   error: string
+  failureKind?: string
   nodeName: string
   generation: number
   waitSeconds?: number

@@ -203,17 +203,20 @@ async def _wait_for_llm_intervention(
     """Block workflow, show LlmTimeoutDialog, wait for user action.
 
     Returns:
-        LlmFailureAction.RETRY     — user clicked Retry (caller should clear caches and retry)
+        LlmFailureAction.RETRY     — user clicked Retry (caller resumes recovery)
         LlmFailureAction.SKIP      — user clicked Skip
         LlmFailureAction.TERMINATE — user clicked Terminate (caller should abort)
     """
+    annotation_failure = error.failure_kind == "annotation_tool_failure"
+    log_label = "annotation tool failed" if annotation_failure else "LLM upstream exhausted"
+    message_label = "annotation tool failed" if annotation_failure else "LLM call failed"
     logger.error(
-        f"[{self.session_id}] Node {node_name} LLM upstream exhausted: "
+        f"[{self.session_id}] Node {node_name} {log_label}: "
         f"agent={error.agent_name} model={error.model} server={error.llm_server}"
     )
     await self._send_message(
         "error",
-        f"Node {node_name} LLM call failed: {str(error)}",
+        f"Node {node_name} {message_label}: {str(error)}",
         AgentType.PI,
     )
     return await self._drive_hitl_gate(
@@ -225,12 +228,13 @@ async def _wait_for_llm_intervention(
             "model": error.model,
             "llm_server": error.llm_server,
             "error": str(error),
+            "failure_kind": error.failure_kind,
         },
         enter_change=StateSyncChangeType.LLM_FAILURE.value,
         exit_change=StateSyncChangeType.LLM_RETRY.value,
-        clear_cache_on_retry=True,
+        clear_cache_on_retry=not annotation_failure,
         wait_seconds=wait_seconds,
-        auto_retry=auto_retry and not _is_non_recoverable_llm_failure(error),
+        auto_retry=auto_retry and not annotation_failure and not _is_non_recoverable_llm_failure(error),
         require_explicit_resolution=require_explicit_resolution,
     )
 

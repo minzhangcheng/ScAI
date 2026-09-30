@@ -119,7 +119,7 @@ describe('state_sync with a partial payload', () => {
     expect(state.stateVersion).toBe(8)
   })
 
-  it('opens the LLM gate with its effective wait and clears it on skip', async () => {
+  it.each([undefined, 'annotation_tool_failure'])('retains failure kind %s from state sync and clears it on skip', async (failureKind) => {
     const { result } = renderHook(() => useWebSocket())
 
     await act(async () => {
@@ -142,6 +142,7 @@ describe('state_sync with a partial payload', () => {
             node_name: 'generate_detailed_report',
             generation: 1,
             wait_seconds: -1,
+            failure_kind: failureKind,
           },
         }),
       } as MessageEvent)
@@ -150,6 +151,7 @@ describe('state_sync with a partial payload', () => {
     expect(useAppStore.getState().llmFailureInfo).toMatchObject({
       nodeName: 'generate_detailed_report',
       waitSeconds: -1,
+      failureKind,
     })
     expect(useAppStore.getState().showLlmTimeoutDialog).toBe(true)
 

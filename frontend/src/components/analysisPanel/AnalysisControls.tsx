@@ -22,6 +22,8 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
     validationUncertain,
   } = controller
   if (!currentSession) return null
+  const failureBadgeKey = llmFailureInfo?.failureKind === 'annotation_tool_failure'
+    ? 'annotationToolFailed' : 'llmCallFailedBadge'
   const isPaused = currentSession.status === 'paused'
   const isWaitingInput = currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation' || currentSession.status === 'waiting_plan_review' || currentSession.status === 'waiting_species_input'
   const isRunning = currentSession.status === 'running'
@@ -212,11 +214,11 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
                 <button
                   onClick={() => setShowLlmTimeoutDialog(true)}
                   className="flex items-center gap-2 px-3 py-1 bg-red-100 dark:bg-red-900/60 hover:bg-red-200 dark:hover:bg-red-800/70 text-red-700 dark:text-red-300 rounded-lg transition-colors"
-                  aria-label={t('llmCallFailedBadge')}
+                  aria-label={t(failureBadgeKey)}
                 >
                   <AlertCircle className="w-4 h-4" aria-hidden="true" />
                   <span className="font-medium">
-                    {t('llmCallFailedBadge')}
+                    {t(failureBadgeKey)}
                   </span>
                 </button>
               ) : (

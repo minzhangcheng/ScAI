@@ -237,7 +237,7 @@ describe('transformLoadResponse — LLM intervention gate', () => {
     })
   })
 
-  it('opens the dialog on load and clears it after the gate is released', () => {
+  it.each([undefined, 'annotation_tool_failure'])('retains failure kind %s on load and clears the released gate', (failureKind) => {
     const pending = transformLoadResponse({
       ...MINIMAL_RESPONSE,
       status: 'waiting_input',
@@ -246,11 +246,13 @@ describe('transformLoadResponse — LLM intervention gate', () => {
         agent: 'bioinformatics',
         node_name: 'bioinformatics_analysis',
         generation: 4,
+        failure_kind: failureKind,
       },
     })
 
     applyStoreUpdates(pending.storeUpdates)
     expect(useAppStore.getState().llmFailureInfo?.nodeName).toBe('bioinformatics_analysis')
+    expect(useAppStore.getState().llmFailureInfo?.failureKind).toBe(failureKind)
     expect(useAppStore.getState().showLlmTimeoutDialog).toBe(true)
 
     applyStoreUpdates(transformLoadResponse(MINIMAL_RESPONSE).storeUpdates)

@@ -137,6 +137,44 @@ async def test_exception_gate_retries_twice_then_waits(monkeypatch, round_wait, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", list(LlmFailureAction))
+async def test_annotation_failure_requires_action_without_upstream_recovery(monkeypatch, action):
+    slept = _no_backoff(monkeypatch)
+    parked = _park_probe(monkeypatch)
+    wf = _gate_self()
+    wf._set_status = lambda state, status: setattr(state, "status", status)
+    plan = AnalysisPlan(id="annotation-plan", phase="exploration", stage="stage2", status="approved")
+    state = AnalysisState(user_id="u", current_plan=plan, round_wait_seconds=0)
+    error = UpstreamExhaustedError(
+        "Analysis source preparation is missing or no longer exact",
+        agent_name="bioinformatics", failure_kind="annotation_tool_failure",
+    )
+    task = asyncio.create_task(wf._wait_for_llm_intervention(
+        error, "bioinformatics_analysis", state,
+    ))
+    try:
+        await asyncio.wait_for(parked.wait(), 2)
+        assert not task.done()
+        assert state.status == TaskStatus.WAITING_INPUT
+        assert state.llm_failure_info["failure_kind"] == "annotation_tool_failure"
+        assert state.llm_failure_info["error"] == str(error)
+        assert state.llm_failure_info["wait_seconds"] == -1
+        assert state.current_plan is plan
+        assert slept == []
+        assert wf._unattended_gate_retries == {}
+        assert "annotation tool failed" in wf._send_message.await_args.args[1]
+        assert "LLM call failed" not in wf._send_message.await_args.args[1]
+        assert wf.signal_llm_failure_action("bioinformatics_analysis", action.value, 1)
+        assert await asyncio.wait_for(task, 2) == action
+        wf._settings_provider.clear_client_cache.assert_not_called()
+        assert state.llm_failure_info is None
+        assert state.current_plan is plan
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_non_recoverable_failure_waits_without_retrying(monkeypatch):
     from backend.utils.llm_client import AuthenticationError
 
