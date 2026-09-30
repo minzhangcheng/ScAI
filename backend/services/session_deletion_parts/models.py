@@ -12,6 +12,15 @@ class SessionProducerStopError(RuntimeError):
 
 
 @dataclass
+class SessionDeletionIdentity:
+    """Owner and generation needed for deletion without analysis deserialization."""
+
+    id: str
+    user_id: str
+    lifecycle_generation: int = 0
+
+
+@dataclass
 class _TombstoneCleanupLease:
     """Process-crash-safe ownership of one session's physical cleanup."""
 

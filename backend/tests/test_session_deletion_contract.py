@@ -1,5 +1,7 @@
 import asyncio
+import json
 import threading
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -75,6 +77,77 @@ def _prepare_delete_case(monkeypatch, tmp_path, session_id):
     marker.write_text("producer-owned", encoding="utf-8")
     sessions[session_id] = state
     return state, session_dir, marker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["legacy", "v1"])
+@pytest.mark.parametrize("has_lifecycle", [True, False])
+@pytest.mark.parametrize("request_owner", ["owner", "other"])
+async def test_delete_invalid_persisted_state_uses_only_owner_identity(
+    monkeypatch, tmp_path, api, has_lifecycle, request_owner,
+):
+    from fastapi import HTTPException
+    from backend.routes import sessions as session_routes, v1
+    from backend.services import session_store
+
+    session_id = "delete-invalid-analysis-state"
+    state, session_dir, marker = _prepare_delete_case(monkeypatch, tmp_path, session_id)
+    data = state.model_dump(mode="json")
+    data["current_round"] = "not-an-integer"
+    (session_dir / "session.json").write_text(json.dumps(data), encoding="utf-8")
+    sessions.pop(session_id)
+    if not has_lifecycle:
+        session_lifecycle._record_path(session_id, "owner").unlink()
+    monkeypatch.setattr(
+        session_deletion, "resolve_session_metadata_path",
+        lambda _sid: session_dir / "session.json",
+    )
+    monkeypatch.setattr(
+        session_store, "ensure_session_loaded",
+        AsyncMock(side_effect=AssertionError("deletion must not load AnalysisState")),
+    )
+    request = SimpleNamespace(state=SimpleNamespace(user_id=request_owner))
+    delete = session_routes.delete_session if api == "legacy" else v1.delete_analysis
+
+    if request_owner != "owner":
+        with pytest.raises(HTTPException) as exc:
+            await delete(session_id, request)
+        assert exc.value.status_code == 404
+        assert marker.exists()
+        assert read_lifecycle_record(session_id)["status"] == "active"
+        return
+
+    result = await delete(session_id, request)
+    assert (result.success if api == "legacy" else result["deleted"]) is True
+    assert not session_dir.exists()
+    assert session_id not in sessions
+    record = read_lifecycle_record(session_id)
+    assert record["status"] == "deleted"
+    assert record["generation"] == state.lifecycle_generation
+    assert record["cleanup_complete"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["legacy", "v1"])
+async def test_delete_identity_path_still_rejects_running_session(
+    monkeypatch, tmp_path, api,
+):
+    from fastapi import HTTPException
+    from backend.routes import sessions as session_routes, v1
+
+    session_id = "delete-running-analysis-state"
+    _state, _session_dir, marker = _prepare_delete_case(monkeypatch, tmp_path, session_id)
+    monkeypatch.setitem(workflows, session_id, SimpleNamespace())
+    request = SimpleNamespace(state=SimpleNamespace(user_id="owner"))
+    delete = session_routes.delete_session if api == "legacy" else v1.delete_analysis
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await delete(session_id, request)
+        assert exc.value.status_code == 409
+        assert marker.exists()
+        assert read_lifecycle_record(session_id)["status"] == "active"
+    finally:
+        sessions.pop(session_id, None)
 
 
 @pytest.mark.asyncio

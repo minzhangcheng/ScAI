@@ -346,9 +346,8 @@ def _apply_registry_reconciliation_to_state(state, payload):
             if record.status != status:
                 record.status = status
                 changed = True
-            if status != "registered" and record.anchor_name:
-                record.anchor_name = ""
-                changed = True
+            # Status controls eligibility; retain the persisted anchor identity
+            # even after the trusted kernel releases the live anchor.
     return bool(payload.get("changed")) or changed
 
 

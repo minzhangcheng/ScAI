@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request, HTTPException, UploadFile, File, status,
 from pydantic import ValidationError
 
 from backend.models.config_schema import ConfigV1
-from backend.utils.auth import require_session_ownership
+from backend.utils.auth import require_session_ownership, require_session_deletion_ownership
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_path_within
 from backend.services.config_io import apply_config_to_session, export_session_to_config
@@ -261,7 +261,7 @@ async def delete_analysis(session_id: str, request: Request):
             "job_id": session_id,
             "pending_cleanup": int(stats.get("pending_producers") or 0) > 0,
         }
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    state = await require_session_deletion_ownership(session_id=session_id, user_id=user_id)
     try:
         await delete_session_generation(session_id, state, user_id)
     except SessionProducerStopError:

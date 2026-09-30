@@ -24,7 +24,10 @@ from backend.state import (
     sessions, workflows, state_lock, initializing_sessions,
     session_access_times, last_save_times,
 )
-from backend.utils.auth import require_session_ownership, require_session_read_ownership
+from backend.utils.auth import (
+    require_session_ownership, require_session_read_ownership,
+    require_session_deletion_ownership,
+)
 from backend.utils.auth import get_db
 from backend.utils import crypto
 from backend.utils.config_resolver import resolve_config_for_user
@@ -323,7 +326,7 @@ async def delete_session(session_id: str, request: Request):
             ),
             data=stats,
         )
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    state = await require_session_deletion_ownership(session_id=session_id, user_id=user_id)
     try:
         await delete_session_generation(session_id, state, user_id)
     except SessionProducerStopError:

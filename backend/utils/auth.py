@@ -252,6 +252,18 @@ async def require_session_read_ownership(
     )
 
 
+async def require_session_deletion_ownership(
+    session_id: str,
+    user_id: str,
+) -> "SessionDeletionIdentity":
+    """Verify deletion ownership without requiring a valid AnalysisState."""
+    from backend.services.session_deletion import load_session_deletion_identity
+
+    return await _require_session_ownership_with_loader(
+        session_id, user_id, load_session_deletion_identity,
+    )
+
+
 async def _require_session_ownership_with_loader(
     session_id: str,
     user_id: Optional[str],

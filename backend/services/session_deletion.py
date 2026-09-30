@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -19,15 +20,18 @@ from backend.config import (
     WORKSPACE_DIR,
     INTEGRITY_DIR,
     get_session_dir,
+    resolve_session_metadata_path,
 )
 from backend.services.session_lifecycle import (
     abandon_import_generation,
+    adopt_persisted_generation,
     complete_tombstone_cleanup,
     get_lifecycle_lock,
     lifecycle_file_lock,
     tombstone_generation,
     read_lifecycle_record,
     list_lifecycle_records,
+    SessionGoneError,
 )
 from backend.state import (
     _monitor_tasks,
@@ -72,6 +76,7 @@ _PRODUCER_STOP_TIMEOUT_SECONDS = 10.0
 
 
 from backend.services.session_deletion_parts.models import (
+    SessionDeletionIdentity,
     SessionProducerStopError,
     _PendingTombstoneCleanup,
     _TombstoneCleanupLease,
@@ -88,6 +93,56 @@ from backend.services.session_deletion_parts.models import (
 SessionProducerStopError.__module__ = __name__
 _PendingTombstoneCleanup.__module__ = __name__
 _TombstoneCleanupLease.__module__ = __name__
+
+
+def _read_deletion_identity(session_id: str) -> SessionDeletionIdentity | None:
+    try:
+        data = json.loads(resolve_session_metadata_path(session_id).read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("id", session_id) != session_id:
+            return None
+        owner_id = data.get("user_id")
+        if not isinstance(owner_id, str) or not owner_id:
+            return None
+        generation = int(data.get("lifecycle_generation") or 0)
+        if generation < 0:
+            return None
+        return SessionDeletionIdentity(session_id, owner_id, generation)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+async def load_session_deletion_identity(
+    session_id: str,
+) -> SessionDeletionIdentity | None:
+    """Resolve deletion ownership without loading or repairing analysis state."""
+    validate_session_id(session_id)
+    async with get_lifecycle_lock(session_id):
+        record = read_lifecycle_record(session_id)
+        if record is not None:
+            owner_id = str(record.get("owner_id") or "")
+            generation = int(record.get("generation") or 0)
+            if record.get("status") == "deleted":
+                raise SessionGoneError(session_id, owner_id, generation)
+            if record.get("status") != "active" or not owner_id or generation < 1:
+                return None
+            return SessionDeletionIdentity(session_id, owner_id, generation)
+
+        async with state_lock:
+            cached = sessions.get(session_id)
+            identity = (
+                SessionDeletionIdentity(
+                    session_id, cached.user_id, cached.lifecycle_generation,
+                )
+                if cached is not None and cached.user_id
+                else None
+            )
+        if identity is None:
+            identity = await run_in_owned_thread(_read_deletion_identity, session_id)
+        if identity is not None:
+            # Pin legacy metadata to a durable generation before releasing the
+            # lock, so a delayed deletion cannot target a later same-ID import.
+            adopt_persisted_generation(identity)
+        return identity
 
 
 def _get_cleanup_lock(session_id: str) -> asyncio.Lock:

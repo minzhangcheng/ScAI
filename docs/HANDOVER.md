@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.6 · **Last updated**: 2026-09-30
+**Version**: 0.63.7 · **Last updated**: 2026-09-30
 
 ## 1. Runtime Architecture
 
@@ -364,6 +364,15 @@ gate settings.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.7` — Fixes invalidated AnnData binding persistence and deletion of
+  sessions whose analysis state cannot be deserialized. Host reconciliation
+  retains the non-empty anchor identity and marks invalidated bindings stale,
+  preserving the persisted model contract. Browser and V1 deletion routes
+  authorize from lifecycle owner/generation records or minimal session metadata
+  without loading the full AnalysisState, while retaining tombstone-first cleanup,
+  ownership checks, and running-session protection. Focused binding, deletion,
+  and lifecycle regressions passed `28/28`; existing persisted state is unchanged.
 
 - `0.63.6` — Fixes cross-filesystem publication failures for figure-follow-up
   revisions. Validated JPG/PDF output from the disposable renderer is copied to
