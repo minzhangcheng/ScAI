@@ -83,6 +83,58 @@ def test_schema_v2_figure_selection_revalidates_durable_source_receipt():
     assert "missing from durable code history" in figure.provenance_validation_reason
 
 
+def test_followup_figure_remains_reportable_after_many_scopes_and_disk_reload():
+    from backend.models.schemas import AnalysisPlan, PlanStep
+    from backend.services.figure_followup import (
+        build_figure_followup_scope,
+        get_figure_followup_scope,
+        persist_figure_followup_scope,
+    )
+    from backend.services.session_store import load_session_from_disk, save_session_to_disk
+
+    figure = _figure(
+        "early-qc", FigureReviewStatus.APPROVED,
+        plan_id="early-plan", plan_step_id=4, round_number=1,
+        provenance_schema_version=2, producer_run_kind="figure_followup",
+        producer_run_scope_id="scope-0", figure_followup_task_id="qc-task",
+        plan_requirement_key="plan.4.1", source_execution_id="qc-source",
+        source_execution_run_kind="ordinary", source_execution_validated=True,
+    )
+    state = AnalysisState(
+        id="followup-scope-retention", user_id="user", current_round=1,
+        current_plan=AnalysisPlan(
+            id="early-plan", phase="exploration", steps=[
+                PlanStep(id=4, title="Quality control", method="QC", status="completed"),
+            ],
+        ),
+        code_history=[CodeExecution(
+            id="qc-source", code="compute_qc()", round_number=1,
+            plan_id="early-plan", plan_step_ids=[4], plan_binding_status="confirmed",
+            evidence_schema_version=2, executor_run_kind="ordinary",
+            execution_status="succeeded",
+        )],
+        publication_figures=[figure],
+    )
+    task = {"id": "qc-task", "plan_step_id": 4, "plan_requirement_key": "plan.4.1"}
+    first_scope = build_figure_followup_scope(state, [task], run_scope_id="scope-0")
+    persist_figure_followup_scope(state, first_scope)
+    assert is_report_eligible(figure, state=state)
+
+    for index in range(1, 16):
+        state.current_round = index + 1
+        state.current_plan.id = f"later-plan-{index}"
+        persist_figure_followup_scope(state, build_figure_followup_scope(
+            state, [], run_scope_id=f"scope-{index}",
+        ))
+    save_session_to_disk(state.id, state)
+    loaded = load_session_from_disk(state.id)
+
+    assert loaded is not None
+    assert get_figure_followup_scope(loaded, "scope-0") == first_scope
+    assert all(get_figure_followup_scope(loaded, f"scope-{i}") for i in range(16))
+    assert is_report_eligible(loaded.publication_figures[0], state=loaded)
+
+
 def test_historical_data_drift_invalidation_is_now_advisory():
     figure = _figure(
         "historical-drift", FigureReviewStatus.APPROVED,

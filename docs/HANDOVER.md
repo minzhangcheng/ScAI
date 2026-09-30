@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.10 · **Last updated**: 2026-09-30
+**Version**: 0.63.11 · **Last updated**: 2026-10-01
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,14 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.11` — Removes the fixed eight-entry retention limit for figure-follow-up
+  scopes. Every persisted follow-up scope remains available for later figure
+  provenance validation, so accepted QC and other result figures cannot become
+  unavailable merely because later rounds created more follow-up scopes. Adds a
+  save/reload regression covering sixteen scopes and report eligibility. Focused
+  figure-follow-up and report-artifact regressions passed `13/13`; no image
+  build, deployment, or historical-session repair was performed.
 
 - `0.63.10` — Distinguishes `annotate_clusters` tool failures from upstream LLM
   failures in workflow intervention and the frontend. The failure kind survives

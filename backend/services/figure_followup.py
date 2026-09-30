@@ -16,7 +16,6 @@ from backend.services.execution_evidence import (
 
 SCOPE_KEY = "figure_followup_scopes_v1"
 ANALYSIS_REQUESTS_KEY = "figure_followup_analysis_requests_v1"
-MAX_FOLLOWUP_SCOPES = 8
 MAX_SCOPE_TASKS = 12
 MAX_SCOPE_RECEIPTS = 256
 MAX_PENDING_ANALYSIS_REQUESTS = 40
@@ -318,7 +317,7 @@ def build_figure_followup_scope(
 
 
 def persist_figure_followup_scope(state: Any, scope: dict[str, Any]) -> dict[str, Any]:
-    """Persist one bounded scope idempotently before any executor dispatch."""
+    """Persist each scope idempotently for later figure and report validation."""
     sandbox_state = dict(getattr(state, "sandbox_state", None) or {})
     scopes = dict(sandbox_state.get(SCOPE_KEY) or {})
     scope_id = str(scope.get("run_scope_id") or "")
@@ -334,11 +333,7 @@ def persist_figure_followup_scope(state: Any, scope: dict[str, Any]) -> dict[str
         scope = existing
     else:
         scopes[scope_id] = dict(scope)
-    while len(scopes) > MAX_FOLLOWUP_SCOPES:
-        oldest = next(iter(scopes))
-        if oldest == scope_id:
-            break
-        scopes.pop(oldest, None)
+    # Published figures reference these scopes across subsequent rounds.
     sandbox_state[SCOPE_KEY] = scopes
     state.sandbox_state = sandbox_state
     return dict(scope)
