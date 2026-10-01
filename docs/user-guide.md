@@ -159,14 +159,20 @@ While the analysis runs:
 
 ### Respond to model or agent failures
 
-If an agent or model repeatedly fails, ScAI can present **Retry**, **Modify Agent Settings**, **Skip**, and **Terminate**, depending on the failure:
+If an upstream model provider returns an error, a connection fails, or a model produces unusable output, ScAI may pause the analysis and open a failure decision dialog.
+
+![Model failure details and recovery actions](images/error_processing.png)
+
+Check the **Agent**, **Model**, and **LLM Server**, then expand **Error Details** to identify the cause. The screenshot shows an incomplete plan JSON response; provider availability, credentials, and output-format problems require different corrections. The dialog title can vary with the failure type, for example **LLM Call Failed** or **Invalid Model Output**.
+
+Choose the appropriate action from those offered:
 
 - **Retry** reruns the failed operation. Use it for a transient provider or connectivity problem, or after correcting the relevant agent settings.
 - **Modify Agent Settings** opens the configuration needed to correct a model, endpoint, credential, or disabled core agent. Save the correction before returning to retry the step.
 - **Skip** continues without that operation's result. Use it only if the missing contribution is nonessential, and record the resulting limitation.
-- **Terminate** ends the workflow. Use it when continuing would be scientifically invalid, unsafe, or unnecessarily costly.
+- **Terminate Analysis** ends the workflow. Use it when continuing would be scientifically invalid, unsafe, or unnecessarily costly.
 
-Some failure dialogs automatically choose **Skip** when a finite timer expires. Address failures promptly, and use manual wait when skipping a core or scientifically essential step would invalidate the analysis. Marker-resource and species-resolution dialogs may offer different actions; follow the specific dialog rather than assuming every failure has the same options.
+These failure decisions do not use the routine **Round Wait Time** to automatically skip a failed operation. ScAI may first make a limited number of automatic retries for retryable failures; unresolved failures then wait for an explicit user action. Closing the dialog leaves the failure unresolved; click the corresponding failure badge in the analysis controls to reopen it. Marker-resource and species-resolution dialogs may offer different actions; follow the specific dialog rather than assuming every failure has the same options.
 
 ## Human-in-the-Loop Decisions
 
@@ -206,7 +212,13 @@ You can confirm a cluster, edit its label, and then confirm all annotations. In 
 
 ![Editing a proposed cell annotation](images/cell-annot-modify.png)
 
-Select **Request More Analysis** when the evidence is insufficient. Describe a bounded supplementary task, such as comparing marker expression for two plausible labels, checking cluster-specific differential expression, or consulting relevant literature. Reassess the updated evidence before confirming. Annotation labels remain analytical interpretations and should be validated independently when they support a central claim.
+Select **Request More Analysis** when the evidence is insufficient. This opens **Request Supplementary Analysis** while you are reviewing cell annotations.
+
+![Requesting supplementary analysis during cell annotation review](images/addition_analysis.png)
+
+Describe a bounded supplementary task, including the relevant cluster IDs and the question to resolve, such as comparing marker expression for two plausible labels, checking cluster-specific differential expression, or consulting relevant literature. Select **Submit** to send the request; the PI coordinates agents to perform the supplementary work and update the review report. **Cancel** returns to annotation review without submitting the request.
+
+Reassess the updated evidence before confirming. Annotation labels remain analytical interpretations and should be validated independently when they support a central claim.
 
 ### Select research directions
 
@@ -245,9 +257,15 @@ The browser countdown pauses when you begin typing or add a file, and it can als
 
 After a batch of research directions, ScAI may synthesize cross-direction evidence and ask whether to continue with integration candidates or finalize the analysis.
 
-![Cross-direction integration review](images/integrate.png)
+![Integration research-direction selection and report controls](images/integrate.png)
 
-Review the integration report when available. Select one or more candidates and continue, finalize the current analysis, or let the PI decide. If the integration countdown expires, the PI-decision path is used. Treat cross-direction links as hypotheses unless the data and external evidence establish otherwise.
+Select **View Integration Report** when available to review the synthesis before choosing the next action:
+
+- **Continue with Selected**: check one or more candidate directions, then continue with those directions.
+- **Write Report**: finalize the current analysis and proceed to reporting.
+- **Let PI Decide**: ask the PI to decide whether to continue or finalize.
+
+If the integration countdown expires, the PI-decision path is used. Treat cross-direction links as hypotheses unless the data and external evidence establish otherwise.
 
 ### Go back to an earlier decision
 
@@ -256,7 +274,15 @@ Review the integration report when available. Select one or more candidates and 
 
 If your administrator enabled snapshots, the analysis panel lists a restore point taken immediately before each decision above: confirming the cell annotation, choosing a research direction, choosing again after integration, and accepting a round.
 
+Open **Analysis** and expand **Decision snapshots**. The header shows the snapshot count and total disk usage; each entry shows its round, decision point, capture time, size, and importance rank.
+
+![Decision snapshots in Analysis with restore and delete controls](images/snapshot.png)
+
 **Restore into a new session** opens a copy of the analysis as it stood just before that decision, waiting at the same dialog so you can answer differently. The session you are looking at is not changed, keeps running, and keeps all of its snapshots — so you can try a second direction without giving up the first.
+
+Wait for the new session to be created and opened, then review the decision dialog and submit your choice. If the list shows **Restored into** links, use them to reopen sessions previously created from that snapshot.
+
+Select **Delete** beside a snapshot to remove that restore point when it is no longer needed. Deletion is immediate, and that snapshot can no longer be used for restoration. The current analysis, other snapshots, and sessions already restored from it remain available.
 
 Three things a restored session does not have. It carries no reports; those belong to the run that produced them, and the restored copy has not reached that point. It may be missing values the original could not serialise, which the list shows as a count. And whatever automatic skip time the original was running under, the restored session waits for you rather than deciding on its own.
 
@@ -297,6 +323,22 @@ Before sharing or citing a report:
 - State limitations introduced by skipped agents, failed steps, missing modalities, uncertain annotations, or incomplete metadata.
 - Separate exploratory associations from validated mechanisms and causal conclusions.
 - Have an appropriately qualified researcher review the final scientific interpretation.
+
+## Discuss Results and Request Follow-up Work in Chat
+
+Open **Chat** in the current session to ask the PI about the analysis, clarify findings, or request follow-up work based on existing results. You can also use it after the main analysis has completed.
+
+![Chat workspace with a follow-up request and real-time agent activity](images/chat.png)
+
+Describe the question, relevant results or figures, requested output, and any limits on the work. For example, ask the PI to compare two interpretations, check a particular result, or prepare an additional figure from existing data. The PI can answer directly or coordinate specialist agents when the request requires analysis.
+
+Use the composer controls as follows:
+
+- Enter your message and select **Send**, or press **Enter**. Use **Shift+Enter** for a new line.
+- Use the paperclip to attach supplementary files. The **PI (auto-dispatch)** selector sets the default target for new attachments; you can choose a specialist and review each file's agent, group, sample, and data type before sending.
+- Follow the conversation and the **Real-time Messages** panel to inspect agent activity and execution output. While a request is running, the red stop button can stop the current chat request.
+
+Review any new findings and figures against the underlying evidence before using them in a report.
 
 ## Practical Checklist and Troubleshooting
 

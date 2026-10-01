@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.13 · **Last updated**: 2026-10-01
+**Version**: 0.63.14 · **Last updated**: 2026-10-01
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,15 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.14` — Updates the English and Chinese user guides with screenshots and
+  instructions for Chat follow-up requests, decision-snapshot restoration and
+  deletion, supplementary analysis during cell-annotation review, and model or
+  provider failure recovery. Refreshes the integration-review screenshot and
+  documents its report, direction-selection, and PI-decision controls. Failure
+  guidance distinguishes provider errors from invalid model output and explains
+  explicit resolution of unresolved failures. Synchronizes application, client,
+  and documentation versions and administrator build examples.
 
 - `0.63.13` — Corrects planner JSON/schema failure attribution. Host-generated
   diagnostics remain distinct from model-supplied `parse_error` fields through
