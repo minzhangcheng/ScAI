@@ -316,6 +316,10 @@ async def perform_revision(
     )
     attempt.revision_count += 1
     attempt.figure.revision_count = attempt.revision_count
+    revision_kwargs = (
+        {"figure_followup": True}
+        if attempt.request.producer_run_kind == "figure_followup" else {}
+    )
     try:
         revised_code = await agent._revise_figure_code(
             attempt.current_code,
@@ -327,6 +331,7 @@ async def perform_revision(
             attempt.figure.png_base64,
             revision_history=attempt.revision_history,
             layout_violations=attempt.figure.layout_violations,
+            **revision_kwargs,
         )
     except UpstreamExhaustedError:
         abandon_render(attempt)
@@ -414,6 +419,7 @@ async def perform_revision(
             attempt.figure.png_base64,
             revision_history=attempt.revision_history,
             layout_violations=attempt.figure.layout_violations,
+            **revision_kwargs,
         )
         is_valid_retry, _retry_error = agent._validate_code(retry_code)
         if is_valid_retry:

@@ -222,11 +222,15 @@ async def start_turn(context) -> TurnStart:
         if input_anchor:
             # Request-only: every turn receives the freshest registry without
             # duplicating the reminder in history or checkpoint transcripts.
-            request_messages.append({
+            anchor_message = {
                 "role": "user",
                 "content": input_anchor,
-                PROMPT_CACHE_EPHEMERAL_TAIL_KEY: True,
-            })
+            }
+            # Figure follow-up inserts an earlier protected dynamic anchor,
+            # which owns the sole cache boundary for the whole dynamic suffix.
+            if not figure_followup:
+                anchor_message[PROMPT_CACHE_EPHEMERAL_TAIL_KEY] = True
+            request_messages.append(anchor_message)
             prompt_cache_plan = PromptCachePlan()
     anchor_count = context.agent._context_anchor_count(request_messages)
     if figure_followup and state is not None:

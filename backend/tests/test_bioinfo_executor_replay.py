@@ -97,6 +97,44 @@ async def test_each_code_request_receives_latest_working_adata(replay_context):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("figure_followup", [False, True])
+async def test_request_has_one_cache_boundary_before_dynamic_context(
+    replay_context, monkeypatch, caplog, figure_followup,
+):
+    from backend.agents.bioinformatics import figure_context
+    from backend.utils.llm_client_parts.prompt_cache import (
+        PROMPT_CACHE_EPHEMERAL_TAIL_KEY, PromptCachePlan,
+    )
+    from backend.utils.llm_client_parts.protocol import _anthropic_messages_translate
+
+    context, client, response = replay_context
+    client.chat_with_tools.return_value = response
+    context.executor_run_kind = "figure_followup" if figure_followup else "ordinary"
+    context.resolved_adata_source_context["active_adata_var"] = "adata"
+    monkeypatch.setattr(figure_context, "figure_input_context", AsyncMock(return_value="live inventory"))
+    original_messages = list(context.messages)
+
+    await executor_loop.start_turn(context)
+    request = client.chat_with_tools.await_args.kwargs
+    messages = request["messages"]
+    tails = [i for i, message in enumerate(messages)
+             if message.get(PROMPT_CACHE_EPHEMERAL_TAIL_KEY)]
+    assert len(tails) == 1
+    assert isinstance(request["prompt_cache_plan"], PromptCachePlan)
+    _, translated = _anthropic_messages_translate(messages, request["prompt_cache_plan"])
+    assert "expected one stable-boundary" not in caplog.text
+    if figure_followup:
+        assert "live inventory" in messages[tails[0]]["content"]
+        assert tails[0] < len(messages) - 1
+        dynamic_contents = {message["content"] for message in messages[tails[0]:]
+                            if isinstance(message.get("content"), str)}
+        assert all(not block.get("cache_control")
+                   for message in translated for block in message.get("content", [])
+                   if isinstance(block, dict) and block.get("text") in dynamic_contents)
+    assert context.messages == original_messages
+
+
+@pytest.mark.asyncio
 async def test_chat_uses_pi_selected_live_adata_instead_of_prior_plan(monkeypatch, tmp_path):
     from backend.models.schemas import AdataSourceSelection
     from backend.tests.test_bioinfo_context_scopes import _plan

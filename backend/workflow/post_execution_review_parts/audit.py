@@ -899,7 +899,8 @@ def _sanitize_evidence_records(values: Any) -> List[Dict[str, str]]:
     Raw ``CodeExecution`` and ``AnalysisStep`` instances remain on the separate
     provenance merge path.  Only the four primitive observation fields cross the
     review boundary, and the terminal portions of output/error are retained so
-    the useful result or exception context survives truncation.
+    the useful result or exception context survives truncation. All twenty
+    possible supplementary execution receipts remain available to the PI.
     """
     from backend.utils.error_parsing import bounded_diagnostic
 
@@ -919,7 +920,7 @@ def _sanitize_evidence_records(values: Any) -> List[Dict[str, str]]:
             "stdout_excerpt": str(value.get("stdout_excerpt", "") or "")[-2000:],
             "error": bounded_diagnostic(error, 1000) if error else "",
         })
-        if len(records) >= _MAX_LIST:
+        if len(records) >= 20:
             break
     return records
 

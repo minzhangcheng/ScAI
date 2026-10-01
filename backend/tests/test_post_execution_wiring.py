@@ -101,6 +101,17 @@ def _execution(
 # Budget derivation
 # ---------------------------------------------------------------------------
 
+def test_review_limits_accept_twenty_and_defer_total_until_tasks_are_known():
+    from backend.config import SystemConfig
+    from pydantic import ValidationError
+
+    config = SystemConfig(post_execution_review_timeout_seconds=900)
+    assert _Harness(config=config)._post_execution_review_limits() == (20, 900, 0, 5)
+    with pytest.raises(ValidationError):
+        SystemConfig(post_execution_review_max_iterations=21)
+    config.post_execution_review_max_iterations = 100
+    assert _Harness(config=config)._post_execution_review_limits()[0] == 20
+
 # ---------------------------------------------------------------------------
 # Last-direction detection
 # ---------------------------------------------------------------------------

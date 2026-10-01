@@ -567,7 +567,8 @@ class FiguresMixin:
         state: AnalysisState = None,
         image_base64: str = None,
         revision_history: List[Dict[str, Any]] = None,
-        layout_violations: List[Dict[str, Any]] = None
+        layout_violations: List[Dict[str, Any]] = None,
+        *, figure_followup: bool = False,
     ) -> str:
         """
         Generate revised plotting code based on PI feedback.
@@ -605,6 +606,21 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
         input_context = await figure_input_context(
             getattr(self, "sandbox", None), original_code,
         )
+        capability_section = ""
+        if figure_followup:
+            capability_section = """
+**Figure follow-up capability boundary (applies to revisions and retries):**
+- Plot only existing results from the committed runtime. Do not load files,
+  rerun analysis, fit models, or introduce new scientific claims.
+- Do not assign into, delete from, or mutate a pre-existing AnnData container
+  (including .X, .obs, .var, .obsm, .layers, and .uns). Use local plotting
+  variables or copies for display labels and styling.
+- Do not call savefig, save, show, or close, or write data or render files
+  directly. The host wraps saving and figure cleanup for this tool.
+- Do not use dynamic capability access such as eval, exec, getattr, or globals.
+- If a requested panel needs new analysis or unavailable results, preserve the
+  existing valid panels and disclose that limitation; do not fabricate data.
+"""
 
         # Build revision history section (show previous rounds, exclude current which is shown below)
         history_section = ""
@@ -659,6 +675,7 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
 8. Use legend_.get_legend_handles_labels() instead of legend_.legendHandles (deprecated in newer matplotlib)
 9. For ax.bar()/ax.barh(), the 3rd positional arg IS the bar thickness (width for bar, height for barh) — never also pass it as a width=/height= keyword, or you get "got multiple values for argument". Use the explicit keyword form only: ax.barh(y, values, height=0.7, ...)
 10. Return ONLY the revised Python code, no explanations
+{capability_section}
 
 **Layout rules (this revision is judged against them by the rendering engine, not by opinion):**
 - Build the figure with a layout engine: `plt.figure(figsize=(...), layout='constrained')`. Never combine that with `tight_layout()` or `subplots_adjust()` — they fight each other and the result is the one you did not intend.

@@ -87,9 +87,9 @@ class PostExecutionReviewMixin:
     _DEFAULT_STEP_TIMEOUT = _DEFAULT_SANDBOX_TIMEOUT + _REVIEW_LLM_ALLOWANCE_SECONDS
 
     def _post_execution_review_limits(self) -> Tuple[int, int, int, int]:
-        """(max_iterations, step_timeout, total_timeout, max_tasks) from config.
+        """(iteration_ceiling, step_timeout, total_timeout, max_tasks) from config.
 
-        Clamped defensively — iterations in [1,8], timeouts >= 600, tasks in [0,10] —
+        Clamped defensively — iterations in [1,20], step timeout >= 600, tasks in [0,10] —
         so a stray config cannot make the pass loop unboundedly or commission an
         open-ended study.
 
@@ -98,13 +98,14 @@ class PostExecutionReviewMixin:
         long analysis, and a fixed ceiling below `sandbox_timeout` would abandon it
         mid-execution while the kernel kept working on it. Cells are also bounded
         and interrupted by the sandbox itself, so this only has to be large enough
-        that it never becomes the thing that cuts one off. The total defaults to the
-        sum of the step budgets for the same reason, and is floored at one step.
+        that it never becomes the thing that cuts one off. An unset total stays zero
+        here so the executor can derive it from the approved task count and reserve
+        a final reporting request after the PI has selected the tasks.
         """
         try:
             from ..config import default_config
             cfg = getattr(self, "config", None) or default_config
-            iterations = max(1, min(int(getattr(cfg, "post_execution_review_max_iterations", 5)), 8))
+            iterations = max(1, min(int(getattr(cfg, "post_execution_review_max_iterations", 20)), 20))
             tasks = max(0, min(int(getattr(cfg, "post_execution_review_max_tasks", 5)), 10))
 
             step = int(getattr(cfg, "post_execution_review_timeout_seconds", 0) or 0)
@@ -119,11 +120,9 @@ class PostExecutionReviewMixin:
             step = max(600, step)
 
             total = int(getattr(cfg, "post_execution_review_total_timeout_seconds", 0) or 0)
-            if total <= 0:
-                total = step * iterations
-            return (iterations, step, max(step, total), tasks)
+            return (iterations, step, max(step, total) if total > 0 else 0, tasks)
         except Exception:
-            return (5, self._DEFAULT_STEP_TIMEOUT, self._DEFAULT_STEP_TIMEOUT * 5, 5)
+            return (20, self._DEFAULT_STEP_TIMEOUT, 0, 5)
 
     async def _run_figure_followup(
         self, analysis_state, contract, planning_stage: str,

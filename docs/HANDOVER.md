@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.11 · **Last updated**: 2026-10-01
+**Version**: 0.63.12 · **Last updated**: 2026-10-01
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,25 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.12` — Fixes supplementary execution budgets and figure-follow-up request
+  context. The supplementary executor allows twice the approved task count,
+  capped by the configured ceiling and a hard limit of twenty; the default
+  ceiling rises from five to twenty while existing lower settings remain valid.
+  One final reporting-only request and its time allowance are reserved after
+  execution reaches its iteration or admission-time budget. Reporting cannot
+  execute more code, and all twenty possible execution receipts, including failed
+  attempts, survive PI review transport. Reporting failures retain the recorded
+  evidence, while cancellation, termination, and supersession propagate from the
+  executor. Figure-follow-up revision and retry prompts now carry the existing
+  plotting-only restrictions, including no mutation of pre-existing AnnData and
+  no direct saving; capability validation remains in place. Figure-follow-up
+  requests retain one cache boundary before the protected dynamic context, so
+  live inventories and authoritative input reminders stay outside the cached
+  prefix. Focused figure/revision/cache regressions passed `58/58`; the final
+  supplementary-budget and workflow regressions passed `34/34`. The existing
+  test-code size ceiling remains exceeded at `30.77%`. No image build, deployment,
+  or historical-session rerun was performed.
 
 - `0.63.11` — Removes the fixed eight-entry retention limit for figure-follow-up
   scopes. Every persisted follow-up scope remains available for later figure

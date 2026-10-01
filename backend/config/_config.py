@@ -640,10 +640,10 @@ class SystemConfig(BaseModel):
         description="Max supplementary tasks the PI may commission per execution. This is the cost ceiling: a PI asked what else could be done proposes something every time, so the budget is fixed here rather than left to its judgment. 0 disables commissioning while keeping the audit.",
     )
     post_execution_review_max_iterations: int = Field(
-        default=5,
+        default=20,
         ge=1,
-        le=8,
-        description="Max code-generation iterations for the supplementary executor (hard-capped at 8 in code).",
+        le=20,
+        description="Execution ceiling for the supplementary executor. The actual allowance is twice the approved task count, capped by this setting and a hard limit of 20. One final reporting-only request is reserved separately.",
     )
     post_execution_review_timeout_seconds: int = Field(
         default=0,
@@ -653,7 +653,7 @@ class SystemConfig(BaseModel):
     post_execution_review_total_timeout_seconds: int = Field(
         default=0,
         ge=0,
-        description="Admission budget (seconds) for the supplementary pass. 0 derives it as the sum of the per-step budgets. It is raised to at least one step's budget, and expiration prevents another step from starting without cancelling a started step. Each step has an effective minimum of 600 seconds for its LLM call.",
+        description="Admission budget (seconds) for the supplementary pass. 0 derives it from the actual execution allowance plus one reporting-only request. It is raised to at least one execution step plus reporting. Reporting time is reserved before admitting execution steps; started steps retain their full timeout. Each LLM request has an effective minimum of 600 seconds.",
     )
 
     # State persistence (deprecated: use get_session_states/get_session_workspace instead)

@@ -267,7 +267,7 @@ class SupplementaryMixin:
         tasks: List[str],
         context_summary: str,
         direction: str,
-        max_iterations: int = 5,
+        max_iterations: int = 20,
         timeout_seconds: int = 5520,
         total_timeout_seconds: Optional[int] = None,
         source_context: Optional[Dict[str, Any]] = None,

@@ -451,6 +451,135 @@ async def test_scientific_preprocessing_is_not_vetoed_by_supplementary_execution
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("report", ["done", "code", "error", "cancel", "terminate", "supersede"])
+async def test_execution_limit_leaves_one_reporting_turn_without_more_code(report):
+    import asyncio
+    from backend.workflow.helpers import WorkflowSupersededError, WorkflowTerminatedError
+
+    state = _state_and_plan()
+    control_errors = {"cancel": asyncio.CancelledError, "terminate": WorkflowTerminatedError,
+                      "supersede": WorkflowSupersededError}
+
+    def final_reply(prompt):
+        assert "Final reporting turn" in prompt
+        assert all(f"task {i}: measured output" in prompt for i in range(5))
+        if report in control_errors:
+            raise control_errors[report]()
+        if report == "error":
+            raise RuntimeError("reporting unavailable")
+        if report == "code":
+            return json.dumps({"code": "print('extra computation')", "done": False})
+        return json.dumps({"done": True, "result": {
+            "status": "completed", "summary": "Five tasks measured.",
+            "findings": ["The recorded tasks produced measurements."],
+        }})
+
+    code = [f"print('task {i}')" for i in range(5)]
+    bio = _bio_agent(
+        [json.dumps({"code": cell, "done": False}) for cell in code] + [final_reply],
+        exec_results=[(f"task {i}: measured output", None) for i in range(5)],
+    )
+    bio._current_analysis_state = state
+    async def run():
+        return await bio.run_supplementary_tasks(
+            tasks=[f"Measure task {i}" for i in range(5)],
+            context_summary="", direction="test", max_iterations=5,
+        )
+
+    if report in control_errors:
+        with pytest.raises(control_errors[report]):
+            await run()
+        assert bio.executed_code == code
+        assert len(bio.code_history) == 5
+        return
+    result = await run()
+
+    assert bio.executed_code == code
+    assert len(bio.prompts_seen) == 6
+    assert len(result["evidence_records"]) == 5
+    assert all(record["status"] == "completed" for record in result["evidence_records"])
+    assert result["status"] == ("completed" if report == "done" else "partial")
+    assert bool(result["findings"]) == (report == "done")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_count,ceiling,allowance", [
+    (0, None, 0), (1, None, 2), (5, None, 10),
+    (10, 20, 20), (11, 100, 20), (5, 3, 3),
+])
+async def test_supplementary_budget_scales_with_tasks_and_retains_all_receipts(task_count, ceiling, allowance):
+    from backend.workflow.post_execution_review import sanitize_review_result
+
+    def final_reply(prompt):
+        assert "Final reporting turn" in prompt
+        assert all(f"attempt {i}: measured output" in prompt for i in range(allowance))
+        return json.dumps({"done": True, "result": {"status": "completed", "summary": "Results recorded."}})
+
+    code = [f"print('attempt {i}')" for i in range(allowance)]
+    bio = _bio_agent(
+        [json.dumps({"code": cell}) for cell in code] + [final_reply],
+        exec_results=[(f"attempt {i}: measured output", "first attempt failed" if i == 0 else None)
+                      for i in range(allowance)],
+    )
+    bio._current_analysis_state = _state_and_plan()
+    result = await bio.run_supplementary_tasks(
+        tasks=[f"Measure task {i}" for i in range(task_count)], context_summary="", direction="test",
+        **({"max_iterations": ceiling} if ceiling is not None else {}),
+    )
+
+    assert bio.executed_code == code
+    assert len(bio.prompts_seen) == (allowance + 1 if task_count else 0)
+    records = sanitize_review_result(result)["evidence_records"]
+    assert [record["execution_id"] for record in records] == [record.id for record in result["code_history"]]
+    assert len(records) == allowance
+    if allowance:
+        assert records[0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("total_timeout,expected_executions", [(None, 10), (300, 1), (1800, 2)])
+async def test_supplementary_reserves_reporting_after_execution_time_budget(monkeypatch, total_timeout, expected_executions):
+    import asyncio
+    from backend.agents.bioinformatics import supplementary_support
+
+    clock = [0]
+    timeouts = []
+    original_wait_for = asyncio.wait_for
+    monkeypatch.setattr(supplementary_support, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], perf_counter=supplementary_support.time.perf_counter,
+    ))
+
+    async def capture_timeout(awaitable, *, timeout):
+        timeouts.append(timeout)
+        return await original_wait_for(awaitable, timeout=timeout)
+    monkeypatch.setattr(asyncio, "wait_for", capture_timeout)
+
+    def reply(prompt):
+        if "Final reporting turn" in prompt:
+            return json.dumps({"done": True, "result": {"status": "partial", "summary": "Recorded available results."}})
+        return json.dumps({"code": "print('measured')"})
+    bio = _bio_agent([reply])
+    bio._current_analysis_state = _state_and_plan()
+    original_execute = bio.sandbox.execute
+
+    async def execute(code, **kwargs):
+        clock[0] += 900
+        return await original_execute(code, **kwargs)
+    bio.sandbox.execute = execute
+    result = await bio.run_supplementary_tasks(
+        tasks=[f"Measure task {i}" for i in range(5)], context_summary="", direction="test",
+        timeout_seconds=900, total_timeout_seconds=total_timeout,
+    )
+
+    assert timeouts == [900] * expected_executions + [600]
+    assert len(result["evidence_records"]) == expected_executions
+    assert result["summary"] == "Recorded available results."
+    if total_timeout:
+        assert clock[0] >= total_timeout
+        assert any("time budget" in warning for warning in result["warnings"])
+
+
+@pytest.mark.asyncio
 async def test_a_slow_step_is_interrupted_and_the_pass_continues(monkeypatch):
     """A step that overruns its budget must not abandon the pass: the kernel is
     interrupted, the executor is told, and the remaining steps still run."""

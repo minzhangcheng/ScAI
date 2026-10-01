@@ -13,6 +13,7 @@ from backend.services.sample_design import (
     samples_per_group_by_modality,
 )
 from backend.services.statistical_gates import run_gates as run_statistical_gates
+from backend.workflow.helpers import WorkflowSupersededError, WorkflowTerminatedError
 
 from .shared import (
     AnalysisStep,
@@ -140,6 +141,7 @@ async def _execute_supplementary_pass(
     max_iterations,
     step_timeout,
     total_timeout,
+    reporting_timeout,
     produced,
     analysis_log,
     warnings,
@@ -150,7 +152,7 @@ async def _execute_supplementary_pass(
 
     abort_envelope: Optional[Dict[str, Any]] = None
 
-    async def _one_step() -> str:
+    async def _one_step(*, report_only: bool = False) -> str:
         """One executor iteration: generate, run, and record the result.
 
         Returns a loop signal — "continue", "done" or "abort" — so the
@@ -158,9 +160,11 @@ async def _execute_supplementary_pass(
         is being timed.
         """
         nonlocal final_result, abort_envelope
-        step_metadata = await agent.resolve_analysis_source_metadata(
-            metadata, permit_evolved_binding=True, require_cluster_key=False,
-        )
+        step_metadata = metadata
+        if not report_only:
+            step_metadata = await agent.resolve_analysis_source_metadata(
+                metadata, permit_evolved_binding=True, require_cluster_key=False,
+            )
         if not step_metadata.get("var"):
             abort_envelope = envelope(
                 "partial" if produced else "failed",
@@ -174,9 +178,17 @@ async def _execute_supplementary_pass(
                 warnings.append(warning)
         prompt = agent._build_supplementary_executor_prompt(
             clean_tasks, context_summary, direction, step_metadata,
-            "\n\n".join(transcript[-3:]),
+            "\n\n".join(transcript if report_only else transcript[-3:]),
             registered_data_files=registered_data_files,
         )
+        if report_only:
+            prompt += (
+                "\n\n## Final reporting turn\n"
+                "The code-execution budget is exhausted. Do not return code or "
+                "request another computation. Reply with done=true and a result "
+                "summarizing only the recorded execution outputs above. Cite "
+                "their execution_ids and disclose any unfinished tasks."
+            )
         parsed = agent._safe_parse_json(
             await agent.chat(prompt, temperature=0.2),
             default={},
@@ -187,6 +199,9 @@ async def _execute_supplementary_pass(
         if parsed.get("done"):
             final_result = parsed.get("result") or {}
             return "done"
+        if report_only:
+            warnings.append("The final reporting turn did not return done=true; no code was executed.")
+            return "continue"
 
         code = parsed.get("code", "")
         if not code or not isinstance(code, str):
@@ -279,10 +294,13 @@ async def _execute_supplementary_pass(
 
         return "continue"
 
-    deadline = time.monotonic() + total_timeout
+    execution_deadline = time.monotonic() + total_timeout - reporting_timeout
+    exhausted_budget = "max_iterations reached"
     for _ in range(max_iterations):
-        if time.monotonic() >= deadline:
-            return envelope("partial", "Supplementary pass reached its total budget.", ["timeout"])
+        if time.monotonic() >= execution_deadline:
+            exhausted_budget = "timeout"
+            warnings.append("Supplementary execution reached its time budget; reporting recorded results.")
+            break
         # Admit a step with its full budget; the aggregate budget controls whether
         # another step starts, never truncates an in-flight LLM request.
         try:
@@ -312,10 +330,23 @@ async def _execute_supplementary_pass(
                 "failed", "Supplementary pass aborted.", ["aborted"])
 
     if final_result is None:
+        # Computation keeps its original iteration ceiling. One additional
+        # reporting-only request lets the last successful cell be summarized.
+        try:
+            await asyncio.wait_for(_one_step(report_only=True), timeout=reporting_timeout)
+        except (WorkflowTerminatedError, WorkflowSupersededError):
+            raise
+        except Exception as exc:
+            warnings.append(
+                "Final supplementary reporting failed; execution receipts were retained: "
+                + compact_traceback(str(exc), max_chars=1000)
+            )
+
+    if final_result is None:
         # Ending on the iteration limit does not mean nothing was computed.
         # The Host records the cells that actually ran; it does not keep a
         # signature gate deciding whether the live object changed.
-        orphan_warnings = ["max_iterations reached"]
+        orphan_warnings = [exhausted_budget]
         if produced:
             orphan_warnings.append(
                 "Produced by execution_id(s): "
@@ -323,7 +354,7 @@ async def _execute_supplementary_pass(
             )
         return envelope(
             "partial",
-            "Supplementary pass reached its iteration limit before reporting a result.",
+            "Supplementary pass reached its execution budget before reporting a result.",
             orphan_warnings,
         )
 
@@ -363,7 +394,7 @@ async def run_supplementary_tasks(
     tasks: List[str],
     context_summary: str,
     direction: str,
-    max_iterations: int = 5,
+    max_iterations: int = 20,
     timeout_seconds: int = 5520,
     total_timeout_seconds: Optional[int] = None,
     source_context: Optional[Dict[str, Any]] = None,
@@ -374,14 +405,17 @@ async def run_supplementary_tasks(
     consultation. Publication deliverables are routed back to the main executor,
     because only that path can register, review and contract-check them. Any
     incidental inline render is discarded rather than entering report state.
-    Never raises — every failure path returns a status.
+    Execution failures return a status; workflow-control exceptions propagate.
 
     Two independent budgets, because one shared ceiling cannot serve both:
     `timeout_seconds` bounds ONE step (its code generation, its execution and
     result capture), so a heavy analysis — GRN inference, deconvolution
     training — gets its full allowance instead of inheriting whatever the
-    earlier steps left over; `total_timeout_seconds` (default: the sum of the
-    per-step budgets) only backstops a pass that never converges. A step that
+    earlier steps left over; `total_timeout_seconds` defaults to the actual
+    execution allowance plus a final reporting request. The execution allowance
+    is twice the task count, capped by `max_iterations` and a hard limit of 20.
+    Reporting time is reserved before admitting another execution step; started
+    steps retain their full timeout. A step that
     overruns interrupts the kernel and is reported back to the executor, which
     then picks a cheaper route or stops — it does not abandon the pass.
 
@@ -394,16 +428,17 @@ async def run_supplementary_tasks(
         if state is not None and hasattr(agent, "_render_registered_data_files")
         else ""
     )
-    max_iterations = max(1, min(int(max_iterations), 8))
+    clean_tasks = [str(t).strip()[:600] for t in (tasks or []) if str(t).strip()]
+    max_iterations = max(1, min(int(max_iterations), 2 * len(clean_tasks), 20))
     from backend.utils.llm_client_parts.retry import llm_timeout_seconds
     step_timeout = llm_timeout_seconds(timeout_seconds)
+    reporting_timeout = llm_timeout_seconds()
     total_timeout = int(total_timeout_seconds or 0)
     if total_timeout <= 0:
-        total_timeout = step_timeout * max_iterations
-    # A total below one step's budget would re-create the problem this split
-    # exists to fix: the pass ceiling cutting off a single legitimate analysis.
-    total_timeout = max(total_timeout, step_timeout)
-    clean_tasks = [str(t).strip()[:600] for t in (tasks or []) if str(t).strip()]
+        total_timeout = step_timeout * max_iterations + reporting_timeout
+    # Preserve one full execution step and a reporting request even when an
+    # explicit total is smaller than those two allowances.
+    total_timeout = max(total_timeout, step_timeout + reporting_timeout)
 
     # Accumulated in the enclosing scope so the timeout and exception handlers
     # can still hand back what ran. A supplementary execution IS evidence the
@@ -431,8 +466,8 @@ async def run_supplementary_tasks(
         # These are bounded observations of the cells this pass actually
         # returned.  They deliberately carry no scientific interpretation;
         # the PI uses the output/error context to decide whether a requested
-        # gap was addressed.  The loop is capped at eight iterations, which
-        # is below the existing review-list bound.
+        # gap was addressed. The evidence transport retains all twenty possible
+        # execution receipts, including failed attempts.
         evidence_records = [
             {
                 "execution_id": str(record.id)[:100],
@@ -507,6 +542,7 @@ async def run_supplementary_tasks(
                 max_iterations=max_iterations,
                 step_timeout=step_timeout,
                 total_timeout=total_timeout,
+                reporting_timeout=reporting_timeout,
                 produced=produced,
                 analysis_log=analysis_log,
                 warnings=warnings,
@@ -522,6 +558,8 @@ async def run_supplementary_tasks(
         # on ours, so this ceiling has to do it itself.
         agent._interrupt_kernel_after_timeout()
         return _envelope("partial", "Supplementary executor timed out.", ["timeout"])
+    except (WorkflowTerminatedError, WorkflowSupersededError):
+        raise
     except Exception as e:
         compact_error = compact_traceback(str(e), max_chars=3000)
         logger.error(

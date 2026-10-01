@@ -98,4 +98,36 @@ async def test_every_followup_revision_and_retry_is_revalidated_before_render():
     assert outcome == "break"
     assert attempt.terminal_revision_reason == "revision_failed"
     assert agent._revise_figure_code.await_count == 2
+    assert all(call.kwargs["figure_followup"] is True
+               for call in agent._revise_figure_code.await_args_list)
     agent.sandbox.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_image", [False, True])
+async def test_followup_revision_prompt_includes_runtime_boundary(monkeypatch, tmp_path, with_image):
+    from backend.agents.bioinformatics_agent import BioinformaticsAgent
+    from backend.agents.bioinformatics import figure_context
+    from backend.tests.test_bioinfo_context_scopes import _bare_agent
+
+    agent = _bare_agent(monkeypatch, tmp_path)
+    client = MagicMock()
+    client.chat_with_vision = AsyncMock(return_value=SimpleNamespace(content="ax.plot(values)"))
+    monkeypatch.setattr(BioinformaticsAgent, "llm_client", property(lambda self: client))
+    monkeypatch.setattr(BioinformaticsAgent, "has_vision", property(lambda self: True))
+    monkeypatch.setattr(figure_context, "figure_input_context", AsyncMock(return_value="values exist"))
+    agent._call_figure_revision_llm = lambda call: call()
+    agent._budgeted_text_call = AsyncMock(return_value=SimpleNamespace(content="ax.plot(values)"))
+
+    code = await agent._revise_figure_code(
+        "ax.plot(values)", "Improve labels", [], [], "line",
+        AnalysisState(user_id="figure-capability"), "image" if with_image else None,
+        figure_followup=True,
+    )
+
+    call = client.chat_with_vision.await_args if with_image else agent._budgeted_text_call.await_args
+    prompt = call.kwargs["text_prompt"] if with_image else call.kwargs["messages"][0]["content"]
+    assert "Do not assign into, delete from, or mutate a pre-existing AnnData" in prompt
+    assert "Do not call savefig, save, show, or close" in prompt
+    assert "Do not load files" in prompt
+    assert code == "ax.plot(values)"
