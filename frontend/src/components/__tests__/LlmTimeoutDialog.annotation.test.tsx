@@ -41,4 +41,19 @@ describe('Annotation failure intervention', () => {
     expect(screen.getByRole('button', { name: 'Modify Agent Settings' })).toBeTruthy()
     expect(screen.getByText('test-server')).toBeTruthy()
   })
+
+  it.each(['en', 'zh'] as const)('classifies invalid model output in %s', (language) => {
+    const input = props(language, 'parse_error')
+    input.llmFailureInfo.error = 'No complete JSON plan'
+    render(<LlmTimeoutDialog {...input} />)
+    const title = language === 'en' ? 'Invalid Model Output' : '模型输出格式错误'
+    expect(screen.getByRole('dialog', { name: title })).toBeTruthy()
+    expect(screen.getByText(language === 'en'
+      ? 'After closing, click the "Invalid Model Output" badge to reopen'
+      : '关闭后，可点击“模型输出格式错误”标签重新打开')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Modify Agent|修改 Agent/ })).toBeTruthy()
+    expect(screen.getByText('test-model')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /Error Details|错误详情/ }))
+    expect(screen.getByRole('log').textContent).toBe('No complete JSON plan')
+  })
 })

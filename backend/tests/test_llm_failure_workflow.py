@@ -175,6 +175,34 @@ async def test_annotation_failure_requires_action_without_upstream_recovery(monk
 
 
 @pytest.mark.asyncio
+async def test_parse_failure_keeps_bounded_retry_without_upstream_classification(monkeypatch, caplog):
+    slept = _no_backoff(monkeypatch)
+    wf = _gate_self()
+    plan = AnalysisPlan(id="plan", phase="exploration", status="approved")
+    state = AnalysisState(user_id="u", current_plan=plan)
+    failures = []
+
+    async def record_sync(state, change_type):
+        if change_type == StateSyncChangeType.LLM_FAILURE.value:
+            failures.append(dict(state.llm_failure_info))
+
+    wf._send_state_sync = AsyncMock(side_effect=record_sync)
+    error = UpstreamExhaustedError(
+        "No complete JSON plan", agent_name="bioinformatics", failure_kind="parse_error",
+    )
+
+    assert await wf._wait_for_llm_intervention(error, "planning_dialogue", state) == LlmFailureAction.RETRY
+    assert failures[0]["failure_kind"] == "parse_error"
+    assert failures[0]["error"] == str(error)
+    assert "LLM output validation failed" in caplog.text
+    assert "upstream exhausted" not in caplog.text
+    assert "LLM output validation failed" in wf._send_message.await_args.args[1]
+    assert slept == [0]
+    wf._settings_provider.clear_client_cache.assert_not_called()
+    assert state.current_plan is plan
+
+
+@pytest.mark.asyncio
 async def test_non_recoverable_failure_waits_without_retrying(monkeypatch):
     from backend.utils.llm_client import AuthenticationError
 

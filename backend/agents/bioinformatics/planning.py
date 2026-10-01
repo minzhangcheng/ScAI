@@ -42,6 +42,7 @@ from ...utils.formatting import (
     coerce_json_text,
     format_revision_history,
     render_plan_steps,
+    safe_parse_json,
     truncate_for_llm,
 )
 from ...utils.mechanism_policy import MECHANISM_EVIDENCE_POLICY
@@ -182,6 +183,10 @@ from .shared import (  # noqa: F401
 )
 
 
+class _HostPlanDiagnostic(str):
+    """Host error provenance that survives dict copies and cannot come from JSON."""
+
+
 class PlanGenerationFailure(RuntimeError):
     """Bounded, typed signal that a planner failed plan validation."""
 
@@ -266,14 +271,24 @@ class PlanningMixin:
                 if not stack or stack.pop() != {"}": "{", "]": "["}[char]:
                     break
                 if not stack:
-                    parsed = self._safe_parse_json(response[start:index + 1], default={})
-                    if isinstance(parsed, dict):
-                        parsed.pop("_incomplete_plan_json", None)
+                    # BaseAgent's wrapper also returns a parse_error dict on
+                    # failure, which is indistinguishable from model JSON here.
+                    parsed = safe_parse_json(response[start:index + 1], default=None)
+                    if not isinstance(parsed, dict):
+                        return {
+                            "steps": [],
+                            "parse_error": _HostPlanDiagnostic(
+                                "Failed to extract valid JSON from response"
+                            ),
+                        }
+                    parsed.pop("_incomplete_plan_json", None)
                     return parsed
         return {
             "steps": [],
             "_incomplete_plan_json": start >= 0,
-            "parse_error": "Incomplete or invalid plan JSON: missing a closed JSON object",
+            "parse_error": _HostPlanDiagnostic(
+                "Incomplete or invalid plan JSON: missing a closed JSON object"
+            ),
         }
 
     async def _call_planning_llm(self, prompt: str, *, temperature: float) -> str:
@@ -348,32 +363,34 @@ in key_decision_points for PI review.
         """
         from ...models.schemas import PlanStep
 
-        plan_data = _normalize_plan_boundary(plan_data)
-        if not isinstance(plan_data, dict):
-            return {
-                "steps": [],
-                "parse_error": "Invalid plan schema: response must be a JSON object",
-            }
-        if plan_data.get("_incomplete_plan_json") is True:
-            # The response parser removes this marker from model JSON. Keep
-            # this host diagnosis distinct from a model-supplied parse_error.
-            return {**plan_data, "steps": []}
-        if "parse_error" in plan_data:
+        # Check the raw payload before normalization can add its own diagnosis.
+        # JSON cannot manufacture the internal string subtype, including when
+        # it supplies the legacy _incomplete_plan_json marker itself.
+        if isinstance(plan_data, dict) and "parse_error" in plan_data:
+            detail = plan_data["parse_error"]
+            if not isinstance(detail, _HostPlanDiagnostic):
+                detail = _HostPlanDiagnostic(
+                    "Invalid plan schema: parse_error is reserved for host parsing; "
+                    f"model signal: {detail}"
+                )
             return {
                 **plan_data,
                 "steps": [],
-                "parse_error": (
-                    "Invalid plan schema: parse_error is reserved for host parsing; "
-                    f"model signal: {plan_data.get('parse_error')}"
-                ),
+                "parse_error": detail,
             }
+
+        plan_data = _normalize_plan_boundary(plan_data)
+        if "parse_error" in plan_data:
+            return {**plan_data, "parse_error": _HostPlanDiagnostic(plan_data["parse_error"])}
 
         raw_steps = plan_data.get("steps")
         if not isinstance(raw_steps, list) or not raw_steps:
             return {
                 **plan_data,
                 "steps": [],
-                "parse_error": "Invalid plan schema: steps must be a non-empty JSON array",
+                "parse_error": _HostPlanDiagnostic(
+                    "Invalid plan schema: steps must be a non-empty JSON array"
+                ),
             }
 
         reserved = set(reserved_step_ids or set())
@@ -477,7 +494,7 @@ in key_decision_points for PI review.
             return {
                 **plan_data,
                 "steps": [],
-                "parse_error": f"Invalid plan schema: {exc}",
+                "parse_error": _HostPlanDiagnostic(f"Invalid plan schema: {exc}"),
             }
 
     async def _retry_on_parse_failure(

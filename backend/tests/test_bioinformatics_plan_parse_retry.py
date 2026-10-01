@@ -77,10 +77,19 @@ async def test_truncated_revision_and_retry_preserve_complete_previous_plan():
 
 
 @pytest.mark.asyncio
-async def test_twice_malformed_plan_raises_typed_failure_not_empty_plan(caplog):
+@pytest.mark.parametrize("response, detail", [
+    ("I'll inspect the data before revising the plan.", "missing a closed JSON object"),
+    ('{"steps": [???]}', "Failed to extract valid JSON"),
+    ('{"steps": null}', "steps must be a JSON array"),
+    ('{"parse_error": "model error", "_incomplete_plan_json": true}', "model signal: model error"),
+])
+async def test_twice_malformed_plan_raises_typed_failure_not_empty_plan(caplog, monkeypatch, response, detail):
+    from backend.utils import formatting
+
+    monkeypatch.setattr(formatting, "_JSON_REPAIR_AVAILABLE", False)
     agent = _make_agent()
     state = _make_state()
-    agent.chat_without_history = AsyncMock(side_effect=["not json", "also not json"])
+    agent.chat_without_history = AsyncMock(return_value=response)
 
     with pytest.raises(Exception) as exc_info:
         await agent.generate_analysis_plan(
@@ -93,6 +102,21 @@ async def test_twice_malformed_plan_raises_typed_failure_not_empty_plan(caplog):
     assert agent.chat_without_history.call_count == 2
     assert type(exc_info.value).__name__ == "PlanGenerationFailure"
     assert "retry also failed" in caplog.text
+    assert detail in str(exc_info.value)
+    assert detail in agent.chat_without_history.call_args.args[0]
+    if "model signal" not in detail:
+        assert "model signal" not in str(exc_info.value)
+        assert "model signal" not in agent.chat_without_history.call_args.args[0]
+
+
+def test_host_plan_diagnosis_survives_repeated_normalization():
+    agent = _make_agent()
+    parsed = agent._parse_plan_response("I'll inspect the data first.")
+    prepared = agent._prepare_plan_data(parsed)
+
+    assert agent._prepare_plan_data(prepared) == prepared
+    assert "model signal" not in prepared["parse_error"]
+    assert json.loads(json.dumps(prepared))["parse_error"] == str(prepared["parse_error"])
 
 
 @pytest.mark.asyncio

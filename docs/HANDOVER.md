@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.12 · **Last updated**: 2026-10-01
+**Version**: 0.63.13 · **Last updated**: 2026-10-01
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,18 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.13` — Corrects planner JSON/schema failure attribution. Host-generated
+  diagnostics remain distinct from model-supplied `parse_error` fields through
+  parsing and normalization, including prose-only responses and closed but
+  invalid JSON. Workflow logs, English/Chinese dialogs, and analysis badges
+  identify `parse_error` as invalid model output rather than upstream exhaustion.
+  Retrying a format failure no longer clears the LLM client cache; existing
+  bounded retries, complete-plan preservation, and Retry/Skip/Terminate actions
+  remain unchanged. Focused parser, PI finalization, planning-dialogue, and
+  intervention regressions passed `45/45`; the isolated frontend suite passed
+  `212/212`. The existing test-code size ceiling remains exceeded at `30.79%`.
+  No image build, deployment, or historical-session repair was performed.
 
 - `0.63.12` — Fixes supplementary execution budgets and figure-follow-up request
   context. The supplementary executor allows twice the approved task count,

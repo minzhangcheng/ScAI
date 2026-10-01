@@ -208,8 +208,14 @@ async def _wait_for_llm_intervention(
         LlmFailureAction.TERMINATE — user clicked Terminate (caller should abort)
     """
     annotation_failure = error.failure_kind == "annotation_tool_failure"
-    log_label = "annotation tool failed" if annotation_failure else "LLM upstream exhausted"
-    message_label = "annotation tool failed" if annotation_failure else "LLM call failed"
+    parse_failure = error.failure_kind == "parse_error"
+    if annotation_failure:
+        log_label = message_label = "annotation tool failed"
+    elif parse_failure:
+        log_label = message_label = "LLM output validation failed"
+    else:
+        log_label = "LLM upstream exhausted"
+        message_label = "LLM call failed"
     logger.error(
         f"[{self.session_id}] Node {node_name} {log_label}: "
         f"agent={error.agent_name} model={error.model} server={error.llm_server}"
@@ -232,7 +238,7 @@ async def _wait_for_llm_intervention(
         },
         enter_change=StateSyncChangeType.LLM_FAILURE.value,
         exit_change=StateSyncChangeType.LLM_RETRY.value,
-        clear_cache_on_retry=not annotation_failure,
+        clear_cache_on_retry=not (annotation_failure or parse_failure),
         wait_seconds=wait_seconds,
         auto_retry=auto_retry and not annotation_failure and not _is_non_recoverable_llm_failure(error),
         require_explicit_resolution=require_explicit_resolution,

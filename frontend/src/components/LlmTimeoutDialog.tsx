@@ -83,6 +83,7 @@ export default function LlmTimeoutDialog({
   const isMarkerDb = llmFailureInfo.reason === 'marker_db_missing'
   const isAgentDisabled = llmFailureInfo.reason === 'agent_disabled'
   const isAnnotationFailure = llmFailureInfo.failureKind === 'annotation_tool_failure'
+  const isParseFailure = llmFailureInfo.failureKind === 'parse_error'
 
   const title = isMarkerDb
     ? t('markerDbMissingTitle')
@@ -90,7 +91,9 @@ export default function LlmTimeoutDialog({
       ? t('agentDisabledTitle')
       : isAnnotationFailure
         ? t('annotationToolFailed')
-        : t('llmCallFailed')
+        : isParseFailure
+          ? t('llmOutputInvalid')
+          : t('llmCallFailed')
 
   const description = isMarkerDb ? t('markerDbMissingDesc') : null
 
@@ -161,6 +164,9 @@ export default function LlmTimeoutDialog({
         {!isMarkerDb && (<div className="px-6 py-4 space-y-3">
           {isAnnotationFailure && (
             <p className="text-sm text-gray-600">{t('annotationToolFailureDesc')}</p>
+          )}
+          {isParseFailure && (
+            <p className="text-sm text-gray-600">{t('llmOutputInvalidDesc')}</p>
           )}
           <div className="flex justify-between text-sm">
             <span className="text-gray-500">{t('llmAgent')}</span>
@@ -307,7 +313,8 @@ export default function LlmTimeoutDialog({
         </div>
 
         <div className="px-6 pb-4 text-center text-xs text-gray-400">
-          {t(isAnnotationFailure ? 'annotationReopenHint' : 'llmReopenHint')}
+          {t(isAnnotationFailure ? 'annotationReopenHint'
+            : isParseFailure ? 'llmOutputInvalidReopenHint' : 'llmReopenHint')}
         </div>
       </div>
     </div>

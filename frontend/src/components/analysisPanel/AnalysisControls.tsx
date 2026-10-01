@@ -23,7 +23,9 @@ export function AnalysisControls({ controller }: AnalysisControlsProps) {
   } = controller
   if (!currentSession) return null
   const failureBadgeKey = llmFailureInfo?.failureKind === 'annotation_tool_failure'
-    ? 'annotationToolFailed' : 'llmCallFailedBadge'
+    ? 'annotationToolFailed'
+    : llmFailureInfo?.failureKind === 'parse_error'
+      ? 'llmOutputInvalid' : 'llmCallFailedBadge'
   const isPaused = currentSession.status === 'paused'
   const isWaitingInput = currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation' || currentSession.status === 'waiting_plan_review' || currentSession.status === 'waiting_species_input'
   const isRunning = currentSession.status === 'running'

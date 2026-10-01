@@ -251,6 +251,9 @@ export const zh = {
     // LLM failure dialog
     llmCallFailed: 'LLM 调用失败',
     llmCallFailedBadge: 'LLM调用失败',
+    llmOutputInvalid: '模型输出格式错误',
+    llmOutputInvalidDesc: '模型返回的内容无法解析或未通过结构校验。请查看下方错误，再重试或调整 Agent 设置。',
+    llmOutputInvalidReopenHint: '关闭后，可点击“模型输出格式错误”标签重新打开',
     annotationToolFailed: '细胞类型注释失败',
     annotationToolFailureDesc: '请查看下方工具错误。重试会继续处理注释错误；跳过会向 PI 披露注释缺失，并继续剩余任务。',
     annotationRetryHint: '继续处理注释错误',

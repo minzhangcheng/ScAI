@@ -251,6 +251,9 @@ export const en = {
     // LLM failure dialog
     llmCallFailed: 'LLM Call Failed',
     llmCallFailedBadge: 'LLM Call Failed',
+    llmOutputInvalid: 'Invalid Model Output',
+    llmOutputInvalidDesc: 'The model returned output that could not be parsed or validated. Review the error below, then retry or adjust the agent settings.',
+    llmOutputInvalidReopenHint: 'After closing, click the "Invalid Model Output" badge to reopen',
     annotationToolFailed: 'Cell-type annotation failed',
     annotationToolFailureDesc: 'Review the tool error below. Retry continues annotation recovery; Skip discloses the annotation gap to the PI and continues the remaining tasks.',
     annotationRetryHint: 'Continue annotation recovery',
