@@ -643,7 +643,7 @@ class SystemConfig(BaseModel):
         default=20,
         ge=1,
         le=20,
-        description="Execution ceiling for the supplementary executor. The actual allowance is twice the approved task count, capped by this setting and a hard limit of 20. One final reporting-only request is reserved separately.",
+        description="Execution ceiling for the supplementary executor, reloaded from the code default on backend startup rather than persisted global settings. The actual allowance is twice the approved task count, capped by this setting and a hard limit of 20. One final reporting-only request is reserved separately.",
     )
     post_execution_review_timeout_seconds: int = Field(
         default=0,

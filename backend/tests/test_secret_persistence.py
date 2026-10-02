@@ -14,6 +14,7 @@ from backend.services import session_store
 from backend.utils.secret_redaction import (
     SEALED_SECRET_PREFIX,
     open_system_config_payload,
+    seal_system_config_payload,
 )
 from backend.utils.db import AppDB
 
@@ -242,6 +243,33 @@ async def test_agent_default_secret_updates_for_one_user_do_not_overwrite_each_o
         "pi": "pi-secret",
         "bioinformatics": "bio-secret",
     }
+
+
+def test_global_config_reloads_supplementary_budget_from_current_default():
+    from backend.config import SystemConfig
+
+    legacy_payload = SystemConfig(
+        api={"api_key": RAW_KEY, "llm_base_url": "https://global.test/v1"},
+        bioinfo_max_steps=120,
+        post_execution_review_max_tasks=3,
+        post_execution_review_max_iterations=5,
+    ).model_dump(mode="json")
+
+    restored = SystemConfig.model_validate(open_system_config_payload(legacy_payload))
+    assert restored.post_execution_review_max_iterations == 20
+    assert restored.bioinfo_max_steps == 120
+    assert restored.post_execution_review_max_tasks == 3
+    assert restored.api.api_key == RAW_KEY
+    assert restored.api.llm_base_url == "https://global.test/v1"
+    assert legacy_payload["post_execution_review_max_iterations"] == 5
+
+    persisted = seal_system_config_payload(restored.model_dump(mode="json"))
+    assert "post_execution_review_max_iterations" not in persisted
+    assert persisted["api"]["api_key"].startswith(SEALED_SECRET_PREFIX)
+    assert RAW_KEY not in json.dumps(persisted)
+    assert SystemConfig.model_validate(
+        open_system_config_payload(persisted)
+    ) == restored
 
 
 @pytest.mark.asyncio

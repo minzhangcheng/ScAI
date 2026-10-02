@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.14 · **Last updated**: 2026-10-01
+**Version**: 0.63.15 · **Last updated**: 2026-10-02
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,21 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.15` — Prevents a stale persisted global configuration from overriding
+  the updated supplementary-execution ceiling on backend startup. Since
+  `0.63.12` raised the code default of `post_execution_review_max_iterations`
+  from five to twenty, an existing `app_meta` record could still carry the old
+  value and force the executor back to five. The field is now deployment-owned:
+  both sealing and opening the persisted global config drop it, so the current
+  code default of twenty applies after a restart while API credentials, base URL,
+  `bioinfo_max_steps`, and `post_execution_review_max_tasks` continue to load from
+  the stored configuration. The model field description records this behavior.
+  A regression test covers a legacy payload stored at five, its restoration to
+  twenty, encrypted key sealing, and an omission-preserving save/load round trip.
+  Focused persistence and version-consistency checks passed `17/17` at
+  `test-results/20261002T024543Z-1622/evidence.json`; no image build, deployment,
+  or historical-session repair was performed.
 
 - `0.63.14` — Updates the English and Chinese user guides with screenshots and
   instructions for Chat follow-up requests, decision-snapshot restoration and

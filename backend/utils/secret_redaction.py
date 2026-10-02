@@ -155,9 +155,10 @@ ENDPOINT_FIELD_NAMES = frozenset({
 })
 
 # These fields are owned by the deployment process. Persisting them in app_meta
-# would override the current operator environment on a later backend startup.
+# would override the current code defaults or operator environment on startup.
 DEPLOYMENT_ONLY_SYSTEM_CONFIG_FIELDS = frozenset({
     "enable_method_decision_guidance",
+    "post_execution_review_max_iterations",
     "runtime_max_namespace_count",
     "runtime_max_single_object_bytes",
     "runtime_max_anndata_total_bytes",
