@@ -1,12 +1,15 @@
 """PI Chat corrections share a budget and preserve every executed attempt."""
 
 import asyncio
+import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.models.schemas import AnalysisState
+from backend.agents.pi.figures import FiguresMixin
+from backend.models.schemas import AnalysisState, PublicationFigure
+from backend.routes.chat_parts import delegation, reviews
 from backend.routes.chat_parts.delegation import _build_execution_context, _build_synthesis_prompt
 from backend.routes.chat_parts.reviews import ChatReviewCallbacks, run_reviewed_analysis
 
@@ -41,6 +44,146 @@ def chat_run():
         )
 
     return state, pi, agent, saved, run
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("figure_reviewer", ["pi", "bioinformatics", "supervisor"])
+async def test_intermediate_pi_consultations_retain_user_scope_during_corrections(
+    monkeypatch, tmp_path, figure_reviewer,
+):
+    state = AnalysisState(id="chat-scope", user_id="owner", initial_instruction="Investigate disease mechanisms")
+    instruction = (
+        "Update the requested visualization.\n\n"
+        "Original user request (scope for final review):\n"
+        "Produce one marker dotplot using existing groups; do not recluster."
+    )
+    class FigureReviewer(FiguresMixin, SimpleNamespace):
+        pass
+
+    def reviewer(**kwargs):
+        return FigureReviewer(
+            session_id=state.id, has_vision=True, model="model", system_prompt="Review evidence",
+            llm_client=SimpleNamespace(base_url=""), _set_llm_context=lambda: None,
+            _safe_parse_json=lambda text, default=None: json.loads(text), **kwargs,
+        )
+
+    pi = reviewer(
+        set_session=lambda _: None,
+        chat_without_history=AsyncMock(return_value="Explain uncertainty in the figure legend."),
+        review_chat_execution=AsyncMock(side_effect=[
+            {"decision": "revise", "revision_instruction": "Improve labels"},
+            {"decision": "accept"},
+        ]),
+    )
+    sandbox = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), km=None)
+    provider = SimpleNamespace(
+        get_model=lambda _: "model", cleanup=AsyncMock(),
+        get_vision_setting=lambda name: name == figure_reviewer,
+    )
+    client = SimpleNamespace(close=AsyncMock())
+    send = AsyncMock()
+    consultations = []
+    answers = []
+    executions = []
+    figure = PublicationFigure(
+        name="marker_dotplot", figure_type="dotplot", description="Markers across existing groups",
+        png_path="dotplot.png", pdf_path="dotplot.pdf", png_base64="image",
+    )
+    vision = AsyncMock(return_value=SimpleNamespace(content=json.dumps({
+        "approved": False, "quality_score": 2, "feedback": "Marker evidence is insufficient",
+        "must_fix": ["Disclose the unsupported label"], "requires_reanalysis": True,
+    })))
+    monkeypatch.setattr("backend.agents.pi.figures.replay_safe_vision_call", vision)
+    monkeypatch.setattr("backend.workflow.callbacks.replay_safe_vision_call", vision)
+
+    async def consult(callback, question, context):
+        consultations.append((question, context))
+        answers.append(await callback(question, context))
+
+    def make_supervisor(**kwargs):
+        async def evaluate(step, figures):
+            await consult(kwargs["pi_callback"], "Review this checkpoint", "Broader atlas concerns")
+            return reviews.SupervisorEvalResult()
+
+        return reviewer(
+            set_sandbox=lambda _: None, evaluate_step=evaluate, supervision_log=[],
+            _compress_base64_figure=lambda image: image,
+        )
+
+    def make_bio_agent(**kwargs):
+        async def run(state, task, **run_kwargs):
+            cycle = len(executions)
+            executions.append(task)
+            await consult(kwargs["pi_callback"], "Resolve marker ambiguity", f"Execution cycle {cycle}")
+            await kwargs["supervisor_callback"](SimpleNamespace(id=f"step-{cycle}"), [])
+            figure.revision_count = cycle
+            verdict = await kwargs["figure_review_callback"](figure)
+            assert verdict["approved"] is False
+            assert verdict["feedback"] == "Marker evidence is insufficient"
+            if figure_reviewer != "supervisor":
+                assert verdict["requires_reanalysis"] is True
+            return _execution(cycle, 2)
+
+        return reviewer(set_session=lambda _: None, run_autonomous_analysis=run)
+
+    monkeypatch.setattr(delegation, "resolve_config_for_user", AsyncMock(return_value=SimpleNamespace(api=None)))
+    monkeypatch.setattr(delegation, "AgentSettingsProvider", lambda *args, **kwargs: provider)
+    monkeypatch.setattr(delegation, "get_session_states", lambda _: tmp_path / "states")
+    monkeypatch.setattr(delegation, "get_session_workspace", lambda _: tmp_path)
+    monkeypatch.setattr(delegation, "_persist_chat_terminal", AsyncMock(return_value=True))
+    monkeypatch.setattr(delegation, "_collect_session_figures", lambda *args, **kwargs: [])
+    monkeypatch.setattr("backend.utils.sandbox.LocalJupyterSandbox", lambda **kwargs: sandbox)
+    monkeypatch.setattr("backend.utils.agent_llm.get_agent_llm_client", lambda *args: client)
+    monkeypatch.setattr("backend.agents.literature_agent.LiteratureAgent", MagicMock())
+    monkeypatch.setattr("backend.agents.pi_agent.PIAgent", lambda **kwargs: pi)
+    monkeypatch.setattr("backend.agents.bioinformatics_agent.BioinformaticsAgent", make_bio_agent)
+    monkeypatch.setattr(reviews, "SupervisorAgent", make_supervisor)
+    monkeypatch.setattr("backend.routes.chat_parts.source_selection.select_chat_source", AsyncMock(return_value=None))
+
+    result, _ = await delegation._execute_chat_agent_inner(
+        state.id, state, "bioinformatics", instruction, client, send, [],
+    )
+
+    assert len(executions) == 2 and "Improve labels" in executions[1]
+    assert len(consultations) == pi.chat_without_history.await_count == 4
+    for call, (question, context) in zip(pi.chat_without_history.await_args_list, consultations):
+        prompt = call.args[0]
+        assert instruction in prompt
+        assert question in prompt and context in prompt
+        assert "requested scope takes precedence" in prompt
+        assert "separate follow-up" in prompt
+    assert answers == [pi.chat_without_history.return_value] * 4
+    responses = [call.args[0].content for call in send.await_args_list
+                 if call.args[0].type == "pi_response"]
+    assert responses == answers
+    assert result["chat_review"]["status"] == "accept"
+    assert state.id not in delegation.chat_sandboxes
+    assert vision.await_count == 2
+    for call in vision.await_args_list:
+        prompt = call.kwargs["text_prompt"]
+        assert instruction in prompt
+        assert "separate follow-up" in prompt
+        assert "do not justify approving an invalid figure" in prompt
+        assert call.kwargs["images"] == ["image"]
+    assert state.initial_instruction == "Investigate disease mechanisms"
+
+
+@pytest.mark.asyncio
+async def test_workflow_figure_review_without_chat_scope_keeps_existing_call():
+    state = AnalysisState(id="workflow-review", user_id="owner")
+    figure = PublicationFigure(
+        name="plot", figure_type="dotplot", png_path="plot.png", pdf_path="plot.pdf",
+        png_base64="image", description="Workflow figure",
+    )
+    pi = SimpleNamespace(review_figure=AsyncMock(return_value={"approved": True}))
+    workflow = SimpleNamespace(
+        session_id=state.id, _current_analysis_state=state, pi_agent=pi,
+        supervisor_agent=None, ensure_agent_ready=lambda _: False,
+        _vision_settings={"pi": True}, _send_message=AsyncMock(),
+    )
+    result = await reviews.CallbacksMixin._figure_review_callback(workflow, figure)
+    assert result == {"approved": True}
+    pi.review_figure.assert_awaited_once_with(state, figure, "image")
 
 
 @pytest.mark.asyncio

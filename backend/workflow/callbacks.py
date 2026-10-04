@@ -460,10 +460,12 @@ QUESTION: {question}"""
         state = self._current_analysis_state
 
         try:
+            review_context = getattr(self, "_figure_review_context", "")
             return await self.pi_agent.review_figure(
                 state,
                 figure,
-                figure.png_base64
+                figure.png_base64,
+                **({"review_context": review_context} if review_context else {}),
             )
         except Exception as exc:
             logger.warning(
@@ -500,6 +502,9 @@ QUESTION: {question}"""
         **vision_kwargs,
     ) -> Dict[str, Any]:
         """Shared helper: call an agent's vision API to review a figure and parse the result."""
+        review_context = getattr(self, "_figure_review_context", "")
+        if review_context:
+            prompt += f"\n\n{review_context}"
         try:
             agent._set_llm_context()
             # Shared by every agent's figure review; without a replay each

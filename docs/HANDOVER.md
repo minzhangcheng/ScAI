@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.15 · **Last updated**: 2026-10-02
+**Version**: 0.63.16 · **Last updated**: 2026-10-05
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,16 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.16` — Keeps the original Chat request and deliverable scope attached to
+  intermediate PI consultations and publication-figure reviews. Bioinformatics,
+  Supervisor, PI, and fallback visual reviewers now receive the same Chat scope,
+  so a bounded figure request remains the reference for review and correction;
+  broader scientific concerns are reported as follow-up suggestions without
+  directing extra analysis in the current execution. Existing ordinary workflow
+  figure-review calls remain compatible. Focused Chat review tests passed `12/12`
+  at `test-results/20261004T164338Z-88028/evidence.json`; no image build,
+  deployment, or historical-session repair was performed.
 
 - `0.63.15` — Prevents a stale persisted global configuration from overriding
   the updated supplementary-execution ceiling on backend startup. Since

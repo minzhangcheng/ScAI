@@ -568,8 +568,14 @@ async def _execute_chat_agent_inner(
             await _send_agent_msg("pi_question", f"Question: {question}\nContext: {context}", AgentType.BIOINFORMATICS)
             prompt = (
                 f"The bioinformatics analyst is asking for your guidance:\n\n"
+                f"CURRENT CHAT TASK AND USER SCOPE:\n{instruction}\n\n"
                 f"QUESTION: {question}\n\nCONTEXT: {context}\n\n"
-                f"Please provide clear, actionable guidance."
+                "Provide clear, actionable guidance within this Chat task. "
+                "The original user's requested scope takes precedence over "
+                "intermediate suggestions and broader project goals. If a "
+                "scientific concern requires expanding the task, explain the "
+                "concern and suggest a separate follow-up instead of directing "
+                "additional work in this execution."
             )
             answer = await literature_pi_agent.chat_without_history(prompt)
             await _send_agent_msg("pi_response", answer, AgentType.PI)
@@ -599,7 +605,7 @@ async def _execute_chat_agent_inner(
 
         reviews = ChatReviewCallbacks(
             state, review_provider, literature_pi_agent, _send_agent_msg,
-            pi_callback, sandbox,
+            pi_callback, sandbox, instruction=instruction,
         )
         bio_agent = BioinformaticsAgent(
             settings_provider=provider,

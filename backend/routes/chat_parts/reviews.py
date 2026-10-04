@@ -32,7 +32,7 @@ class ChatReviewCallbacks:
     _bio_self_figure_review = CallbacksMixin._bio_self_figure_review
     _supervisor_figure_review = CallbacksMixin._supervisor_figure_review
 
-    def __init__(self, state, provider, pi_agent, send, pi_callback, sandbox):
+    def __init__(self, state, provider, pi_agent, send, pi_callback, sandbox, *, instruction=""):
         self.session_id = state.id
         self._current_analysis_state = state
         self._provider = provider
@@ -43,6 +43,16 @@ class ChatReviewCallbacks:
         self.observations = []
         self._pi_callback = pi_callback
         self._sandbox = sandbox
+        self._figure_review_context = (
+            f"CURRENT CHAT TASK AND USER SCOPE:\n{instruction}\n\n"
+            "Review this figure within the original user's requested scope, "
+            "which takes precedence over broader project goals and intermediate "
+            "suggestions. Request corrections needed for this deliverable. "
+            "Report scientific problems even when resolving them is outside "
+            "scope; propose that work as a separate follow-up instead of "
+            "directing additional analysis in this execution. Scope restrictions "
+            "do not justify approving an invalid figure."
+        ) if instruction else ""
 
     @property
     def _vision_settings(self):
