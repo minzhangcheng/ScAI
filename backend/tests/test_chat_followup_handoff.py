@@ -79,9 +79,16 @@ async def test_invalid_branch_reference_is_rejected_before_upload_or_message_mut
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent_name", ["literature", "bioinformatics"])
+@pytest.mark.parametrize("agent_name, figure_markers, expected_figures", [
+    ("literature", "", []),
+    ("bioinformatics", "[[FIGURE:reviewed]] [[FIGURE:raw_debug]]", ["reviewed"]),
+    ("bioinformatics", "[[FIGURE:extra]] [[FIGURE:reviewed]] [[FIGURE:extra]]",
+     ["extra", "reviewed"]),
+    ("bioinformatics", "[[FIGURE:raw_debug]]", []),
+    ("bioinformatics", "", ["reviewed", "extra"]),
+])
 async def test_delegation_receives_server_resolved_context_and_keeps_handoff_identity(
-    monkeypatch, agent_name,
+    monkeypatch, agent_name, figure_markers, expected_figures,
 ):
     chat_delegation.delegation_flow.bind_facade(chat_delegation)
     state = AnalysisState(id="chat-followup-delegation", user_id="owner")
@@ -98,6 +105,10 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
     source_context = "EARLY_TRUSTED_DIRECTION_CONTEXT"
     delegate_instructions = []
     ws_events = []
+    produced_figures = [
+        {"name": "reviewed", "path": "/tmp/reviewed.jpg"},
+        {"name": "extra", "path": "/tmp/extra.jpg"},
+    ]
 
     async def fake_execute_agent(
         _session_id, _state, _agent_name, instruction, _client, _callback, _files,
@@ -106,8 +117,8 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         if agent_name == "bioinformatics":
             return {
                 "findings": ["Delegate completed a score."],
-                "chat_review": {"status": "accept"},
-                "figures": [{"name": "reviewed", "path": "/tmp/reviewed.jpg"}],
+                "chat_review": {"id": "reviewed-chat", "status": "accept"},
+                "figures": produced_figures,
                 "analysis_log": [AnalysisStep(
                     step_number=2, step_type="report_findings",
                     findings_summary="Executed panel: GeneA, GeneB.",
@@ -141,7 +152,7 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         async def chat(self, **kwargs):
             self.last_kwargs = kwargs
             return SimpleNamespace(content=(
-                "SYNTHESIS_RESPONSE [[FIGURE:raw_debug]] "
+                f"SYNTHESIS_RESPONSE {figure_markers} "
                 "[[GENERATE_FIGURE:draw another plot]]"
                 if agent_name == "bioinformatics" else "SYNTHESIS_RESPONSE"
             ))
@@ -196,6 +207,12 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
     assert result is not delegation_flow._DELEGATION_STOP
     assert source_context in delegate_instructions[0]
     assert "Original user request" in delegate_instructions[0]
+    assert delegate_instructions[0].startswith(
+        "Original user request (scope for final review):\ncontinue this question\n"
+    )
+    assert delegate_instructions[0].index("continue this question") < (
+        delegate_instructions[0].index("PI delegation details:")
+    )
     assert source_context in client.last_kwargs["messages"][0]["content"]
     if agent_name == "bioinformatics":
         synthesis_input = client.last_kwargs["messages"][0]["content"]
@@ -204,9 +221,12 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         assert "delegated-execution" in synthesis_input
         assert "Input is log-normalized." in synthesis_input
     terminal = state.chat_messages[-1]
+    assert [figure["name"] for figure in terminal.get("figures", [])] == expected_figures
+    assert [figure["name"] for figure in produced_figures] == ["reviewed", "extra"]
     if agent_name == "bioinformatics":
-        assert [figure["name"] for figure in terminal["figures"]] == ["reviewed"]
         assert "remain unfinished" in terminal["content"]
+        if "raw_debug" in figure_markers:
+            assert "were not attached" in terminal["content"]
         generate.assert_not_awaited()
     assert terminal["id"] == "placeholder-id"
     assert terminal["reply_to"] == "user-id"
@@ -214,3 +234,4 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
     assert terminal["branch_id"] == "branch-a"
     result_events = [event for event in ws_events if event[0] == "chat_result"]
     assert result_events and result_events[-1][1]["followup_id"] == "fu-delegation"
+    assert result_events[-1][1]["figures"] == terminal.get("figures", [])

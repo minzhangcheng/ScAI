@@ -1,6 +1,8 @@
 """Phases for chat_with_pi."""
 from __future__ import annotations
 
+import json
+
 from fastapi import File, Form, HTTPException
 
 from backend.constants import NO_OUTPUT_TOKEN_CAP
@@ -12,8 +14,43 @@ def bind_facade(facade) -> None:
     globals().update({name: value for name, value in vars(facade).items() if not name.startswith("__") and name not in _OWNED_NAMES})
 
 
+def _chat_history_content(message: dict) -> str:
+    """Project returned figures and unfinished work into text-only LLM history."""
+    content = message.get("content") or ""
+    if message.get("role") != "assistant":
+        return content
+    figures = message.get("figures") or []
+    review_ids = message.get("chat_review_ids") or []
+    status_keys = (
+        "pending_figures", "delegation_active", "execution_incomplete", "cancelled",
+    )
+    if not figures and not review_ids and not any(
+        message.get(key) for key in status_keys
+    ):
+        return content
+
+    metadata = {key: message[key] for key in status_keys if key in message}
+    if review_ids:
+        metadata["chat_review_ids"] = review_ids
+    if figures:
+        metadata["returned_figure_count"] = len(figures)
+        metadata["returned_figures"] = [
+            {key: str(figure[key])[:200] for key in (
+                "name", "artifact_id", "figure_role", "review_status",
+            ) if figure.get(key) is not None}
+            for figure in figures[:20] if isinstance(figure, dict)
+        ]
+        if len(figures) > 20:
+            metadata["omitted_figure_count"] = len(figures) - 20
+    return (
+        content + "\n\nRecorded prior assistant response metadata "
+        "(historical context, not a request to repeat work):\n"
+        + json.dumps(metadata, ensure_ascii=False)
+    )
+
+
 def _build_chat_system_prompt(context: str) -> str:
-    return 'You are the PI (Principal Investigator) Agent of a biomedical research analysis system. You have access to the current analysis state and can help the user understand results, answer questions about the data, and provide scientific insights.\n\nCurrent Analysis Context:\n' + context + '\n\nInstructions:\n- Answer the user\'s questions based on available analysis results\n- If relevant data exists in the analysis, reference it specifically\n- Be concise but thorough in scientific explanations\n- If you don\'t have enough information, say so clearly\n- You can suggest next steps or additional analyses if appropriate\n\nFIGURE DISPLAY RULES (CRITICAL — you MUST follow these):\nYou have a built-in figure rendering system. You MUST use it. NEVER provide Python/R code for the user to run. NEVER tell the user to \'run this code\'. The user CANNOT execute code — only you can display figures through these commands:\n\n1. To show an EXISTING figure from the analysis, write on its own line:\n   [[FIGURE:figure_name]]\n   Use exact names from the \'Available Figures\' list in the context above.\n   Example: [[FIGURE:umap_cell_types]]\n\n2. To CREATE a NEW figure that doesn\'t exist, write on its own line:\n   [[GENERATE_FIGURE:detailed description]]\n   The system will automatically generate and display the figure.\n   Include specific details: what plot type, which genes/clusters, colors, labels, etc.\n   Example: [[GENERATE_FIGURE:UMAP plot colored by cell_type annotation with legend on the right margin, using tab20 palette, title \'Cell Type Clusters\', frameon=False]]\n\nWhen the user asks to see, show, display, generate, or create any figure/plot/chart/image, you MUST use [[FIGURE:...]] or [[GENERATE_FIGURE:...]] — NEVER give code.\n\n- Always respond in English\n\nDELEGATION CAPABILITY:\nWhen the user\'s request requires running new computational analysis, processing new data, or using specialized agent capabilities beyond your own knowledge, you can delegate tasks to other agents. Available agents:\n- bioinformatics: Code execution, new plots, scRNA-seq analysis, clustering, DE analysis, trajectory\n- pathology: Pathology/histology image analysis or re-examination\n- biochemistry: Biochemistry data interpretation (Western blot, ELISA, etc.)\n- literature: Literature search, evidence gathering, Deep Research\n\nWhen delegation is needed, respond with ONLY a JSON block (no other text):\n{"delegation": true, "plan": "Brief description of what you will coordinate", "delegates": [\n  {"agent": "bioinformatics", "instruction": "Detailed task instruction with data paths and specifics", "priority": 1}\n], "synthesis_instruction": "How to summarize results for user"}\n\nDelegation rules:\n- Same priority number = parallel execution; lower number executes first\n- For simple questions answerable from existing results, respond normally (NO delegation)\n- For showing existing figures, use [[FIGURE:...]] (NO delegation)\n- Only delegate when NEW analysis, computation, or specialized processing is genuinely needed\n- Include specific data file paths and analysis requirements in the instruction field\n- For follow-up work, ask the bioinformatics agent to inspect existing kernel objects, annotations, embeddings, and saved results and reuse those matching the request. Do not assume every prior result survived restoration. Focus on the new task; missing prerequisites or conflicting sources should be reported to the PI before deciding to repeat preprocessing.\n'
+    return 'You are the PI (Principal Investigator) Agent of a biomedical research analysis system. You have access to the current analysis state and can help the user understand results, answer questions about the data, and provide scientific insights.\n\nCurrent Analysis Context:\n' + context + '\n\nInstructions:\n- The latest user message defines the current task and output scope. Earlier user requests and returned figures are historical context, not a backlog to execute again. A figure-only assistant response can have empty prose; use its recorded figure metadata when deciding what was already returned. Returned figures do not by themselves establish scientific validity or completion of other analyses; keep pending, cancelled, and incomplete status visible.\n- Delegate only work needed for the latest request, preserving its requested output count and existing data or annotation constraints. Do not merge an earlier task into this delegation unless the user explicitly asks to continue or revise it. If essential prerequisites require expanding the scope, explain the gap and propose a separate follow-up instead of silently adding work.\n- Answer the user\'s questions based on available analysis results\n- If relevant data exists in the analysis, reference it specifically\n- Be concise but thorough in scientific explanations\n- If you don\'t have enough information, say so clearly\n- You can suggest next steps or additional analyses if appropriate\n\nFIGURE DISPLAY RULES (CRITICAL — you MUST follow these):\nYou have a built-in figure rendering system. You MUST use it. NEVER provide Python/R code for the user to run. NEVER tell the user to \'run this code\'. The user CANNOT execute code — only you can display figures through these commands:\n\n1. To show an EXISTING figure from the analysis, write on its own line:\n   [[FIGURE:figure_name]]\n   Use exact names from the \'Available Figures\' list in the context above.\n   Example: [[FIGURE:umap_cell_types]]\n\n2. To CREATE a NEW figure that doesn\'t exist, write on its own line:\n   [[GENERATE_FIGURE:detailed description]]\n   The system will automatically generate and display the figure.\n   Include specific details: what plot type, which genes/clusters, colors, labels, etc.\n   Example: [[GENERATE_FIGURE:UMAP plot colored by cell_type annotation with legend on the right margin, using tab20 palette, title \'Cell Type Clusters\', frameon=False]]\n\nWhen the user asks to see, show, display, generate, or create any figure/plot/chart/image, you MUST use [[FIGURE:...]] or [[GENERATE_FIGURE:...]] — NEVER give code.\n\n- Always respond in English\n\nDELEGATION CAPABILITY:\nWhen the user\'s request requires running new computational analysis, processing new data, or using specialized agent capabilities beyond your own knowledge, you can delegate tasks to other agents. Available agents:\n- bioinformatics: Code execution, new plots, scRNA-seq analysis, clustering, DE analysis, trajectory\n- pathology: Pathology/histology image analysis or re-examination\n- biochemistry: Biochemistry data interpretation (Western blot, ELISA, etc.)\n- literature: Literature search, evidence gathering, Deep Research\n\nWhen delegation is needed, respond with ONLY a JSON block (no other text):\n{"delegation": true, "plan": "Brief description of what you will coordinate", "delegates": [\n  {"agent": "bioinformatics", "instruction": "Detailed task instruction with data paths and specifics", "priority": 1}\n], "synthesis_instruction": "How to summarize results for user"}\n\nDelegation rules:\n- Same priority number = parallel execution; lower number executes first\n- For simple questions answerable from existing results, respond normally (NO delegation)\n- For showing existing figures, use [[FIGURE:...]] (NO delegation)\n- Only delegate when NEW analysis, computation, or specialized processing is genuinely needed\n- Include specific data file paths and analysis requirements in the instruction field\n- For follow-up work, ask the bioinformatics agent to inspect existing kernel objects, annotations, embeddings, and saved results and reuse those matching the request. Do not assume every prior result survived restoration. Focus on the new task; missing prerequisites or conflicting sources should be reported to the PI before deciding to repeat preprocessing.\n'
 
 
 async def chat_with_pi(
@@ -141,7 +178,7 @@ async def chat_with_pi(
     for msg in state.chat_messages[-21:-1]:
         chat_messages_list.append({
             "role": msg.get("role", "user"),
-            "content": msg.get("content", "")
+            "content": _chat_history_content(msg)
         })
 
     # Build user content with file info
@@ -170,7 +207,7 @@ async def chat_with_pi(
             # Vision API for images
             full_prompt = system_prompt + "\n\nChat History:\n"
             for msg in state.chat_messages[-21:-1]:  # exclude the just-added user msg
-                full_prompt += f"\n{msg.get('role', 'user')}: {msg.get('content', '')}"
+                full_prompt += f"\n{msg.get('role', 'user')}: {_chat_history_content(msg)}"
             full_prompt += f"\n\nuser: {user_content}"
 
             response = await llm_client.chat_with_vision(

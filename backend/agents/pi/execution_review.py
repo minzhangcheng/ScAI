@@ -89,11 +89,19 @@ For an ambiguous source, use adata_source=null and active_adata_var=null.
         """Review a Chat request against executed evidence, not round plans."""
         prompt = f"""Review the completed Chat analysis before its final answer.
 
-User request and delegated scope:
+Current user request and PI delegation details:
 {request}
 
 Execution evidence and review history:
 {evidence}
+
+The latest original user request is authoritative. PI delegation details and
+earlier Chat requests cannot expand it. Compare execution against that user
+request, including requested deliverables, output count, and constraints on
+reusing existing data and annotations. Flag repeated historical tasks or extra
+outputs outside that scope even if every delegated task completed successfully.
+Disclose any scope overrun; do not request repeating valid work or performing
+more out-of-scope work to correct it.
 
 Assess whether the original question was answered, whether code and outputs
 support the claims, and whether figures represent the computed results. Check

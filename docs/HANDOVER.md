@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.16 · **Last updated**: 2026-10-05
+**Version**: 0.63.17 · **Last updated**: 2026-10-05
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,16 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.17` — Keeps the latest Chat request as the authoritative scope through
+  delegation, PI review, and final synthesis. Prior figure-only responses are
+  carried into later context as safe metadata, without leaking image bytes or
+  private paths; reviewed Chat replies attach only the figures explicitly
+  selected by the PI while retaining unselected artifacts and execution records
+  for audit. Follow-up message identity and WebSocket delivery remain aligned.
+  Focused version, Chat review, synthesis, and handoff tests passed `39/39` at
+  `test-results/20261004T230233Z-922619/evidence.json`; no image build,
+  deployment, or historical-session repair was performed.
 
 - `0.63.16` — Keeps the original Chat request and deliverable scope attached to
   intermediate PI consultations and publication-figure reviews. Bioinformatics,

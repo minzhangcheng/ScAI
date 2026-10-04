@@ -23,8 +23,18 @@ async def _execute_delegation_success(
     delegates = delegation.get("delegates", [])
 
     def _delegation_instruction(raw: Any) -> str:
-        instruction = str(raw or "")
-        instruction += "\n\nOriginal user request (scope for final review):\n" + user_message
+        instruction = (
+            "Original user request (scope for final review):\n" + user_message
+            + "\n\nThe latest user request above defines the authorized scope and "
+            "takes precedence over the PI delegation details below. Earlier Chat "
+            "requests are historical context, not additional tasks. Reuse prior "
+            "results matching this request; do not repeat earlier deliverables "
+            "unless the user requests a revision. Do not execute extra analyses "
+            "or produce extra deliverables just because the delegation mentions "
+            "them. If a prerequisite needs work beyond this scope, consult the "
+            "PI and disclose it as a separate follow-up.\n\n"
+            "PI delegation details:\n" + str(raw or "")
+        )
         if source_context and source_context.strip():
             instruction += (
                 "\n\n## Server-resolved selected-direction context\n"
@@ -219,11 +229,19 @@ async def _execute_delegation_success(
         except Exception as e:
             logger.exception("Chat delegation figure generation failed")
 
-    # Merge: all_figures from agents + synthesis_figures
-    # Deduplicate by name
+    # Explicit PI selection controls reviewed attachments, not the stored artifacts.
+    # Preserve legacy delivery when synthesis supplies no selection markers.
+    figure_candidates = all_figures + synthesis_figures
+    if reviewed_chat and referenced_names:
+        figure_candidates = synthesis_figures
+        if set(referenced_names) - {fig["name"] for fig in synthesis_figures}:
+            final_content += (
+                "\n\nSome referenced figures were unavailable among the reviewed "
+                "delegation artifacts and were not attached."
+            )
     seen_names = set()
     merged_figures = []
-    for fig in all_figures + synthesis_figures:
+    for fig in figure_candidates:
         if fig["name"] not in seen_names:
             seen_names.add(fig["name"])
             merged_figures.append(fig)
