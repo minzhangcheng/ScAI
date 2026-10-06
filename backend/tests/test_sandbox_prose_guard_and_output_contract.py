@@ -33,12 +33,39 @@ def _sandbox(tmp_path, monkeypatch, name, *, before, after, result):
 def test_comment_and_string_mentions_are_not_calls():
     allowed = (
         "# do not use eval() or exec() here\nvalue = 1\n",
+        "# Avoid subprocess, multiprocessing, and os.system here\nvalue = 1\n",
+        "value = 1  # Never call open('/etc/scai-test', 'w')\n",
         "message = 'compile() and __import__() are not used'\n",
         'message = "eval(\'x\') is only documentation"\n',
         "text = '''\nDo not call exec(payload)\n'''\n",
     )
     for code in allowed:
         assert validate_code_safety(code) == (True, ""), code
+
+
+def test_comment_about_fork_allows_threaded_velocity_retry():
+    code = (
+        "import scvelo as scv\n"
+        "# Retry without sandbox-blocked os.fork() from loky/multiprocessing\n"
+        "scv.tl.velocity_graph(adata_hep, n_jobs=1, "
+        "backend='threading', show_progress_bar=False)\n"
+        "scv.tl.velocity_pseudotime(adata_hep)  # Avoid os.fork\n"
+    )
+    assert validate_code_safety(code) == (True, "")
+
+
+def test_fork_calls_remain_blocked_after_comment_masking():
+    blocked = (
+        "# Avoid os.fork()\nimport os\nos.fork()",
+        "import os as operating_system\noperating_system.fork()",
+        "from os import fork as launch",
+        "import os\nlaunch = os.fork\nlaunch()",
+        "import os\nf'{os.fork()}'",
+    )
+    for code in blocked:
+        safe, reason = validate_code_safety(code)
+        assert not safe, code
+        assert "fork" in reason.lower(), reason
 
 
 def test_real_and_fstring_calls_remain_blocked():

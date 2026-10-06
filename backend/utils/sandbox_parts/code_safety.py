@@ -461,8 +461,8 @@ _CALL_SITE_PATTERN_KEYS = frozenset({
 })
 
 
-def _mask_prose(code: str) -> str:
-    """Blank comments and string literals without changing source offsets."""
+def _mask_prose(code: str, *, mask_strings: bool = True) -> str:
+    """Blank comments and optionally string literals, preserving offsets."""
     import ast
     import io
     import tokenize
@@ -479,7 +479,9 @@ def _mask_prose(code: str) -> str:
 
     lines = [list(line) for line in code.splitlines(keepends=True)]
     for token in tokens:
-        if token.type not in (tokenize.COMMENT, tokenize.STRING):
+        if token.type != tokenize.COMMENT and not (
+            mask_strings and token.type == tokenize.STRING
+        ):
             continue
         (start_row, start_col), (end_row, end_col) = token.start, token.end
         for row in range(start_row, end_row + 1):
@@ -801,9 +803,12 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
         Tuple of (is_safe, error_message). is_safe is True if the code
         passes all security checks.
     """
+    # Comments cannot execute. Keep literals available for string-sensitive
+    # checks, and preserve offsets so diagnostics refer to the original source.
+    scan_code = _mask_prose(code, mask_strings=False)
     masked: Optional[str] = None
     for pattern, description in DANGEROUS_PATTERNS:
-        match = re.search(pattern, code)
+        match = re.search(pattern, scan_code)
         if match:
             if description in _CALL_SITE_PATTERN_KEYS:
                 if masked is None:
@@ -812,7 +817,7 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
                 if match is None:
                     continue
             # Check if the matched pattern has a known safe-usage exception
-            if any(key in description and check(code) for key, check in _EXCEPTION_CHECKS.items()):
+            if any(key in description and check(scan_code) for key, check in _EXCEPTION_CHECKS.items()):
                 continue
             logger.warning(
                 "Security: blocked dangerous code pattern [%s] at offset %d — %s",

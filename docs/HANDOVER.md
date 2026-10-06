@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.17 · **Last updated**: 2026-10-05
+**Version**: 0.63.18 · **Last updated**: 2026-10-06
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,17 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.18` — Prevents the sandbox safety scanner from treating dangerous
+  names mentioned in Python comments as executable operations. The scanner now
+  masks comments before applying broad textual checks while preserving literal
+  strings for string-sensitive validation. Real process-launch calls, aliases,
+  imports, and AST-detectable bypasses remain blocked. Adds focused regression
+  coverage for the threaded scVelo retry comment pattern and direct or aliased
+  `os.fork` calls. No image build, deployment, or historical-session repair was
+  performed. Focused sandbox and version-consistency checks collected 52 nodes
+  with 51 passes and one environment-gated kernel skip at
+  `test-results/20261006T091409Z-3191598/evidence.json`.
 
 - `0.63.17` — Keeps the latest Chat request as the authoritative scope through
   delegation, PI review, and final synthesis. Prior figure-only responses are
