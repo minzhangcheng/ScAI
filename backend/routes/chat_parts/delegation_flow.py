@@ -210,9 +210,13 @@ async def _execute_delegation_success(
             fig = fig_lookup.get(name)
             if fig:
                 entry = dict(fig)
-                pdf_path = Path(fig["path"]).with_suffix(".pdf")
-                if pdf_path.exists():
-                    entry["pdfPath"] = str(pdf_path)
+                # Reviewed artifacts already carry their verified PDF path;
+                # the image may be a record preview with a different filename.
+                if (not reviewed_chat and fig.get("figure_role") != "publication"
+                        and fig.get("path")):
+                    pdf_path = Path(fig["path"]).with_suffix(".pdf")
+                    if pdf_path.exists():
+                        entry["pdfPath"] = str(pdf_path)
                 synthesis_figures.append(entry)
 
     generate_pattern = re.compile(r'\[\[GENERATE_FIGURE:(.*?)\]\]', re.DOTALL)

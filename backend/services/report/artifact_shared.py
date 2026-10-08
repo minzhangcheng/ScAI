@@ -662,6 +662,9 @@ def _record_preview_candidates(
     names = [
         f"{safe_stem}_record_preview_{digest[:16]}.jpg",
         f"{safe_stem}_record_preview_{digest[:16]}.png",
+        # Materialization uses the plain stem when its extension is vacant.
+        f"{safe_stem}.jpg",
+        f"{safe_stem}.png",
     ]
     return list(dict.fromkeys(root / name for root in roots for name in names))
 

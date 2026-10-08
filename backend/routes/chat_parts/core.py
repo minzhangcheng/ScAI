@@ -42,7 +42,7 @@ def _build_chat_context(
 
     Returns:
         (context_str, figure_inventory) where figure_inventory is a list of
-        {"name": str, "path": str} dicts for PNG files found on disk.
+        reviewed image/PDF attachments and display-only workspace figures.
     """
     parts = []
 
@@ -123,36 +123,38 @@ def _build_chat_context(
     # Scan disk for actual figure files
     figure_inventory: List[Dict[str, str]] = []
     seen_names: set = set()
-    from backend.services.report.artifacts import eligible_artifacts, verified_artifact_bytes
+    from backend.services.report.artifacts import eligible_artifacts, _record_preview_candidates
+    from .attachments import publication_figure_attachment
 
-    publication_by_path = {
-        str(Path(figure.png_path).resolve()): figure
-        for figure in eligible_artifacts(
-            getattr(state, "publication_figures", None), state=state,
-        )
-        if verified_artifact_bytes(figure.png_path, figure, kind="image") is not None
-    }
+    workspace = get_session_workspace(state.id)
+    publication_paths = set()
+    for figure in eligible_artifacts(getattr(state, "publication_figures", None), state=state):
+        paths = _record_preview_candidates(figure, workspace)
+        if figure.png_path:
+            paths.append(Path(figure.png_path))
+        publication_paths.update(str(path.resolve()) for path in paths)
+        entry = publication_figure_attachment(figure, workspace)
+        if entry is not None:
+            figure_inventory.append(entry)
+            seen_names.add(figure.name)
+            if entry.get("path"):
+                publication_paths.add(str(Path(entry["path"]).resolve()))
 
     def _add_pngs(directory: Path):
         if not directory.exists():
             return
         # Scan JPG first (new format), then PNG for backward compatibility
         for img in sorted(directory.glob("*.jpg")) + sorted(directory.glob("*.png")):
+            if str(img.resolve()) in publication_paths:
+                continue
             if img.stem not in seen_names:
                 seen_names.add(img.stem)
                 entry = {"name": img.stem, "path": str(img),
                          "figure_role": "quick_display"}
-                artifact = publication_by_path.get(str(img.resolve()))
-                if artifact is not None:
-                    entry.update({
-                        "figure_role": "publication",
-                        "artifact_id": artifact.id,
-                        "review_status": artifact.review_status.value,
-                    })
                 figure_inventory.append(entry)
 
-    _add_pngs(get_session_workspace(state.id))
-    _add_pngs(get_session_workspace(state.id) / "figures")
+    _add_pngs(workspace)
+    _add_pngs(workspace / "figures")
     _add_pngs(
         resolve_published_report_dir(
             state.id,

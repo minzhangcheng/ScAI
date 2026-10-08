@@ -85,10 +85,11 @@ async def test_invalid_branch_reference_is_rejected_before_upload_or_message_mut
     ("bioinformatics", "[[FIGURE:extra]] [[FIGURE:reviewed]] [[FIGURE:extra]]",
      ["extra", "reviewed"]),
     ("bioinformatics", "[[FIGURE:raw_debug]]", []),
-    ("bioinformatics", "", ["reviewed", "extra"]),
+    ("bioinformatics", "[[FIGURE:pdf_only]]", ["pdf_only"]),
+    ("bioinformatics", "", ["reviewed", "extra", "pdf_only"]),
 ])
 async def test_delegation_receives_server_resolved_context_and_keeps_handoff_identity(
-    monkeypatch, agent_name, figure_markers, expected_figures,
+    monkeypatch, tmp_path, agent_name, figure_markers, expected_figures,
 ):
     chat_delegation.delegation_flow.bind_facade(chat_delegation)
     state = AnalysisState(id="chat-followup-delegation", user_id="owner")
@@ -105,9 +106,16 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
     source_context = "EARLY_TRUSTED_DIRECTION_CONTEXT"
     delegate_instructions = []
     ws_events = []
+    original_pdf = tmp_path / "original.pdf"
+    original_pdf.write_bytes(b"verified archival PDF")
+    # Same-name sidecars must not replace or bypass the collector's validation.
+    (tmp_path / "reviewed.pdf").write_bytes(b"unverified sidecar")
+    (tmp_path / "extra.pdf").write_bytes(b"unverified sidecar")
     produced_figures = [
-        {"name": "reviewed", "path": "/tmp/reviewed.jpg"},
-        {"name": "extra", "path": "/tmp/extra.jpg"},
+        {"name": "reviewed", "path": str(tmp_path / "reviewed.jpg"),
+         "pdfPath": str(original_pdf)},
+        {"name": "extra", "path": str(tmp_path / "extra.jpg")},
+        {"name": "pdf_only", "pdfPath": str(original_pdf), "figure_role": "publication"},
     ]
 
     async def fake_execute_agent(
@@ -222,7 +230,12 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         assert "Input is log-normalized." in synthesis_input
     terminal = state.chat_messages[-1]
     assert [figure["name"] for figure in terminal.get("figures", [])] == expected_figures
-    assert [figure["name"] for figure in produced_figures] == ["reviewed", "extra"]
+    for figure in terminal.get("figures", []):
+        if figure["name"] in {"reviewed", "pdf_only"}:
+            assert figure["pdfPath"] == str(original_pdf)
+        else:
+            assert "pdfPath" not in figure
+    assert [figure["name"] for figure in produced_figures] == ["reviewed", "extra", "pdf_only"]
     if agent_name == "bioinformatics":
         assert "remain unfinished" in terminal["content"]
         if "raw_debug" in figure_markers:

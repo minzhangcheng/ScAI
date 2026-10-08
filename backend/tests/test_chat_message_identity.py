@@ -21,6 +21,7 @@ async def _run_simple_chat(
     client_error="",
     client_calls=None,
     with_image=False,
+    figure_inventory=None,
 ):
     async def require_owner(*, session_id, user_id):
         assert session_id == state.id
@@ -48,7 +49,7 @@ async def _run_simple_chat(
     monkeypatch.setattr(
         chat_endpoints,
         "_build_chat_context",
-        lambda _state, _direction_context="": ("", []),
+        lambda _state, _direction_context="": ("", figure_inventory or []),
     )
     monkeypatch.setattr(
         chat_endpoints,

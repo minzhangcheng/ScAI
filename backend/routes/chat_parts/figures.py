@@ -389,9 +389,8 @@ def _collect_session_figures(
     and the workspace root (execute_code explicit savefig output, e.g. UMAP plots).
     """
     if run_scope_ids is not None:
-        from backend.services.report.artifacts import (
-            eligible_artifacts, verified_artifact_bytes,
-        )
+        from backend.services.report.artifacts import eligible_artifacts
+        from .attachments import publication_figure_attachment
 
         # A reviewed Chat run has producer identities. Never promote its raw
         # autosaves/debug files to final figures through an mtime-only scan.
@@ -399,17 +398,11 @@ def _collect_session_figures(
         artifacts = [figure for figure in getattr(state, "publication_figures", [])
                      if figure.producer_run_scope_id in scopes]
         figures = []
+        workspace = get_session_workspace(session_id)
         for figure in eligible_artifacts(artifacts, state=state):
-            if verified_artifact_bytes(figure.png_path, figure, kind="image") is None:
-                continue
-            entry = {"name": figure.name, "path": figure.png_path,
-                     "artifact_id": figure.id,
-                     "figure_role": "publication",
-                     "review_status": figure.review_status.value,
-                     "review_unavailable": figure.review_unavailable}
-            if verified_artifact_bytes(figure.pdf_path, figure, kind="pdf") is not None:
-                entry["pdfPath"] = figure.pdf_path
-            figures.append(entry)
+            entry = publication_figure_attachment(figure, workspace)
+            if entry is not None:
+                figures.append(entry)
         return figures
 
     figures: List[Dict[str, str]] = []

@@ -105,7 +105,7 @@ export function ChatPanel() {
                   <div className="mt-3 space-y-3">
                     {msg.figures.map((fig, idx) => (
                       <div key={idx} className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden bg-white dark:bg-surface-900">
-                        <img
+                        {(fig.base64 || fig.path) && <img
                           src={fig.base64
                             ? base64ToDataUri(fig.base64)
                             : `/api/file?path=${encodeURIComponent(fig.path || '')}`}
@@ -113,7 +113,7 @@ export function ChatPanel() {
                           className="publication-canvas w-full h-auto"
                           loading="lazy"
                           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
-                        />
+                        />}
                         <div className="px-3 py-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
                           <div className="flex min-w-0 items-center gap-2">
                             <p className="truncate text-xs font-medium text-slate-700 dark:text-slate-200">{fig.name}</p>

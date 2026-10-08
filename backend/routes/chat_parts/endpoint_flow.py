@@ -290,10 +290,12 @@ async def chat_with_pi(
             fig = fig_lookup.get(name)
             if fig:
                 entry = dict(fig)
-                # Check for corresponding PDF
-                pdf_path = Path(fig["path"]).with_suffix(".pdf")
-                if pdf_path.exists():
-                    entry["pdfPath"] = str(pdf_path)
+                # Publication attachments already carry their verified PDF,
+                # including PDF-only records and separately named previews.
+                if fig.get("figure_role") != "publication" and fig.get("path"):
+                    pdf_path = Path(fig["path"]).with_suffix(".pdf")
+                    if pdf_path.exists():
+                        entry["pdfPath"] = str(pdf_path)
                 response_figures.append(entry)
         logger.info(f"Chat post-process: matched {len(response_figures)} existing figures")
 

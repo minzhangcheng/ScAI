@@ -92,6 +92,23 @@ describe('ChatPanel history response ownership', () => {
     vi.unstubAllGlobals()
   })
 
+  it.each([false, true])('keeps PDF downloads with preview availability %s', async hasPreview => {
+    const view = render(<ChatPanel />)
+    const pdfPath = '/data/figures/original.pdf'
+    const previewPath = '/data/figures/panel_record_preview.jpg'
+    await respond(0, { messages: [{
+      id: 'figure-response', role: 'assistant', content: 'Here is the figure.',
+      figures: [{ name: 'panel', figure_role: 'publication', pdfPath,
+        ...(hasPreview ? { path: previewPath } : {}) }],
+    }] })
+    expect(view.getByRole('link', { name: 'PDF' })).toHaveAttribute(
+      'href', `/api/file?path=${encodeURIComponent(pdfPath)}`,
+    )
+    expect(view.queryByAltText('panel') !== null).toBe(hasPreview)
+    expect(view.queryByRole('link', { name: 'PNG' }) !== null).toBe(hasPreview)
+    view.unmount()
+  })
+
   it.each(['initial history', 'poll'])('drops a retired %s response after switching sessions', async kind => {
     vi.useFakeTimers()
     const view = render(<ChatPanel />)
