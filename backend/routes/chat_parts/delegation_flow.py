@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from backend.constants import NO_OUTPUT_TOKEN_CAP
+from .attachments import resolve_figure_references
 
 _OWNED_NAMES = frozenset({"_run_chat_delegation"})
 
@@ -202,22 +203,17 @@ async def _execute_delegation_success(
         figure_inventory = all_figures
     figure_pattern = re.compile(r'\[\[FIGURE:([\w.-]+)\]\]')
     referenced_names = figure_pattern.findall(final_content)
-    synthesis_figures: List[Dict[str, str]] = []
-
-    if referenced_names and figure_inventory:
-        fig_lookup = {f["name"]: f for f in figure_inventory}
-        for name in dict.fromkeys(referenced_names):
-            fig = fig_lookup.get(name)
-            if fig:
-                entry = dict(fig)
-                # Reviewed artifacts already carry their verified PDF path;
-                # the image may be a record preview with a different filename.
-                if (not reviewed_chat and fig.get("figure_role") != "publication"
-                        and fig.get("path")):
-                    pdf_path = Path(fig["path"]).with_suffix(".pdf")
-                    if pdf_path.exists():
-                        entry["pdfPath"] = str(pdf_path)
-                synthesis_figures.append(entry)
+    synthesis_figures, unresolved_references = resolve_figure_references(
+        referenced_names, figure_inventory,
+    )
+    for entry in synthesis_figures:
+        # Reviewed artifacts already carry their verified PDF path;
+        # the image may be a record preview with a different filename.
+        if (not reviewed_chat and entry.get("figure_role") != "publication"
+                and entry.get("path")):
+            pdf_path = Path(entry["path"]).with_suffix(".pdf")
+            if pdf_path.exists():
+                entry["pdfPath"] = str(pdf_path)
 
     generate_pattern = re.compile(r'\[\[GENERATE_FIGURE:(.*?)\]\]', re.DOTALL)
     generate_requests = generate_pattern.findall(final_content)
@@ -238,7 +234,7 @@ async def _execute_delegation_success(
     figure_candidates = all_figures + synthesis_figures
     if reviewed_chat and referenced_names:
         figure_candidates = synthesis_figures
-        if set(referenced_names) - {fig["name"] for fig in synthesis_figures}:
+        if unresolved_references:
             final_content += (
                 "\n\nSome referenced figures were unavailable among the reviewed "
                 "delegation artifacts and were not attached."

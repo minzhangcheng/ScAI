@@ -86,6 +86,11 @@ async def test_invalid_branch_reference_is_rejected_before_upload_or_message_mut
      ["extra", "reviewed"]),
     ("bioinformatics", "[[FIGURE:raw_debug]]", []),
     ("bioinformatics", "[[FIGURE:pdf_only]]", ["pdf_only"]),
+    ("bioinformatics", "[[FIGURE:reviewed.png]] [[FIGURE:reviewed]]", ["reviewed"]),
+    ("bioinformatics", "[[FIGURE:extra.jpg]] [[FIGURE:reviewed.JPEG]]",
+     ["extra", "reviewed"]),
+    ("bioinformatics", "[[FIGURE:pdf_only.pdf]]", ["pdf_only"]),
+    ("bioinformatics", "[[FIGURE:raw_debug.png]]", []),
     ("bioinformatics", "", ["reviewed", "extra", "pdf_only"]),
 ])
 async def test_delegation_receives_server_resolved_context_and_keeps_handoff_identity(
@@ -228,6 +233,10 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         assert "score(genes=['GeneA', 'GeneB'], bins=25)" in synthesis_input
         assert "delegated-execution" in synthesis_input
         assert "Input is log-normalized." in synthesis_input
+        references = synthesis_input.split("## Available Figure References\n")[1].split("## Agent Results")[0]
+        assert "[[FIGURE:reviewed]]" in references
+        assert "[[FIGURE:pdf_only]]" in references
+        assert "raw_debug" not in references
     terminal = state.chat_messages[-1]
     assert [figure["name"] for figure in terminal.get("figures", [])] == expected_figures
     for figure in terminal.get("figures", []):
@@ -240,6 +249,8 @@ async def test_delegation_receives_server_resolved_context_and_keeps_handoff_ide
         assert "remain unfinished" in terminal["content"]
         if "raw_debug" in figure_markers:
             assert "were not attached" in terminal["content"]
+        else:
+            assert "were not attached" not in terminal["content"]
         generate.assert_not_awaited()
     assert terminal["id"] == "placeholder-id"
     assert terminal["reply_to"] == "user-id"

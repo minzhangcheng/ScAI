@@ -9,6 +9,29 @@ from backend.services.report.artifacts import (
 )
 
 
+def resolve_figure_references(
+    references: list[str], inventory: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Resolve exact names, then unique filename aliases, within the supplied inventory."""
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for figure in inventory:
+        candidates = by_name.setdefault(figure["name"], [])
+        if figure not in candidates:
+            candidates.append(figure)
+
+    selected, unresolved = [], []
+    for reference in dict.fromkeys(references):
+        candidates = by_name.get(reference, [])
+        suffix = Path(reference).suffix
+        if not candidates and suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf"}:
+            candidates = by_name.get(reference[:-len(suffix)], [])
+        if len(candidates) != 1:
+            unresolved.append(reference)
+        elif candidates[0] not in selected:
+            selected.append(dict(candidates[0]))
+    return selected, unresolved
+
+
 def publication_figure_attachment(figure: Any, workspace: Path) -> dict[str, Any] | None:
     image_path = figure.png_path
     if verified_artifact_bytes(image_path, figure, kind="image") is None:

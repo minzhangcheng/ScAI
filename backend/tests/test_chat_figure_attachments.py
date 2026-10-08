@@ -9,6 +9,7 @@ from PIL import Image
 
 from backend.models.schemas import AnalysisState, FigureReviewStatus, PublicationFigure
 from backend.routes.chat_parts import core, figures
+from backend.routes.chat_parts.attachments import resolve_figure_references
 from backend.services.report import artifacts
 from backend.services.report.artifacts import verified_artifact_bytes
 from backend.services.session_store import _durable_state_dump
@@ -129,7 +130,8 @@ def test_changed_pdf_is_not_attached_with_valid_image(reviewed_figure):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("availability", ["preview", "pdf_only", "image_only"])
-async def test_followup_reply_preserves_verified_attachments(reviewed_figure, monkeypatch, availability):
+@pytest.mark.parametrize("reference", ["panel", "panel.png"])
+async def test_followup_reply_preserves_verified_attachments(reviewed_figure, monkeypatch, availability, reference):
     state, figure, _ = reviewed_figure
     if availability == "image_only":
         Path(figure.pdf_path).write_bytes(b"unverified sidecar")
@@ -149,11 +151,42 @@ async def test_followup_reply_preserves_verified_attachments(reviewed_figure, mo
             sidecar.write_bytes(b"unverified sidecar")
     result = await _run_simple_chat(
         monkeypatch, state, figure_inventory=inventory,
-        client_content="Here is the figure. [[FIGURE:panel]]",
+        client_content=f"Here is the figure. [[FIGURE:{reference}]] [[FIGURE:panel]]",
     )
     assert result["figures"] == inventory
     assert state.chat_messages[-1]["figures"] == inventory
+    assert "were not attached" not in result["content"]
     if availability == "pdf_only":
         assert "path" not in result["figures"][0]
     if availability == "image_only":
         assert "pdfPath" not in result["figures"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference, names, expected", [
+    ("panel.png", ["panel", "panel.png"], "artifact-1"),
+    ("panel.png", ["panel", "panel"], None),
+    ("panel", ["panel", "panel"], None),
+    ("panel.csv", ["panel"], None),
+])
+async def test_reference_collision_never_selects_an_arbitrary_artifact(
+    monkeypatch, reference, names, expected,
+):
+    state = AnalysisState(id="chat-figure-collision", user_id="owner")
+    inventory = [{"name": name, "artifact_id": f"artifact-{i}", "figure_role": "publication"}
+                 for i, name in enumerate(names)]
+    result = await _run_simple_chat(
+        monkeypatch, state, figure_inventory=inventory,
+        client_content=f"[[FIGURE:{reference}]]",
+    )
+    assert [f["artifact_id"] for f in result.get("figures", [])] == ([expected] if expected else [])
+    assert ("were not attached" in result["content"]) is (expected is None)
+
+
+def test_duplicate_receipts_and_aliases_preserve_one_canonical_attachment():
+    figure = {"name": "panel.v2", "artifact_id": "reviewed-id", "pdfPath": "/verified.pdf"}
+    selected, unresolved = resolve_figure_references(
+        ["panel.v2.png", "panel.v2.pdf", "panel.v2"], [figure, dict(figure)],
+    )
+    assert selected == [figure] and unresolved == []
+    assert selected[0] is not figure

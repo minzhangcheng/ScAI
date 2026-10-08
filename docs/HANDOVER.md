@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.19 · **Last updated**: 2026-10-08
+**Version**: 0.63.20 · **Last updated**: 2026-10-09
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,14 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.63.x — (2026-09-28 onward)**
+
+- `0.63.20` — Makes Chat figure references tolerant of a uniquely matching
+  image/PDF filename suffix while keeping exact registered artifact identity,
+  verified previews, and archival PDF paths. The PI synthesis prompt now lists
+  the available figure references for direct copying. Ambiguous or unavailable
+  references remain unselected and are reported to the user. Ordinary Chat and
+  reviewed delegation replies share the resolver, with focused attachment and
+  handoff coverage passing `36/36`.
 
 - `0.63.19` — Repairs Chat figure delivery when a reviewed raster exceeds the
   attachment pixel limit. The scoped artifact collector now recovers a

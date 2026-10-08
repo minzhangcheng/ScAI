@@ -338,8 +338,20 @@ def _build_synthesis_prompt(
         "helpful response to the user's original request.",
         f"\n## User's Request\n{user_message}",
         f"\n## Delegation Plan\n{delegation.get('plan', '')}",
-        "\n## Agent Results",
     ]
+    figure_names = dict.fromkeys(
+        figure["name"]
+        for result in agent_results.values()
+        for figure in result.get("figures", [])
+    )
+    if figure_names:
+        parts.append(
+            "\n## Available Figure References\n"
+            "Copy a reference exactly when selecting a figure. Do not add a "
+            "file extension or reconstruct a reference from a file path.\n"
+            + "\n".join(f"[[FIGURE:{name}]]" for name in figure_names)
+        )
+    parts.append("\n## Agent Results")
     for agent_name, result in agent_results.items():
         if "error" in result and not result.get("findings"):
             parts.append(f"\n### {agent_name.upper()} Agent: ERROR\n{result['error']}")

@@ -6,6 +6,7 @@ import json
 from fastapi import File, Form, HTTPException
 
 from backend.constants import NO_OUTPUT_TOKEN_CAP
+from .attachments import resolve_figure_references
 from .source_selection import ChatSourceSelectionError
 
 _OWNED_NAMES = frozenset({"chat_with_pi"})
@@ -283,21 +284,22 @@ async def chat_with_pi(
     referenced_names = figure_pattern.findall(assistant_content)
     logger.info(f"Chat post-process: found {len(referenced_names)} FIGURE refs, {len(figure_inventory)} in inventory")
 
-    response_figures: List[Dict[str, str]] = []
-    if referenced_names and figure_inventory:
-        fig_lookup = {f["name"]: f for f in figure_inventory}
-        for name in dict.fromkeys(referenced_names):  # deduplicate, preserve order
-            fig = fig_lookup.get(name)
-            if fig:
-                entry = dict(fig)
-                # Publication attachments already carry their verified PDF,
-                # including PDF-only records and separately named previews.
-                if fig.get("figure_role") != "publication" and fig.get("path"):
-                    pdf_path = Path(fig["path"]).with_suffix(".pdf")
-                    if pdf_path.exists():
-                        entry["pdfPath"] = str(pdf_path)
-                response_figures.append(entry)
-        logger.info(f"Chat post-process: matched {len(response_figures)} existing figures")
+    response_figures, unresolved_references = resolve_figure_references(
+        referenced_names, figure_inventory,
+    )
+    for entry in response_figures:
+        # Publication attachments already carry their verified PDF,
+        # including PDF-only records and separately named previews.
+        if entry.get("figure_role") != "publication" and entry.get("path"):
+            pdf_path = Path(entry["path"]).with_suffix(".pdf")
+            if pdf_path.exists():
+                entry["pdfPath"] = str(pdf_path)
+    logger.info(f"Chat post-process: matched {len(response_figures)} existing figures")
+    if unresolved_references:
+        assistant_content += (
+            "\n\nSome referenced figures were unavailable or ambiguous "
+            "in the available figure list and were not attached."
+        )
 
     # --- Post-process: extract GENERATE_FIGURE requests ---
     generate_pattern = re.compile(r'\[\[GENERATE_FIGURE:(.*?)\]\]', re.DOTALL)
