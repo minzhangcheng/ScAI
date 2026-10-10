@@ -358,8 +358,8 @@ The release helper always builds both the selected tag and `latest`:
 ```
 
 ```bash
-./build.sh --version 0.63.20
-./build.sh --version 0.63.20 --push
+./build.sh --version 0.64.1
+./build.sh --version 0.64.1 --push
 ```
 
 Without `--version`, the helper uses the newest Git tag returned by `git describe --tags --abbrev=0`, or `latest` if none exists. `--push` pushes both tags to `ghcr.io/minzhangcheng/scai`; authenticate Docker to that registry before using it. The helper does not accept registry, image-name, platform, or build-argument flags.
@@ -871,6 +871,7 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_JWT_SECRET` | Generated and stored as `.jwt_secret` | HS256 JWT signing |
 | `SCAI_CONFIG_SECRET` | Generated local encryption material | Encrypts stored user/model secrets |
 | `SCAI_ENABLE_REPRODUCIBILITY` | Disabled | Truthy `1`, `true`, or `yes` enables reproducibility bundles |
+| `SCAI_LLM_TIMEOUT_SECONDS` | `600` | Positive whole seconds for the shared LLM request default and minimum, and the supplementary-step LLM allowance. Read at backend startup; blank values use the default, invalid/non-positive values warn and fall back. Longer explicit request timeouts are preserved. |
 | `SCAI_RUNTIME_SAVE_FLOOR_MINUTES` | `30` | Minutes that must pass since the last **successful** runtime save before a step boundary saves again. Round and closing boundaries ignore it. Unset, non-integer or non-positive values log and fall back |
 | `SCAI_RUNTIME_MAX_RSS_GB` | `auto` | Per-session kernel RSS ceiling for regular runtime persistence; numeric values are GiB administrator caps |
 | `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB` | `auto` | Total estimated size of live AnnData objects; numeric values are GiB administrator caps |
@@ -885,6 +886,14 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_HOST` | Set internally | Vite proxy host; scripts set it from startup context |
 | `SCAI_BACKPORT` | Set internally | Vite proxy backend port; scripts set it from startup context |
 
+
+For a slow local model, add `-e SCAI_LLM_TIMEOUT_SECONDS=1200` before the image
+name in `docker run`. This gives shared LLM requests a 20-minute default and
+minimum, including text, tool calls, vision, and streaming. It applies to every
+model using that client in the container; it does not change retry counts,
+code-execution/search budgets, or an upstream server's timeout. Recreate the
+container with the new environment to change the setting; an image that supports
+this variable does not need rebuilding when only the value changes.
 
 ### Session storage capacity
 

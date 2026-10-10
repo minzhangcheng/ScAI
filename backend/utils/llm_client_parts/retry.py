@@ -11,6 +11,7 @@ import inspect
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from uuid import uuid4
@@ -37,12 +38,31 @@ from ..context_overflow import is_context_overflow
 # client giving up first does NOT cancel the upstream generation — the relay
 # still bills the full response. A deadline that is too tight therefore pays for
 # the same tokens on every retry and receives nothing.
-DEFAULT_REQUEST_TIMEOUT = 600.0
-MIN_LLM_TIMEOUT_SECONDS = 600.0
+def _resolve_llm_timeout_seconds() -> int:
+    """Read the deployment timeout once at startup, in positive whole seconds."""
+    raw = os.environ.get("SCAI_LLM_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return 600
+    try:
+        value = int(raw)
+        if value > 0:
+            return value
+    except ValueError:
+        pass
+    logger.warning(
+        "SCAI_LLM_TIMEOUT_SECONDS=%r must be a positive whole number of seconds; "
+        "using 600",
+        raw,
+    )
+    return 600
+
+
+DEFAULT_REQUEST_TIMEOUT = _resolve_llm_timeout_seconds()
+MIN_LLM_TIMEOUT_SECONDS = DEFAULT_REQUEST_TIMEOUT
 
 
 def llm_timeout_seconds(value: Optional[float] = None) -> float:
-    """Keep every started model request's timeout at least ten minutes.
+    """Keep started model requests above the deployment's configured floor.
 
     Business budgets may decide whether to start another request, but must not
     shorten an in-flight generation using a network-query or leftover budget.

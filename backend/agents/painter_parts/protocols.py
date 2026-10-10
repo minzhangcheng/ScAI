@@ -254,7 +254,8 @@ async def _run_protocol_cascade(
     a full round fails, back off (2/4/8/16s) and retry the whole cascade, up to
     ``max_rounds`` rounds. Deterministic auth/capability errors disable that
     protocol; operation-wide content-policy failures abort immediately. Each
-    protocol carrying a ``timeout`` receives at least 600 seconds. The optional
+    protocol carrying a ``timeout`` receives at least the configured LLM timeout
+    (``SCAI_LLM_TIMEOUT_SECONDS``, default 600 seconds). The optional
     total deadline controls whether another attempt starts; it never truncates
     a started generation to a smaller leftover budget.
 

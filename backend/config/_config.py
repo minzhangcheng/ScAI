@@ -620,7 +620,7 @@ class SystemConfig(BaseModel):
     annotation_validation_timeout_seconds: int = Field(
         default=600,
         ge=1,
-        description="Annotation validation budget in seconds, with an effective minimum of 600. The budget controls admission of another iteration; each admitted LLM request receives the full budget without an outer timer cancelling it early. Incomplete checks remain visible as partial observations.",
+        description="Annotation validation budget in seconds, with an effective minimum set by SCAI_LLM_TIMEOUT_SECONDS (default 600). The budget controls admission of another iteration; each admitted LLM request receives the full budget without an outer timer cancelling it early. Incomplete checks remain visible as partial observations.",
     )
     annotation_validation_max_iterations: int = Field(
         default=5,
@@ -653,7 +653,7 @@ class SystemConfig(BaseModel):
     post_execution_review_total_timeout_seconds: int = Field(
         default=0,
         ge=0,
-        description="Admission budget (seconds) for the supplementary pass. 0 derives it from the actual execution allowance plus one reporting-only request. It is raised to at least one execution step plus reporting. Reporting time is reserved before admitting execution steps; started steps retain their full timeout. Each LLM request has an effective minimum of 600 seconds.",
+        description="Admission budget (seconds) for the supplementary pass. 0 derives it from the actual execution allowance plus one reporting-only request. It is raised to at least one execution step plus reporting. Reporting time is reserved before admitting execution steps; started steps retain their full timeout. Each LLM request has an effective minimum set by SCAI_LLM_TIMEOUT_SECONDS (default 600 seconds).",
     )
 
     # State persistence (deprecated: use get_session_states/get_session_workspace instead)

@@ -320,7 +320,9 @@ Analysis instruction: {instruction}
                 text_prompt=overview_prompt,
                 images=[overview],
                 temperature=0.3,
-                request_timeout=600.0,  # 10 min for single overview image
+                # Keep the explicit legacy floor; SCAI_LLM_TIMEOUT_SECONDS can
+                # raise it for slow local vision models.
+                request_timeout=600.0,
                 system_prompt=agent.system_prompt,
                 prefer_stream=True,
             ),

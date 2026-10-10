@@ -316,8 +316,8 @@ docker build -t ghcr.io/minzhangcheng/scai:latest .
 ```
 
 ```bash
-./build.sh --version 0.63.20
-./build.sh --version 0.63.20 --push
+./build.sh --version 0.64.1
+./build.sh --version 0.64.1 --push
 ```
 
 如果未指定 `--version`，辅助脚本使用 `git describe --tags --abbrev=0` 返回的最新 Git 标签；如果不存在标签，则使用 `latest`。`--push` 会将两个标签推送到 `ghcr.io/minzhangcheng/scai`；使用前请先向该注册表进行 Docker 身份验证。该辅助脚本不接受注册表、镜像名称、平台或构建参数 flags。
@@ -766,6 +766,7 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_JWT_SECRET`                     | 生成并存储为`.jwt_secret` | HS256 JWT 签名                                                                                             |
 | `SCAI_CONFIG_SECRET`                  | 生成的本地加密材料          | 加密存储的用户/模型 secrets                                                                                |
 | `SCAI_ENABLE_REPRODUCIBILITY`         | Disabled                    | 真值`1`、`true` 或 `yes` 启用可重现性 bundles                                                        |
+| `SCAI_LLM_TIMEOUT_SECONDS`           | `600`                       | 公共 LLM 请求的默认时限、最低时限及补充步骤的 LLM 时间预留，单位为正整数秒。后端启动时读取；空值使用默认值，无效或非正值告警并回退；保留显式设置的更长请求时限。 |
 | `SCAI_RUNTIME_SAVE_FLOOR_MINUTES`     | `30`                      | 距上一次**成功**保存需经过的分钟数，之后步骤边界才会再次保存；轮次边界与收尾保存不受其影响。未设置、非整数或非正值会记录告警并回退 |
 | `SCAI_RUNTIME_MAX_RSS_GB`             | `auto`                    | 常规运行时持久化的逐会话内核 RSS 上限；数值表示管理员 GiB 上限                                              |
 | `SCAI_RUNTIME_MAX_ANNDATA_TOTAL_GB`   | `auto`                    | 存活 AnnData 估算总量上限；数值表示管理员 GiB 上限                                                          |
@@ -779,6 +780,12 @@ python3 session_manager.py --url http://localhost:3000 --api-key '<API_KEY>' \
 | `SCAI_AUTO_FETCH_CELLTYPIST`          | `0`                       | 直接启动；`1` 将 CellTypist 模型缓存到 `$SCAI_DATA_DIR/celltypist`                                        |
 | `SCAI_HOST`                           | Set internally              | Vite 代理主机；脚本根据启动上下文设置                                                                      |
 | `SCAI_BACKPORT`                       | Set internally              | Vite 代理后端端口；脚本根据启动上下文设置                                                                  |
+
+使用较慢的本地模型时，在 `docker run` 的镜像名称前添加
+`-e SCAI_LLM_TIMEOUT_SECONDS=1200`，即可将公共 LLM 请求的默认时限和最低时限
+设为 20 分钟，覆盖文字、工具调用、视觉及流式响应。它作用于容器中使用该客户端的
+所有模型，不改变重试次数、代码执行或搜索预算，也不修改上游服务器的超时。
+调整后需用新环境变量重新创建容器；镜像支持该变量后，仅调整数值无需重建镜像。
 
 ### 会话存储容量
 

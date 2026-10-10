@@ -16,7 +16,8 @@ from ...utils.llm_client_parts.retry import llm_timeout_seconds
 logger = logging.getLogger(__name__)
 
 # Retrieval budgets for the novelty gate. Model calls have an independent
-# minimum 600-second budget; their elapsed time does not consume these windows.
+# deployment-configured minimum (600 seconds by default); their elapsed time
+# does not consume these windows.
 NOVELTY_QUERY_TIMEOUT_SECONDS = 90.0
 PI_DIRECTION_LLM_TIMEOUT_SECONDS = 600.0
 NOVELTY_DIRECTION_TIMEOUT_SECONDS = 420.0

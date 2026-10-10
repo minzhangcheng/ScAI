@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.63.20 · **Last updated**: 2026-10-09
+**Version**: 0.64.1 · **Last updated**: 2026-10-10
 
 ## 1. Runtime Architecture
 
@@ -367,6 +367,17 @@ identify the annotation failure and omit unrelated model/server configuration.
 ## 13. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
+
+**0.64.x — (2026-10-10 onward)**
+
+- `0.64.1` — Adds the deployment environment variable
+  `SCAI_LLM_TIMEOUT_SECONDS` for the shared LLM request default and minimum,
+  including text, tool calls, vision, and streaming. The same configured floor
+  is used for the post-execution supplementary LLM allowance. Unset values
+  retain the 600-second default; invalid or non-positive values log a warning
+  and fall back safely. Administrator manuals document Docker configuration,
+  and focused timeout, transport, and supplementary-review coverage passed
+  `24/24`.
 
 **0.63.x — (2026-09-28 onward)**
 

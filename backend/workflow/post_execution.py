@@ -53,6 +53,7 @@ from ..utils.direction_payload import (
     build_direction_projection_block,
     FOLLOWUP_DISPOSITIONS,
 )
+from ..utils.llm_client_parts.retry import DEFAULT_REQUEST_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,7 @@ class PostExecutionReviewMixin:
     # Per-iteration allowance for the executor's own LLM call, on top of the code
     # execution budget. Generous: a code-generation call on a saturated round
     # context is the slowest kind this workflow makes.
-    _REVIEW_LLM_ALLOWANCE_SECONDS = 600
+    _REVIEW_LLM_ALLOWANCE_SECONDS = DEFAULT_REQUEST_TIMEOUT
 
     # Fallbacks for a config that cannot be read at all: `sandbox_timeout`'s own
     # default, put through the same derivation the configured path applies.
@@ -89,7 +90,8 @@ class PostExecutionReviewMixin:
     def _post_execution_review_limits(self) -> Tuple[int, int, int, int]:
         """(iteration_ceiling, step_timeout, total_timeout, max_tasks) from config.
 
-        Clamped defensively — iterations in [1,20], step timeout >= 600, tasks in [0,10] —
+        Clamped defensively — iterations in [1,20], step timeout at least the
+        configured LLM allowance, tasks in [0,10] —
         so a stray config cannot make the pass loop unboundedly or commission an
         open-ended study.
 
@@ -117,7 +119,7 @@ class PostExecutionReviewMixin:
                         or self._DEFAULT_SANDBOX_TIMEOUT
                     )
                 step = sandbox_timeout + self._REVIEW_LLM_ALLOWANCE_SECONDS
-            step = max(600, step)
+            step = max(self._REVIEW_LLM_ALLOWANCE_SECONDS, step)
 
             total = int(getattr(cfg, "post_execution_review_total_timeout_seconds", 0) or 0)
             return (iterations, step, max(step, total) if total > 0 else 0, tasks)
