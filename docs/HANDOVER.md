@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.64.1 · **Last updated**: 2026-10-10
+**Version**: 0.64.2 · **Last updated**: 2026-10-12
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,11 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.64.x — (2026-10-10 onward)**
+
+- `0.64.2` — Includes echoed `reasoning_content` when estimating prompt
+  tokens, so bioinformatics tool-call histories account for the model's
+  returned reasoning before context compaction. Focused context-budget and
+  evidence-brief coverage passed `4/4`.
 
 - `0.64.1` — Adds the deployment environment variable
   `SCAI_LLM_TIMEOUT_SECONDS` for the shared LLM request default and minimum,

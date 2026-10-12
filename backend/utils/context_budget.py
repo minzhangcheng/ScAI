@@ -35,7 +35,7 @@ def estimate_text_tokens(text: str) -> int:
 
 
 def estimate_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
-    """Estimate text and tool-call argument tokens in chat messages."""
+    """Estimate text, echoed reasoning, and tool-call argument tokens."""
 
     total_chars = 0
     for message in messages:
@@ -44,6 +44,9 @@ def estimate_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
             total_chars += len(content)
         elif isinstance(content, list):
             total_chars += len(json.dumps(content, default=str))
+        reasoning_content = message.get("reasoning_content")
+        if isinstance(reasoning_content, str):
+            total_chars += len(reasoning_content)
         for tool_call in message.get("tool_calls") or []:
             if isinstance(tool_call, dict):
                 arguments = tool_call.get("function", {}).get("arguments", "")

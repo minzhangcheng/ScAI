@@ -45,3 +45,32 @@ def test_compaction_preserves_anchor_recent_context_and_tool_pairing():
     assert report.actions
     assert output[0]["content"] == "ANCHOR"
     assert tool_calls_are_paired(output)
+
+
+def test_reasoning_echo_triggers_compaction_without_mutating_history():
+    messages = [{"role": "system", "content": "ANCHOR"}]
+    for index in range(10):
+        call_id = f"call-{index}"
+        messages.extend([
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "r" * 7_000,
+                "tool_calls": [{
+                    "id": call_id,
+                    "function": {"name": "run", "arguments": "{}"},
+                }],
+            },
+            {"role": "tool", "tool_call_id": call_id, "content": "done"},
+        ])
+    output, report = apply_budget(
+        messages, context_window=12_000, completion_reserve=2_000,
+    )
+    assert report.measured_tokens >= 20_000
+    assert report.actions and report.fits
+    assert len(messages) == 21
+    for history in (messages, output):
+        for message in history:
+            if message.get("role") == "assistant":
+                assert message["reasoning_content"] == "r" * 7_000
+        assert tool_calls_are_paired(history)
