@@ -11,7 +11,7 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 from urllib.parse import quote as url_quote
 
 from datetime import datetime
@@ -98,6 +98,7 @@ def _build_disk_zip(
     recursive: bool,
     csv_only: bool = False,
     skip_report_artifacts: bool = False,
+    extra_members: Iterable[tuple[Path, bytes]] = (),
 ) -> None:
     """Build a bounded ZIP without retaining inputs or output in memory."""
     def include(relative: Path) -> bool:
@@ -119,6 +120,7 @@ def _build_disk_zip(
             max_source_bytes=None,
             reserve_bytes=_BULK_ZIP_DISK_RESERVE_BYTES,
             include_source_space_estimate=False,
+            extra_members=extra_members,
         )
     except SecureArchiveError as exc:
         raise _BulkZipRejected(exc.status_code, exc.detail) from exc
@@ -131,6 +133,7 @@ async def _disk_zip_response(
     recursive: bool,
     csv_only: bool = False,
     skip_report_artifacts: bool = False,
+    extra_members: Iterable[tuple[Path, bytes]] = (),
 ) -> OwnedArchiveFileResponse:
     """Stage a bounded ZIP on disk and retire it after the response completes."""
     UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -151,6 +154,7 @@ async def _disk_zip_response(
                 recursive=recursive,
                 csv_only=csv_only,
                 skip_report_artifacts=skip_report_artifacts,
+                extra_members=extra_members,
             )
         except _BulkZipRejected as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
@@ -248,7 +252,11 @@ async def download_full_report(
     state: AnalysisState = Depends(require_session_ownership),
     branch_id: Optional[str] = None,
 ):
-    """Download full report including figures, tables, and report JSON"""
+    """Download published files and retained round/stage reports for one lineage."""
+    from backend.services.report.history_exports import (
+        iter_report_history_members, snapshot_report_history,
+    )
+
     validate_session_id(session_id)
     target_lineage_id = resolve_report_target_lineage(branch_id)
     branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
@@ -263,6 +271,9 @@ async def download_full_report(
         filename=f"{safe_name}_full_report.zip",
         recursive=True,
         skip_report_artifacts=True,
+        extra_members=iter_report_history_members(
+            snapshot_report_history(state), target_lineage_id,
+        ),
     )
 
 @router.get("/{session_id}/report/archives")

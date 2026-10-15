@@ -9,7 +9,7 @@ import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 logger = logging.getLogger("backend.services.export_lifecycle")
 
@@ -386,6 +386,7 @@ def build_secure_zip(
     max_source_bytes: int | None,
     reserve_bytes: int,
     include_source_space_estimate: bool = True,
+    extra_members: Iterable[tuple[Path, bytes]] = (),
 ) -> None:
     """Build a bounded ZIP from descriptor-pinned, no-follow source files."""
     root = Path(source_root)
@@ -440,6 +441,19 @@ def build_secure_zip(
                         finally:
                             for descriptor in reversed(descriptors):
                                 os.close(descriptor)
+                    for relative, payload in extra_members:
+                        name = Path(*_relative_parts(relative)).as_posix()
+                        if name in archive.NameToInfo:
+                            raise SecureArchiveError(409, "Duplicate archive member path")
+                        total_bytes += len(payload)
+                        member_count = len(archive.filelist) + 1
+                        if max_files is not None and member_count > max_files:
+                            raise SecureArchiveError(413, f"Archive contains more than {max_files} files")
+                        if max_source_bytes is not None and total_bytes > max_source_bytes:
+                            raise SecureArchiveError(413, f"Archive source exceeds {max_source_bytes} bytes")
+                        _reserve_space(target, len(payload), member_count, reserve_bytes)
+                        _verify_owned_destination(target, destination_fd, owned_identity)
+                        archive.writestr(name, payload)
                 output.flush()
                 os.fsync(output.fileno())
         finally:

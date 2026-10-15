@@ -171,7 +171,7 @@ async def get_round_report_html(
     branch_id: Optional[str] = None,
 ):
     """Download one settled round, identified by its saved segment, not its number."""
-    from backend.services.report.variants_parts.detailed import render_detailed_report_document
+    from backend.services.report.history_exports import render_round_report
 
     validate_session_id(session_id)
     state = await require_session_ownership(
@@ -182,19 +182,11 @@ async def get_round_report_html(
     )
     result = next((r for r in state.round_results
                    if r.report_segment_id == segment_id and r.lineage_id == lineage), None)
-    segment = next((s for s in state.detailed_report_segments if s.id == segment_id), None)
-    if result is None or segment is None or not segment.content_html:
+    content = render_round_report(state, result) if result else None
+    if content is None:
         raise HTTPException(status_code=404, detail="Round report not available for this branch")
-    by_id = {item.id: item for item in state.detailed_report_segments}
-    supplements = [by_id[sid] for sid in dict.fromkeys(result.report_supplement_ids)
-                   if sid in by_id and sid != segment.id]
-    if segment.decision_content_html:
-        segment = segment.model_copy(update={"content_html": segment.decision_content_html})
     return HTMLResponse(
-        render_detailed_report_document(
-            state, segment=segment, supplements=supplements,
-            deduplicate_figures=not bool(segment.decision_content_html),
-        ),
+        content,
         headers={
             "Content-Disposition": f'attachment; filename="round_{result.round_number}_report.html"',
             "Cache-Control": "no-store",

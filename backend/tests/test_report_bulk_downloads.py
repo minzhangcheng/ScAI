@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import stat
 import tempfile
@@ -11,6 +12,8 @@ import pytest
 from fastapi.responses import FileResponse
 
 from backend.routes.reports_parts import downloads
+from backend.models.schemas import AnalysisState, DetailedReportSegment, RoundResult
+from backend.models.schema_parts.round_report import StageReviewReport
 
 
 def _allocated_stage(directory: Path) -> tuple[int, Path]:
@@ -201,3 +204,94 @@ def test_report_zip_rejects_parent_directory_swap(monkeypatch, tmp_path):
     finally:
         os.close(fd)
         destination.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lineage", ["main", "child"])
+async def test_full_download_includes_retained_rounds_and_stage_versions(tmp_path, monkeypatch, lineage):
+    state = AnalysisState(restore_branch_id="child")
+    for owner in ("main", "child"):
+        directory = tmp_path / owner
+        (directory / "figures").mkdir(parents=True)
+        (directory / "report.html").write_text(f"Published {owner}")
+        (directory / "figures/retained.png").write_bytes(b"image")
+        (directory / "previous_report_v1.zip").write_bytes(b"old archive")
+        for number, phase in ((1, "exploration"), (2, "integration")):
+            segment = DetailedReportSegment(
+                id=f"{owner}-{number}", phase=phase, title=f"Saved {owner} {number}",
+                round_number=number, content_html=f"Final {owner} {number}",
+                decision_content_html=f"Review {owner} {number}<img src='data:image/png;base64,eA=='>",
+            )
+            supplement = DetailedReportSegment(
+                id=f"{segment.id}-supplement", phase="supplementary", title="Supplement",
+                round_number=number, content_html=f"Supplement {owner} {number}",
+            )
+            state.detailed_report_segments.extend([segment, supplement])
+            state.round_results.append(RoundResult(
+                round_number=number, phase=phase, lineage_id=owner,
+                report_segment_id=segment.id, report_supplement_ids=[supplement.id],
+            ))
+        for stage, revision, status in (("stage1", 1, "ready"), ("stage2", 1, "partial"),
+                                        ("stage2", 2, "ready"), ("stage2", 3, "failed")):
+            state.stage_review_reports.append(StageReviewReport(
+                session_id=state.id, lineage_id=owner, stage=stage, revision=revision,
+                status=status, html=f"<html>{owner} {stage} v{revision}</html>" if status != "failed" else "",
+            ))
+    state.stage_review_reports.append(StageReviewReport(
+        session_id="other-session", lineage_id=lineage, stage="stage1", revision=9,
+        status="ready", html="FOREIGN SESSION",
+    ))
+    state.round_results.append(RoundResult(round_number=3, lineage_id=lineage))
+    # The export also works after persistence/reload, without live workspace figures.
+    from backend.utils.blob_store import externalize_blobs, inline_blobs
+    saved = externalize_blobs(state.model_dump(mode="json"), tmp_path / "blobs")
+    state = AnalysisState.model_validate(inline_blobs(saved, tmp_path / "blobs"))
+    before = state.model_dump_json()
+    monkeypatch.setattr(downloads, "UPLOAD_TEMP_DIR", tmp_path / "staging")
+    monkeypatch.setattr(downloads, "resolve_published_report_dir", lambda _id, branch: tmp_path / (branch or "main"))
+    response = await downloads.download_full_report(
+        state.id, state=state, branch_id=None if lineage == "main" else lineage,
+    )
+    with zipfile.ZipFile(response.path) as archive:
+        assert archive.read("report.html").decode() == f"Published {lineage}"
+        assert archive.read("figures/retained.png") == b"image"
+        assert "previous_report_v1.zip" not in archive.namelist()
+        index = json.loads(archive.read("history/index.json"))
+        assert index["session_id"] == state.id and index["lineage_id"] == lineage
+        rounds = [entry for entry in index["reports"] if entry["kind"] == "round"]
+        assert [entry["round"] for entry in rounds] == [1, 2, 3]
+        assert rounds[-1]["path"] is None and rounds[-1]["status"] == "unavailable"
+        for entry in rounds[:2]:
+            content = archive.read(entry["path"]).decode()
+            assert f"Review {lineage} {entry['round']}" in content
+            assert f"Supplement {lineage} {entry['round']}" in content
+            assert "data:image/png;base64,eA==" in content
+            assert f"Final {lineage}" not in content
+            assert ("Review child" if lineage == "main" else "Review main") not in content
+        stages = [entry for entry in index["reports"] if entry["kind"] == "stage"]
+        assert len(stages) == 4 and stages[-1]["status"] == "failed" and stages[-1]["path"] is None
+        for entry in stages[:3]:
+            original = next(r for r in state.stage_review_reports if r.id == entry["report_id"])
+            assert archive.read(entry["path"]) == original.html.encode()
+    assert state.model_dump_json() == before
+    await _consume_response(response)
+    assert not Path(response.path).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["../escape.html", "report.html"])
+async def test_extra_report_member_rejection_cleans_up_archive(tmp_path, monkeypatch, name):
+    from fastapi import HTTPException
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "report.html").write_text("Published report")
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(downloads, "UPLOAD_TEMP_DIR", staging)
+    with pytest.raises(HTTPException) as error:
+        await downloads._disk_zip_response(
+            source, filename="bundle.zip", recursive=True,
+            extra_members=[(Path(name), b"retained report")],
+        )
+    assert error.value.status_code == 409
+    assert not list(staging.iterdir())
