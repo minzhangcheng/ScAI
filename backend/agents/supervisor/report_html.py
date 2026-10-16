@@ -221,8 +221,10 @@ class ReportHtmlMixin:
         esc = html_module.escape
 
         parts = []
-        parts.append('<div class="appendix" id="appendix">')
-        parts.append('<h2>Appendix: Analysis Settings &amp; Records</h2>')
+        parts.append('<details class="appendix report-collapsible" id="appendix">')
+        parts.append('<summary class="report-collapsible-summary">'
+                     '<h2>Appendix: Analysis Settings &amp; Records</h2></summary>')
+        parts.append('<div class="report-collapsible-content">')
 
         # Project Information
         parts.append('<h3>Project Information</h3>')
@@ -340,6 +342,7 @@ class ReportHtmlMixin:
             parts.append(downloads_html)
 
         parts.append('</div>')
+        parts.append('</details>')
         return "\n".join(parts)
 
     @staticmethod
@@ -347,7 +350,10 @@ class ReportHtmlMixin:
         """Build the enhanced 'Score Definitions' section (shared with the
         services/report path so the two stay in sync)."""
         from ...services.report.score_section import build_score_definitions_section_html
-        return build_score_definitions_section_html(report.get("score_definitions", []))
+        return build_score_definitions_section_html(
+            report.get("score_definitions", []),
+            table_records=report.get("tables", []),
+        )
 
     @staticmethod
     def _categorize_figure(filename: str) -> str:
@@ -606,6 +612,7 @@ class ReportHtmlMixin:
                     getattr(record, "preview_data", None) or []
                 ),
                 "total_rows": int(getattr(record, "total_rows", 0) or 0),
+                "csv_sha256": getattr(record, "csv_sha256", None),
                 "table_id": getattr(record, "id", None),
                 "plan_step_ids": list(
                     getattr(record, "plan_step_ids", None) or []

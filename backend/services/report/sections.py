@@ -575,17 +575,21 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         # ── 7. Related Reports & Downloads ─────────────────────────
         from .interaction_records import direction_record_entries
         from .download_section import render_related_reports_downloads_html
-        related_reports = {
-            "annotation_record": (
-                "annotation_record.html"
-                if getattr(state, "annotation_record", None) is not None else None
-            ),
-            "direction_records": direction_record_entries(state),
-            "integration_report": (
-                "integration_report.html"
-                if getattr(state, "integration_report_html_path", None) else None
-            ),
-        }
+        related_reports = dict(
+            (report.get("appendix", {}) or {}).get("related_reports", {}) or {}
+        )
+        if not related_reports:
+            related_reports = {
+                "annotation_record": (
+                    "annotation_record.html"
+                    if getattr(state, "annotation_record", None) is not None else None
+                ),
+                "direction_records": direction_record_entries(state),
+                "integration_report": (
+                    "integration_report.html"
+                    if getattr(state, "integration_report_html_path", None) else None
+                ),
+            }
         downloads_html = render_related_reports_downloads_html(
             related_reports,
             notebook_filename=f"{state.id}.ipynb",
@@ -597,8 +601,9 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 
         # ── Assemble ────────────────────────────────────────────────
         return f"""
-        <div class="appendix" id="appendix">
-            <h2>{appendix_title}</h2>
+        <details class="appendix report-collapsible" id="appendix">
+            <summary class="report-collapsible-summary"><h2>{appendix_title}</h2></summary>
+            <div class="report-collapsible-content">
             {project_html}
             {agent_html}
             {data_html}
@@ -607,5 +612,6 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             {interaction_html}
             {downloads_html}
             {repro_html}
-        </div>
+            </div>
+        </details>
         """

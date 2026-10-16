@@ -606,7 +606,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "register_score",
-            "description": "Register how a score was computed for the final report methodology section. Call this IMMEDIATELY AFTER computing any score (gene signature scores, pathway enrichment, TF activity, etc.).",
+            "description": (
+                "Register how a score was computed for the final report methodology "
+                "section. Call this IMMEDIATELY AFTER computing any score (gene "
+                "signature scores, pathway enrichment, TF activity, etc.). A flat "
+                "gene panel is stored inline. A gene-set collection or regulatory "
+                "network must instead cite the exact registered CSV table that "
+                "preserves its membership or edge structure."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -626,15 +633,67 @@ TOOLS = [
                         "type": "object",
                         "description": "Key parameters used (e.g., {\"ctrl_size\": 50, \"n_bins\": 25})"
                     },
+                    "definition_kind": {
+                        "type": "string",
+                        "enum": [
+                            "gene_panel",
+                            "gene_set_collection",
+                            "regulatory_network",
+                        ],
+                        "description": (
+                            "Shape of the score definition. Use gene_panel for one "
+                            "flat panel, gene_set_collection when named set membership "
+                            "defines the computation, and regulatory_network when "
+                            "regulator-target edges and optional weights define it."
+                        ),
+                    },
+                    "definition_artifacts": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "description": (
+                            "Registered CSV tables that carry the exact structured "
+                            "definition. gene_set_collection requires a "
+                            "gene_set_membership reference; regulatory_network requires "
+                            "a regulatory_network reference. Export the structure with "
+                            "execute_code, register it with register_publication_table, "
+                            "then cite the returned table_id. ranked_input and "
+                            "leading_edge are optional supplemental inputs."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "role": {
+                                    "type": "string",
+                                    "enum": [
+                                        "gene_set_membership",
+                                        "regulatory_network",
+                                        "ranked_input",
+                                        "leading_edge",
+                                    ],
+                                },
+                                "table_id": {"type": "string"},
+                            },
+                            "required": ["role", "table_id"],
+                            "additionalProperties": False,
+                        },
+                    },
                     "gene_list": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Full gene panel supplied to the score calculation, when applicable. Do not substitute only top genes. Record actual matched/missing genes in parameters when measured; distinguish the supplied panel from its matched subset."
+                        "description": (
+                            "For definition_kind=gene_panel only: the full flat panel "
+                            "supplied to the calculation. Do not substitute only top "
+                            "genes. Do not flatten a gene-set collection or regulatory "
+                            "network into a union here. Record actual matched/missing "
+                            "genes in parameters when measured; distinguish the supplied "
+                            "panel from its matched subset."
+                        )
                     },
                     "gene_list_source": {
                         "type": "string",
                         "description": (
-                            "Where the gene panel came from, preferably in one of four "
+                            "Where the score definition came from, preferably in one "
+                            "of four "
                             "machine-checkable forms. "
                             "(1) database:<resource>:<version>:<set_id> for a named set from a "
                             "versioned resource - the version must be a concrete release, not "
@@ -642,8 +701,9 @@ TOOLS = [
                             "(2) derived:<method>[:<detail>] when computed from this dataset. "
                             "(3) literature:PMID:<id> or literature:DOI:<id>. "
                             "(4) bespoke:<justification of at least 20 characters> when the "
-                            "panel was assembled by hand - allowed, but say why no versioned "
-                            "set fits, because hand-assembled panels are reported as such and "
+                            "definition was assembled by hand - allowed, but say why "
+                            "no versioned resource fits, because hand-assembled "
+                            "definitions are reported as such and "
                             "weighed accordingly. Missing or invalid provenance is recorded "
                             "as a non-blocking PI review observation."
                         )
@@ -661,11 +721,11 @@ TOOLS = [
                     "n_genes_matched": {
                         "type": "integer",
                         "description": (
-                            "How many genes of gene_list are actually present in the analysed "
-                            "matrix, e.g. len([g for g in gene_list if g in adata.var_names]). "
-                            "This, not the nominal panel size, governs statistical power: a "
-                            "panel whose genes are mostly absent from the data cannot support "
-                            "a negative conclusion. Supply it whenever a gene panel is used."
+                            "For definition_kind=gene_panel only: how many genes of "
+                            "gene_list are actually present in the analysed matrix, e.g. "
+                            "len([g for g in gene_list if g in adata.var_names]). Never "
+                            "use a set count, regulator count, network edge count, or ranked "
+                            "input size here. Supply it whenever a gene panel is used."
                         )
                     },
                     "background_source": {
@@ -683,7 +743,10 @@ TOOLS = [
                         )
                     }
                 },
-                "required": ["score_name", "method", "description", "gene_list_source"]
+                "required": [
+                    "score_name", "method", "description", "gene_list_source",
+                    "definition_kind",
+                ]
             }
         }
     },

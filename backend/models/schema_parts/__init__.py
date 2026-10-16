@@ -17,6 +17,7 @@ from .analysis import (  # noqa: F401
     BulkInputProfile,
     MethodDecision,
     AnalysisStep,
+    ScoreDefinitionArtifactRef,
     ScoreDefinition,
     TreatmentGroup,
     DataFile,

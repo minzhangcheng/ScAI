@@ -186,6 +186,7 @@ def attach_evidence_sources(state, records):
                 else:
                     source.update(score.model_dump(mode="json", include={
                         "id", "score_name", "method", "gene_list", "gene_list_source",
+                        "definition_kind", "definition_status", "definition_artifacts",
                         "n_genes", "n_genes_matched", "panel_hash", "plan_id",
                         "plan_drift", "round_number", "parameters",
                     }))
@@ -319,7 +320,11 @@ def _source_preview(source):
         genes = source.get("gene_list") or []
         parameters = source.get("parameters") or {}
         preview = {
-            "method": source.get("method"), "gene_list": genes[:16],
+            "method": source.get("method"),
+            "definition_kind": source.get("definition_kind"),
+            "definition_status": source.get("definition_status"),
+            "definition_artifacts": source.get("definition_artifacts") or [],
+            "gene_list": genes[:16],
             "omitted_genes": max(0, len(genes) - 16),
             "n_genes_matched": source.get("n_genes_matched"),
             "matched_genes": parameters.get("matched_genes", "not recorded"),

@@ -24,8 +24,8 @@ You are conducting {modality} analysis. You have access to tools:
    writer will use this record to describe methods without reconstructing them
    from the image.
 7. fetch_gene_set - Fetch a named gene set from a versioned resource (any organism)
-8. register_analysis_plan - Freeze a gene panel BEFORE scoring it; returns a plan_id
-9. register_score - Register a computed score's methodology for the final report
+8. register_analysis_plan - Freeze one flat gene panel BEFORE scoring it; returns a plan_id
+9. register_score - Register a score and its flat or structured definition for the final report
 10. register_mechanism_programs - Register data-driven mechanism programs with cited evidence
 11. validate_species_genes - Check gene-name convention against the declared organism
 12. lookup_documentation - Look up API docs for an installed Python function, OR
@@ -213,11 +213,25 @@ When you need to compute ANY score (gene signature, pathway enrichment, TF activ
    - Question: "I plan to compute [score name] using [method]. Gene list source: [source]. Is this appropriate?"
    - Context: Include why this score is relevant to the current analysis
    - Options: List alternative methods if applicable
-2. Call register_analysis_plan to FREEZE the panel before you compute it. Give the
-   exact gene list, its source, the hypothesis, and what result would count against
-   the hypothesis. It returns a plan_id.
-3. After PI confirms/modifies, execute the computation via execute_code
-4. IMMEDIATELY after, call register_score with that plan_id to record the methodology
+2. Preserve the exact definition BEFORE computing:
+   - For one flat gene panel, call register_analysis_plan with the full gene list,
+     its source, the hypothesis, and what result would count against the hypothesis.
+     It returns a plan_id.
+   - For a named gene-set collection, export the exact set-to-gene membership to a
+     workspace CSV (for example, set_id,gene) and register it with
+     register_publication_table. Keep the returned table_id.
+   - For a regulatory network, export the exact regulator-target edges and any
+     weights/evidence columns to a workspace CSV and register it with
+     register_publication_table. Keep the returned table_id.
+   Never flatten a collection or network into one union gene list: membership and
+   edge structure are part of the definition.
+3. After PI confirms/modifies, execute the computation via execute_code.
+4. IMMEDIATELY after, call register_score. Set definition_kind and provide either
+   the full gene_list plus plan_id, or definition_artifacts citing the registered
+   gene_set_membership/regulatory_network table. ranked_input and leading_edge
+   tables may be cited as supplemental artifacts. n_genes_matched is only the
+   matched count for one flat gene panel; never put a set count, regulator count,
+   network edge count, or ranked-input size there.
 This applies to: sc.tl.score_genes, gseapy.ssgsea, gseapy.prerank, gseapy.enrichr, decoupler, custom scoring functions.
 
 WHY THE PLAN COMES FIRST:
@@ -529,8 +543,9 @@ if the assertion fails, print both shapes and stop rather than guessing an orien
   Cite exact registered score IDs and table_rows (table ID, exact row_match,
   relevant columns), plus the finding's actual execution IDs. These references
   supply small source excerpts to PI; do not dump notebooks or whole tables.
-  Read the score's actual panel before describing what it measures. If measured,
-  record matched/missing genes in register_score parameters. An unperformed
+  Read the score's actual panel, set membership, or regulatory network before
+  describing what it measures. For a flat panel, record matched/missing genes in
+  register_score parameters. An unperformed
   comparison is an open question, not a negative result. Do not manufacture new
   work or evidence solely to fill a brief; legacy findings remain valid.
 """

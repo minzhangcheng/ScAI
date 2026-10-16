@@ -611,8 +611,9 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
             pass
 
     return f"""
-    <div class="appendix" id="appendix">
-        <h2>{appendix_title}</h2>
+    <details class="appendix report-collapsible" id="appendix">
+        <summary class="report-collapsible-summary"><h2>{appendix_title}</h2></summary>
+        <div class="report-collapsible-content">
         {project_html}
         {agent_html}
         {data_html}
@@ -621,7 +622,8 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
         {interaction_html}
         {downloads_html}
         {reproducibility_html}
-    </div>
+        </div>
+    </details>
     """
 
 
@@ -1000,7 +1002,10 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     analysis_log_html = ""
 
     # Build score definitions HTML from report.json data if available
-    score_definitions_html = build_score_definitions_section_html(report.get("score_definitions", []))
+    score_definitions_html = build_score_definitions_section_html(
+        report.get("score_definitions", []),
+        table_records=report.get("tables", []),
+    )
     if score_definitions_html:
         score_toc_label = "Score Definitions"
         toc_items.append(

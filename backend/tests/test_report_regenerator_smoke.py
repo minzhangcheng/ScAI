@@ -45,6 +45,16 @@ def test_report_regenerator_smoke(tmp_path):
             "blocking_issues": [],
             "cautions": ["Evidence is qualified."],
         },
+        "score_definitions": [{
+            "score_name": "test_score",
+            "method": "sc.tl.score_genes",
+            "description": "Test score",
+            "gene_list": ["G1", "G2"],
+        }],
+        "appendix": {
+            "project_name": "Test Project",
+            "related_reports": {},
+        },
         "sections": [
             {
                 "id": "overview",
@@ -89,5 +99,14 @@ def test_report_regenerator_smoke(tmp_path):
     assert '<details class="report-limitations-details"' not in html_content
     assert "overview" in html_content
     assert "Evidence is qualified" not in html_content
+    assert (
+        '<details class="section score-definitions report-collapsible" '
+        'id="score-definitions">'
+    ) in html_content
+    assert (
+        '<details class="appendix report-collapsible" id="appendix">'
+    ) in html_content
+    assert '<details class="section score-definitions report-collapsible" open' not in html_content
+    assert '<details class="appendix report-collapsible" open' not in html_content
     retained = json.loads(report_json_path.read_text(encoding="utf-8"))
     assert retained["quality_disclosures"]["cautions"] == ["Evidence is qualified."]

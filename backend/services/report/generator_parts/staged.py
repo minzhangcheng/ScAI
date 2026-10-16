@@ -191,6 +191,7 @@ async def generate_report_staged(
         abstract=abstract,
         conclusions=conclusions,
         existing_figures=existing_figures,
+        existing_tables=existing_tables,
         language=language,
         force_fallback=force_fallback,
         bindings=bindings,
@@ -341,6 +342,7 @@ async def _assemble_report(
     abstract,
     conclusions,
     existing_figures,
+    existing_tables,
     language,
     force_fallback,
     bindings,
@@ -374,6 +376,7 @@ async def _assemble_report(
         report_state,
         record_files,
         reports_dir=generator.output_dir,
+        lineage_id=generator.target_lineage_id,
     )
     followups = bindings.build_report_followups(
         report_state,
@@ -466,6 +469,17 @@ async def _assemble_report(
     appendix_data["report_kind"] = report_status
     appendix_data["partial_reason"] = partial_reason
     appendix_data["partial_reasons"] = partial_reasons
+    missing_definition_tables = bindings.ensure_score_definition_tables(
+        report_state.score_definitions,
+        existing_tables,
+        generator.generated_tables,
+    )
+    if missing_definition_tables:
+        bindings.logger.warning(
+            "Score definition table(s) unavailable for report packaging: %s",
+            ", ".join(missing_definition_tables),
+        )
+
     report = {
         "id": report_id,
         "session_id": report_state.id,

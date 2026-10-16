@@ -118,6 +118,29 @@ body {
     color: #dc2626;
 }
 
+.report-collapsible > summary.report-collapsible-summary {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    list-style: none;
+}
+
+.report-collapsible > summary.report-collapsible-summary::-webkit-details-marker {
+    display: none;
+}
+
+.report-collapsible > summary.report-collapsible-summary::before {
+    content: "▶";
+    flex: 0 0 auto;
+    font-size: 0.8rem;
+    transition: transform 0.15s ease;
+}
+
+.report-collapsible[open] > summary.report-collapsible-summary::before {
+    transform: rotate(90deg);
+}
+
 .graphic-abstract {
     text-align: center;
     margin-bottom: 30px;
@@ -428,6 +451,10 @@ tr:hover {
 .appendix h2 {
     color: #b45309;
     margin-bottom: 16px;
+}
+
+.appendix > summary h2 {
+    margin-bottom: 0;
 }
 
 .appendix h3 {

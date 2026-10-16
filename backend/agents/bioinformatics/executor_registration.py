@@ -411,7 +411,7 @@ async def handle_register_score(context, tool_call) -> ToolAction:
     step_count = context.step_count
     agent_reasoning = context.agent_reasoning
     args = tool_call.arguments
-    from ...models.schemas import ScoreDefinition
+    from ...models.schemas import ScoreDefinition, ScoreDefinitionArtifactRef
     from ...services.analysis_plan import (
         describe_drift, diff_panels, panel_hash,
     )
@@ -420,6 +420,22 @@ async def handle_register_score(context, tool_call) -> ToolAction:
     )
 
     gene_list = args.get("gene_list") or []
+    valid_definition_kinds = {
+        "gene_panel", "gene_set_collection", "regulatory_network",
+    }
+    valid_artifact_roles = {
+        "gene_set_membership", "regulatory_network",
+        "ranked_input", "leading_edge",
+    }
+    requested_kind = str(args.get("definition_kind") or "").strip()
+    if requested_kind in valid_definition_kinds:
+        definition_kind = requested_kind
+    elif not requested_kind and gene_list:
+        # Compatibility for tool calls created before definition_kind became
+        # required. New calls are constrained by the tool schema.
+        definition_kind = "gene_panel"
+    else:
+        definition_kind = "unspecified"
     provenance, prov_error = parse_provenance(
         args.get("gene_list_source")
     )
@@ -447,6 +463,118 @@ async def handle_register_score(context, tool_call) -> ToolAction:
         ):
             context.evidence_gate_findings.append(record)
 
+    raw_artifacts = args.get("definition_artifacts") or []
+    definition_artifacts = []
+    seen_artifacts = set()
+    malformed_artifact = False
+    for item in raw_artifacts[:8] if isinstance(raw_artifacts, list) else []:
+        if isinstance(item, dict):
+            role = str(item.get("role") or "").strip()
+            table_id = str(item.get("table_id") or "").strip()
+        else:
+            role = str(getattr(item, "role", "") or "").strip()
+            table_id = str(getattr(item, "table_id", "") or "").strip()
+        if role not in valid_artifact_roles or not table_id:
+            malformed_artifact = True
+            continue
+        key = (role, table_id)
+        if key in seen_artifacts:
+            continue
+        seen_artifacts.add(key)
+        definition_artifacts.append(ScoreDefinitionArtifactRef(
+            role=role,
+            table_id=table_id,
+        ))
+
+    active_lineage = getattr(state, "restore_branch_id", None) or "main"
+    table_by_id = {
+        str(getattr(table, "id", "") or ""): table
+        for table in (getattr(state, "publication_tables", None) or [])
+    }
+    eligible_artifact_roles = set()
+    unavailable_artifacts = []
+    for reference in definition_artifacts:
+        table = table_by_id.get(reference.table_id)
+        eligible = bool(
+            table is not None
+            and str(getattr(table, "csv_sha256", "") or "").strip()
+            and bool(getattr(table, "is_current", True))
+            and str(getattr(table, "producer_status", "published")) == "published"
+            and str(getattr(table, "lineage_id", "main") or "main") == active_lineage
+        )
+        if eligible:
+            eligible_artifact_roles.add(reference.role)
+        else:
+            unavailable_artifacts.append(f"{reference.role}:{reference.table_id}")
+
+    required_role = {
+        "gene_set_collection": "gene_set_membership",
+        "regulatory_network": "regulatory_network",
+    }.get(definition_kind)
+    if definition_kind == "gene_panel":
+        definition_status = "complete" if gene_list else "incomplete"
+    elif required_role:
+        definition_status = (
+            "complete" if required_role in eligible_artifact_roles else "incomplete"
+        )
+    else:
+        definition_status = "incomplete"
+
+    if definition_kind == "unspecified":
+        detail = (
+            f"definition_kind={requested_kind!r} is not supported."
+            if requested_kind else
+            "No definition_kind or flat gene panel was supplied."
+        )
+        review_notes.append(
+            "Score definition kind is missing or invalid; the PI must treat the "
+            "record as structurally incomplete."
+        )
+        record_review_observation(
+            gate="register-score-definition",
+            rule_id="score-definition-kind",
+            detail=detail,
+        )
+    elif definition_kind == "gene_panel" and not gene_list:
+        review_notes.append(
+            "The gene_panel definition has no gene list; the PI must treat the "
+            "record as structurally incomplete."
+        )
+        record_review_observation(
+            gate="register-score-definition",
+            rule_id="score-definition-artifact",
+            detail="definition_kind=gene_panel requires a non-empty gene_list.",
+        )
+    elif required_role and required_role not in eligible_artifact_roles:
+        review_notes.append(
+            f"Definition artifact not registered: a current hash-bound "
+            f"{required_role} table is required for {definition_kind}."
+        )
+        record_review_observation(
+            gate="register-score-definition",
+            rule_id="score-definition-artifact",
+            detail=(
+                f"definition_kind={definition_kind} requires an eligible "
+                f"{required_role} publication table."
+            ),
+        )
+    if malformed_artifact or unavailable_artifacts:
+        detail_parts = []
+        if malformed_artifact:
+            detail_parts.append("Malformed definition artifact references were omitted.")
+        if unavailable_artifacts:
+            detail_parts.append(
+                "Unavailable or ineligible references: "
+                + ", ".join(unavailable_artifacts)
+                + "."
+            )
+        review_notes.append(" ".join(detail_parts))
+        record_review_observation(
+            gate="register-score-definition",
+            rule_id="score-definition-artifact-reference",
+            detail=" ".join(detail_parts),
+        )
+
     if prov_error:
         logger.warning(
             "[Bioinformatics] register_score provenance unresolved; "
@@ -454,11 +582,11 @@ async def handle_register_score(context, tool_call) -> ToolAction:
         )
         provenance, _ = parse_provenance(
             "bespoke:valid provenance was not supplied; "
-            "this panel is unattributed and not reproducible"
+            "this score definition is unattributed and not reproducible"
         )
         review_notes.append(
             "Recorded without valid provenance; the PI must decide how much "
-            "weight to give this unattributed panel."
+            "weight to give this unattributed definition."
         )
         record_review_observation(
             gate="register-score-provenance",
@@ -466,25 +594,16 @@ async def handle_register_score(context, tool_call) -> ToolAction:
             detail=str(prov_error),
         )
 
-    # Link to a frozen panel when one exists; missing linkage remains visible.
+    # Link a flat panel to its frozen plan; structured definitions preserve
+    # their membership or edge identity through registered table references.
     plan_id = str(args.get("plan_id", "") or "").strip()
     plan = next(
         (pl for pl in state.scoring_plans if pl.id == plan_id),
         None,
     )
     drift = {}
-    # A set's size is a property of the set, not of the excerpt
-    # reported alongside it. `gene_list` is documented as an
-    # excerpt, so sizing and hashing the panel from it mis-states
-    # every panel above that cap: n_genes, match_rate, the
-    # underpowered flag and the drift hash all come out wrong, and
-    # the power observation then fires -- or fails to fire -- on a number
-    # that describes the excerpt. The frozen plan carries the full
-    # canonicalised membership; use it when one is cited, and keep
-    # the excerpt for what it is for, which is detecting drift
-    # away from that record.
     panel_members = list(gene_list)
-    if gene_list:
+    if definition_kind == "gene_panel" and gene_list:
         if not plan_id or plan is None:
             known = ", ".join(
                 pl.id for pl in state.scoring_plans[-5:]
@@ -515,13 +634,33 @@ async def handle_register_score(context, tool_call) -> ToolAction:
             drift = diff_panels(plan.panel_genes, gene_list)
             if plan.panel_genes:
                 panel_members = list(plan.panel_genes)
+    else:
+        plan_id = ""
 
     n_matched = args.get("n_genes_matched")
-    try:
-        n_matched = int(n_matched) if n_matched is not None else None
-    except (TypeError, ValueError):
+    if definition_kind != "gene_panel":
+        if n_matched is not None:
+            review_notes.append(
+                "n_genes_matched applies only to gene_panel; the supplied value "
+                "was not used as a panel size or power input."
+            )
+            record_review_observation(
+                gate="register-score-definition",
+                rule_id="score-definition-matched-count",
+                detail=(
+                    "n_genes_matched applies only to gene_panel; do not use set, "
+                    "regulator, edge, or ranked-input counts."
+                ),
+            )
         n_matched = None
-    power = assess_panel_power(len(panel_members), n_matched)
+        panel_members = []
+        power = {}
+    else:
+        try:
+            n_matched = int(n_matched) if n_matched is not None else None
+        except (TypeError, ValueError):
+            n_matched = None
+        power = assess_panel_power(len(panel_members), n_matched)
 
     context.has_register_score = True
     score_def = ScoreDefinition(
@@ -529,6 +668,9 @@ async def handle_register_score(context, tool_call) -> ToolAction:
         method=args.get("method", ""),
         description=args.get("description", ""),
         parameters=args.get("parameters", {}),
+        definition_kind=definition_kind,
+        definition_status=definition_status,
+        definition_artifacts=definition_artifacts,
         gene_list=gene_list,
         gene_list_source=args.get("gene_list_source", ""),
         background_source=str(args.get("background_source", "") or ""),
@@ -537,7 +679,7 @@ async def handle_register_score(context, tool_call) -> ToolAction:
         n_genes_matched=n_matched,
         power=power,
         plan_id=plan_id,
-        panel_hash=panel_hash(panel_members),
+        panel_hash=(panel_hash(panel_members) if definition_kind == "gene_panel" else ""),
         plan_drift=drift,
         round_number=state.current_round,
     )
@@ -558,16 +700,17 @@ async def handle_register_score(context, tool_call) -> ToolAction:
         f"Score '{score_def.score_name}' {action_word}. "
         f"Score definition ID: {score_def.id}. "
         f"Method: {score_def.method}. "
+        f"Definition: {score_def.definition_kind} ({score_def.definition_status}). "
         f"Provenance: {provenance.citation()}. "
         f"This will appear in the report methodology."
     ]
     if provenance.is_bespoke:
         result_lines.append(
-            "This panel is recorded as hand-assembled. If a versioned "
-            "database set covers the same concept, prefer it: bespoke "
-            "panels are reported as such and carry less weight."
+            "This definition source is recorded as hand-assembled. If a "
+            "versioned database resource covers the same concept, prefer it: "
+            "bespoke definitions are reported as such and carry less weight."
         )
-    if n_matched is None and gene_list:
+    if n_matched is None and gene_list and definition_kind == "gene_panel":
         result_lines.append(
             "n_genes_matched was not supplied, so power was assessed on "
             "the nominal panel size. Report the number of panel genes "

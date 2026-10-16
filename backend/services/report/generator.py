@@ -30,7 +30,11 @@ from backend.utils.llm_client import OpenAICompatibleClient
 from backend.utils.checkpoint import CheckpointManager
 from backend.utils.image_utils import compress_image_to_base64, categorize_figures
 from backend.config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_dir, get_session_workspace, get_session_uploads, default_config
-from .score_section import build_score_definitions_section_html, write_score_definitions_csv
+from .score_section import (
+    build_score_definitions_section_html,
+    ensure_score_definition_tables,
+    write_score_definitions_csv,
+)
 from .literature_files import write_literature_report, LITERATURE_REPORT_FILENAME
 from backend.utils.report_html import markdown_to_html, _make_figure_block, _safe_parse_json, _build_figure_description_map, render_report_html
 from .analysis_log import AnalysisLogMixin

@@ -234,6 +234,19 @@ class AnalysisStep(BaseModel):
 
     round_number: int = 1
 
+
+class ScoreDefinitionArtifactRef(BaseModel):
+    """Exact registered table that carries a structured score definition."""
+
+    role: Literal[
+        "gene_set_membership",
+        "regulatory_network",
+        "ranked_input",
+        "leading_edge",
+    ]
+    table_id: str
+
+
 class ScoreDefinition(BaseModel):
     """Definition of a computed score for methodology transparency in the final report"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -241,6 +254,21 @@ class ScoreDefinition(BaseModel):
     method: str              # e.g., "sc.tl.score_genes", "gseapy.ssgsea"
     description: str         # What the score measures biologically
     parameters: Dict[str, Any] = Field(default_factory=dict)
+    # A score can be defined by one flat panel, a collection of named sets, or
+    # a weighted regulator-target network.  Do not flatten the latter two into
+    # a union: that would lose the membership/edge structure that defines the
+    # computation. Old serialized records load as unspecified/legacy.
+    definition_kind: Literal[
+        "gene_panel",
+        "gene_set_collection",
+        "regulatory_network",
+        "unspecified",
+    ] = "unspecified"
+    definition_status: Literal["complete", "incomplete", "legacy"] = "legacy"
+    definition_artifacts: List[ScoreDefinitionArtifactRef] = Field(
+        default_factory=list,
+        max_length=8,
+    )
     gene_list: List[str] = Field(default_factory=list)
     gene_list_source: str = ""  # controlled vocabulary, see services/gene_set_provenance
     # Universe an over-representation test was run against. The universe is the
@@ -248,11 +276,11 @@ class ScoreDefinition(BaseModel):
     # services/statistical_gates.check_ora_background.
     background_source: str = ""
     # Parsed form of gene_list_source. Empty when the score predates provenance
-    # enforcement or carries no gene panel at all.
+    # enforcement or did not record a definition source.
     provenance: Dict[str, Any] = Field(default_factory=dict)
-    # Nominal panel size and how many genes actually mapped into the analysed
-    # matrix. n_genes_matched is what governs power; without it a panel that
-    # looks large can be almost entirely absent from the data.
+    # Flat-panel size and how many genes actually mapped into the analysed
+    # matrix. Structured collections/networks leave these panel-only fields at
+    # zero/None and preserve their dimensions in the referenced table instead.
     n_genes: int = 0
     n_genes_matched: Optional[int] = None
     # Result of services.gene_set_provenance.assess_panel_power.

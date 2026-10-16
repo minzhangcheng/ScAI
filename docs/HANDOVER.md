@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.64.3 · **Last updated**: 2026-10-15
+**Version**: 0.64.4 · **Last updated**: 2026-10-16
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,29 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.64.x — (2026-10-10 onward)**
+
+- `0.64.4` — Makes score definitions explicit and reproducible end to end.
+  `register_score`, `ScoreDefinition`, and the tool schema now distinguish flat
+  `gene_panel`, `gene_set_collection`, and `regulatory_network` definitions.
+  Flat panels retain their complete gene list, frozen plan, and hash; structured
+  definitions cite role-labeled, hash-bound publication tables for exact set
+  membership or regulator-target edges, with ranked-input and leading-edge tables
+  available as supplemental artifacts. Registration validates table identity and
+  lineage, limits matched-gene and power fields to flat panels, and records
+  incomplete or legacy definitions as PI-visible observations instead of silently
+  inventing gene lists. Bioinformatics prompts now require materializing and
+  registering structured definitions without flattening them. Evidence previews,
+  report regeneration, supervisor HTML, report HTML/CSV, and the report bundle
+  carry definition kind/status/artifact identity; referenced tables are packaged
+  and displayed with links, row counts, and hashes, while missing references stay
+  explicit. The Score Definitions report is collapsible and labels the expanded
+  definition column. Final report generation now also stages lineage-filtered
+  retained Stage 1/2 and round reports under `history/`, exposes them through
+  Related Reports & Downloads, and renders both Score Definitions and the Appendix
+  as collapsed sections by default. Added model, registration, report-export,
+  table-packaging, retained-report staging, collapsed-section,
+  legacy-compatibility, and non-panel power regression coverage, and synchronized
+  the 0.64.4 version surfaces.
 
 - `0.64.3` — Extends the full report download bundle with the retained
   per-round reports, Stage 1/2 review exports, supplementary report content,

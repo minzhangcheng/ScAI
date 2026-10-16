@@ -479,7 +479,10 @@ def _write_html_report(
     # Build score definitions HTML
     score_definitions_html = ""
     if state is not None and state.score_definitions:
-        score_definitions_html = bindings.build_score_definitions_section_html(state.score_definitions)
+        score_definitions_html = bindings.build_score_definitions_section_html(
+            state.score_definitions,
+            table_records=report.get("tables", []),
+        )
         score_toc_label = "Score Definitions"
         toc_items.append(
             f'<li><a href="#score-definitions">{score_toc_label}</a>'

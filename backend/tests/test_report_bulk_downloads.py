@@ -14,6 +14,10 @@ from fastapi.responses import FileResponse
 from backend.routes.reports_parts import downloads
 from backend.models.schemas import AnalysisState, DetailedReportSegment, RoundResult
 from backend.models.schema_parts.round_report import StageReviewReport
+from backend.services.report.download_section import (
+    build_related_reports_metadata,
+    render_related_reports_downloads_html,
+)
 
 
 def _allocated_stage(directory: Path) -> tuple[int, Path]:
@@ -39,6 +43,60 @@ async def _consume_response(response, *, fail_body: bool = False) -> bytes:
         send,
     )
     return bytes(body)
+
+
+def test_final_report_stages_retained_stage_and_round_downloads(tmp_path):
+    state = AnalysisState(restore_branch_id="child")
+    for lineage in ("main", "child"):
+        segment = DetailedReportSegment(
+            id=f"{lineage}-round",
+            phase="exploration_complete",
+            title=f"Saved {lineage} round",
+            round_number=1,
+            content_html=f"{lineage} round content",
+        )
+        state.detailed_report_segments.append(segment)
+        state.round_results.append(RoundResult(
+            round_number=1,
+            lineage_id=lineage,
+            report_segment_id=segment.id,
+        ))
+        state.stage_review_reports.append(StageReviewReport(
+            session_id=state.id,
+            lineage_id=lineage,
+            stage="stage1",
+            revision=1,
+            status="ready",
+            html=f"<html>{lineage} stage content</html>",
+        ))
+
+    related = build_related_reports_metadata(
+        state,
+        {},
+        reports_dir=tmp_path,
+        lineage_id="child",
+    )
+
+    assert [item["label"] for item in related["stage_reports"]] == [
+        "Round 1 Stage 1 Report — Revision 1 (ready)",
+    ]
+    assert [item["label"] for item in related["round_reports"]] == [
+        "Round 1 Report — Saved child round",
+    ]
+    for item in related["stage_reports"] + related["round_reports"]:
+        assert (tmp_path / item["filename"]).is_file()
+    staged_html = "".join(
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / "history").rglob("*.html")
+    )
+    assert "main round content" not in staged_html
+    assert "main stage content" not in staged_html
+    assert "child round content" in staged_html
+    assert "child stage content" in staged_html
+
+    rendered = render_related_reports_downloads_html(related)
+    assert 'href="history/stages/' in rendered
+    assert 'href="history/rounds/' in rendered
 
 
 @pytest.mark.asyncio

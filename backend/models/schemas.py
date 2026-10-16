@@ -60,7 +60,7 @@ from .schema_parts.analysis import (  # noqa: F401
     AgentError,
     AgentMessage,
     CodeExecution, BulkInputProfile, MethodDecision,
-    AnalysisStep,
+    AnalysisStep, ScoreDefinitionArtifactRef,
     ScoreDefinition,
     TreatmentGroup,
     SampleCountRecord,
