@@ -150,6 +150,8 @@ function transformBiochemistryIndicators(raw: RawBiochemistryIndicator[] | undef
     referenceRange: r.referenceRange ?? r.reference_range,
     interpretation: r.interpretation,
     groupId: r.groupId ?? r.group_id, sampleNumber: r.sampleNumber ?? r.sample_number,
+    sourceGroupLabel: r.sourceGroupLabel ?? r.source_group_label ?? undefined,
+    provenanceNotes: r.provenanceNotes ?? r.provenance_notes ?? [],
   }))
 }
 

@@ -389,7 +389,7 @@ class DataFile(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class BiochemistryIndicator(BaseModel):
-    """Manual biochemistry entry (indicator name + value + unit) with group/sample association"""
+    """Biochemistry measurement with source notes and group/sample association."""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     indicator: str
     value: float

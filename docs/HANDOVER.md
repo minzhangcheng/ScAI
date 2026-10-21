@@ -2,7 +2,7 @@
 
 Architecture, module map, and developer guide for contributors. For end-user workflow, see the [User Guide](user-guide.md); for installation and the project overview, see the [README](../README.md).
 
-**Version**: 0.64.4 · **Last updated**: 2026-10-16
+**Version**: 0.64.5 · **Last updated**: 2026-10-21
 
 ## 1. Runtime Architecture
 
@@ -369,6 +369,15 @@ identify the annotation failure and omit unrelated model/server configuration.
 Detailed release notes for every version are available through `git log` and release tags. For versions before 0.30.1, changes are summarized by major version group; from 0.30.1 onward, each version is documented individually. The summary below highlights the architectural arc of the project.
 
 **0.64.x — (2026-10-10 onward)**
+
+- `0.64.5` — Preserves provenance for biochemistry values extracted from
+  uploaded images through session reload and downstream indicator analysis.
+  The data view now distinguishes image-derived chart estimates from manual
+  entries and displays their source and limitations. Image extraction prompts
+  require explicit uncertainty for approximate readings, ranges, bounds, and
+  near-baseline values, while registration retains those notes and never treats
+  image readings as replicate identifiers. Added backend and frontend regression
+  coverage for persisted provenance and the reloaded indicator view.
 
 - `0.64.4` — Makes score definitions explicit and reproducible end to end.
   `register_score`, `ScoreDefinition`, and the tool schema now distinguish flat

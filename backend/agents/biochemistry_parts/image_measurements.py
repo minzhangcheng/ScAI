@@ -90,7 +90,8 @@ def mark_minted(bio_file: DataFile, fingerprint: str, indicator_ids: List[str]) 
     bio_file.extracted_data = extracted
 
 
-def provenance_notes(filename: str, row: Dict[str, Any]) -> List[str]:
+def provenance_notes(filename: str, row: Dict[str, Any],
+                     extraction_notes: Optional[str] = None) -> List[str]:
     """Say where the number came from and how firmly the figure states it.
 
     A value estimated against an axis and a value printed as text are not the
@@ -105,6 +106,11 @@ def provenance_notes(filename: str, row: Dict[str, Any]) -> List[str]:
     notes = [origin]
     if str(row.get("readout") or "").strip().lower() == "chart_estimate":
         notes.append("chart estimate read against an axis, not a printed number")
+    description = clean_optional_text(row.get("value_description"))
+    if description:
+        notes.append(f"source value description: {description}")
+    if extraction_notes:
+        notes.append(f"image extraction limitations: {extraction_notes}")
     annotation = clean_optional_text(row.get("statistical_annotation"))
     if annotation:
         notes.append(f"figure annotates {annotation}")
@@ -167,7 +173,7 @@ def usable_rows(payload: Any) -> List[Dict[str, Any]]:
 
 
 async def register_rows(agent, bio_file: DataFile, rows: List[Dict[str, Any]],
-                        state: AnalysisState) -> List[str]:
+                        state: AnalysisState, extraction_notes: Optional[str] = None) -> List[str]:
     """Send each row through the same reconcile/add path a data file uses.
 
     ``reconcile_provenance`` already accepts a group label parsed from a file
@@ -212,7 +218,7 @@ async def register_rows(agent, bio_file: DataFile, rows: List[Dict[str, Any]],
                 group_id=group_id,
                 sample_number=sample_number,
                 source_group_label=label,
-                provenance_notes=provenance_notes(bio_file.filename, row) + notes,
+                provenance_notes=provenance_notes(bio_file.filename, row, extraction_notes) + notes,
             )
             minted.append(record.id)
     except BaseException:
@@ -269,7 +275,10 @@ async def extract_image_measurements(agent, state: AnalysisState,
                 )
                 continue
             rows = usable_rows(payload)
-            minted = await register_rows(agent, bio_file, rows, state)
+            minted = await register_rows(
+                agent, bio_file, rows, state,
+                extraction_notes=clean_optional_text(payload.get("notes")),
+            )
             if prior_marker and prior_marker.get("input_sha256") == fingerprint:
                 # Replace only this unchanged image's previous generation, and
                 # only after successful extraction/registration. Manual entries

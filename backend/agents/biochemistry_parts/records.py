@@ -282,5 +282,10 @@ def restore_measurement_identity(markers: Any, indicators: Any, state: Any) -> l
         entry["group"] = group_names.get(record.group_id) or record.source_group_label or ""
         entry["sample_number"] = record.sample_number
         entry["reference_range"] = record.reference_range
+        notes = list(record.provenance_notes)
+        for note in entry.get("provenance_notes") or []:
+            if note not in notes:
+                notes.append(note)
+        entry["provenance_notes"] = notes
         restored.append(entry)
     return restored

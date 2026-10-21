@@ -1,4 +1,4 @@
-// Manual biochemistry indicator entry form.
+// Biochemistry indicator records, provenance, and manual entry form.
 // Split out of frontend/src/components/DataPanel.tsx verbatim.
 
 import { useState } from 'react'
@@ -13,7 +13,6 @@ export function IndicatorForm({
   indicators,
   onAdd,
   onDelete,
-  language,
   t,
 }: {
   groups: TreatmentGroup[]
@@ -62,7 +61,7 @@ export function IndicatorForm({
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <h4 className="text-sm font-medium text-slate-700 dark:text-slate-200">
-          {language === 'zh' ? '手动输入指标' : 'Manual Indicators'}
+          {t('biochemistryIndicators')}
         </h4>
         <button
           onClick={() => setShowForm(!showForm)}
@@ -72,6 +71,10 @@ export function IndicatorForm({
           {t('addIndicator')}
         </button>
       </div>
+
+      <p className="text-xs text-slate-600 dark:text-slate-400">
+        {t('indicatorProvenanceHelp')}
+      </p>
 
       {showForm && (
         <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg space-y-2">
@@ -144,7 +147,7 @@ export function IndicatorForm({
 
       {/* Indicators table */}
       {indicators.length > 0 && (
-        <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
+        <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 dark:bg-slate-800">
               <tr>
@@ -153,6 +156,7 @@ export function IndicatorForm({
                 <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('unit')}</th>
                 <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('group')}</th>
                 <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('sample')}</th>
+                <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('indicatorSourceNotes')}</th>
                 <th className="px-3 py-2 text-right font-medium text-slate-600 dark:text-slate-300 w-12"></th>
               </tr>
             </thead>
@@ -162,9 +166,16 @@ export function IndicatorForm({
                   <td className="px-3 py-2 font-medium text-slate-900 dark:text-slate-100">{ind.indicator}</td>
                   <td className="px-3 py-2 text-slate-600 dark:text-slate-300">{ind.value}</td>
                   <td className="px-3 py-2 text-slate-500 dark:text-slate-400">{ind.unit}</td>
-                  <td className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">{getGroupName(ind.groupId)}</td>
+                  <td className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">{ind.groupId ? getGroupName(ind.groupId) : ind.sourceGroupLabel || '-'}</td>
                   <td className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">
                     {ind.sampleNumber ? `${t('sample')} ${ind.sampleNumber}` : '-'}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-slate-600 dark:text-slate-400 min-w-48 break-words">
+                    {ind.provenanceNotes?.length ? (
+                      <ul className="space-y-1">
+                        {ind.provenanceNotes.map((note, index) => <li key={index}>{note}</li>)}
+                      </ul>
+                    ) : t('indicatorSourceUnrecorded')}
                   </td>
                   <td className="px-3 py-2 text-right">
                     <button

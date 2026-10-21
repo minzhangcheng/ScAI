@@ -116,6 +116,39 @@ async def test_measurements_are_minted_once_per_image_version(monkeypatch):
     assert agent.chat.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_image_uncertainty_survives_persistence_and_indicator_analysis(monkeypatch):
+    _stub_vision(monkeypatch)
+    agent = _agent()
+    payload = {
+        "results": [{**EXTRACTED_ROWS["results"][1],
+                     "value_description": "DKO approximately 2.2; axis reading is uncertain"}],
+        "notes": "Raw numerical data and error-bar definitions are unavailable",
+    }
+    agent.chat = AsyncMock(return_value=json.dumps(payload))
+    state = _state()
+    await agent._step0_extract_image_measurements(state, [_image()], "review")
+    state = AnalysisState.model_validate_json(state.model_dump_json())
+    record = state.biochemistry_indicators[0]
+    expected_notes = [
+        "value read from image biochem.png, panel G",
+        "chart estimate read against an axis, not a printed number",
+        "source value description: " + payload["results"][0]["value_description"],
+        "image extraction limitations: " + payload["notes"],
+    ]
+    assert all(note in record.provenance_notes for note in expected_notes)
+    assert record.sample_number is None
+    agent.chat = AsyncMock(return_value=json.dumps({"abnormal_markers": [{
+        "measurement_id": record.id, "provenance_notes": ["Additional model caveat"],
+    }]}))
+    result = await agent._step1_process_indicators(state, [], "review")
+    prompt = agent.chat.await_args.args[0]
+    assert all(note in prompt for note in record.provenance_notes)
+    marker = result["abnormal_markers"][0]
+    assert marker["provenance_notes"] == record.provenance_notes + ["Additional model caveat"]
+    assert marker["value"] == 2.2
+
+
 # Idempotence. `process` runs every round, `add_result` is a bare append with no
 # dedupe, and the once-only marker is the only thing standing between one figure
 # and a fake replicate count -- so every path that can lose or wrongly set it is

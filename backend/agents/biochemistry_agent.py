@@ -230,7 +230,7 @@ class BiochemistryAgent(BaseAgent):
                 parts.append(f"reference_range={r.reference_range}")
             if r.source_group_label and not r.group_id:
                 parts.append(f"UNDECLARED group label in file={r.source_group_label!r}")
-            for note in (r.provenance_notes or [])[:2]:
+            for note in (r.provenance_notes or []):
                 parts.append(f"note: {note}")
             results_text.append(parts[0] + ("  [" + "; ".join(parts[1:]) + "]" if parts[1:] else ""))
 
@@ -417,13 +417,17 @@ class BiochemistryAgent(BaseAgent):
 1. **Image type**: Describe the type of visualization (bar chart, western blot, table, gel image, scatter plot, etc.)
 2. **Experimental groups**: Identify ALL experimental groups and conditions shown
 3. **Measured indicators**: List all biochemistry indicators / measurements shown
-4. **Specific values**: Extract ALL specific numerical values visible (indicator name, value, unit)
+4. **Specific values**: Separate printed numbers from approximate chart readings (indicator, group, coordinate, value, unit)
 5. **Statistical significance**: Note any significance markers (*, **, ***, p-values, error bars)
 6. **Group comparisons**: Describe key differences and trends between groups
 7. **Expert interpretation**: Provide your interpretation of what these results mean
 
 Be thorough and extract EVERY piece of information visible in the image.
 Transcribe panel labels, group names, axis titles and units before estimating values.
+For each chart reading, check the series, category/time point and adjacent axis ticks.
+Mark estimates as approximate and preserve ranges, bounds and reading uncertainty.
+Do not round a near-baseline point to zero or infer an endpoint beyond the visible curve.
+If a point cannot be located reliably, describe the trend and uncertainty without inventing a number.
 Do not infer assay names, units or numerical scales from the research context or
 from the shape of a familiar panel. Preserve relative/normalized readouts as labeled.
 If a label cannot be read, identify it as unreadable instead of guessing its identity.

@@ -12,6 +12,10 @@ def indicator_analysis_prompt(results_block: str, instruction: str, design_note:
 ## Biochemistry Results:
 {results_block}
 
+Keep image-derived estimates labeled as approximate in your findings. Carry their
+source and reading limitations into interpretation; structured storage does not make
+them exact measurements or independent samples. Judge their weight in this context.
+
 ## Research Context / Analysis Objective:
 {instruction}
 
@@ -85,8 +89,9 @@ For each measurement, record:
 1. indicator — the name as the figure writes it, including any normalisation the figure
    states (for example a relative or fold-change readout). Keep the source name; do not
    rename it into a panel abbreviation or a clinical scheme the figure does not use
-2. value — the number. Where the analysis gives an approximation or a range, take the
-   stated central value
+2. value — a printed number or an explicitly stated point estimate. Preserve its
+   precision; never invent a midpoint for a range, turn a bound into an exact value,
+   or round a near-zero estimate to zero
 3. unit — as given; the empty string when the figure prints none
 4. group — the experimental group or condition this number belongs to, exactly as the
    figure labels it
@@ -100,11 +105,17 @@ For each measurement, record:
    comparison (a star notation, "ns", a p-value), verbatim, with what it compares if
    stated; null when the figure prints none. This is the test the authors actually ran
 9. reference_range — the reference interval printed alongside, if any
+10. value_description — preserve the source wording for approximations, ranges,
+    bounds and reading uncertainty, including the group and category/time point
 
 Emit no row for something the analysis describes only in words with no number, and do
 not compute a value the figure does not show — a difference, ratio, or percentage you
 would have to derive is not a measurement. Qualitative panels (photographs, gels with
 no densitometry) produce no rows.
+This step structures the supplied visual analysis; it is not an independent check
+against the image. Preserve any uncertainty it reports. If it gives only a range or
+bound without a point estimate, retain that observation in notes without inventing
+a numeric row. Do not infer normalization to a control baseline unless stated.
 
 Reply ONLY in JSON format:
 {{
@@ -112,6 +123,7 @@ Reply ONLY in JSON format:
         {{"indicator": "<name as written in the figure>", "value": 0.0, "unit": "<as written>",
           "group": "<group label or null>", "sample": "<sample id or null>",
           "panel": "<panel label or null>", "readout": "printed_number|chart_estimate",
+          "value_description": "<source wording and reading uncertainty, or null>",
           "statistical_annotation": "<as printed, or null>",
           "reference_range": "<as printed, or null>"}},
         ...

@@ -220,6 +220,8 @@ export interface BiochemistryIndicator {
   interpretation?: string
   groupId?: string
   sampleNumber?: number
+  sourceGroupLabel?: string
+  provenanceNotes?: string[]
 }
 
 export interface RoundResult {

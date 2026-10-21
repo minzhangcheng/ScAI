@@ -199,6 +199,10 @@ export interface RawBiochemistryIndicator {
   group_id?: string
   sampleNumber?: number
   sample_number?: number
+  sourceGroupLabel?: string | null
+  source_group_label?: string | null
+  provenanceNotes?: string[]
+  provenance_notes?: string[]
 }
 
 export interface CrossModalCandidate {
