@@ -254,6 +254,7 @@ except ScaiError as exc:
 - [Biomedical User Guide](../../docs/user-guide.md)
 - [Administrator Manual](../../docs/admin-manual.md)
 - [Technical Handover](../../docs/HANDOVER.md)
+- [Changelog](../../docs/CHANGELOG.md)
 
 ## License
 

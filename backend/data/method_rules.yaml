@@ -22,7 +22,7 @@
 #   Rules are selected by ScAI's *capability surface* -- what the installed
 #   packages can actually do -- not by any past analysis. Selecting them from
 #   previous runs would overfit the platform to whatever biology those runs
-#   happened to involve. ScAI is general-purpose (see CLAUDE.md), so every rule
+#   happened to involve. ScAI is general-purpose, so every rule
 #   here is stated without reference to any organism, tissue, disease or
 #   pathway, and a test enforces that.
 #

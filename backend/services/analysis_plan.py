@@ -32,7 +32,7 @@ executions between plan and score is recorded so a reader can judge.
 Domain neutrality
 -----------------
 Nothing here names an organism, tissue, disease or pathway, and nothing may be
-added that does. ScAI is a general-purpose platform (see CLAUDE.md).
+added that does. ScAI is a general-purpose platform.
 """
 from __future__ import annotations
 

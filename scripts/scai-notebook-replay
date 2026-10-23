@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Replay a session's notebook on a clean kernel and judge it against the
-declared contract in docs/coding/plain-persistence-replay-contract.md.
+declared contract in docs/notebook-replay.md.
 
 Two modes, and the order between them is the whole point:
 
@@ -14,8 +14,7 @@ notebook cell in order without stopping at a failure, extracts the same
 variables, and compares.
 
 The tolerances live in TOLERANCES below and are transcribed from the contract
-document, which was committed before this file existed. They are not arguments
-and there is no flag to relax them: a harness whose thresholds can be tuned
+document. They are not arguments and there is no flag to relax them: a harness whose thresholds can be tuned
 after seeing a result measures nothing.
 
 Not claimed here, per the contract: byte-identical figures, stability of network
@@ -32,7 +31,7 @@ import pathlib
 import sys
 import time
 
-# Transcribed from docs/coding/plain-persistence-replay-contract.md section 4.
+# Transcribed from docs/notebook-replay.md, Declared variables and tolerances.
 # Exact wherever the quantity is combinatorial; a relative bound only where
 # floating-point accumulation order legitimately differs.
 TOLERANCES = {

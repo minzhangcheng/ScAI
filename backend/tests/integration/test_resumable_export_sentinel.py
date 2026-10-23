@@ -1,17 +1,12 @@
-"""Spec 5.4's acceptance, and half of §7's Goal 3.
+"""Verify that runtime export flushes variables created after the last save.
 
-The unit tests in ``test_resumable_export.py`` say each part works. This says
-the feature does: a variable bound **after** the last scheduled save survives an
-export and an import.
+The sentinel is bound after the scheduled save, so an export that ships the
+previous generation cannot contain it. This integration test complements the
+component tests in ``test_resumable_export.py``.
 
-"After" is the whole design of the test. The sentinel is bound past the point at
-which the cadence would have saved, so an export that ships the previous
-generation cannot contain it. An export that passes this flushed.
-
-Requires a real kernel: ``SCAI_RUN_KERNEL_TESTS=1``, i.e. the ``kernel``
-profile. The cross-container half of Goal 3 — export here, import into a second
-container, continue a round — is not a unit test and is recorded by hand in
-``docs/coding/plain-persistence-baseline.md``.
+Requires a real kernel through the ``kernel`` profile. Cross-installation
+export, import, and workflow continuation need separate integration evidence;
+this test does not establish them. See ``docs/HANDOVER.md`` for persistence.
 """
 from __future__ import annotations
 

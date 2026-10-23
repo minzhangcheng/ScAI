@@ -10,7 +10,7 @@ not a decision.
 
 The layer performs no serialisation of its own: it copies files the ordinary
 save already committed and verifies them against the digests that commit
-signed. See ``docs/coding/plain-persistence-part-b-spec.md``.
+signed. See ``docs/HANDOVER.md`` for session storage and recovery.
 """
 from __future__ import annotations
 

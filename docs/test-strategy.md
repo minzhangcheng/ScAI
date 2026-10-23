@@ -61,9 +61,9 @@ The size ceiling is subordinate to load-bearing coverage. Persistence and crash
 recovery, authentication and ownership, execution identity, cleanup leases,
 report and artifact transactions, protocol failure handling, Chat request
 ownership, and the distinction between search completion and verified evidence
-remain independently tested. The [test suite review](test-suite-review.md)
-records removed coverage, restored regressions, the associated tradeoffs, and
-the evidence for the release profiles.
+remain independently tested. Historical coverage changes and recorded release
+checks are summarized in the [changelog](CHANGELOG.md). Current test results
+must be read from the evidence produced by the selected profile.
 
 There was a fifth, `backend-full-gate-off`, which ran the same suite with the
 snapshot subsystem disabled — the configuration production actually shipped.

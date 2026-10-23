@@ -9,7 +9,7 @@ from backend.constants import VERSION
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize("document", ["CLAUDE.md", "AGENTS.md", "README.md", "docs/HANDOVER.md"])
+@pytest.mark.parametrize("document", ["README.md", "docs/HANDOVER.md"])
 def test_document_version_matches(document):
     match = re.search(r"\*\*Version\*\*:\s*(\S+)", (ROOT / document).read_text())
     assert match and match.group(1) == VERSION, f"{document}: {match.group(1) if match else 'NOT FOUND'} != {VERSION}"
@@ -26,11 +26,11 @@ def test_python_client_version_matches():
     )
 
 
-def test_agents_current_version_registry_row_matches():
-    txt = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    rows = re.findall(r"^\|\s*Version\s*\|.*$", txt, re.MULTILINE)
-    assert any(re.search(rf'Currently\s+`"{re.escape(VERSION)}"`', row) for row in rows), (
-        f"AGENTS.md Version registry row does not record current VERSION {VERSION}"
+def test_changelog_starts_with_current_version():
+    text = (ROOT / "docs/CHANGELOG.md").read_text(encoding="utf-8")
+    releases = re.findall(r"^- `(\d+\.\d+\.\d+)`", text, re.MULTILINE)
+    assert releases and releases[0] == VERSION, (
+        f"CHANGELOG.md must list current VERSION {VERSION} first"
     )
 
 

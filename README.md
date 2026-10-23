@@ -90,6 +90,7 @@ See the [Python client documentation](clients/python/README.md) for authenticati
 - [Administrator Manual](docs/admin-manual.md)
 - [管理员手册](docs/admin-manual-zh.md)
 - [Technical Handover](docs/HANDOVER.md)
+- [Changelog](docs/CHANGELOG.md)
 - [Python Client](clients/python/README.md)
 - [Third-Party Notices](THIRD_PARTY_NOTICES.md)
 

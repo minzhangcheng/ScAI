@@ -1,6 +1,6 @@
 """Adoption of workspace renders into the plan figure contract.
 
-Spec: docs/superpowers/specs/2026-08-27-figure-adoption-design.md
+See docs/HANDOVER.md for figure identity and review responsibilities.
 
 The executor saves result figures with plt.savefig inside execute_code. Those
 files never become PublicationFigure records, and _matches reads

@@ -1,19 +1,10 @@
-"""The replay harness, executed against a real dump and a real notebook.
+"""Exercise notebook replay from a recorded session in a fresh kernel.
 
-**This is not spec §7 Goal 4.** Goal 4 is a completed analysis session on real
-input data, judged against
-`docs/coding/plain-persistence-replay-contract.md`, and it is deferred. This is
-the smaller claim the contract cannot make for itself: that the harness runs at
-all — that it reads a dump written by the real save path, walks a notebook
-written by the real notebook writer, executes it on a clean kernel, and produces
-a comparable fingerprint.
+The comparison variables, tolerances, and limitations are documented in
+``docs/notebook-replay.md``. This smoke test covers its synthetic session;
+representative workflow replay requires separate evidence.
 
-A harness whose only evidence is unit tests of its comparison functions has
-never touched the two file formats it exists to read. That is the gap this
-closes.
-
-The session is deliberately tiny and seeded. A toy session proves the machinery,
-not the contract.
+Requires a real kernel through the ``kernel`` test profile.
 """
 from __future__ import annotations
 

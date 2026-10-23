@@ -14,7 +14,7 @@ This module defines a small controlled vocabulary so that provenance is a
 parseable value rather than prose. It is deliberately *structural*: it checks
 the shape of the claim, never its biology. No pathway, tissue, disease or
 organism name appears here, and none may be added -- ScAI is a general-purpose
-platform (see CLAUDE.md) and a domain-neutrality test guards the tool schemas.
+platform, and a domain-neutrality test guards the tool schemas.
 
 Grammar
 -------

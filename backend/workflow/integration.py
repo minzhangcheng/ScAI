@@ -2,7 +2,7 @@
 
 Orchestrates PI (cumulative integration + candidate generation + scoring) and
 Literature (open search + novelty gate). Does NOT run bioinformatics/pathology/
-biochemistry agents. See docs/superpowers/specs/2026-07-03-integration-round-loop-design.md.
+biochemistry agents. See docs/HANDOVER.md for workflow routing.
 """
 import asyncio
 import logging

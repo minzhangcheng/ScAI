@@ -30,7 +30,6 @@ Thumbs.db
 # entirely (see scripts/fetch_markers.py). This rule is a backstop against a
 # stray copy being committed and then baked into a container image.
 backend/data/markers/
-.superpowers/
 states/
 # Cached MSigDB GMTs live under $SCAI_DATA_DIR/gene_sets now; backstop only.
 backend/data/gene_sets/
