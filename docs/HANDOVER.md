@@ -5,7 +5,7 @@ maintaining ScAI. Release history is in [CHANGELOG.md](CHANGELOG.md). For setup,
 usage, and operations, see the [README](../README.md), [User Guide](user-guide.md),
 and [Administrator Manual](admin-manual.md).
 
-**Version**: 0.64.5 · **Last updated**: 2026-10-23
+**Version**: 0.64.6 · **Last updated**: 2026-10-23
 
 ## Architecture and source map
 

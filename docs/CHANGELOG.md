@@ -11,6 +11,15 @@ some early versions are summarized together.
 
 ## 0.64.x — (2026-10-10 onward)
 
+- `0.64.6` — Aligns the DKO bulk RNA-seq demo preprocessing workflow with
+  the verified preprocessing run. The demo now uses
+  GRCm39 with GENCODE vM39, FastQC and Trim Galore/Cutadapt Q20 trimming with
+  10-base mate clipping, STAR two-pass alignment, paired-end RSEM
+  `expected_count` quantification, RSeQC/MultiQC quality control, and an
+  annotated `expr/merged_counts.csv` matrix. Modular scripts, compatibility
+  entry points, and a README document the six-sample design and the confirmed
+  correspondence between the generated matrix and the ScAI bulk RNA-seq input.
+
 - `0.64.5` — Preserves provenance for biochemistry values extracted from
   uploaded images through session reload and downstream indicator analysis.
   The data view now distinguishes image-derived chart estimates from manual
