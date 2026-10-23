@@ -7,7 +7,8 @@ Access rules:
   /api/config, /api/user/
 - pending/deleting status: all protected access blocked except /api/auth/logout
 - readonly status: non-GET blocked except
-  /api/auth/logout, /api/auth/profile/password, /api/auth/profile/username
+  /api/auth/logout, /api/auth/profile/password, /api/auth/profile/username,
+  and explicit POST report bundle downloads
 
 All protected paths require authentication; user is loaded from DB per request.
 """
@@ -72,6 +73,26 @@ SESSION_AUTH_OPTIONAL_SUFFIXES = (
     "/export/download",
     "/figure/",    # /figure/{fid}/png, /figure/{fid}/pdf (FigureGallery <img src> without auth headers)
 )
+
+# These POST routes only package existing results in temporary storage. They
+# retain route-level session ownership checks and do not grant session writes.
+READONLY_REPORT_DOWNLOAD_SUFFIXES = frozenset({
+    "report/download-all-figures",
+    "report/download-all-tables",
+    "report/download-reproducibility",
+    "report/download-full",
+})
+
+
+def _is_readonly_report_download(path: str, method: str) -> bool:
+    if method != "POST" or not path.startswith("/api/session/"):
+        return False
+    session_id, _, tail = path[len("/api/session/"):].partition("/")
+    return (
+        session_id not in ("", ".", "..")
+        and tail in READONLY_REPORT_DOWNLOAD_SUFFIXES
+    )
+
 
 # Cache for admin_initialized check (avoids DB query on every config request)
 _admin_initialized_cache: dict = {"value": None, "expires": 0}
@@ -226,10 +247,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Session ownership is still enforced at the route layer via
         # require_session_ownership, so admins only see their own sessions.
 
-        # Readonly status: allow logout and personal login-credential changes.
+        # Readonly status: allow credentials/logout and explicit result downloads.
         if user.status == "readonly":
             if request.method != "GET":
-                if path not in ("/api/auth/logout", "/api/auth/profile/password", "/api/auth/profile/username"):
+                if (
+                    path not in ("/api/auth/logout", "/api/auth/profile/password", "/api/auth/profile/username")
+                    and not _is_readonly_report_download(path, request.method)
+                ):
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Readonly account cannot perform write operations"},

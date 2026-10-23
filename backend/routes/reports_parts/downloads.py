@@ -224,6 +224,8 @@ async def download_all_tables(
         csv_only=True,
     )
 
+# GET serves report HTML links; POST remains compatible with existing API callers.
+@router.get("/{session_id}/report/download-reproducibility")
 @router.post("/{session_id}/report/download-reproducibility")
 async def download_reproducibility_bundle(
     session_id: str,

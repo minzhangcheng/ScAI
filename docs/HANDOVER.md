@@ -5,7 +5,7 @@ maintaining ScAI. Release history is in [CHANGELOG.md](CHANGELOG.md). For setup,
 usage, and operations, see the [README](../README.md), [User Guide](user-guide.md),
 and [Administrator Manual](admin-manual.md).
 
-**Version**: 0.64.8 · **Last updated**: 2026-10-23
+**Version**: 0.64.9 · **Last updated**: 2026-10-23
 
 ## Architecture and source map
 
@@ -206,6 +206,12 @@ administrators can rename non-deleting accounts. User IDs remain stable, so
 sessions, API keys, and per-user configuration survive a rename. Preserve
 username uniqueness, account-status checks, and write-time authorization in
 `backend/routes/auth.py`, `backend/routes/admin.py`, and `backend/utils/db.py`.
+
+Readonly accounts can download existing figure, table, report, and
+reproducibility bundles through the explicit download routes. Downloads still
+enforce session ownership and account status, stage archives in temporary
+storage, and do not grant session-write access. Reproducibility bundles support
+both the POST API form and GET links embedded in report HTML.
 
 ## Development and verification
 

@@ -562,6 +562,12 @@
   [
     "/api/session/{session_id}/report/download-reproducibility",
     [
+      "GET"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/report/download-reproducibility",
+    [
       "POST"
     ]
   ],

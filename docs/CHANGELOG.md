@@ -11,6 +11,14 @@ some early versions are summarized together.
 
 ## 0.64.x — (2026-10-10 onward)
 
+- `0.64.9` — Allows readonly users to download existing report bundles for
+  figures, tables, full reports, and reproducibility outputs. The exception is
+  limited to the explicit bundle routes, keeps session ownership checks, stages
+  archives in temporary storage, and does not grant session writes. The
+  reproducibility endpoint supports both the POST API form and GET links
+  embedded in report HTML. Added regression coverage for archive contents,
+  cleanup, ownership, account revocation, and readonly write boundaries.
+
 - `0.64.8` — Allows users to change their own username after current-password
   verification and allows administrators to rename any non-deleting user,
   including themselves. Renames preserve the stable user ID, sessions, API
