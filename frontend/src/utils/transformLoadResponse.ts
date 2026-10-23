@@ -147,6 +147,7 @@ function transformDataFiles(raw: RawDataFile[] | undefined) {
 function transformBiochemistryIndicators(raw: RawBiochemistryIndicator[] | undefined) {
   return (raw || []).map((r) => ({
     id: r.id, indicator: r.indicator, value: r.value, unit: r.unit,
+    origin: r.origin ?? 'unknown',
     referenceRange: r.referenceRange ?? r.reference_range,
     interpretation: r.interpretation,
     groupId: r.groupId ?? r.group_id, sampleNumber: r.sampleNumber ?? r.sample_number,

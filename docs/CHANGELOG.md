@@ -11,6 +11,17 @@ some early versions are summarized together.
 
 ## 0.64.x — (2026-10-10 onward)
 
+- `0.64.7` — Limits the Data tab to uploaded files and explicitly user-entered
+  biochemistry indicators. Automatically extracted values and legacy indicators
+  with unknown origin no longer appear in the indicator table or data overview
+  counts; the underlying records remain available to analysis. The manual-entry
+  table removes the Source and limitations column and updates its English and
+  Chinese labels. Indicator origin is recorded at creation and preserved through
+  session reload and configuration export/import, while the session API also
+  retains existing source-group labels and provenance notes. Added regression
+  coverage for origin persistence, configuration round trips, immediate manual
+  entry, and Data tab visibility and counts.
+
 - `0.64.6` — Aligns the DKO bulk RNA-seq demo preprocessing workflow with
   the verified preprocessing run. The demo now uses
   GRCm39 with GENCODE vM39, FastQC and Trim Galore/Cutadapt Q20 trimming with

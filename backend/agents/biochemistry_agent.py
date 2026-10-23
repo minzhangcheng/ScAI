@@ -900,6 +900,7 @@ Reply in JSON format:
             indicator=indicator,
             value=value,
             unit=unit,
+            origin="extracted",
             reference_range=reference_range or None,
             group_id=group_id or None,
             sample_number=sample_number,

@@ -216,6 +216,7 @@ export interface BiochemistryIndicator {
   indicator: string
   value: number
   unit: string
+  origin?: 'manual' | 'extracted' | 'unknown'
   referenceRange?: string
   interpretation?: string
   groupId?: string

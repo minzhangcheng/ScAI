@@ -192,6 +192,7 @@ export interface RawBiochemistryIndicator {
   indicator: string
   value: number
   unit: string
+  origin?: BiochemistryIndicator['origin']
   referenceRange?: string
   reference_range?: string
   interpretation?: string

@@ -1,4 +1,4 @@
-// Biochemistry indicator records, provenance, and manual entry form.
+// User-entered biochemistry indicators and manual entry form.
 // Split out of frontend/src/components/DataPanel.tsx verbatim.
 
 import { useState } from 'react'
@@ -61,7 +61,7 @@ export function IndicatorForm({
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <h4 className="text-sm font-medium text-slate-700 dark:text-slate-200">
-          {t('biochemistryIndicators')}
+          {t('manualIndicators')}
         </h4>
         <button
           onClick={() => setShowForm(!showForm)}
@@ -73,7 +73,7 @@ export function IndicatorForm({
       </div>
 
       <p className="text-xs text-slate-600 dark:text-slate-400">
-        {t('indicatorProvenanceHelp')}
+        {t('manualIndicatorsHelp')}
       </p>
 
       {showForm && (
@@ -156,7 +156,6 @@ export function IndicatorForm({
                 <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('unit')}</th>
                 <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('group')}</th>
                 <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('sample')}</th>
-                <th className="px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">{t('indicatorSourceNotes')}</th>
                 <th className="px-3 py-2 text-right font-medium text-slate-600 dark:text-slate-300 w-12"></th>
               </tr>
             </thead>
@@ -169,13 +168,6 @@ export function IndicatorForm({
                   <td className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">{ind.groupId ? getGroupName(ind.groupId) : ind.sourceGroupLabel || '-'}</td>
                   <td className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">
                     {ind.sampleNumber ? `${t('sample')} ${ind.sampleNumber}` : '-'}
-                  </td>
-                  <td className="px-3 py-2 text-xs text-slate-600 dark:text-slate-400 min-w-48 break-words">
-                    {ind.provenanceNotes?.length ? (
-                      <ul className="space-y-1">
-                        {ind.provenanceNotes.map((note, index) => <li key={index}>{note}</li>)}
-                      </ul>
-                    ) : t('indicatorSourceUnrecorded')}
                   </td>
                   <td className="px-3 py-2 text-right">
                     <button

@@ -21,6 +21,20 @@ describe('new-session Agent defaults', () => {
     })
   })
 
+  it('marks a newly added indicator as manual immediately', async () => {
+    useAppStore.setState({ currentSession: {
+      id: 'session', name: 'Study', status: 'pending', currentRound: 0,
+      createdAt: '', instruction: '', treatmentGroups: [], dataFiles: [],
+      biochemistryIndicators: [], roundResults: [],
+    } })
+    apiFetchMock.mockResolvedValue({ success: true, data: { indicator_id: 'manual' } })
+    const { result } = renderHook(() => useSessionData(useAppStore.getState()))
+    await act(async () => { await result.current.addIndicator('Measured value', 5, 'g') })
+    expect(useAppStore.getState().currentSession?.biochemistryIndicators).toEqual([
+      expect.objectContaining({ id: 'manual', indicator: 'Measured value', origin: 'manual' }),
+    ])
+  })
+
   it('copies the per-user nonsecret snapshot into the start request', async () => {
     const settings = defaultAgentSettings('en')
     settings.models.pi = 'saved-model'

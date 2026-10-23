@@ -243,7 +243,7 @@ export function useSessionData(store: SessionDataStore) {
       biochemistryIndicators: [
         ...(latestSession?.biochemistryIndicators || []),
         { id: response.data.indicator_id, indicator, value, unit, referenceRange: undefined,
-          interpretation: undefined, groupId, sampleNumber },
+          interpretation: undefined, groupId, sampleNumber, origin: 'manual' },
       ],
     })
     return response

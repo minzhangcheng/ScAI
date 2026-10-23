@@ -82,6 +82,7 @@ def apply_config_to_session(config: ConfigV1, user_id: str = "") -> AnalysisStat
             indicator=ind.indicator,
             value=ind.value,
             unit=ind.unit,
+            origin=ind.origin,
             reference_range=ind.reference_range,
             interpretation=ind.interpretation,
             group_id=group_uuid,
@@ -211,6 +212,7 @@ def export_session_to_config(state: AnalysisState) -> Dict[str, Any]:
             "indicator": ind.indicator,
             "value": ind.value,
             "unit": ind.unit,
+            "origin": ind.origin,
         }
         if ind.reference_range:
             entry["reference_range"] = ind.reference_range

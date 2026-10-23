@@ -40,6 +40,7 @@ async def add_indicator(session_id: str, request: Request, body: BiochemistryInp
         indicator=body.indicator.strip(),
         value=body.value,
         unit=body.unit.strip(),
+        origin="manual",
         group_id=group_id,
         sample_number=sample_number
     )

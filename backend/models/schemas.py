@@ -949,8 +949,10 @@ class AnalysisState(BaseModel):
     def _serialize_biochemistry_indicators(indicators):
         return [
             {"id": r["id"], "indicator": r["indicator"], "value": r["value"], "unit": r["unit"],
+             "origin": r["origin"],
              "referenceRange": r["reference_range"], "interpretation": r["interpretation"],
-             "groupId": r["group_id"], "sampleNumber": r["sample_number"]}
+             "groupId": r["group_id"], "sampleNumber": r["sample_number"],
+             "sourceGroupLabel": r["source_group_label"], "provenanceNotes": r["provenance_notes"]}
             for r in indicators
         ]
 

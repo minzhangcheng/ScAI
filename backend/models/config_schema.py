@@ -66,6 +66,8 @@ class FileEntry(BaseModel):
 
 class IndicatorEntry(BaseModel):
     indicator: str = Field(min_length=1, max_length=200)
+    # Config entries are user input unless an exported record says otherwise.
+    origin: Literal["manual", "extracted", "unknown"] = "manual"
     value: float
     # A unit is optional in the sessions this schema has to describe: the PI
     # agent writes `data.get("unit", "")` when it parses an indicator out of a

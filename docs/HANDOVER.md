@@ -5,7 +5,7 @@ maintaining ScAI. Release history is in [CHANGELOG.md](CHANGELOG.md). For setup,
 usage, and operations, see the [README](../README.md), [User Guide](user-guide.md),
 and [Administrator Manual](admin-manual.md).
 
-**Version**: 0.64.6 · **Last updated**: 2026-10-23
+**Version**: 0.64.7 · **Last updated**: 2026-10-23
 
 ## Architecture and source map
 
@@ -101,6 +101,11 @@ The analysis environment is Python-only. There is no R runtime or R service;
 method guidance records relevant limitations of the Python alternatives.
 Prompts and defaults remain neutral to organism, tissue, disease, and research
 direction.
+
+The Data tab lists uploaded files and manually entered biochemistry indicators.
+Image-extracted values and legacy indicators remain available to analysis but
+are excluded from the input table and counts. Preserve indicator origin and
+provenance notes through session reload and configuration export/import.
 
 ## Session storage and recovery
 

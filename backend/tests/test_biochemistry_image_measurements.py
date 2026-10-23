@@ -138,6 +138,10 @@ async def test_image_uncertainty_survives_persistence_and_indicator_analysis(mon
     ]
     assert all(note in record.provenance_notes for note in expected_notes)
     assert record.sample_number is None
+    api_record = state.to_api_dict()["biochemistry_indicators"][0]
+    assert api_record["origin"] == "extracted"
+    assert api_record["provenanceNotes"] == record.provenance_notes
+    assert api_record["sourceGroupLabel"] == record.source_group_label
     agent.chat = AsyncMock(return_value=json.dumps({"abnormal_markers": [{
         "measurement_id": record.id, "provenance_notes": ["Additional model caveat"],
     }]}))

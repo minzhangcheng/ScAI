@@ -151,6 +151,7 @@ class InitializeMixin:
                                 indicator=indicator,
                                 value=value,
                                 unit=data.get("unit", ""),
+                                origin="extracted",
                                 interpretation=data.get("interpretation")
                             )
                             analysis_state.biochemistry_indicators.append(result)

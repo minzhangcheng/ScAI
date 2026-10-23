@@ -33,6 +33,20 @@ def _config_dict(**overrides) -> dict:
 
 
 class TestConfigRoundtrip:
+    def test_indicator_origins_survive_config_roundtrip(self):
+        data = _config_dict()
+        data["data"]["indicators"] = [
+            {"indicator": "Manual", "value": 1, "unit": "g"},
+            {"indicator": "Extracted", "value": 2, "unit": "g", "origin": "extracted"},
+            {"indicator": "Legacy", "value": 3, "unit": "g", "origin": "unknown"},
+        ]
+        state = apply_config_to_session(ConfigV1.model_validate(data), user_id="u1")
+        assert [r.origin for r in state.biochemistry_indicators] == ["manual", "extracted", "unknown"]
+        restored = apply_config_to_session(
+            ConfigV1.model_validate(export_session_to_config(state)), user_id="u1",
+        )
+        assert [r.origin for r in restored.biochemistry_indicators] == ["manual", "extracted", "unknown"]
+
     def test_disabled_agent_stays_disabled_across_roundtrip(self):
         data = _config_dict()
         data["agents"]["pi"]["model"] = ""

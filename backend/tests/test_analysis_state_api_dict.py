@@ -8,6 +8,10 @@ import base64
 import hashlib
 import json
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from backend.models.schemas import (
     AnalysisState,
@@ -26,6 +30,28 @@ from backend.models.schemas import (
     FigureReviewStatus,
 )
 from backend.tests.figure_image_helpers import valid_image_bytes
+
+
+@pytest.mark.asyncio
+async def test_manual_indicator_origin_survives_save_and_reload_without_relabeling_legacy(monkeypatch):
+    from backend.models.api_requests import BiochemistryInput
+    from backend.routes import indicators
+
+    state = AnalysisState(user_id="test", biochemistry_indicators=[
+        BiochemistryIndicator(id="legacy", indicator="Legacy", value=1, unit="g"),
+    ])
+    monkeypatch.setattr(indicators, "require_session_ownership", AsyncMock(return_value=state))
+    save = AsyncMock()
+    monkeypatch.setattr(indicators, "async_save_session", save)
+    response = await indicators.add_indicator(
+        state.id, SimpleNamespace(state=SimpleNamespace(user_id="test")),
+        BiochemistryInput(indicator="Manual", value=2, unit="g"),
+    )
+    save.assert_awaited_once_with(state.id, state)
+    restored = AnalysisState.model_validate_json(state.model_dump_json())
+    records = restored.to_api_dict()["biochemistry_indicators"]
+    assert [r["origin"] for r in records] == ["unknown", "manual"]
+    assert records[1]["id"] == response.data["indicator_id"]
 
 
 class TestAnalysisStateApiDictRoundTrip:

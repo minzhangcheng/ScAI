@@ -394,6 +394,8 @@ class BiochemistryIndicator(BaseModel):
     indicator: str
     value: float
     unit: str
+    # Legacy records do not prove user entry; keep them as analysis evidence.
+    origin: Literal["manual", "extracted", "unknown"] = "unknown"
     reference_range: Optional[str] = None
     interpretation: Optional[str] = None
 

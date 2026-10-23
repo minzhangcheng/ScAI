@@ -46,7 +46,8 @@ export function DataPanel() {
 
   const groups = currentSession.treatmentGroups || []
   const dataFiles = currentSession.dataFiles || []
-  const indicators = currentSession.biochemistryIndicators || []
+  // The Data tab describes user inputs; extracted evidence remains in session state.
+  const indicators = (currentSession.biochemistryIndicators || []).filter(ind => ind.origin === 'manual')
 
   return (
     <div className="space-y-6">
