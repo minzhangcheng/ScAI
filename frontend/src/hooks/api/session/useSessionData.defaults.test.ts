@@ -28,7 +28,12 @@ describe('new-session Agent defaults', () => {
       biochemistryIndicators: [], roundResults: [],
     } })
     apiFetchMock.mockResolvedValue({ success: true, data: { indicator_id: 'manual' } })
-    const { result } = renderHook(() => useSessionData(useAppStore.getState()))
+    const store = {
+      ...useAppStore.getState(),
+      setLoading: vi.fn(),
+      setError: vi.fn(),
+    }
+    const { result } = renderHook(() => useSessionData(store))
     await act(async () => { await result.current.addIndicator('Measured value', 5, 'g') })
     expect(useAppStore.getState().currentSession?.biochemistryIndicators).toEqual([
       expect.objectContaining({ id: 'manual', indicator: 'Measured value', origin: 'manual' }),
