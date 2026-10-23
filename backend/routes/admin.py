@@ -2,14 +2,17 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from typing import Optional
+from sqlite3 import IntegrityError
 
 from backend.models.user import (
     PasswordStr,
+    USER_ACCESSIBLE_STATUSES,
     USER_STATUS_DELETING,
+    USER_STATUS_PENDING,
     UsernameStr,
 )
 from backend.utils.db import AppDB
-from backend.utils.auth import get_db, hash_password, require_admin, check_user_uniqueness
+from backend.utils.auth import get_db, hash_password, require_admin, check_user_uniqueness, create_access_token
 from backend.services.user_cleanup import UserCleanupPendingError, delete_user_data
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -42,6 +45,10 @@ class SetRoleRequest(BaseModel):
 
 class SetPasswordRequest(BaseModel):
     new_password: PasswordStr
+
+
+class SetUsernameRequest(BaseModel):
+    new_username: UsernameStr
 
 
 # ── Routes ────────────────────────────────────────────────────────────────
@@ -212,6 +219,37 @@ async def set_user_password(
     if not success:
         await _raise_guarded_user_update_failure(db, uid, admin_id)
     return {"message": "Password updated successfully"}
+
+
+@router.patch("/users/{uid}/username")
+async def set_user_username(
+    uid: str,
+    req: SetUsernameRequest,
+    admin_id: str = Depends(require_admin),
+):
+    """Rename any non-deleting user, including the acting admin."""
+    db: AppDB = await get_db()
+    target = await db.get_user_by_id(uid)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    _reject_deleting_user(target)
+    try:
+        updated = await db.update_user_username(
+            uid,
+            req.new_username,
+            expected_username=target.username,
+            allowed_statuses=(*sorted(USER_ACCESSIBLE_STATUSES), USER_STATUS_PENDING),
+            required_admin_id=admin_id,
+        )
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Username already taken") from exc
+    if not updated:
+        await _raise_guarded_user_update_failure(db, uid, admin_id)
+    return {
+        "message": "Username updated successfully",
+        "username": req.new_username,
+        "access_token": create_access_token(uid, req.new_username) if uid == admin_id else None,
+    }
 
 
 @router.delete("/users/{uid}", status_code=status.HTTP_204_NO_CONTENT)

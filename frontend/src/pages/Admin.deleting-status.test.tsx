@@ -47,6 +47,7 @@ describe('Admin deleting account state', () => {
     expect(screen.getByRole('button', { name: 'Retry cleanup' })).toBeInTheDocument()
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Password' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rename' })).not.toBeInTheDocument()
   })
 
   it('refreshes the row into deleting state after retryable cleanup conflict', async () => {

@@ -73,12 +73,12 @@ function App() {
       const { apiConfig, setApiConfig } = useAppStore.getState()
       if (authUser?.role === 'admin') {
         const s = await checkStatus()
-        if (!s.configured) setShowConfig(true)
+        if (!s.configured && authUser.status !== 'readonly') setShowConfig(true)
         setConfigured(s.configured)
         useAppStore.getState().setApiConfigured(s.configured)
       } else if (authUser) {
         const s = await getUserConfigStatus()
-        if (!s.configured) setShowConfig(true)
+        if (!s.configured && authUser.status !== 'readonly') setShowConfig(true)
         setConfigured(s.configured)
         useAppStore.getState().setApiConfigured(s.configured)
         if (s.configured && !apiConfig.apiKey) {

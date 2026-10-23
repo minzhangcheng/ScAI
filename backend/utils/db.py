@@ -269,6 +269,40 @@ class AppDB:
             await db.commit()
             return cur.rowcount > 0
 
+    async def update_user_username(
+        self,
+        uid: str,
+        username: str,
+        *,
+        expected_username: str,
+        allowed_statuses: Sequence[str],
+        expected_password_hash: Optional[str] = None,
+        required_admin_id: Optional[str] = None,
+    ) -> bool:
+        """Rename without changing identity, checking authority at the write boundary."""
+        statuses = tuple(allowed_statuses)
+        if not statuses:
+            return False
+        placeholders = ",".join("?" for _ in statuses)
+        clauses = ["id=?", "username=?", f"status IN ({placeholders})"]
+        params = [username, uid, expected_username, *statuses]
+        if expected_password_hash is not None:
+            clauses.append("password_hash=?")
+            params.append(expected_password_hash)
+        if required_admin_id is not None:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM users AS actor WHERE actor.id=? "
+                "AND actor.role='admin' AND actor.status IN ('active','readonly'))"
+            )
+            params.append(required_admin_id)
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            cur = await db.execute(
+                "UPDATE users SET username=? WHERE " + " AND ".join(clauses),
+                tuple(params),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
     async def set_user_status(
         self,
         uid: str,

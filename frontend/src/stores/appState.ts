@@ -176,6 +176,7 @@ export interface AppState {
   register: (username: string, password: string, email?: string) => Promise<{ id: string; username: string; status: string }>
   updateProfileEmail: (currentPassword: string, newEmail: string) => Promise<void>
   updateProfilePassword: (currentPassword: string, newPassword: string) => Promise<void>
+  updateProfileUsername: (currentPassword: string, newUsername: string) => Promise<void>
   logout: () => void
   loadAuthFromStorage: () => Promise<void>
 

@@ -11,6 +11,17 @@ some early versions are summarized together.
 
 ## 0.64.x — (2026-10-10 onward)
 
+- `0.64.8` — Allows users to change their own username after current-password
+  verification and allows administrators to rename any non-deleting user,
+  including themselves. Renames preserve the stable user ID, sessions, API
+  keys, and per-user configuration; username uniqueness, format validation,
+  account-status checks, and write-time authority checks are enforced. New
+  frontend controls update the active identity and refresh administrator user
+  listings, with regression coverage for conflicts, races, readonly accounts,
+  and credential continuity. Readonly accounts no longer receive the automatic
+  API-key configuration prompt after login; configuration status remains accurate
+  and active accounts retain the setup prompt.
+
 - `0.64.7` — Limits the Data tab to uploaded files and explicitly user-entered
   biochemistry indicators. Automatically extracted values and legacy indicators
   with unknown origin no longer appear in the indicator table or data overview

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Mail, Lock, Loader2 } from 'lucide-react'
+import { X, Mail, Lock, Loader2, User } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 
 interface SettingsDialogProps {
@@ -12,10 +12,14 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
   const authUser = useAppStore(s => s.authUser)
   const updateProfileEmail = useAppStore(s => s.updateProfileEmail)
   const updateProfilePassword = useAppStore(s => s.updateProfilePassword)
+  const updateProfileUsername = useAppStore(s => s.updateProfileUsername)
   const language = useAppStore(s => s.language)
-  const [tab, setTab] = useState<'email' | 'password'>('email')
+  const [tab, setTab] = useState<'username' | 'email' | 'password'>('username')
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  const [newUsername, setNewUsername] = useState('')
+  const [usernamePassword, setUsernamePassword] = useState('')
 
   // Email tab state
   const [newEmail, setNewEmail] = useState('')
@@ -30,6 +34,8 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
   const zh = language === 'zh'
 
   const resetForms = () => {
+    setNewUsername('')
+    setUsernamePassword('')
     setNewEmail('')
     setCurrentEmailPassword('')
     setCurrentPassword('')
@@ -41,6 +47,22 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
   const handleClose = () => {
     resetForms()
     onClose()
+  }
+
+  const handleUpdateUsername = async () => {
+    if (!newUsername.trim() || !usernamePassword) return
+    setLoading(true)
+    setMessage(null)
+    try {
+      await updateProfileUsername(usernamePassword, newUsername.trim())
+      setMessage({ type: 'success', text: zh ? '用户名已更新，下次登录请使用新用户名。' : 'Username updated. Use your new username next time you sign in.' })
+      setNewUsername('')
+      setUsernamePassword('')
+    } catch (e: any) {
+      setMessage({ type: 'error', text: e.message || (zh ? '更新失败' : 'Update failed') })
+    } finally {
+      setLoading(false)
+    }
   }
 
   const handleUpdateEmail = async () => {
@@ -106,8 +128,19 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
         </div>
 
         {/* Tabs */}
-        {!isReadOnly && (
-          <div className="flex border-b border-surface-200">
+        <div className="flex border-b border-surface-200">
+          <button
+            onClick={() => { setTab('username'); setMessage(null) }}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
+              tab === 'username'
+                ? 'text-accent-600 border-b-2 border-accent-500'
+                : 'text-surface-500 hover:text-surface-700'
+            }`}
+          >
+            <User className="w-4 h-4" />
+            {zh ? '用户名' : 'Username'}
+          </button>
+          {!isReadOnly && (
             <button
               onClick={() => { setTab('email'); setMessage(null) }}
               className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
@@ -119,22 +152,62 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
               <Mail className="w-4 h-4" />
               {zh ? '邮箱' : 'Email'}
             </button>
-            <button
-              onClick={() => { setTab('password'); setMessage(null) }}
-              className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
-                tab === 'password'
-                  ? 'text-accent-600 border-b-2 border-accent-500'
-                  : 'text-surface-500 hover:text-surface-700'
-              }`}
-            >
-              <Lock className="w-4 h-4" />
-              {zh ? '密码' : 'Password'}
-            </button>
-          </div>
-        )}
+          )}
+          <button
+            onClick={() => { setTab('password'); setMessage(null) }}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
+              tab === 'password'
+                ? 'text-accent-600 border-b-2 border-accent-500'
+                : 'text-surface-500 hover:text-surface-700'
+            }`}
+          >
+            <Lock className="w-4 h-4" />
+            {zh ? '密码' : 'Password'}
+          </button>
+        </div>
 
         {/* Content */}
         <div className="px-6 py-5 space-y-4 overflow-y-auto">
+          {tab === 'username' && (
+            <form onSubmit={e => { e.preventDefault(); void handleUpdateUsername() }} className="space-y-4">
+              <p className="text-sm text-surface-500">{zh ? '当前用户名：' : 'Current username: '}{authUser?.username}</p>
+              <div>
+                <label htmlFor="profile-new-username" className="block text-sm font-medium text-surface-700 mb-1.5">{zh ? '新用户名' : 'New Username'}</label>
+                <input
+                  id="profile-new-username"
+                  value={newUsername}
+                  onChange={e => setNewUsername(e.target.value)}
+                  autoComplete="username"
+                  required
+                  minLength={3}
+                  maxLength={64}
+                  pattern="[a-zA-Z0-9_\-]+"
+                  className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+                />
+                <p className="mt-1 text-xs text-surface-500">{zh ? '3–64 位字母、数字、下划线或连字符。修改后请使用新用户名登录。' : '3–64 letters, numbers, underscores or hyphens. Sign in with the new username after saving.'}</p>
+              </div>
+              <div>
+                <label htmlFor="profile-username-password" className="block text-sm font-medium text-surface-700 mb-1.5">{zh ? '当前密码' : 'Current Password'}</label>
+                <input
+                  id="profile-username-password"
+                  type="password"
+                  value={usernamePassword}
+                  onChange={e => setUsernamePassword(e.target.value)}
+                  autoComplete="current-password"
+                  required
+                  className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loading || !newUsername.trim() || !usernamePassword || newUsername.trim() === authUser?.username}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-600 text-white text-sm font-medium rounded-lg hover:bg-accent-700 disabled:opacity-50 transition-colors"
+              >
+                {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                {zh ? '更新用户名' : 'Update Username'}
+              </button>
+            </form>
+          )}
           {/* Email Tab */}
           {tab === 'email' && (
             <>

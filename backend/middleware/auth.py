@@ -7,7 +7,7 @@ Access rules:
   /api/config, /api/user/
 - pending/deleting status: all protected access blocked except /api/auth/logout
 - readonly status: non-GET blocked except
-  /api/auth/logout, /api/auth/profile/password
+  /api/auth/logout, /api/auth/profile/password, /api/auth/profile/username
 
 All protected paths require authentication; user is loaded from DB per request.
 """
@@ -226,10 +226,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Session ownership is still enforced at the route layer via
         # require_session_ownership, so admins only see their own sessions.
 
-        # Readonly status: block non-GET mutations (except logout)
+        # Readonly status: allow logout and personal login-credential changes.
         if user.status == "readonly":
             if request.method != "GET":
-                if path not in ("/api/auth/logout", "/api/auth/profile/password"):
+                if path not in ("/api/auth/logout", "/api/auth/profile/password", "/api/auth/profile/username"):
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Readonly account cannot perform write operations"},

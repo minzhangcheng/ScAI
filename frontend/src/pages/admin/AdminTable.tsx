@@ -29,7 +29,7 @@ function EnumCell({ readOnly, value, options, onChange }: {
 export function AdminTable({ controller }: { controller: AdminController }) {
   const {
     authUser, formatDate, handleRoleChange, handleStatusChange, loading,
-    setChangePasswordTarget, setDeleteTarget, users, zh,
+    setChangePasswordTarget, setChangeUsernameTarget, setDeleteTarget, users, zh,
   } = controller
   return (
     <div className="bg-white dark:bg-surface-900 rounded-xl border border-surface-200 dark:border-surface-700 overflow-hidden">
@@ -79,7 +79,10 @@ export function AdminTable({ controller }: { controller: AdminController }) {
                 <td className="px-6 py-4 text-sm text-surface-600 dark:text-surface-300">{formatDate(user.created_at)}</td>
                 <td className="px-6 py-4">
                   {isSelf ? (
-                    <span className="text-xs text-surface-400 italic">{zh ? '本人' : 'You'}</span>
+                    <div className="flex items-center gap-4">
+                      <span className="text-xs text-surface-400 italic">{zh ? '本人' : 'You'}</span>
+                      {!isDeleting && <button onClick={() => setChangeUsernameTarget(user)} className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium transition-colors">{zh ? '改名' : 'Rename'}</button>}
+                    </div>
                   ) : isDeleting ? (
                     <div className="flex items-center gap-4">
                       <span className="text-xs text-amber-700 dark:text-amber-300">{zh ? '删除清理中' : 'Deletion in progress'}</span>
@@ -89,6 +92,7 @@ export function AdminTable({ controller }: { controller: AdminController }) {
                     </div>
                   ) : (
                     <div className="flex items-center gap-4">
+                      <button onClick={() => setChangeUsernameTarget(user)} className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium transition-colors">{zh ? '改名' : 'Rename'}</button>
                       <button onClick={() => setChangePasswordTarget(user)} className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium transition-colors">{zh ? '改密' : 'Password'}</button>
                       <button onClick={() => setDeleteTarget(user)} className="text-sm text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 font-medium transition-colors">{zh ? '删除' : 'Delete'}</button>
                     </div>

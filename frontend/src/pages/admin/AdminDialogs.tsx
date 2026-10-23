@@ -165,17 +165,58 @@ function AdminPasswordPrompt({ open, user, onClose, onConfirm }: {
   )
 }
 
+function AdminUsernamePrompt({ user, onClose, onConfirm }: {
+  user: AdminUser
+  onClose: () => void
+  onConfirm: (userId: string, newUsername: string) => Promise<void>
+}) {
+  const [username, setUsername] = useState(user.username)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const zh = useAppStore(s => s.language) === 'zh'
+  const confirm = async () => {
+    const value = username.trim()
+    if (!/^[a-zA-Z0-9_-]{3,64}$/.test(value)) {
+      setError(zh ? '用户名须为 3–64 位字母、数字、下划线或连字符。' : 'Use 3–64 letters, numbers, underscores or hyphens.')
+      return
+    }
+    setLoading(true); setError('')
+    try { await onConfirm(user.id, value); onClose() }
+    catch (e: any) { setError(e.message || (zh ? '更新失败' : 'Update failed')) }
+    finally { setLoading(false) }
+  }
+  return (
+    <DialogShell title={zh ? `修改 ${user.username} 的用户名` : `Rename ${user.username}`} onClose={onClose}>
+      <div className="px-6 py-5 space-y-4">
+        <Field label={zh ? '新用户名' : 'New Username'} value={username} onChange={setUsername} placeholder={zh ? '输入新用户名' : 'Enter new username'} />
+        <p className="text-xs text-surface-500">{zh ? '保存后，该用户须使用新用户名登录。' : 'After saving, this user must sign in with the new username.'}</p>
+        {error && <div className="text-sm text-red-600 dark:text-red-400 py-2 px-3 bg-red-50 dark:bg-red-950/40 rounded-lg">{error}</div>}
+      </div>
+      <DialogActions disabled={!username.trim() || username.trim() === user.username} label={zh ? '保存' : 'Save'} loading={loading} onCancel={onClose} onConfirm={confirm} />
+    </DialogShell>
+  )
+}
+
 export function AdminDialogs({ controller }: { controller: AdminController }) {
   const {
     changePasswordTarget, deleteTarget, handleAdminChangePassword,
     handleChangePassword, handleCreateUser, handleDeleteUser,
     setChangePasswordTarget, setDeleteTarget, setShowCreateUser,
     setShowPasswordPrompt, showCreateUser, showPasswordPrompt, zh,
+    changeUsernameTarget, handleAdminChangeUsername, setChangeUsernameTarget,
   } = controller
   return (
     <>
       <PasswordPrompt open={showPasswordPrompt} onClose={() => setShowPasswordPrompt(false)} onConfirm={handleChangePassword} />
       <CreateUserPrompt open={showCreateUser} onClose={() => setShowCreateUser(false)} onConfirm={handleCreateUser} />
+      {changeUsernameTarget && (
+        <AdminUsernamePrompt
+          key={changeUsernameTarget.id}
+          user={changeUsernameTarget}
+          onClose={() => setChangeUsernameTarget(null)}
+          onConfirm={handleAdminChangeUsername}
+        />
+      )}
       <ConfirmDialog
         open={deleteTarget !== null}
         title={zh ? '确认删除' : 'Confirm Delete'}

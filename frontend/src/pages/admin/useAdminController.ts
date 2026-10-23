@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { apiFetch } from '../../hooks/useApi'
 import { useAppStore } from '../../stores/appStore'
+import { getToken, setToken } from '../../utils/authStorage'
 
 export interface AdminUser {
   id: string
@@ -31,6 +32,7 @@ export function useAdminController() {
   const [showCreateUser, setShowCreateUser] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<AdminUser | null>(null)
   const [changePasswordTarget, setChangePasswordTarget] = useState<AdminUser | null>(null)
+  const [changeUsernameTarget, setChangeUsernameTarget] = useState<AdminUser | null>(null)
   const zh = language === 'zh'
 
   const fetchUsers = useCallback(async () => {
@@ -92,12 +94,24 @@ export function useAdminController() {
       method: 'POST', body: JSON.stringify({ new_password: newPassword }),
     })
   }
+  const handleAdminChangeUsername = async (userId: string, newUsername: string) => {
+    const token = getToken()
+    const data = await apiFetch<{ username: string; access_token: string | null }>(`/admin/users/${userId}/username`, {
+      method: 'PATCH', body: JSON.stringify({ new_username: newUsername }),
+    })
+    if (useAppStore.getState().authUser?.id === userId && getToken() === token) {
+      if (data.access_token) setToken(data.access_token)
+      useAppStore.setState(state => state.authUser ? { authUser: { ...state.authUser, username: data.username } } : {})
+    }
+    await fetchUsers()
+  }
   const formatDate = (dateStr: string) => new Date(dateStr).toLocaleDateString(zh ? 'zh-CN' : 'en-US', {
     year: 'numeric', month: 'short', day: 'numeric',
   })
 
   return {
-    authUser, changePasswordTarget, deleteTarget, error, formatDate,
+    authUser, changePasswordTarget, changeUsernameTarget, deleteTarget, error, formatDate,
+    handleAdminChangeUsername, setChangeUsernameTarget,
     handleAdminChangePassword, handleChangePassword, handleCreateUser,
     handleDeleteUser, handleRoleChange, handleSignOut, handleStatusChange,
     loading, navigate, setChangePasswordTarget, setDeleteTarget, setShowCreateUser,

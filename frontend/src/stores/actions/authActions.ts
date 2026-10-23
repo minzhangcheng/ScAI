@@ -7,7 +7,7 @@ type SetState = StoreApi<AppState>['setState']
 type GetState = StoreApi<AppState>['getState']
 type AuthActionKeys =
   | 'authReady' | '_hydrated' | 'authUser' | 'login' | 'register'
-  | 'updateProfileEmail' | 'updateProfilePassword' | 'logout' | 'loadAuthFromStorage'
+  | 'updateProfileEmail' | 'updateProfilePassword' | 'updateProfileUsername' | 'logout' | 'loadAuthFromStorage'
 
 function clearSignedOutSecrets(state: AppState, authReady: boolean) {
   return {
@@ -80,6 +80,24 @@ export function createAuthActions(set: SetState, get: GetState): Pick<AppState, 
         const body = await response.json().catch(() => ({ detail: 'Update failed' }))
         throw new Error(body.detail || 'Update failed')
       }
+    },
+    updateProfileUsername: async (currentPassword, newUsername) => {
+      const token = getToken()
+      const userId = get().authUser?.id
+      if (!token || !userId) throw new Error('Not authenticated')
+      const response = await fetch('/api/auth/profile/username', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ current_password: currentPassword, new_username: newUsername }),
+      })
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({ detail: 'Update failed' }))
+        throw new Error(body.detail || 'Update failed')
+      }
+      const data = await response.json()
+      if (get().authUser?.id !== userId || getToken() !== token) return
+      setToken(data.access_token)
+      set(state => state.authUser ? { authUser: { ...state.authUser, username: data.username } } : {})
     },
     logout: () => {
       clearToken()

@@ -5,7 +5,7 @@ maintaining ScAI. Release history is in [CHANGELOG.md](CHANGELOG.md). For setup,
 usage, and operations, see the [README](../README.md), [User Guide](user-guide.md),
 and [Administrator Manual](admin-manual.md).
 
-**Version**: 0.64.7 · **Last updated**: 2026-10-23
+**Version**: 0.64.8 · **Last updated**: 2026-10-23
 
 ## Architecture and source map
 
@@ -198,6 +198,14 @@ The live detailed-report path is `backend/agents/supervisor_agent.py`; the
 fallback is `backend/services/report/generator.py`. Keep both aligned with the
 shared report services. Scientific caveats are disclosed to readers and the PI;
 host validation checks structure, artifact references, and renderability.
+
+## Accounts and access
+
+Users can change their username after current-password verification;
+administrators can rename non-deleting accounts. User IDs remain stable, so
+sessions, API keys, and per-user configuration survive a rename. Preserve
+username uniqueness, account-status checks, and write-time authorization in
+`backend/routes/auth.py`, `backend/routes/admin.py`, and `backend/utils/db.py`.
 
 ## Development and verification
 

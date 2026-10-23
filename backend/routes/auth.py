@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
+from sqlite3 import IntegrityError
 
 from backend.models.user import (
     PasswordStr,
@@ -88,6 +89,11 @@ class ChangePasswordRequest(BaseModel):
 class ChangeEmailRequest(BaseModel):
     current_password: str
     new_email: EmailStr
+
+
+class ChangeUsernameRequest(BaseModel):
+    current_password: str
+    new_username: UsernameStr
 
 
 class LogoutResponse(BaseModel):
@@ -211,6 +217,41 @@ async def update_email(req: ChangeEmailRequest, user_id: str = Depends(require_a
         raise HTTPException(status_code=409, detail="Email already in use")
     await db.update_user_email(user_id, req.new_email)
     return {"message": "Email updated successfully"}
+
+
+@router.post("/profile/username")
+async def update_username(
+    req: ChangeUsernameRequest,
+    user_id: str = Depends(require_non_pending_user),
+):
+    db: AppDB = await get_db()
+    user = await db.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not verify_password(req.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Invalid old password")
+    try:
+        updated = await db.update_user_username(
+            user_id,
+            req.new_username,
+            expected_username=user.username,
+            expected_password_hash=user.password_hash,
+            allowed_statuses=tuple(sorted(USER_ACCESSIBLE_STATUSES)),
+        )
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Username already taken") from exc
+    if not updated:
+        current = await db.get_user_by_id(user_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        if current.status not in USER_ACCESSIBLE_STATUSES:
+            raise HTTPException(status_code=403, detail="Account is unavailable")
+        raise HTTPException(status_code=409, detail="Account changed during the update; please try again")
+    return {
+        "message": "Username updated successfully",
+        "username": req.new_username,
+        "access_token": create_access_token(user_id, req.new_username),
+    }
 
 
 @router.post("/logout", response_model=LogoutResponse)
