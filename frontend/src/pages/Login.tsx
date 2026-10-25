@@ -89,6 +89,10 @@ export function Login() {
       </button>
 
       <p className="text-center text-sm text-surface-500 dark:text-surface-400">
+        {zh ? 'Demo 账号：demo，密码：scaidemo' : 'Demo username: demo, password: scaidemo'}
+      </p>
+
+      <p className="text-center text-sm text-surface-500 dark:text-surface-400">
         {zh ? '没有账号？' : "Don't have an account?"}{' '}
         <Link to="/register" className="text-accent-600 dark:text-accent-400 hover:text-accent-700 dark:hover:text-accent-300 font-medium">
           {zh ? '注册' : 'Register'}

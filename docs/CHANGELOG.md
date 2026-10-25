@@ -11,6 +11,10 @@ some early versions are summarized together.
 
 ## 0.64.x — (2026-10-10 onward)
 
+- `0.64.10` — Adds a bilingual login-page hint for the demo account
+  (`demo` / `scaidemo`) and records the release version across the application,
+  Python client, README, handover, and administrator build examples.
+
 - `0.64.9` — Allows readonly users to download existing report bundles for
   figures, tables, full reports, and reproducibility outputs. The exception is
   limited to the explicit bundle routes, keeps session ownership checks, stages
